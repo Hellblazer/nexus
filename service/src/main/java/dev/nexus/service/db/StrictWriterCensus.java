@@ -118,7 +118,7 @@ final class StrictWriterCensus {
             // A bind names a collection only when the statement binds it to a collection label or id COLUMN (collection, source_collection,
             // physical_collection, ..._collection_id): the tenant, a tumbler or a row id is a String or a Long too, and judging those against the
             // held labels flagged every statement keyed by a document or a job.
-            boolean namesACollection = bindsACollection(sql) && binds.stream().anyMatch(b -> b instanceof String || b instanceof Long);
+            boolean namesACollection = bindsACollection(sql, binds) && binds.stream().anyMatch(b -> b instanceof String || b instanceof Long);
             if (namesACollection && !WriteRegistryMemo.holdsOneOf(c.configuration(), binds)) {
                 String finding = m.group(1) + " @ " + where + " [holds another collection's row, or the statement binds no held collection]";
                 FOUND.add(finding);
@@ -144,11 +144,53 @@ final class StrictWriterCensus {
      * census, are what prove those writers.
      */
     static boolean bindsACollection(String sql) {
-        if (COLLECTION_COLUMN_BOUND.matcher(sql).find()) {
-            return true;
+        return bindsACollection(sql, List.of());
+    }
+
+    /**
+     * {@link #bindsACollection(String)} for a statement whose bind values are known: a collection column bound to the empty string names no
+     * collection. {@code CollectionIds.idOf(Field, Field)} renders its empty-name guard as {@code <name column> = ?} with {@code ''}
+     * bound, and the keep-the-stored-id coalesce of a ledger write carries it, so such a statement compares a column with {@code ''} and
+     * writes under whatever collection the row already has. Each {@code ?} of the statement is the next bind value; the placeholders of
+     * an {@code IN} list are each read. A placeholder the scan cannot place against a bind counts as before, and an INSERT is judged by
+     * its column list as before.
+     */
+    static boolean bindsACollection(String sql, List<Object> binds) {
+        Matcher m = COLLECTION_COLUMN_BOUND.matcher(sql);
+        while (m.find()) {
+            int at = m.end() - 1;
+            int index = placeholdersBefore(sql, at);
+            while (true) {
+                if (index >= binds.size() || !"".equals(binds.get(index))) {
+                    return true;
+                }
+                int next = at + 1;
+                while (next < sql.length() && Character.isWhitespace(sql.charAt(next))) next++;
+                if (next >= sql.length() || sql.charAt(next) != ',') break;
+                next++;
+                while (next < sql.length() && Character.isWhitespace(sql.charAt(next))) next++;
+                if (next >= sql.length() || sql.charAt(next) != '?') break;
+                at = next;
+                index++;
+            }
         }
-        Matcher m = INSERT_COLUMNS.matcher(sql);
-        return m.find() && m.group(1).toLowerCase().contains("collection");
+        Matcher insert = INSERT_COLUMNS.matcher(sql);
+        return insert.find() && insert.group(1).toLowerCase().contains("collection");
+    }
+
+    /** How many bind placeholders precede {@code at}: the index of the bind value of the {@code ?} at {@code at}. A {@code ?} inside a string literal is not one. */
+    private static int placeholdersBefore(String sql, int at) {
+        int n = 0;
+        boolean quoted = false;
+        for (int i = 0; i < at; i++) {
+            char ch = sql.charAt(i);
+            if (ch == '\'') {
+                quoted = !quoted;
+            } else if (ch == '?' && !quoted) {
+                n++;
+            }
+        }
+        return n;
     }
 
     /**
