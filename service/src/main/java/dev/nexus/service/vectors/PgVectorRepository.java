@@ -6766,8 +6766,7 @@ FROM scope s
                                     : CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
                           .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))));
             return ctx.deleteFrom(ch.table())
-               // by the row's CURRENT label (coll), not the request's: before gate 3 the name column decides (368cf7da04)
-               .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(), coll)
+               .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(), coll)   // the row's CURRENT label, not the request's (368cf7da04)
                    .and(ch.chash().in(ids)).andNot(stillReferenced))
                .execute();
         });
@@ -8324,8 +8323,7 @@ FROM scope s
             int affected = 0;
             List<String> missing = new ArrayList<>();
             for (int i = 0; i < ids.size(); i++) {
-                // the row's CURRENT label, not the request's: before gate 3 the statement names the collection by it (368cf7da04)
-                int rows = updateMetadataOneRow(ctx, ch, tenant, coll, ids.get(i), metadatas.get(i), deleteKeys,
+                int rows = updateMetadataOneRow(ctx, ch, tenant, coll, ids.get(i), metadatas.get(i), deleteKeys,   // coll: the row's CURRENT label (368cf7da04)
                                                 gate3);
                 affected += rows;
                 if (rows == 0) missing.add(ids.get(i));
@@ -8549,10 +8547,7 @@ FROM scope s
                 queries.add(ctx.update(ch.table())
                                .set(ch.metadata(), value)
                                .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
-                               // the stored id wins (RDR-229 P3.5a row 14): a row whose label a one-row rename left behind, and another collection has
-                               // since taken, must keep the id of the collection it is in; the label's id fills only an unstamped row. From gate 3
-                               // every row is stamped and keeps its id
-                               .set(CHUNKS.COLLECTION_ID, byId ? ch.collectionId() : DSL.coalesce(ch.collectionId(), rowCollectionId(ch, false)))
+                               .set(CHUNKS.COLLECTION_ID, byId ? ch.collectionId() : DSL.coalesce(ch.collectionId(), rowCollectionId(ch, false)))   // the stored id wins (row 14); the label's id fills only an unstamped row
                                .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(),
                                                                       collection)
                                    .and(ch.chash().eq(ids.get(idx)))));
@@ -8841,9 +8836,8 @@ FROM scope s
                 // to slice docsToEmbed / align an embedding — so this reordering is
                 // behavior-preserving; see CatalogRepository-sibling PgVectorMetadata
                 // BatchParityTest for the exact-row-state parity this must hold instead.
-                // by the row's CURRENT label (coll), as the existence read above: the request's reaches other rows after a rename (368cf7da04)
                 needEmbedIdx.addAll(
-                    batchUpdateMetadata(ctx, ch, tenant, coll, dedupIds, dedupMetas, unchangedIdx,
+                    batchUpdateMetadata(ctx, ch, tenant, coll, dedupIds, dedupMetas, unchangedIdx,   // coll: the row's CURRENT label (368cf7da04)
                             deleteKeys == null ? List.of() : deleteKeys, gate3));
                 return new NeedEmbedResolution(needEmbedIdx, originalAbsentIdx);
             }));
