@@ -15,6 +15,7 @@ CatalogRepository.java	registerDocumentManyWithOutcome	CATALOG_OWNERS	forUpdate	
 CatalogRepository.java	registerDocumentWithOutcome	CATALOG_OWNERS	forUpdate	1	after-registry	a registry read (requireWritable, registryFirst or normalize) precedes the lock in the same method
 CatalogRepository.java	sweepOneOwner	CATALOG_OWNERS	forUpdate	1	no-registry-lock	ghost sweep of one owner: owner row, no collection named
 ChunkKeySweep.java	oneBatch	CHUNKS	forUpdate	1	no-registry-lock	background chunk-key sweep: chunk rows FOR UPDATE SKIP LOCKED, which never waits for a row lock, so it cannot be a link of a cycle
+CollectionDeleteFence.java	lockInIdOrder	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: the delete by id takes the origin's row FOR UPDATE between its quarantine siblings' key shares below and above its id, after the re-embed start guard and before any child row; requireSourceById then re-locks it without waiting
 CollectionOneRowRename.java	readOwn	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: the one-row rename re-reads the old label's row FOR UPDATE after CollectionTombstones.lockRowsOfOneRowRename took it in collection_id order
 CollectionRefusals.java	requireSourceById	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: a retiring verb reads its named source (a supersede also its named successor) FOR UPDATE by id; for supersede and rename a second lock of a row the ordered lockRows took (registry first), for the delete the first and only registry lock, taken before any child row with no sweep gate ahead of it
 CollectionRegistry.java	fillOrNull	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
@@ -24,7 +25,6 @@ CollectionRegistry.java	readLocked	CATALOG_COLLECTIONS	forKeyShare	1	registry	th
 CollectionRegistry.java	readLocked	CATALOG_COLLECTIONS	forShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CollectionTombstones.java	lockRowsWhere	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CollectionTombstones.java	repointTombstones	CATALOG_COLLECTIONS	forUpdate	1	after-registry	the successor's registry row is read FOR KEY SHARE first (requireIdForWrite), then the tombstone rows FOR UPDATE in collection_id order, the order of a retiring verb's lockRows (folio review F4)
-RegistryRowLocks.java	keyShareIfPresent	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 GroupRules.java	lock	GROUP_RECORDS	forUpdate	1	no-registry-lock	identity group rows, no collection
 GroupRules.java	onJoin	GROUP_RECORDS	forShare	1	no-registry-lock	identity group rows, no collection
 GroupRules.java	onLeave	GROUP_RECORDS	forShare	1	no-registry-lock	identity group rows, no collection
@@ -42,6 +42,7 @@ ReembedJobRepository.java	advanceAfterBatch	REEMBED_JOB_MOVES	forUpdate	1	no-reg
 ReembedJobRepository.java	markRevivedIn	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows, inside startMarking's transaction, which already read both ends' registry rows (requireAllForWrite); it has no other caller
 ReembedJobRepository.java	recordMoveInTxn	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows, inside the per-document move transaction that read the registry (writeManifestMany)
 ReembedJobRepository.java	recordMoveInTxn	REEMBED_JOB_MOVES	forUpdate	1	no-registry-lock	re-embed job rows, inside the per-document move transaction that read the registry (writeManifestMany)
+RegistryRowLocks.java	keyShareIfPresent	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 RequestLedger.java	read	?	forUpdate	1	no-registry-lock	request ledger rows, no collection
 TupleRepository.java	claimOnce	TUPLES	forNoKeyUpdate	1	no-registry-lock	tuple space rows
 TupleRepository.java	lockLiveClaimRow	?	forNoKeyUpdate	1	no-registry-lock	the claim row of the fenced aspect upsert, taken after the key share (AspectUpsertFencedLockOrderTest)
