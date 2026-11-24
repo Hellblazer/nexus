@@ -3206,21 +3206,32 @@ its acceptance is that test green plus the census pin it lowers.
   The `vectors-079` trigger
   that sets a child row's name from its chunk goes with the name columns,
   and the two `chunk_orphaned_at` stamp triggers switch to the id twin
-  (comments 17:55 and 18:13; T2 `229-research-110`). Then the name columns
+  (comments 17:55 and 18:13; T2 `229-research-110`). Before any name
+  column drops, one step redefines the SQL functions that survive P4.1
+  and still read or write a name column, so they read and write by the id:
+  the rows of `service/src/test/resources/rdr229/p35b-reader-dispositions.tsv`
+  whose disposition is `writer-kept` or `unchanged-fallback`, and the
+  `sql_function` rows of `service/src/test/resources/rdr229/p31-writer-census.tsv`
+  (P3.1's SQL writers, `canary_query_ring_upsert` among them). The list is
+  read from those two files, not written out by name, so it cannot drift
+  from them (linda 2026-11-24; T2 `229-research-323`). Then the name columns
   on referencing tables are dropped (the name primary keys of the chunks and
-  centroids went in the swap above), and `hybrid_search_<dim>`, which has
-  no `_by_id` twin, is dropped (comment 20:10; T2 `229-research-110`). The
-  same step drops the 38 functions P3.5b left on the name path (the
-  search functions, `chunk_live_owners` and `manifest_qualifying_hits`),
-  the rows of `service/src/test/resources/rdr229/p35b-reader-dispositions.tsv` whose disposition is
-  `name-kept` (each reads the `collection` name column; its `<object>_by_id`
-  twin from `vectors-077` stays). Test: after the drop, a test reads the body
-  (`prosrc`) of every function in schema `nexus` from `pg_proc` and fails
-  when a body still names a dropped name column, or when it examined no
-  function (linda 2026-11-23; T2 `229-research-322`). Then,
+  centroids went in the swap above). Then,
   in the registry changeset, `superseded_by` (replaced by
-  `superseded_by_id`) and the `(tenant_id, name, embedding_model)` UNIQUE;
-  and last in that changeset, the primary key swap to `(tenant_id,
+  `superseded_by_id`) and the `(tenant_id, name, embedding_model)` UNIQUE.
+  The same changeset drops the functions left on the name path. They are
+  the 38 that P3.5b left there, which are the dispositions tsv's
+  `name-kept` rows (the search functions, `chunk_live_owners` and
+  `manifest_qualifying_hits`; each reads the `collection` name column, and
+  its `<object>_by_id` twin from `vectors-077` stays), and
+  `hybrid_search_<dim>`, which has no `_by_id` twin (comment 20:10; T2
+  `229-research-110`). Functions are schema, not data, so these drops go in
+  this changeset and not in a move's `on_complete`. Inside it, every object
+  that still calls one of them is first redefined to call its `_by_id`
+  twin, and then the originals are dropped with RESTRICT, so a missed
+  dependent fails the changeset and does not cascade (linda 2026-11-24; T2
+  `229-research-323`).
+  Last in that changeset comes the primary key swap to `(tenant_id,
   collection_id)` (T2 `229-research-53`). No name key to the registry is
   P4.1's: P3.7's name-key drop move has dropped all eight, the queue's
   where that table exists (item 6, Switch; T2 `229-research-58`,
@@ -3234,7 +3245,17 @@ its acceptance is that test green plus the census pin it lowers.
   P4.1's drop move, and a check that no foreign key references
   `catalog_collections` but the id keys (inferred, not read: read from
   `pg_constraint`). It is skipped and retried at each boot until all
-  hold. UNIQUE `(tenant_id,
+  hold. Test, run after P4.1's last changeset: a test reads the body
+  (`prosrc`) of every function in schema `nexus` from `pg_proc` and fails
+  when a body references a column on P4.1's drop list, either qualified by
+  its table or bare in a function over a table P4.1 alters. The drop list
+  is read from the same source the changesets use. The history name
+  columns kept by design (`relevance_log`, `search_telemetry`,
+  `hook_failures` and `gc_audit`, whose name column records the label at
+  the time of the event) are not on it, and `superseded_by` is on it only
+  once the registry changeset has run. It also fails unless every function
+  the dispositions tsv says survives P4.1 was examined (linda 2026-11-23 and
+  2026-11-24; T2 `229-research-322`, `229-research-323`). UNIQUE `(tenant_id,
   collection_id, embedding_model)` stays: the RDR-225 composite depends on
   it, and PostgreSQL drops such a constraint only with CASCADE (item 6; T2
   `229-research-44`). Each drop waits for this install's stamp, swap and
@@ -3867,3 +3888,4 @@ large, and moved under a ratchet.
 - 2026-11-23: P3.5b folded from the stacked code (grant 3, nexus-p2m1x.24): the CONTINUE gate as one `sqlCheck` applying the completion check's stamp-label rule, the empty-name rule of the both-shapes match, the search functions kept on names with `_by_id` twins, the plan measurement done as acceptance item 3, the ghost sweep's by-id stats read, `vectors-078-8` now in the tree, "every P3.5b changeset" named as the twelve ids of `p35b-continue-changesets.txt` in `databasechangelog` (no engine code reads the list before P3.7), the restart text not shipped, and the trigger on `physical_collection_id` (T2 `229-research-315` to `-320`).
 - 2026-11-23: P3.5a's gc routes and re-home folded from the stacked code (grant 3, nexus-p2m1x.23): the gc routes' order (the sweep gate in Java where the route takes one, the registry rows FOR KEY SHARE with no lock timeout, the SQL function with the current labels), the 25 s registry-read bound on a route that sets none, `rename_busy`'s three sources, `quarantine_restore_busy` and, on the keyed quarantine and bounded expire forms, `sweep_gate_busy`, the client's same-key resend, `registry_wait_slow`, and the re-home as a writer that sets the moved rows' id and label itself (T2 `229-research-321`).
 - 2026-11-24: linda's three design rulings written (Sam, option 1 on ask `rdr229-p41-p40-p35-rulings`; gaps from fix check `229-fix-check-dd7a970c71`; T2 `229-research-322`): P4.1 drops the 38 `name-kept` functions in the step that drops the name columns, with a `pg_proc` body test that also fails on zero functions examined; P4.0 owns the restart request, in `rdr229_completion` and not `boot_work`, matching item 6; P3.5's Test says gate 3 on a half-stamped store latches only after the boot that applies `vectors-078-8` (bead nexus-p2m1x.48).
+- 2026-11-24: linda's follow-up rulings D1 to D3 on P4.1 written (Sam, "proceed" on ask `rdr229-p41-d1-d3`; gaps from fix check `229-fix-check-92fbbaa966`; T2 `229-research-323`): the 38 `name-kept` drops and `hybrid_search_<dim>` go in the registry changeset, dependents redefined to their `_by_id` twins first and the originals dropped with RESTRICT; a step before the column drops redefines the `writer-kept` and `unchanged-fallback` functions and P3.1's SQL writers by the id, listed from the two tsv files; the `pg_proc` test matches columns on the drop list, leaves out the history name columns, counts `superseded_by` only after its changeset, requires every surviving function examined, and runs after P4.1's last changeset.
