@@ -159,4 +159,15 @@ consumers query the wrapper, never the matview.
 - **Never edit a shipped Liquibase changeset.** Schema evolution is a NEW changeset (and, for data migrations, an upgrade-ladder rung in `src/nexus/upgrade_ladder/`). Editing a shipped changeset breaks checksum validation on every installed engine past that version.
 - **Pagination must respect `_PAGE = 300`, and writes `MAX_RECORDS_PER_WRITE`** (limits table: `.claude/rules/external-service-limits.md`).
 
-#
+## Other modules
+
+Modules the key-modules table does not describe, one line each (the module docstring has the contract). Most of the client-side plumbing here exists to reach the engine reliably; none of it holds state the engine does not.
+
+| Group | Files |
+|---|---|
+| Endpoint and credentials | `service_endpoint.py` (endpoint discovery and the production-write guard), `data_token.py` (`DataTokenManager`: self-minting short-TTL data tokens), `managed_endpoint.py` (cloud endpoint config and capability probe), `client_identity.py` (the client version the engine reads), `serving_engine_version.py` (the version of the engine this process talks to), `storage_mode.py` (backend env validation) |
+| HTTP transport | `pooled_http.py` (persistent-connection transport), `edge_refusal.py` (edge/WAF refusal rendering), `gateway_backoff.py`, `gateway_hold.py` (a gateway 503 holds every client of one config dir), `request_gate.py` (per-process request interval and count) |
+| Engine clients | `http_scratch_store.py` (T1), `http_pipeline_client.py` and `inmemory_pipeline.py` (streaming-PDF buffer and its test twin), `http_engine_status.py` (`GET /v1/status` embed counters), `t2_reads.py` (narrow T2 reads for callers outside the facade) |
+| Collections and chunks | `collection_purge.py` (the canonical collection-delete cascade), `collection_state.py` (three-state existence probe), `chash_tables.py` (the chash-bearing tables), `reconcile.py` (model/dimension routing, chunk pagers) |
+| Local Postgres | `pg_provision.py` (local cluster provisioner), `pg_bundle.py` (first-run bundle extraction), `pg_auth.py` (`pg_hba.conf`), `pg_cluster_upgrade.py` (`pg_upgrade` of older clusters), `admin_sql.py` (the local admin SQL runner), `diag_connection.py` (the only product path to a `nexus_diag` session), `svc_monitor.py` (`pg_monitor` queries), `note_uri_pairs.py` (the RDR-231 pair query) |
+| Local models | `service_bge_model.py`, `service_crossencoder_model.py`, `onnx_model_root.py` (provisioning of the engine's ONNX models), `minilm_direct.py` (MiniLM embedding function for tests and `--dry-run`) |
