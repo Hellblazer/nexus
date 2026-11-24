@@ -60,3 +60,28 @@ INDEX_HOOK_NAMES: tuple[str, ...] = ("post-commit", "post-merge", "post-rewrite"
 PRE_PUSH_HOOK = "pre-push"
 #: Every hook nexus manages with this sentinel: what ``update``, ``uninstall``, ``status``, the sweep and ``nx doctor`` walk.
 MANAGED_HOOK_NAMES: tuple[str, ...] = (*INDEX_HOOK_NAMES, PRE_PUSH_HOOK)
+
+
+def index_hooks_managed(hooks_dir: Path) -> bool:
+    """Whether any of the INDEX hooks in *hooks_dir* carries the nexus stanza. ``nx index repo``'s "run nx hooks install" tip and
+    ``nx doctor``'s indexing hint read this: a repo with only the pre-push hook is not indexed on commit."""
+    for name in INDEX_HOOK_NAMES:
+        try:
+            if SENTINEL_BEGIN in (hooks_dir / name).read_text(encoding="utf-8"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def installed_detail(repo: Path, installed: list[str]) -> str:
+    """The "git hooks" row's detail for a repo whose managed hooks are *installed*; says so when no index hook is among them."""
+    text = f"{repo} ({', '.join(installed)})"
+    return text if any(n in INDEX_HOOK_NAMES for n in installed) else f"{text}; indexing hooks not installed"
+
+
+def index_hint(repo: Path, installed: list[str]) -> list[str]:
+    """The fix suggestion for a repo with no index hook among its *installed* managed hooks, else none."""
+    import shlex  # noqa: PLC0415 -- only this hint needs it
+
+    return [] if any(n in INDEX_HOOK_NAMES for n in installed) else [f"nx hooks install {shlex.quote(str(repo))}"]

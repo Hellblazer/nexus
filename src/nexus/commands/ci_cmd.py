@@ -302,7 +302,7 @@ def _board_of_origin(store: Any, repo: str) -> str:
     """The owner post of *repo*'s one board with a red open: ``<repo>-<branch>--owner`` for each branch the CI adapter
     posts boards for (:data:`nexus.ci_wait.BOARD_BRANCHES`). Refuses when no board or more than one has an open red:
     an ack has no push branch to tell them apart, and a guess could acknowledge the wrong red."""
-    bases = [f"{repo}-{branch}" for branch in sorted(ci_wait.BOARD_BRANCHES)]
+    bases = [ci_base.join(repo, branch) for branch in sorted(ci_wait.BOARD_BRANCHES)]
     open_bases = [b for b in bases if _current_red(store, f"board/ci/{b}--owner", f"{b}--owner") is not None]
     if len(open_bases) == 1:
         return f"{open_bases[0]}--owner"

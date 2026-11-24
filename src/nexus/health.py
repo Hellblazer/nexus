@@ -2172,8 +2172,8 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                         ))
                     if not malformed and not drifted:
                         out.append(HealthResult(
-                            label="git hooks", ok=True,
-                            detail=f"{repo_path} ({', '.join(installed)})",
+                            label="git hooks", ok=True, detail=_ghm.installed_detail(repo_path, installed),
+                            fix_suggestions=_ghm.index_hint(repo_path, installed),
                         ))
                 else:
                     out.append(HealthResult(

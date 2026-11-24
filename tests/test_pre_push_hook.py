@@ -53,6 +53,8 @@ with open(env("FAKE_NX_LOG"), "a") as fh:
 if argv[:2] == ["tuple", "in"]:
     print(json.dumps({"claim_id": "claim-1"}))   # the push script's lock
 if argv[:2] == ["ci", "check-hold"]:
+    import time
+    time.sleep(float(env("FAKE_NX_GATE_SLEEP", "0")))
     out = env("FAKE_NX_GATE_OUT", "")
     if out:
         print(out)
@@ -292,7 +294,7 @@ def test_uninstall_leaves_the_existing_body_and_install_is_idempotent(rig: Rig, 
     assert hooks_mod._install_hook(rig.hooks_dir, "pre-push") == "already installed"
     assert (rig.hooks_dir / "pre-push").read_text() == once
     hooks_mod._uninstall_hook(rig.hooks_dir, "pre-push")
-    assert (rig.hooks_dir / "pre-push").read_text().strip() == body.strip()
+    assert (rig.hooks_dir / "pre-push").read_bytes() == body.encode(), "uninstall restores the bytes that were there"
 
 
 def test_a_non_shell_hook_is_left_alone(rig: Rig) -> None:
@@ -362,9 +364,9 @@ def _repos(tmp_path: Path) -> tuple[Rig, Rig]:
     return Rig(tmp_path, "served"), Rig(tmp_path, "unserved")
 
 
-def _sweep(monkeypatch: pytest.MonkeyPatch, repos: list[Rig], served: frozenset[str] | None) -> dict:
+def _sweep(monkeypatch: pytest.MonkeyPatch, repos: list[Rig], served: frozenset[str] | None, why: str = "") -> dict:
     monkeypatch.setattr(hooks_mod, "_iter_managed_repo_roots", lambda: [r.work for r in repos])
-    monkeypatch.setattr(hooks_mod, "_served_bases", lambda: served)
+    monkeypatch.setattr(hooks_mod, "_served_bases", lambda: (served, why))
     return hooks_mod.refresh_all_managed_hooks(echo=False)
 
 

@@ -52,6 +52,13 @@ def branch_of(base: str) -> str:
     return base.rsplit("-", 1)[-1]
 
 
+def join(repo: str, branch: str) -> str:
+    """``<repo>-<branch>`` as the CI adapter writes the topic: runs of ``-`` collapsed to one (RDR-220: the adapter collapses
+    them after replacing every character outside ``[A-Za-z0-9._-]`` with ``-``), so a repo ``a--b`` pushing ``develop`` is the
+    board ``a-b-develop``. The one place a base is put together."""
+    return re.sub(r"-{2,}", "-", f"{repo}-{branch}")
+
+
 def remote_url(remote: str = "origin", *, cwd: str | Path | None = None) -> str:
     """The URL of *remote* in the repository *cwd* (default: the current directory) is in, or "" when there is none, no git,
     or no repository."""
@@ -76,7 +83,7 @@ def derive(remote: str, branch: str | None, *, cwd: str | Path | None = None) ->
     repo = repo_from_url(url)
     if repo is None:
         raise BaseUnderivableError(f"the repo name cannot be read from the remote URL {url!r}: {hint}")
-    return f"{repo}-{branch}"
+    return join(repo, branch)
 
 
 def default_branch(remote: str = "origin", *, cwd: str | Path | None = None) -> str | None:

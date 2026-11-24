@@ -1059,8 +1059,10 @@ def _refresh_all_git_hooks() -> None:
             # nexus-igea9: the pre-push hold + push-record hook goes into repos a group you belong to serves.
             click.echo(
                 f"\nInstalled the pre-push hook (hold check and push record) in {summary['installed']} repo(s) "
-                "a group you belong to serves; `nx hooks uninstall <path>` removes it."
+                "a group you belong to serves; `nx hooks uninstall --pre-push <path>` removes it."
             )
+        for note in summary.get("notes") or ():
+            click.echo(f"\n{note}")
     except Exception as exc:  # noqa: BLE001 — best-effort git-hook refresh; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_git_hook_refresh_failed", error=str(exc))
 

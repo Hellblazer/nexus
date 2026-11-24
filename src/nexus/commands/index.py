@@ -1873,15 +1873,10 @@ def index_repo_cmd(
 
         if not frecency_only:
             try:
-                from nexus.commands.hooks import SENTINEL_BEGIN, _effective_hooks_dir  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
+                from nexus._git_hooks_meta import index_hooks_managed  # noqa: PLC0415 — call-time import; the tip is about indexing, so a pre-push hook alone does not silence it
+                from nexus.commands.hooks import _effective_hooks_dir  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
                 hdir = _effective_hooks_dir(path)
-                from nexus._git_hooks_meta import INDEX_HOOK_NAMES as hook_names  # noqa: PLC0415, E402 — call-time import; the tip is about indexing: pre-push alone does not silence it
-                any_managed = any(
-                    SENTINEL_BEGIN in (hdir / n).read_text(encoding="utf-8")
-                    for n in hook_names
-                    if (hdir / n).exists()
-                )
-                if not any_managed:
+                if not index_hooks_managed(hdir):
                     click.echo("Tip: run `nx hooks install` to auto-index this repo on every commit.")
             except Exception as exc:  # noqa: BLE001 — best-effort hook detection must not crash indexing; logged via log.debug
                 _log.debug("hook_detection_failed", error=str(exc))  # Don't let hook detection break indexing
