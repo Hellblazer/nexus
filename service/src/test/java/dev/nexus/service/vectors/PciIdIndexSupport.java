@@ -19,7 +19,6 @@ import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -48,7 +47,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  * NULL) is built the way an upgraded install has it: the two NOT VALID CHECKs of {@code nexus.chunks} are dropped and the id
  * is set NULL.
  */
-@Tag("integration")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 abstract class PciIdIndexSupport {
 
