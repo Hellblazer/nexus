@@ -240,9 +240,9 @@ def test_the_lock_is_held_while_the_tree_is_deleted(tmp_path: Path, config: Path
         # The Windows reap is the custom walk, not rmtree: probe from inside it.
         real_walk = gc_core._remove_all_but_lease
 
-        def walking(root, lease_name, on_error):
+        def walking(root, lease_name, on_error, platform=None):
             during.append(lease_core.probe(root))  # the generation being reaped, each time
-            return real_walk(root, lease_name, on_error)
+            return real_walk(root, lease_name, on_error, platform)
 
         monkeypatch.setattr(gc_core, "_remove_all_but_lease", walking)
     gc_core.gc_generations(tools, keep=1, snapshot=blind_snapshot(), grace_minutes=0)
