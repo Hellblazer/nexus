@@ -98,6 +98,11 @@ COLLECTION_LABEL_AMBIGUOUS_REASON: str = "collection_label_ambiguous"
 #: them, and re-register the origin or let the quarantine expire for the marked ones.
 RESTORE_ORIGIN_UNREGISTERED_REASON: str = "restore_origin_unregistered"
 
+#: ``POST /v1/catalog/collections/delete`` named a collection a re-embed job in a non-terminal state (planned, running, paused,
+#: cutover or failed) holds as its source or its target (HTTP 409, RDR-229 P3.5a row 14). Also carries ``error``, ``collection``
+#: and ``job_id``. Nothing was removed. Retry once the job is done, or after ``nx collection re-embed --abort JOB``.
+COLLECTION_BUSY_REASON: str = "collection_busy"
+
 #: A write naming an embedding model registered nowhere (HTTP 422, RDR-225).
 UNREGISTERED_EMBEDDING_MODEL_REASON: str = "unregistered_embedding_model"
 

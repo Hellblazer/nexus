@@ -581,6 +581,17 @@ def delete_cmd(name: str, yes: bool) -> None:
             f"note: T3 collection '{name}' already absent — running cascade anyway",
             err=True,
         )
+    if cascade.collection_busy is not None:
+        # RDR-229 P3.5a row 14 (engine 0.1.202): the engine refused with 409 collection_busy; nothing was removed.
+        held, job = cascade.collection_busy["collection"], cascade.collection_busy["job_id"]
+        job_arg = shlex.quote(job) if job else "JOB"
+        raise click.ClickException(
+            f"re-embed job {job or '(unnamed)'} holds collection '{held}' as its source or its target, so nothing was "
+            f"deleted. Wait for it to finish "
+            f"(`nx collection re-embed --status {job_arg}`), or cancel it "
+            f"(`nx collection re-embed --abort {job_arg}`; documents already moved stay moved), then run "
+            f"`nx collection delete {shlex.quote(name)}` again."
+        )
     # Surface any cascade-step failure to the user (orphan rows may remain).
     for failure in cascade.failures:
         click.echo(f"warn: {failure}", err=True)
@@ -2010,6 +2021,22 @@ def _reembed_job_error(exc: Exception) -> click.ClickException:
     return click.ClickException(text)
 
 
+def _end_refused_reason(exc: Exception) -> str | None:
+    """The reason in the engine's 409 ``EndRefused`` answer to a re-entry (engine 0.1.202), else None.
+
+    The body is ``{error, job_id}`` with no ``reason`` and no ``state`` (the lock-held 409 carries a ``state``):
+    ``error`` reads ``job J cannot be re-entered: <why>; the source is not re-entered``. The engine refuses it when
+    the job's target is retired or has no registry row."""
+    body = getattr(exc, "engine_body", None)
+    if getattr(exc, "code", None) != 409 or not isinstance(body, dict) or not body.get("job_id") or "state" in body:
+        return None
+    text = str(body.get("error") or "")
+    marker = "cannot be re-entered: "
+    if marker not in text:
+        return None
+    return text.split(marker, 1)[1].removesuffix("; the source is not re-entered")
+
+
 def _require_local_engine(db: object) -> None:
     """The re-embed job runs on the local engine only (Sam, 2026-10-17): refuse in any other mode."""
     from nexus.config import is_local_mode  # noqa: PLC0415 — deferred import; patched in tests at the module attribute
@@ -2385,6 +2412,10 @@ def _reembed_jobs(
         try:
             job = db.reembed_reenter(name)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 — boundary: one source's refusal must not stop the others
+            if (why := _end_refused_reason(exc)) is not None:
+                # The race: the target was retired after the client read it. A skip, as the one before the send.
+                click.echo(f"{name}: not re-entered: {why}")
+                continue
             failures += 1
             click.echo(f"{name}: not re-entered: {_reembed_job_error(exc).message}", err=True)
             continue
@@ -2449,6 +2480,7 @@ def _reembed_all(
             {str(r.get("name")) for r in found.stale}
             | {str(row.get("name")) for row, _job in found.held}
             | {str(r.source_row.get("name")) for r in found.reentries}
+            | {str(r.source_row.get("name")) for r, _why in found.skipped_reentries}
         )
         unknown = [n for n in skipped if n not in known]
         if unknown:
@@ -2457,6 +2489,10 @@ def _reembed_all(
                 f"job, or a re-entry); they are: "
                 f"{', '.join(known) or '(none)'}."
             )
+    for r, why in found.skipped_reentries:
+        # Engine 0.1.202 refuses this re-entry (409 EndRefused): its target is retired or gone. Said, not sent.
+        if str(r.source_row.get("name")) not in skipped:
+            click.echo(f"{r.source_row.get('name')}: not re-entered: {why}")
     _reembed_jobs(
         db, [r for r in found.stale if str(r.get("name")) not in skipped], profile=profile,
         held=[(row, j) for row, j in found.held if str(row.get("name")) not in skipped],

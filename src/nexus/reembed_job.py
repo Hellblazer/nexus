@@ -187,6 +187,23 @@ class Candidates:
     stale: list[dict] = field(default_factory=list)
     held: list[tuple[dict, dict]] = field(default_factory=list)
     reentries: list[Reentry] = field(default_factory=list)
+    #: Re-entries the engine would refuse (engine 0.1.202: 409 ``EndRefused``) because the job's target is retired or
+    #: has no registry row, each with the one-line reason; they are reported, never sent.
+    skipped_reentries: list[tuple[Reentry, str]] = field(default_factory=list)
+
+
+def target_unusable(job: dict, rows_by_name: dict[str, dict]) -> str | None:
+    """Why *job*'s target can no longer take a re-entry, or None when it can.
+
+    ``its target B is retired`` when B's registry row is superseded or its lifecycle state is ``retired``;
+    ``its target B is not registered`` when B has no row. The engine refuses the re-entry in both cases."""
+    target = str(job.get("target_collection"))
+    row = rows_by_name.get(target)
+    if row is None:
+        return f"its target {target} is not registered"
+    if is_superseded(row) or row.get("lifecycle_state") == "retired":
+        return f"its target {target} is retired"
+    return None
 
 
 def reentry_candidates(
@@ -247,9 +264,13 @@ def candidates(
     for row in stale_rows(rows, profile):
         job = holder.get(str(row.get("name")))
         (result.held.append((row, job)) if job is not None else result.stale.append(row))
-    result.reentries = reentry_candidates(
-        jobs, {str(r.get("name")): r for r in rows}, live_docs, all_docs,
-    )
+    by_name = {str(r.get("name")): r for r in rows}
+    for entry in reentry_candidates(jobs, by_name, live_docs, all_docs):
+        why = target_unusable(entry.job, by_name)
+        if why is None:
+            result.reentries.append(entry)
+        else:
+            result.skipped_reentries.append((entry, why))
     return result
 
 

@@ -32,6 +32,7 @@ from nexus.commands.t3_cmds import quarantine as t3_quarantine
 from nexus.commands.t3 import t3
 from nexus.db import gateway_backoff
 from nexus.db import http_vector_client as hv
+from nexus.db.engine_reasons import RESTORE_ORIGIN_UNREGISTERED_REASON
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from tests._catalog_fixture_ops import register_real_doc_id
 from tests._module_seam import module_time
@@ -145,6 +146,27 @@ class TestWire:
             client.gc_quarantine_restore(ORIGIN, chashes=[_chash("a")])
         assert raised.value.reason == "quarantine_restore_busy"
         assert request.call_count == 1 and sleeps == []
+
+    def test_a_restore_origin_unregistered_409_is_raised_with_its_reason_and_body_not_resent(self) -> None:
+        """RDR-229 P3.7 (engine 0.1.202): a restore naming chunks quarantined from an origin with no registry
+        row answers 409 with a typed body; the client raises it once, with ``reason`` and the engine's body."""
+        body = {"error": f"origin collection {ORIGIN} has no registry row; 3 quarantined chunk(s) stay quarantined",
+                "reason": "restore_origin_unregistered", "label": ORIGIN, "rows": 3}
+
+        def err(*_a, **_kw):
+            raise urllib.error.HTTPError("http://engine/x", 409, "conflict", {}, io.BytesIO(_json.dumps(body).encode()))
+
+        client = HttpVectorClient.__new__(HttpVectorClient)
+        client._tenant = "t"
+        with patch("nexus.db.service_endpoint.guard_production_write"), \
+             patch.object(hv, "_resolve_endpoint", return_value=("http://engine", None)), \
+             patch.object(hv, "_request", side_effect=err) as request, \
+             pytest.raises(VectorServiceError) as raised:
+            client.gc_quarantine_restore(ORIGIN, chashes=[_chash("a")])
+        assert RESTORE_ORIGIN_UNREGISTERED_REASON == "restore_origin_unregistered"
+        assert raised.value.code == 409 and raised.value.reason == RESTORE_ORIGIN_UNREGISTERED_REASON
+        assert raised.value.engine_body["label"] == ORIGIN and raised.value.engine_body["rows"] == 3
+        assert request.call_count == 1
 
     def test_a_dry_run_busy_503_is_raised_at_once_unkeyed(self) -> None:
         body = {"error": "held", "reason": "quarantine_restore_busy", "nothing_moved": True,
@@ -671,6 +693,27 @@ class TestCli:
         # A 503 that is NOT the typed busy answer is still an engine failure.
         other = _run(runner, _Stub(error=VectorServiceError("bad gateway", code=503)), "--chash", _chash("a"))
         assert other.exit_code == t3_quarantine.EXIT_ENGINE_ERROR, other.output
+
+    def test_an_unregistered_origin_says_so_names_the_rows_and_exits_5(self, runner) -> None:
+        """RDR-229 P3.7: the engine refused the whole call (409 ``restore_origin_unregistered``): the origin has no
+        registry row, so it will not re-create the origin from its label, and the chunks stay quarantined."""
+        refused = VectorServiceError(
+            f"origin collection {ORIGIN} has no registry row", code=409, reason="restore_origin_unregistered",
+            engine_body={"error": "x", "reason": "restore_origin_unregistered", "label": ORIGIN, "rows": 7})
+        result = _run(runner, _Stub(error=refused), "--chash", _chash("a"))
+
+        assert result.exit_code == t3_quarantine.EXIT_ENGINE_ERROR == 5, result.output
+        assert f"origin collection {ORIGIN} has no registry row" in result.output
+        assert "will not re-create it from its label" in result.output
+        assert "7 chunks stay quarantined" in result.output
+        assert "refused by the engine" not in result.output, "a typed answer is not the generic refusal"
+
+    def test_an_unregistered_origin_with_one_row_says_chunk_not_chunks(self, runner) -> None:
+        refused = VectorServiceError(
+            "x", code=409, reason="restore_origin_unregistered",
+            engine_body={"reason": "restore_origin_unregistered", "label": ORIGIN, "rows": 1})
+        result = _run(runner, _Stub(error=refused), "--chash", _chash("a"))
+        assert result.exit_code == 5 and "1 chunk stays quarantined" in result.output
 
     def test_a_busy_trip_after_an_earlier_sibling_committed_does_not_say_nothing_moved(self, runner) -> None:
         # nexus-wbfpw.55 round 2: each quarantine sibling is its own transaction on the engine, so the busy answer

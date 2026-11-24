@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from tests._catalog_fixture_ops import active_reader
 from click.testing import CliRunner
 
+from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.cli import main
 from nexus.db.collection_purge import CascadeCounts
 from nexus.db.http_vector_client import HttpVectorClient
@@ -419,6 +422,58 @@ def test_delete_with_failed_service_cascade_is_unconfirmed_and_exits_nonzero(
     assert "unconfirmed" in result.output
     assert "nx collection delete old" in result.output
     assert "service deleteCollection failed" in result.output
+
+
+def _busy_engine_catalog(requests: list, *, body: dict | None = None):
+    """A real ``HttpCatalogClient`` whose transport answers the delete route as engine 0.1.202 does while a re-embed
+    job holds the collection (409 ``collection_busy``); every request is recorded."""
+    answer = body if body is not None else {
+        "error": "collection 'old' is held by re-embed job 7f3e0000-0000-0000-0000-000000000001 (running)",
+        "reason": "collection_busy", "collection": "old", "job_id": "7f3e0000-0000-0000-0000-000000000001",
+    }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, json.loads(request.content) if request.content else {}))
+        return httpx.Response(409, json=answer)
+
+    cat = HttpCatalogClient(base_url="http://mock.test", _token="t")
+    cat._client = httpx.Client(base_url="http://mock.test", transport=httpx.MockTransport(handle))
+    return cat
+
+
+def test_delete_of_a_collection_a_reembed_job_holds_names_the_job_and_exits_nonzero(runner, env_creds, mock_db) -> None:
+    """RDR-229 P3.5a row 14 (engine 0.1.202): the delete route answers 409 ``collection_busy`` while a re-embed job
+    holds the collection, and removes nothing. The CLI says which job, what to do, and does not claim a delete."""
+    requests: list = []
+    cat = _busy_engine_catalog(requests)
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=cat), \
+         patch("nexus.db.service_endpoint.guard_production_write"), \
+         patch("nexus.db.collection_purge._purge_pipeline_db") as pipeline:
+        result = _invoke(runner, mock_db, ["delete", "old", "--yes"])
+
+    assert result.exit_code != 0, result.output
+    out = " ".join(result.output.split())
+    assert "old" in out and "7f3e0000-0000-0000-0000-000000000001" in out
+    assert "re-embed job" in out and "holds" in out
+    assert "wait for it to finish" in out.lower()
+    assert "nx collection re-embed --abort 7f3e0000-0000-0000-0000-000000000001" in out
+    assert "nothing was deleted" in out
+    assert "Deleted:" not in out
+    assert "unconfirmed" not in out, "the engine answered: the delete is refused, not unconfirmed"
+    assert [(m, p) for m, p, _b in requests] == [("POST", "/v1/catalog/collections/delete")], "one attempt, never resent"
+    pipeline.assert_not_called()
+
+
+def test_delete_busy_is_read_from_the_reason_not_from_any_409(runner, env_creds, mock_db) -> None:
+    """A 409 with another body (the label-ambiguous refusal) keeps the unconfirmed-delete answer."""
+    cat = _busy_engine_catalog([], body={"error": "collection 'old' is held by 2 live rows",
+                                         "reason": "collection_label_ambiguous", "collection": "old"})
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=cat), \
+         patch("nexus.db.service_endpoint.guard_production_write"):
+        result = _invoke(runner, mock_db, ["delete", "old", "--yes"])
+
+    assert result.exit_code != 0
+    assert "re-embed job" not in result.output and "unconfirmed" in result.output
 
 
 def test_delete_reports_the_quarantine_rows_the_engine_took_with_the_origin(runner, env_creds, mock_db) -> None:
