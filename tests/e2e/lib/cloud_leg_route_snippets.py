@@ -501,3 +501,38 @@ ROW14_PROBES = {
     "POST /v1/catalog/documents/move": ("route-documents-move-refusal", MOVE_DOCUMENT_REFUSAL, "documents/move of nothing refused 409"),
     "POST /v1/catalog/owners/move": ("route-owners-move-refusal", MOVE_OWNER_REFUSAL, "owners/move of nothing refused 409"),
 }
+
+_REEMBED_REFUSAL = r"""
+from nexus.db import make_t3
+from nexus.db.http_vector_client import VectorServiceError
+# RDR-229 R7 (nexus-p2m1x.25): the re-embed routes answer a different 409 value for a retired source. The probe names a source nothing registers, so
+# the handler refuses it before it writes anything: ReembedHandler#start reads the job table (keptTombstonedJobOf), then resolve() lists the
+# lock-state jobs and reads the source's registry row, and answers 404 when it has none; no job row, lock or registration is written before that.
+# A managed engine (no NX_ENGINE_LOCAL) refuses every re-embed route with the 503 of its local-mode gate, before the handler's own reads, and a local
+# engine with no embedder with the one that follows: each is an exact body, and none starts or plans anything.
+name = "@label@-reembed-probe"
+local_gate = ("re-embed jobs run only on a local engine: this engine was not started with NX_ENGINE_LOCAL=1 (local mode)",
+              "re-embed jobs need an embedder and this engine has none")
+try:
+    make_t3().@call@(name)
+except VectorServiceError as exc:
+    body = exc.engine_body
+    if exc.code == 404:
+        assert body == {"error": f"source collection {name} is not registered"}, f"@verb@ of an unregistered source answered 404 with {body!r}"
+    elif exc.code == 503:
+        assert isinstance(body, dict) and set(body) == {"error"} and body["error"] in local_gate, f"@verb@ answered 503 with {body!r}"
+    else:
+        raise SystemExit(f"@verb@ of an unregistered source answered {exc.code}: {body!r}")
+    print("reembed @verb@ of an unregistered source refused", exc.code)
+else:
+    raise SystemExit("reembed @verb@ of an unregistered source was accepted")
+"""
+
+REEMBED_PLAN_REFUSAL = _REEMBED_REFUSAL.replace("@call@", "reembed_plan").replace("@verb@", "plan")
+REEMBED_JOBS_REFUSAL = _REEMBED_REFUSAL.replace("@call@", "reembed_start").replace("@verb@", "jobs")
+
+#: RDR-229 R7 (nexus-p2m1x.25): the ledger line of the re-embed refusals; the jobs probe can only reach a refusal, since its source is registered nowhere.
+REEMBED_PROBES = {
+    "POST /v1/vectors/reembed/plan": ("route-reembed-plan-unregistered", REEMBED_PLAN_REFUSAL, "reembed plan of an unregistered source refused"),
+    "POST /v1/vectors/reembed/jobs": ("route-reembed-jobs-unregistered", REEMBED_JOBS_REFUSAL, "reembed jobs of an unregistered source refused"),
+}
