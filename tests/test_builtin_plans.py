@@ -261,6 +261,22 @@ def test_builtin_template_scope_topic_is_never_a_bound_var(path: Path) -> None:
 _AUTHOR_FILTER_TOOLS = frozenset({"query", "search_metadata_scoped"})
 
 
+def test_the_author_filter_check_examines_a_real_author_step() -> None:
+    """Non-vacuity: the literal-author check above must have a step to examine.
+
+    find-by-author binds ``author``; if no builtin retrieval step carried one,
+    the per-template check would pass over nothing.
+    """
+    seen = 0
+    for path in _YAML_FILES:
+        steps = (yaml.safe_load(path.read_text()).get("plan_json") or {}).get("steps") or []
+        seen += sum(
+            1 for st in steps
+            if (st or {}).get("tool") in _AUTHOR_FILTER_TOOLS and "author" in ((st or {}).get("args") or {})
+        )
+    assert seen >= 1, "no builtin retrieval step carries `author`: the literal-author check is vacuous"
+
+
 @pytest.mark.skipif(
     not _BUILTIN_DIR.exists() or not _YAML_FILES,
     reason="conexus/plans/builtin/ dir is empty - defensive skip; expected to be populated",

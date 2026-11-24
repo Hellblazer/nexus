@@ -347,11 +347,7 @@ If expected context not received:
 
 ## Beads Integration
 
-All agents should:
-- Check `bd ready` for available work before starting
-- Update bead status when starting: `bd update <id> --claim`
-- Do NOT close the bead you worked: the caller closes it after both reviewers return clean
-- Discovered work: add it as a note on the bead you hold (`bd update <id> --append-notes`), or hand it back; the caller files beads
+All agents should check `bd ready` for available work before starting and claim a bead with `bd update <id> --claim`. For an implementer (`developer`) and any agent that works a bead someone else owns: do NOT close it (the caller closes it after both reviewers return clean), and record discovered work as a note on the bead (`bd update <id> --append-notes`) or hand it back, since the caller files beads. An agent's own Beads section wins where it differs: the planners create beads, and the critics and analysts follow their own sections.
 
 ## nx Store Patterns
 
