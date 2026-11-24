@@ -177,7 +177,7 @@ def test_the_sweep_never_leaves_the_tools_root(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("keep", ["0", "-1", "x", ""])
 def test_a_bad_keep_is_refused_before_anything_is_planned(keep: str, tmp_path: Path) -> None:
-    """--keep 0 would leave only the four rules between the operator and an
+    """--keep 0 would leave only the five rules between the operator and an
     install with no fallback. Refused, and refused BEFORE the sweep runs."""
     tools = _tools(tmp_path, "gen-A", "gen-B", "gen-C", "gen-D")
     r = _sh(f'nx_gc_generations --keep "{keep}" "{tools}"', tmp_path)

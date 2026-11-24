@@ -6,7 +6,8 @@ nexus-utpuw.6 (P2b). Everything else here builds beside, points at, or reports
 on. This reaps — so the tests are the deliverable, and they are written as
 refusals rather than as coverage.
 
-FOUR NEVER-DELETE RULES, each tested alone AND in combination:
+FIVE NEVER-DELETE RULES, each tested alone AND in combination (the fifth, the lease,
+is tested in tests/test_install_lease_gc.py):
   (a) the generation `current` points at
   (b) the PREVIOUS current — rollback for free (.3 records it)
   (c) any generation with a live holder (.5's census)
@@ -98,7 +99,7 @@ def test_gc_is_present() -> None:
 
 
 # --------------------------------------------------------------------------
-# the four never-delete rules, each on its own
+# the never-delete rules (a)-(d), each on its own
 # --------------------------------------------------------------------------
 
 def test_rule_a_never_deletes_what_current_points_at(env) -> None:
@@ -391,7 +392,7 @@ def test_dry_run_deletes_nothing_but_reports_the_same_set(env) -> None:
 
 
 def test_a_keep_of_zero_is_refused(env) -> None:
-    """--keep 0 would mean 'retain nothing', and the four rules are the only
+    """--keep 0 would mean 'retain nothing', and the five rules are the only
     thing between that and an unusable install. It is almost certainly a
     mistake, and refusing costs one message."""
     tools, stub_bin = env

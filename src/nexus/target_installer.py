@@ -87,8 +87,11 @@ __all__ = ["BUILD_PYTHON", "Staged", "TargetFetchError", "staged_installer"]
 #: What the POSIX build needs beside ``install_generation.sh`` (it sources
 #: ``layout.sh``, which dispatches to ``layout_core.py``, and reads the overrides;
 #: ``lease_core.py`` writes the generation's lease and copies ``_nx_lease.py`` into
-#: it). A file missing here makes the staged installer unusable and the build falls
-#: back to the old one, which writes no lease.
+#: it). This list is only a PRESENCE check: the whole fetched ``_install`` directory
+#: is what runs, so an older running nexus that does not list these files still
+#: builds a leased generation from a target that carries them. A target that LACKS
+#: one (a ``--version`` older than the lease) is judged unusable and built by the
+#: running installer instead, which writes the lease.
 POSIX_FILES = (
     "install_generation.sh", "layout.sh", "layout_core.py", "lease_core.py", "_nx_lease.py", "overrides.txt",
 )

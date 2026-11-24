@@ -5356,9 +5356,11 @@ install, so the tree grew by one 1.7 GB generation per upgrade for as long as
 the sessions lived. The plugin's SessionStart hook runs this, so a tree goes
 the moment its holders are gone. Every held tree the reap keeps is printed
 (`kept <gen>: held by <pids>`), from both this verb and `nx self install`,
-where the reap used to say nothing about them. `nx doctor`'s Holders row names
-each held generation's size on disk and the remedy: end those sessions, then
-`nx self gc`.
+where the reap used to say nothing about them. A generation kept because a live
+interpreter holds its lease (below) prints `kept <gen>: leased: ...`. `nx doctor`'s
+Holders row names each held generation's size on disk and the remedy (end those
+sessions, then `nx self gc`), and reports the lease-held generations and the lease
+error and unsupported counts from the last gc run record.
 
 When the process census cannot be trusted (`ps` fails, times out or is not on
 PATH, or its table does not list the cleanup's own process), no complete
@@ -5372,12 +5374,21 @@ it goes: `gc_reap_begin` before each delete, `gc_reaped`, `gc_reap_kept` or
 the census (state, why, `ps` duration, rows), `caller` (`self-gc-hook`,
 `self-gc`, `self-install`, `bootstrap`) and the nx that ran the reap; the
 begin and summary lines add the parent process chain, with token, key,
-secret, password and auth values redacted. The file is owner-only (0600) and
+secret, password and auth values redacted. Each generation's line also carries
+its `lease` state (`absent`, `held`, `free`, `unsupported` or `error:<what>`), and
+the `gc_run` summary carries `lease`, a count of each state, and `lease_unsupported`
+(`true` when the filesystem has no locks; a `lease_unsupported` line is also written
+once). A generation built by a release that has leases carries a `.nx-lease` file
+that every interpreter started from it locks for its life; gc asks that lock in
+addition to the process census, so a process the census cannot see (started through
+`current`, or with a rewritten or cut command line) still keeps its generation. Where
+the filesystem has no locks the census alone decides; any other lease error keeps the
+generation for that run and says so. The file is owner-only (0600) and
 rotates to `install-gc.log.1` past 1 MB.
 
 | Flag | Description |
 |------|-------------|
-| `--keep N` | Generations to retain (default 3); the four rules still apply on top. |
+| `--keep N` | Generations to retain (default 3); the five rules still apply on top. |
 | `--dry-run` | Report what would go; delete nothing. |
 | `--prune-uv-cache` | Also run `uv cache prune`. Every generation build unpacks its wheels into uv's archive cache and nothing else ever removes them (82 GB measured on a box that had upgraded for months); `nx self install` runs the prune after every successful flip. |
 
