@@ -8834,8 +8834,11 @@ FROM scope s
                 // to slice docsToEmbed / align an embedding — so this reordering is
                 // behavior-preserving; see CatalogRepository-sibling PgVectorMetadata
                 // BatchParityTest for the exact-row-state parity this must hold instead.
+                // by the row's CURRENT label (coll), as the existence read above: before gate 3 the UPDATE names the collection by that label,
+                // and the request's label, after a one-row rename, reaches nothing of this row (every chash rerouted to a re-embed) or the
+                // new holder's rows (368cf7da04 handed it the request's)
                 needEmbedIdx.addAll(
-                    batchUpdateMetadata(ctx, ch, tenant, collection, dedupIds, dedupMetas, unchangedIdx,
+                    batchUpdateMetadata(ctx, ch, tenant, coll, dedupIds, dedupMetas, unchangedIdx,
                             deleteKeys == null ? List.of() : deleteKeys, gate3));
                 return new NeedEmbedResolution(needEmbedIdx, originalAbsentIdx);
             }));
