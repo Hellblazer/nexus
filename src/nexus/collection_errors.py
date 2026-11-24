@@ -74,3 +74,34 @@ def superseded_write_error_from_body(
     if not (isinstance(name, str) and name and isinstance(successor, str) and successor):
         return None
     return SupersededCollectionWriteError(name, successor)
+
+
+class LabelReservedError(RuntimeError):
+    """The engine refused a label because it is reserved (409 ``label_reserved``, RDR-229 P3.7, engine 0.1.202).
+
+    A collection renamed away from the label by the one-row rename still has rows that carry it, under another
+    collection id, until the P4.1 cleanup drops the name columns. A register, revive, mint, a supersede's successor,
+    a rename's target and a per-collection import of that label are all refused before anything is written, so the
+    message is the same for each: the label, why, and the two ways out. Never retried. Exposes ``label``."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        super().__init__(
+            f"the collection label {label!r} is reserved: a collection that was renamed away from it still has rows "
+            f"that carry it, and it can be used again once the P4.1 cleanup removes those names. Nothing was written. "
+            f"Pick another label, or rename that collection back to {label!r} "
+            f"(`nx collection rename <its current name> {shlex.quote(label)}`)."
+        )
+
+
+def label_reserved_error_from_body(status: int | None, body: Any) -> LabelReservedError | None:
+    """The typed error for the engine's 409 ``label_reserved`` body, else None.
+
+    Keyed on the status and the body's ``reason``; a body that names no label is not turned into the typed error (the
+    caller keeps its generic 409, which is no more retryable)."""
+    from nexus.db.engine_reasons import LABEL_RESERVED_REASON, error_reason  # noqa: PLC0415 — deferred: this module stays import-free for the CLI boundary
+
+    if status != 409 or not isinstance(body, dict) or error_reason(body) != LABEL_RESERVED_REASON:
+        return None
+    label = body.get("label")
+    return LabelReservedError(label) if isinstance(label, str) and label else None
