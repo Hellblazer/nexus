@@ -32,6 +32,16 @@ def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # returns True for this very process. Patch the name on the module under
     # test, not is_dev_checkout_process itself: install_ping is what decides.
     monkeypatch.setattr(ip, "running_from_dev_checkout", lambda: False)
+    # SAME REASONING FOR THE AUTOMATION SKIPS: this suite runs under pytest
+    # (PYTEST_CURRENT_TEST is always set), often in CI or a lab-run grant, so
+    # the real answer is always "automated". Give the tests below an empty
+    # environment and an empty container root; the automation section
+    # (the `auto` fixture) fills them in per signal.
+    root = tmp_path / "rootfs"
+    root.mkdir()
+    monkeypatch.setattr(ip, "_automation_env", lambda: {})
+    monkeypatch.setattr(ip, "_CONTAINER_ROOT", root)
+    monkeypatch.delenv("NX_TELEMETRY", raising=False)
     return tmp_path
 
 
@@ -294,8 +304,7 @@ def test_an_undecidable_check_counts_as_not_a_checkout(monkeypatch: pytest.Monke
 @pytest.fixture
 def auto(cfg: Path, monkeypatch: pytest.MonkeyPatch):
     """`cfg` plus a clean, writable stand-in for the automation environment."""
-    root = cfg / "rootfs"
-    root.mkdir()
+    root = cfg / "rootfs"  # cfg made it empty
     env: dict[str, str] = {}
     monkeypatch.setattr(ip, "_automation_env", lambda: env)
     monkeypatch.setattr(ip, "_CONTAINER_ROOT", root)
@@ -320,7 +329,7 @@ def test_ci_vendor_list_covers_the_named_vendors() -> None:
     assert required <= set(ip.CI_ENV_VARS)
 
 
-@pytest.mark.parametrize("name", sorted(ip.CI_ENV_VARS) if hasattr(ip, "CI_ENV_VARS") else ["CI"])
+@pytest.mark.parametrize("name", ip.CI_ENV_VARS)
 def test_each_ci_variable_skips_and_is_named(auto: SimpleNamespace, name: str) -> None:
     auto.env[name] = "true"
     assert ip.telemetry_enabled() is False
@@ -406,16 +415,14 @@ def test_unreadable_proc_never_raises(auto: SimpleNamespace, monkeypatch: pytest
     assert ip.automation_reason(auto.env, auto.root) is None
 
     # and a permission failure, the other way /proc is unreadable in a sandbox
-    from pathlib import Path as _Path
-
-    real = _Path.read_text
+    real = Path.read_text
 
     def deny(self: Path, *a: object, **k: object) -> str:
         if self.name == "cgroup":
             raise PermissionError("denied")
         return real(self, *a, **k)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(_Path, "read_text", deny)
+    monkeypatch.setattr(Path, "read_text", deny)
     assert ip.automation_reason(auto.env, auto.root) is None
     assert ip.telemetry_enabled() is True
 
