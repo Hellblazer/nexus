@@ -100,41 +100,44 @@ final class ByIdRestoreSupport {
      * {@code table.constraint} of each key dropped, so a test can name them.
      */
     static List<String> dropRegistryNameKeys(ImportTestEnv env) {
-        return env.su(ctx -> {
-            Table<?> con = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("con");
-            Table<?> child = DSL.table(DSL.name("pg_catalog", "pg_class")).as("child");
-            Table<?> parent = DSL.table(DSL.name("pg_catalog", "pg_class")).as("parent");
-            Table<?> childNs = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("cns");
-            Table<?> parentNs = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("pns");
-            Field<Long> conRel = DSL.field(DSL.name("con", "conrelid"), Long.class);
-            Field<Long> conRef = DSL.field(DSL.name("con", "confrelid"), Long.class);
-            Field<String> conKind = DSL.field(DSL.name("con", "contype"), Object.class).cast(SQLDataType.VARCHAR);
-            Field<Long> conParent = DSL.field(DSL.name("con", "conparentid"), Object.class).cast(SQLDataType.BIGINT);
-            List<String[]> keys = new ArrayList<>();
-            for (Record r : ctx.select(DSL.field(DSL.name("cns", "nspname"), String.class),
-                        DSL.field(DSL.name("child", "relname"), String.class), DSL.field(DSL.name("con", "conname"), String.class),
-                        DSL.function("pg_get_constraintdef", SQLDataType.VARCHAR, DSL.field(DSL.name("con", "oid"), Long.class)))
-                    .from(con)
-                    .join(child).on(DSL.field(DSL.name("child", "oid"), Long.class).eq(conRel))
-                    .join(parent).on(DSL.field(DSL.name("parent", "oid"), Long.class).eq(conRef))
-                    .join(childNs).on(DSL.field(DSL.name("cns", "oid"), Long.class).eq(DSL.field(DSL.name("child", "relnamespace"), Long.class)))
-                    .join(parentNs).on(DSL.field(DSL.name("pns", "oid"), Long.class).eq(DSL.field(DSL.name("parent", "relnamespace"), Long.class)))
-                    .where(DSL.field(DSL.name("parent", "relname"), String.class).eq("catalog_collections"))
-                    .and(DSL.field(DSL.name("pns", "nspname"), String.class).eq("nexus"))
-                    .and(conKind.eq("f")).and(conParent.eq(0L))
-                    .fetch()) {
-                java.util.regex.Matcher m = REFERENCED.matcher(r.get(3, String.class));
-                boolean namesAName = m.find() && java.util.Arrays.stream(m.group(1).split(","))
-                    .map(String::trim).anyMatch(c -> c.equals("name"));
-                if (namesAName) keys.add(new String[] {r.get(0, String.class), r.get(1, String.class), r.get(2, String.class)});
-            }
-            List<String> dropped = new ArrayList<>();
-            for (String[] k : keys) {
-                ctx.alterTable(DSL.table(DSL.name(k[0], k[1]))).dropConstraint(DSL.name(k[2])).execute();
-                dropped.add(k[1] + "." + k[2]);
-            }
-            return dropped;
-        });
+        return env.su(ByIdRestoreSupport::dropRegistryNameKeys);
+    }
+
+    /** {@link #dropRegistryNameKeys(ImportTestEnv)} over a superuser session of any database. */
+    static List<String> dropRegistryNameKeys(DSLContext ctx) {
+        Table<?> con = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("con");
+        Table<?> child = DSL.table(DSL.name("pg_catalog", "pg_class")).as("child");
+        Table<?> parent = DSL.table(DSL.name("pg_catalog", "pg_class")).as("parent");
+        Table<?> childNs = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("cns");
+        Table<?> parentNs = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("pns");
+        Field<Long> conRel = DSL.field(DSL.name("con", "conrelid"), Long.class);
+        Field<Long> conRef = DSL.field(DSL.name("con", "confrelid"), Long.class);
+        Field<String> conKind = DSL.field(DSL.name("con", "contype"), Object.class).cast(SQLDataType.VARCHAR);
+        Field<Long> conParent = DSL.field(DSL.name("con", "conparentid"), Object.class).cast(SQLDataType.BIGINT);
+        List<String[]> keys = new ArrayList<>();
+        for (Record r : ctx.select(DSL.field(DSL.name("cns", "nspname"), String.class),
+                    DSL.field(DSL.name("child", "relname"), String.class), DSL.field(DSL.name("con", "conname"), String.class),
+                    DSL.function("pg_get_constraintdef", SQLDataType.VARCHAR, DSL.field(DSL.name("con", "oid"), Long.class)))
+                .from(con)
+                .join(child).on(DSL.field(DSL.name("child", "oid"), Long.class).eq(conRel))
+                .join(parent).on(DSL.field(DSL.name("parent", "oid"), Long.class).eq(conRef))
+                .join(childNs).on(DSL.field(DSL.name("cns", "oid"), Long.class).eq(DSL.field(DSL.name("child", "relnamespace"), Long.class)))
+                .join(parentNs).on(DSL.field(DSL.name("pns", "oid"), Long.class).eq(DSL.field(DSL.name("parent", "relnamespace"), Long.class)))
+                .where(DSL.field(DSL.name("parent", "relname"), String.class).eq("catalog_collections"))
+                .and(DSL.field(DSL.name("pns", "nspname"), String.class).eq("nexus"))
+                .and(conKind.eq("f")).and(conParent.eq(0L))
+                .fetch()) {
+            java.util.regex.Matcher m = REFERENCED.matcher(r.get(3, String.class));
+            boolean namesAName = m.find() && java.util.Arrays.stream(m.group(1).split(","))
+                .map(String::trim).anyMatch(c -> c.equals("name"));
+            if (namesAName) keys.add(new String[] {r.get(0, String.class), r.get(1, String.class), r.get(2, String.class)});
+        }
+        List<String> dropped = new ArrayList<>();
+        for (String[] k : keys) {
+            ctx.alterTable(DSL.table(DSL.name(k[0], k[1]))).dropConstraint(DSL.name(k[2])).execute();
+            dropped.add(k[1] + "." + k[2]);
+        }
+        return dropped;
     }
 
     /** The registry's ids of {@code tenant}, by collection name. */

@@ -13,8 +13,11 @@
     stamp because a rename keeps rewriting the name columns until P3.7's gates pass (RDR item 6); P4.1 removes the name arm.
     Outputs are unchanged: only WHERE, ON, IN, EXISTS and = ANY clauses change. collection_vector_stats joins the manifest twice,
     once by id and once by name, each at most one row per chunk, so a chunk with a stamped and an unstamped manifest row is
-    counted once. Registry upserts take ON CONFLICT (tenant_id, name) WHERE superseded_by_id IS NULL (linda's G15 ruling), which
-    infers P3.6's live-label partial UNIQUE and, until P4.1, the name key.
+    counted once. Registry upserts take ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL (linda's
+    G15 ruling, with the first conjunct added 2026-11-23): PostgreSQL infers a partial unique index only when the WHERE implies the
+    index predicate, and P3.6's live-label index is over superseded_by = '' (catalog-053) while P4.1's re-created one is over
+    superseded_by_id IS NULL, so each conjunct proves one of them and the name key (until P4.1) is inferred whatever the WHERE says;
+    a WHERE of superseded_by_id IS NULL alone finds no arbiter once the name key is gone (Rdr229P35bRegistryArbiterIntegrationTest).
 
     Every changeset is one object's CREATE OR REPLACE (signature, return type, volatility, SECURITY and grants kept; a view keeps
     its column list), built on its LAST DEFINER in master include order (service/src/test/resources/rdr229/p35b-reader-census.tsv),
@@ -3552,7 +3555,7 @@ BEGIN
         v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
         v_origin_model_version, v_origin_dimension, 'quarantine'
     )
-    ON CONFLICT (tenant_id, name) WHERE superseded_by_id IS NULL DO UPDATE
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO UPDATE
       SET content_type    = EXCLUDED.content_type,
           owner_id        = EXCLUDED.owner_id,
           embedding_model = EXCLUDED.embedding_model,
@@ -4367,7 +4370,7 @@ BEGIN
         v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
         v_origin_model_version, v_origin_dimension, 'live'
     )
-    ON CONFLICT (tenant_id, name) WHERE superseded_by_id IS NULL DO NOTHING;
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO NOTHING;
 
     -- The origin's id is read again now that it is registered: a first-ever origin had none when the body began, and a
     -- racing registration (the DO NOTHING above) may have committed one since.
@@ -4761,7 +4764,7 @@ BEGIN
         v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
         v_origin_model_version, v_origin_dimension, 'live'
     )
-    ON CONFLICT (tenant_id, name) WHERE superseded_by_id IS NULL DO NOTHING;
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO NOTHING;
 
     -- The origin's id is read again now that it is registered: a first-ever origin had none when the body began, and a
     -- racing registration (the DO NOTHING above) may have committed one since.
@@ -6618,7 +6621,7 @@ BEGIN
         v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
         v_origin_model_version, v_origin_dimension, 'quarantine'
     )
-    ON CONFLICT (tenant_id, name) WHERE superseded_by_id IS NULL DO UPDATE
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO UPDATE
       SET content_type    = EXCLUDED.content_type,
           owner_id        = EXCLUDED.owner_id,
           embedding_model = EXCLUDED.embedding_model,
@@ -7915,7 +7918,7 @@ BEGIN
         v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
         v_origin_model_version, v_origin_dimension, 'quarantine'
     )
-    ON CONFLICT (tenant_id, name) WHERE superseded_by_id IS NULL DO UPDATE
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO UPDATE
       SET content_type    = EXCLUDED.content_type,
           owner_id        = EXCLUDED.owner_id,
           embedding_model = EXCLUDED.embedding_model,
@@ -10010,21 +10013,24 @@ $$;
     </changeSet>
 
     <changeSet id="vectors-077-98" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24), form B: nexus.collection_vector_stats reads both shapes of the collection name, the id where both sides carry one and the name where either lacks one (a NULL id never matches through a '' name). CREATE OR REPLACE of the view body only: same signature, return type, volatility, security and grants. The rollback restores the last definer's text. DATA EFFECT: none; no row is read or written.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24), form B: nexus.collection_vector_stats reads both shapes of the collection name, the id where both sides carry one and the name where either lacks one (a NULL id never matches through a '' name). CREATE OR REPLACE of the view body, one column appended at the end, same volatility, security and grants. It outputs the registry's label for a stamped row's id (nexus.catalog_collections.name by collection_id; the row's own name where the row carries no id, so a half-stamped collection is still one row) and a trailing collection_id column (max over the group: one id per label until P4.1, whose primary key keeps a superseded row's name taken), so P3.7's one-row rename shows at once and P3.5c can join by the id. CREATE OR REPLACE appends the column at the end and changes nothing before it. The rollback DROPs the view and restores the last definer's text and its PUBLIC grant, because CREATE OR REPLACE cannot drop a column. DATA EFFECT: none; no row is read or written.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE VIEW nexus.collection_vector_stats
     WITH (security_invoker = true)
 AS
 SELECT c.tenant_id,
-       c.collection,
+       COALESCE(r.name, c.collection) AS collection,
        CASE WHEN c.embedding_384  IS NOT NULL THEN 384
             WHEN c.embedding_768  IS NOT NULL THEN 768
             WHEN c.embedding_1024 IS NOT NULL THEN 1024
        END AS dim,
        count(*) FILTER (WHERE lvi.chash IS NOT NULL OR lvn.chash IS NOT NULL) AS chunk_count,
        max(c.created_at) FILTER (WHERE lvi.chash IS NOT NULL OR lvn.chash IS NOT NULL) AS last_write,
-       count(*)                                                    AS stored_count
+       count(*)                                                    AS stored_count,
+       max(c.collection_id)                                        AS collection_id
   FROM nexus.chunks c
+  LEFT JOIN nexus.catalog_collections r
+         ON r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id
   LEFT JOIN (SELECT DISTINCT m.tenant_id, m.collection_id, m.chash
                FROM nexus.catalog_document_chunks m
                JOIN nexus.catalog_documents d
@@ -10039,11 +10045,12 @@ SELECT c.tenant_id,
               GROUP BY m.tenant_id, m.collection, m.chash) lvn
          ON lvn.tenant_id = c.tenant_id AND lvn.collection = c.collection AND c.collection <> '' AND lvn.chash = c.chash
         AND (c.collection_id IS NULL OR lvn.unstamped)
- GROUP BY c.tenant_id, c.collection, 3;
+ GROUP BY c.tenant_id, COALESCE(r.name, c.collection), 3;
 ]]></sql>
         <rollback>
             <sql splitStatements="false" stripComments="false"><![CDATA[
-CREATE OR REPLACE VIEW nexus.collection_vector_stats
+DROP VIEW IF EXISTS nexus.collection_vector_stats;
+CREATE VIEW nexus.collection_vector_stats
     WITH (security_invoker = true)
 AS
 SELECT c.tenant_id,
@@ -10063,18 +10070,19 @@ SELECT c.tenant_id,
               WHERE d.deleted_at IS NULL) lv
          ON lv.tenant_id = c.tenant_id AND lv.collection = c.collection AND lv.chash = c.chash
  GROUP BY c.tenant_id, c.collection, 3;
+GRANT SELECT ON nexus.collection_vector_stats TO PUBLIC;
 ]]></sql>
         </rollback>
     </changeSet>
 
     <changeSet id="vectors-077-99" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24), form B: nexus.live_chunks reads both shapes of the collection name, the id where both sides carry one and the name where either lacks one (a NULL id never matches through a '' name). CREATE OR REPLACE of the view body only: same signature, return type, volatility, security and grants. The rollback restores the last definer's text. DATA EFFECT: none; no row is read or written.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24), form B: nexus.live_chunks reads both shapes of the collection name, the id where both sides carry one and the name where either lacks one (a NULL id never matches through a '' name). CREATE OR REPLACE of the view body, one column appended at the end, same volatility, security and grants. It outputs the registry's label for a stamped row's id (nexus.catalog_collections.name by collection_id; the row's own name where the row carries no id) and a trailing collection_id column, so P3.7's one-row rename shows at once. CREATE OR REPLACE appends the column at the end and changes nothing before it. The rollback DROPs the view and restores the last definer's text and its PUBLIC grant, because CREATE OR REPLACE cannot drop a column. DATA EFFECT: none; no row is read or written.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE VIEW nexus.live_chunks
     WITH (security_invoker = true)
 AS
 SELECT c.tenant_id,
-       c.collection,
+       COALESCE(r.name, c.collection) AS collection,
        c.chash,
        c.chunk_text,
        COALESCE(c.embedding_384, c.embedding_768, c.embedding_1024)::nexus.vector AS embedding,
@@ -10084,8 +10092,11 @@ SELECT c.tenant_id,
        CASE WHEN c.embedding_384  IS NOT NULL THEN 384
             WHEN c.embedding_768  IS NOT NULL THEN 768
             WHEN c.embedding_1024 IS NOT NULL THEN 1024
-       END AS dim
+       END AS dim,
+       c.collection_id
   FROM nexus.chunks c
+  LEFT JOIN nexus.catalog_collections r
+         ON r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id
  WHERE EXISTS (SELECT 1
                   FROM nexus.catalog_document_chunks m
                   JOIN nexus.catalog_documents d
@@ -10097,7 +10108,8 @@ SELECT c.tenant_id,
 ]]></sql>
         <rollback>
             <sql splitStatements="false" stripComments="false"><![CDATA[
-CREATE OR REPLACE VIEW nexus.live_chunks
+DROP VIEW IF EXISTS nexus.live_chunks;
+CREATE VIEW nexus.live_chunks
     WITH (security_invoker = true)
 AS
 SELECT c.tenant_id,
@@ -10114,6 +10126,7 @@ SELECT c.tenant_id,
        END AS dim
   FROM nexus.chunks c
  WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash));
+GRANT SELECT ON nexus.live_chunks TO PUBLIC;
 ]]></sql>
         </rollback>
     </changeSet>
@@ -10121,14 +10134,17 @@ SELECT c.tenant_id,
 
 
     <changeSet id="vectors-077-103" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.manifest_qualifying_hits_by_id, the id-path twin of nexus.manifest_qualifying_hits. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.manifest_qualifying_hits_by_id, the id-path twin of nexus.manifest_qualifying_hits. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing chunk_collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing chunk_collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.manifest_qualifying_hits_by_id(p_collection_ids bigint[], p_where jsonb, p_where_path text, p_manifest_where jsonb, p_manifest_path text, p_cap integer, p_embedding_model text, p_tenant text, p_query_text text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(hit integer, chunk_collection text, chunk_chash bytea)
+ RETURNS TABLE(hit integer, chunk_collection text, chunk_chash bytea, chunk_collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
-    SELECT 1, m.collection, m.chash
+    SELECT 1,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = m.tenant_id AND r.collection_id = m.collection_id),
+           m.chash,
+           m.collection_id
       FROM nexus.catalog_document_chunks m
       JOIN nexus.catalog_documents d
         ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
@@ -10291,19 +10307,20 @@ DROP FUNCTION IF EXISTS nexus.manifest_qualifying_hits_by_id(bigint[],jsonb,text
     </changeSet>
 
     <changeSet id="vectors-077-104" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.manifest_search_1024_by_id, the id-path twin of nexus.manifest_search_1024. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.manifest_search_1024_by_id, the id-path twin of nexus.manifest_search_1024. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.manifest_search_1024_by_id(p_query nexus.vector, p_query_text text, p_chashes bytea[], p_collection_ids bigint[], p_where jsonb, p_where_path text, p_manifest_where jsonb, p_manifest_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -10482,19 +10499,20 @@ DROP FUNCTION IF EXISTS nexus.manifest_search_1024_by_id(nexus.vector,text,bytea
     </changeSet>
 
     <changeSet id="vectors-077-105" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.manifest_search_384_by_id, the id-path twin of nexus.manifest_search_384. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.manifest_search_384_by_id, the id-path twin of nexus.manifest_search_384. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.manifest_search_384_by_id(p_query nexus.vector, p_query_text text, p_chashes bytea[], p_collection_ids bigint[], p_where jsonb, p_where_path text, p_manifest_where jsonb, p_manifest_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -10673,19 +10691,20 @@ DROP FUNCTION IF EXISTS nexus.manifest_search_384_by_id(nexus.vector,text,bytea[
     </changeSet>
 
     <changeSet id="vectors-077-106" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.manifest_search_768_by_id, the id-path twin of nexus.manifest_search_768. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.manifest_search_768_by_id, the id-path twin of nexus.manifest_search_768. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.manifest_search_768_by_id(p_query nexus.vector, p_query_text text, p_chashes bytea[], p_collection_ids bigint[], p_where jsonb, p_where_path text, p_manifest_where jsonb, p_manifest_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -10864,19 +10883,20 @@ DROP FUNCTION IF EXISTS nexus.manifest_search_768_by_id(nexus.vector,text,bytea[
     </changeSet>
 
     <changeSet id="vectors-077-107" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.plain_search_1024_by_id, the id-path twin of nexus.plain_search_1024. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.plain_search_1024_by_id, the id-path twin of nexus.plain_search_1024. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.plain_search_1024_by_id(p_query nexus.vector, p_collection_ids bigint[], p_where jsonb, p_where_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -10943,19 +10963,20 @@ DROP FUNCTION IF EXISTS nexus.plain_search_1024_by_id(nexus.vector,bigint[],json
     </changeSet>
 
     <changeSet id="vectors-077-108" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.plain_search_384_by_id, the id-path twin of nexus.plain_search_384. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.plain_search_384_by_id, the id-path twin of nexus.plain_search_384. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.plain_search_384_by_id(p_query nexus.vector, p_collection_ids bigint[], p_where jsonb, p_where_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -11022,19 +11043,20 @@ DROP FUNCTION IF EXISTS nexus.plain_search_384_by_id(nexus.vector,bigint[],jsonb
     </changeSet>
 
     <changeSet id="vectors-077-109" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.plain_search_768_by_id, the id-path twin of nexus.plain_search_768. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.plain_search_768_by_id, the id-path twin of nexus.plain_search_768. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.plain_search_768_by_id(p_query nexus.vector, p_collection_ids bigint[], p_where jsonb, p_where_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -11101,19 +11123,20 @@ DROP FUNCTION IF EXISTS nexus.plain_search_768_by_id(nexus.vector,bigint[],jsonb
     </changeSet>
 
     <changeSet id="vectors-077-110" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_aspect_scoped_1024_by_id, the id-path twin of nexus.search_aspect_scoped_1024. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_aspect_scoped_1024_by_id, the id-path twin of nexus.search_aspect_scoped_1024. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_aspect_scoped_1024_by_id(p_query nexus.vector, p_collection_ids bigint[], p_field text, p_pattern text, p_min_confidence double precision, p_where jsonb, p_manifest_where jsonb, p_manifest_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT d.tumbler,
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
            encode(c.chash, 'hex'),
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
       JOIN nexus.catalog_document_chunks m
         ON m.tenant_id = c.tenant_id AND m.collection_id = c.collection_id AND m.chash = c.chash
@@ -11285,19 +11308,20 @@ DROP FUNCTION IF EXISTS nexus.search_aspect_scoped_1024_by_id(nexus.vector,bigin
     </changeSet>
 
     <changeSet id="vectors-077-111" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_aspect_scoped_384_by_id, the id-path twin of nexus.search_aspect_scoped_384. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_aspect_scoped_384_by_id, the id-path twin of nexus.search_aspect_scoped_384. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_aspect_scoped_384_by_id(p_query nexus.vector, p_collection_ids bigint[], p_field text, p_pattern text, p_min_confidence double precision, p_where jsonb, p_manifest_where jsonb, p_manifest_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT d.tumbler,
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
            encode(c.chash, 'hex'),
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
       JOIN nexus.catalog_document_chunks m
         ON m.tenant_id = c.tenant_id AND m.collection_id = c.collection_id AND m.chash = c.chash
@@ -11469,19 +11493,20 @@ DROP FUNCTION IF EXISTS nexus.search_aspect_scoped_384_by_id(nexus.vector,bigint
     </changeSet>
 
     <changeSet id="vectors-077-112" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_aspect_scoped_768_by_id, the id-path twin of nexus.search_aspect_scoped_768. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_aspect_scoped_768_by_id, the id-path twin of nexus.search_aspect_scoped_768. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_aspect_scoped_768_by_id(p_query nexus.vector, p_collection_ids bigint[], p_field text, p_pattern text, p_min_confidence double precision, p_where jsonb, p_manifest_where jsonb, p_manifest_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT d.tumbler,
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
            encode(c.chash, 'hex'),
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
       JOIN nexus.catalog_document_chunks m
         ON m.tenant_id = c.tenant_id AND m.collection_id = c.collection_id AND m.chash = c.chash
@@ -11653,10 +11678,10 @@ DROP FUNCTION IF EXISTS nexus.search_aspect_scoped_768_by_id(nexus.vector,bigint
     </changeSet>
 
     <changeSet id="vectors-077-113" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_graph_hop_1024_by_id, the id-path twin of nexus.search_graph_hop_1024. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_graph_hop_1024_by_id, the id-path twin of nexus.search_graph_hop_1024. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_graph_hop_1024_by_id(p_query nexus.vector, p_seeds text[], p_collection_ids bigint[], p_link_type text, p_depth integer, p_direction text, p_where jsonb, p_manifest_where jsonb, p_manifest_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
@@ -11678,10 +11703,11 @@ AS $function$
     reached AS (SELECT DISTINCT tumbler FROM reach)
     SELECT d.tumbler,
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
            encode(c.chash, 'hex'),
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
       JOIN nexus.catalog_document_chunks m
         ON m.tenant_id = c.tenant_id AND m.collection_id = c.collection_id AND m.chash = c.chash
@@ -11844,10 +11870,10 @@ DROP FUNCTION IF EXISTS nexus.search_graph_hop_1024_by_id(nexus.vector,text[],bi
     </changeSet>
 
     <changeSet id="vectors-077-114" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_graph_hop_384_by_id, the id-path twin of nexus.search_graph_hop_384. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_graph_hop_384_by_id, the id-path twin of nexus.search_graph_hop_384. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_graph_hop_384_by_id(p_query nexus.vector, p_seeds text[], p_collection_ids bigint[], p_link_type text, p_depth integer, p_direction text, p_where jsonb, p_manifest_where jsonb, p_manifest_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
@@ -11869,10 +11895,11 @@ AS $function$
     reached AS (SELECT DISTINCT tumbler FROM reach)
     SELECT d.tumbler,
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
            encode(c.chash, 'hex'),
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
       JOIN nexus.catalog_document_chunks m
         ON m.tenant_id = c.tenant_id AND m.collection_id = c.collection_id AND m.chash = c.chash
@@ -12035,10 +12062,10 @@ DROP FUNCTION IF EXISTS nexus.search_graph_hop_384_by_id(nexus.vector,text[],big
     </changeSet>
 
     <changeSet id="vectors-077-115" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_graph_hop_768_by_id, the id-path twin of nexus.search_graph_hop_768. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_graph_hop_768_by_id, the id-path twin of nexus.search_graph_hop_768. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_graph_hop_768_by_id(p_query nexus.vector, p_seeds text[], p_collection_ids bigint[], p_link_type text, p_depth integer, p_direction text, p_where jsonb, p_manifest_where jsonb, p_manifest_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
@@ -12060,10 +12087,11 @@ AS $function$
     reached AS (SELECT DISTINCT tumbler FROM reach)
     SELECT d.tumbler,
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
            encode(c.chash, 'hex'),
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
       JOIN nexus.catalog_document_chunks m
         ON m.tenant_id = c.tenant_id AND m.collection_id = c.collection_id AND m.chash = c.chash
@@ -12226,19 +12254,20 @@ DROP FUNCTION IF EXISTS nexus.search_graph_hop_768_by_id(nexus.vector,text[],big
     </changeSet>
 
     <changeSet id="vectors-077-116" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_metadata_scoped_1024_by_id, the id-path twin of nexus.search_metadata_scoped_1024. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_metadata_scoped_1024_by_id, the id-path twin of nexus.search_metadata_scoped_1024. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_metadata_scoped_1024_by_id(p_query nexus.vector, p_collection_ids bigint[], p_content_type text, p_author text, p_year integer, p_corpus text, p_subtree text, p_where jsonb, p_manifest_where jsonb, p_manifest_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT d.tumbler,
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
            encode(c.chash, 'hex'),
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
       JOIN nexus.catalog_document_chunks m
         ON m.tenant_id = c.tenant_id AND m.collection_id = c.collection_id AND m.chash = c.chash
@@ -12405,19 +12434,20 @@ DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_1024_by_id(nexus.vector,big
     </changeSet>
 
     <changeSet id="vectors-077-117" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_metadata_scoped_384_by_id, the id-path twin of nexus.search_metadata_scoped_384. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_metadata_scoped_384_by_id, the id-path twin of nexus.search_metadata_scoped_384. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_metadata_scoped_384_by_id(p_query nexus.vector, p_collection_ids bigint[], p_content_type text, p_author text, p_year integer, p_corpus text, p_subtree text, p_where jsonb, p_manifest_where jsonb, p_manifest_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT d.tumbler,
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
            encode(c.chash, 'hex'),
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
       JOIN nexus.catalog_document_chunks m
         ON m.tenant_id = c.tenant_id AND m.collection_id = c.collection_id AND m.chash = c.chash
@@ -12584,19 +12614,20 @@ DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_384_by_id(nexus.vector,bigi
     </changeSet>
 
     <changeSet id="vectors-077-118" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_metadata_scoped_768_by_id, the id-path twin of nexus.search_metadata_scoped_768. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_metadata_scoped_768_by_id, the id-path twin of nexus.search_metadata_scoped_768. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_metadata_scoped_768_by_id(p_query nexus.vector, p_collection_ids bigint[], p_content_type text, p_author text, p_year integer, p_corpus text, p_subtree text, p_where jsonb, p_manifest_where jsonb, p_manifest_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, chash text, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT d.tumbler,
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
            encode(c.chash, 'hex'),
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
       JOIN nexus.catalog_document_chunks m
         ON m.tenant_id = c.tenant_id AND m.collection_id = c.collection_id AND m.chash = c.chash
@@ -12763,18 +12794,19 @@ DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_768_by_id(nexus.vector,bigi
     </changeSet>
 
     <changeSet id="vectors-077-119" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_topic_scoped_1024_by_id, the id-path twin of nexus.search_topic_scoped_1024. Same arguments and RETURNS as the original except p_collection_id bigint in place of p_collection text; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_topic_scoped_1024_by_id, the id-path twin of nexus.search_topic_scoped_1024. Same arguments as the original except p_collection_id bigint in place of p_collection text; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_topic_scoped_1024_by_id(p_query nexus.vector, p_topic_label text, p_collection_id bigint, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
       JOIN nexus.topic_assignments ta
         ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
@@ -12845,18 +12877,19 @@ DROP FUNCTION IF EXISTS nexus.search_topic_scoped_1024_by_id(nexus.vector,text,b
     </changeSet>
 
     <changeSet id="vectors-077-120" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_topic_scoped_384_by_id, the id-path twin of nexus.search_topic_scoped_384. Same arguments and RETURNS as the original except p_collection_id bigint in place of p_collection text; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_topic_scoped_384_by_id, the id-path twin of nexus.search_topic_scoped_384. Same arguments as the original except p_collection_id bigint in place of p_collection text; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_topic_scoped_384_by_id(p_query nexus.vector, p_topic_label text, p_collection_id bigint, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
       JOIN nexus.topic_assignments ta
         ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
@@ -12927,18 +12960,19 @@ DROP FUNCTION IF EXISTS nexus.search_topic_scoped_384_by_id(nexus.vector,text,bi
     </changeSet>
 
     <changeSet id="vectors-077-121" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_topic_scoped_768_by_id, the id-path twin of nexus.search_topic_scoped_768. Same arguments and RETURNS as the original except p_collection_id bigint in place of p_collection text; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_topic_scoped_768_by_id, the id-path twin of nexus.search_topic_scoped_768. Same arguments as the original except p_collection_id bigint in place of p_collection text; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_topic_scoped_768_by_id(p_query nexus.vector, p_topic_label text, p_collection_id bigint, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
       JOIN nexus.topic_assignments ta
         ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
@@ -13654,19 +13688,20 @@ DROP FUNCTION IF EXISTS nexus.text_gate_probe_768_by_id(text,bigint[],jsonb,text
     </changeSet>
 
     <changeSet id="vectors-077-125" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_allowed_1024_by_id, the id-path twin of nexus.text_gated_search_allowed_1024. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_allowed_1024_by_id, the id-path twin of nexus.text_gated_search_allowed_1024. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.text_gated_search_allowed_1024_by_id(p_query nexus.vector, p_query_text text, p_chashes bytea[], p_collection_ids bigint[], p_where jsonb, p_where_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -13738,19 +13773,20 @@ DROP FUNCTION IF EXISTS nexus.text_gated_search_allowed_1024_by_id(nexus.vector,
     </changeSet>
 
     <changeSet id="vectors-077-126" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_allowed_384_by_id, the id-path twin of nexus.text_gated_search_allowed_384. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_allowed_384_by_id, the id-path twin of nexus.text_gated_search_allowed_384. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.text_gated_search_allowed_384_by_id(p_query nexus.vector, p_query_text text, p_chashes bytea[], p_collection_ids bigint[], p_where jsonb, p_where_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -13822,19 +13858,20 @@ DROP FUNCTION IF EXISTS nexus.text_gated_search_allowed_384_by_id(nexus.vector,t
     </changeSet>
 
     <changeSet id="vectors-077-127" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_allowed_768_by_id, the id-path twin of nexus.text_gated_search_allowed_768. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_allowed_768_by_id, the id-path twin of nexus.text_gated_search_allowed_768. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.text_gated_search_allowed_768_by_id(p_query nexus.vector, p_query_text text, p_chashes bytea[], p_collection_ids bigint[], p_where jsonb, p_where_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -13906,19 +13943,20 @@ DROP FUNCTION IF EXISTS nexus.text_gated_search_allowed_768_by_id(nexus.vector,t
     </changeSet>
 
     <changeSet id="vectors-077-128" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_by_chash_1024_by_id, the id-path twin of nexus.text_gated_search_by_chash_1024. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_by_chash_1024_by_id, the id-path twin of nexus.text_gated_search_by_chash_1024. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.text_gated_search_by_chash_1024_by_id(p_query nexus.vector, p_chashes bytea[], p_collection_ids bigint[], p_where jsonb, p_where_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -13986,19 +14024,20 @@ DROP FUNCTION IF EXISTS nexus.text_gated_search_by_chash_1024_by_id(nexus.vector
     </changeSet>
 
     <changeSet id="vectors-077-129" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_by_chash_384_by_id, the id-path twin of nexus.text_gated_search_by_chash_384. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_by_chash_384_by_id, the id-path twin of nexus.text_gated_search_by_chash_384. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.text_gated_search_by_chash_384_by_id(p_query nexus.vector, p_chashes bytea[], p_collection_ids bigint[], p_where jsonb, p_where_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -14066,19 +14105,20 @@ DROP FUNCTION IF EXISTS nexus.text_gated_search_by_chash_384_by_id(nexus.vector,
     </changeSet>
 
     <changeSet id="vectors-077-130" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_by_chash_768_by_id, the id-path twin of nexus.text_gated_search_by_chash_768. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_by_chash_768_by_id, the id-path twin of nexus.text_gated_search_by_chash_768. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.text_gated_search_by_chash_768_by_id(p_query nexus.vector, p_chashes bytea[], p_collection_ids bigint[], p_where jsonb, p_where_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -14146,19 +14186,20 @@ DROP FUNCTION IF EXISTS nexus.text_gated_search_by_chash_768_by_id(nexus.vector,
     </changeSet>
 
     <changeSet id="vectors-077-131" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_hnsw_first_1024_by_id, the id-path twin of nexus.text_gated_search_hnsw_first_1024. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_hnsw_first_1024_by_id, the id-path twin of nexus.text_gated_search_hnsw_first_1024. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.text_gated_search_hnsw_first_1024_by_id(p_query nexus.vector, p_query_text text, p_collection_ids bigint[], p_where jsonb, p_where_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -14229,19 +14270,20 @@ DROP FUNCTION IF EXISTS nexus.text_gated_search_hnsw_first_1024_by_id(nexus.vect
     </changeSet>
 
     <changeSet id="vectors-077-132" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_hnsw_first_384_by_id, the id-path twin of nexus.text_gated_search_hnsw_first_384. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_hnsw_first_384_by_id, the id-path twin of nexus.text_gated_search_hnsw_first_384. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.text_gated_search_hnsw_first_384_by_id(p_query nexus.vector, p_query_text text, p_collection_ids bigint[], p_where jsonb, p_where_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -14312,19 +14354,20 @@ DROP FUNCTION IF EXISTS nexus.text_gated_search_hnsw_first_384_by_id(nexus.vecto
     </changeSet>
 
     <changeSet id="vectors-077-133" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_hnsw_first_768_by_id, the id-path twin of nexus.text_gated_search_hnsw_first_768. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gated_search_hnsw_first_768_by_id, the id-path twin of nexus.text_gated_search_hnsw_first_768. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.text_gated_search_hnsw_first_768_by_id(p_query nexus.vector, p_query_text text, p_collection_ids bigint[], p_where jsonb, p_where_path text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, metadata jsonb, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
            c.metadata,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -14395,18 +14438,19 @@ DROP FUNCTION IF EXISTS nexus.text_gated_search_hnsw_first_768_by_id(nexus.vecto
     </changeSet>
 
     <changeSet id="vectors-077-134" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_topic_set_1024_by_id, the id-path twin of nexus.search_topic_set_1024. Same arguments and RETURNS as the original except p_collection_id bigint in place of p_collection text; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_topic_set_1024_by_id, the id-path twin of nexus.search_topic_set_1024. Same arguments as the original except p_collection_id bigint in place of p_collection text; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_topic_set_1024_by_id(p_query nexus.vector, p_topic_ids bigint[], p_collection_id bigint, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -14480,18 +14524,19 @@ DROP FUNCTION IF EXISTS nexus.search_topic_set_1024_by_id(nexus.vector,bigint[],
     </changeSet>
 
     <changeSet id="vectors-077-135" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_topic_set_384_by_id, the id-path twin of nexus.search_topic_set_384. Same arguments and RETURNS as the original except p_collection_id bigint in place of p_collection text; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_topic_set_384_by_id, the id-path twin of nexus.search_topic_set_384. Same arguments as the original except p_collection_id bigint in place of p_collection text; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_topic_set_384_by_id(p_query nexus.vector, p_topic_ids bigint[], p_collection_id bigint, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -14565,18 +14610,19 @@ DROP FUNCTION IF EXISTS nexus.search_topic_set_384_by_id(nexus.vector,bigint[],b
     </changeSet>
 
     <changeSet id="vectors-077-136" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_topic_set_768_by_id, the id-path twin of nexus.search_topic_set_768. Same arguments and RETURNS as the original except p_collection_id bigint in place of p_collection text; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.search_topic_set_768_by_id, the id-path twin of nexus.search_topic_set_768. Same arguments as the original except p_collection_id bigint in place of p_collection text; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's; its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE FUNCTION nexus.search_topic_set_768_by_id(p_query nexus.vector, p_topic_ids bigint[], p_collection_id bigint, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
- RETURNS TABLE(id text, content text, collection text, distance double precision, retention text)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, retention text, collection_id bigint)
  LANGUAGE sql
  STABLE
 AS $function$
     SELECT encode(c.chash, 'hex'),
            c.chunk_text,
-           c.collection,
+           (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id),
            (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
-           c.retention
+           c.retention,
+           c.collection_id
       FROM nexus.chunks c
      WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
@@ -14650,7 +14696,7 @@ DROP FUNCTION IF EXISTS nexus.search_topic_set_768_by_id(nexus.vector,bigint[],b
     </changeSet>
 
     <changeSet id="vectors-077-137" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gate_probe_by_collection_1024_by_id, the id-path twin of nexus.text_gate_probe_by_collection_1024. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's (the posture is read back from the original, as its own changeset does); its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gate_probe_by_collection_1024_by_id, the id-path twin of nexus.text_gate_probe_by_collection_1024. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's (the posture is read back from the original, as its own changeset does); its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 DO $do$
 DECLARE
@@ -14671,7 +14717,7 @@ BEGIN
     p_cap          int,
     p_embedding_model text,
     p_tenant          text
-) RETURNS TABLE(collection text, chash bytea)
+) RETURNS TABLE(collection text, chash bytea, collection_id bigint)
 LANGUAGE plpgsql
 STABLE$f$
         || CASE WHEN v_definer THEN $f$
@@ -14687,14 +14733,13 @@ SET cpu_operator_cost = 0.25
 SET jit = off
 AS $$
 DECLARE
-    v_coll    text[];
     v_cid     bigint[];
     v_chash   bytea[];
     v_ceiling int := COALESCE(NULLIF(pg_catalog.current_setting('nexus.gate_probe_max_rows', true), '')::int, 2000000);
 BEGIN
     IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
-        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
-          FROM (SELECT c.collection, c.collection_id, c.chash
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection_id, c.chash
           FROM nexus.chunks c
          WHERE true
          AND c.embedding_model = $5
@@ -14705,11 +14750,11 @@ BEGIN
          AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
          AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1))
          LIMIT $7) g$q$
-          INTO v_coll, v_cid, v_chash
+          INTO v_cid, v_chash
           USING p_text, p_collection_ids, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
     ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
-        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
-          FROM (SELECT c.collection, c.collection_id, c.chash
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection_id, c.chash
           FROM nexus.chunks c
          WHERE true
          AND c.embedding_model = $5
@@ -14721,11 +14766,11 @@ BEGIN
          AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1)
               OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace($1, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
          LIMIT $7) g$q$
-          INTO v_coll, v_cid, v_chash
+          INTO v_cid, v_chash
           USING p_text, p_collection_ids, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
     ELSE
-        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
-          FROM (SELECT c.collection, c.collection_id, c.chash
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection_id, c.chash
           FROM nexus.chunks c
          WHERE true
          AND c.embedding_model = $5
@@ -14736,18 +14781,18 @@ BEGIN
          AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
          AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1) OR $1 OPERATOR(nexus.<%) c.chunk_text)
          LIMIT $7) g$q$
-          INTO v_coll, v_cid, v_chash
+          INTO v_cid, v_chash
           USING p_text, p_collection_ids, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
     END IF;
-    IF pg_catalog.cardinality(v_coll) > v_ceiling THEN
+    IF pg_catalog.cardinality(v_cid) > v_ceiling THEN
         RAISE EXCEPTION 'text_gate_probe_by_collection: the gate admitted more than % rows', v_ceiling
             USING ERRCODE = 'program_limit_exceeded',
                   HINT = 'the engine answers with each collection''s own capped probe';
     END IF;
     RETURN QUERY
     WITH g AS (
-        SELECT u.coll, u.ch, pg_catalog.row_number() OVER (PARTITION BY u.cid) AS rn, u.cid
-          FROM ROWS FROM (pg_catalog.unnest(v_coll), pg_catalog.unnest(v_cid), pg_catalog.unnest(v_chash)) AS u(coll, cid, ch)
+        SELECT u.ch, pg_catalog.row_number() OVER (PARTITION BY u.cid) AS rn, u.cid
+          FROM ROWS FROM (pg_catalog.unnest(v_cid), pg_catalog.unnest(v_chash)) AS u(cid, ch)
          WHERE EXISTS (SELECT 1
                          FROM nexus.catalog_document_chunks lo
                          JOIN nexus.catalog_documents lod
@@ -14757,11 +14802,13 @@ BEGIN
                           AND lo.chash = u.ch
                           AND lod.deleted_at IS NULL)
     ), capped AS (
-        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.cid) AS n
+        SELECT g.ch, g.rn, g.cid, pg_catalog.count(*) OVER (PARTITION BY g.cid) AS n
           FROM g
          WHERE g.rn <= p_cap
     )
-    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+    SELECT (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = p_tenant AND r.collection_id = x.cid),
+           CASE WHEN x.n < p_cap THEN x.ch END,
+           x.cid
       FROM capped x
      WHERE x.n < p_cap OR x.rn = p_cap;
 END
@@ -14804,7 +14851,7 @@ DROP FUNCTION IF EXISTS nexus.text_gate_probe_by_collection_1024_by_id(text,bigi
     </changeSet>
 
     <changeSet id="vectors-077-138" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gate_probe_by_collection_384_by_id, the id-path twin of nexus.text_gate_probe_by_collection_384. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's (the posture is read back from the original, as its own changeset does); its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gate_probe_by_collection_384_by_id, the id-path twin of nexus.text_gate_probe_by_collection_384. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's (the posture is read back from the original, as its own changeset does); its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 DO $do$
 DECLARE
@@ -14825,7 +14872,7 @@ BEGIN
     p_cap          int,
     p_embedding_model text,
     p_tenant          text
-) RETURNS TABLE(collection text, chash bytea)
+) RETURNS TABLE(collection text, chash bytea, collection_id bigint)
 LANGUAGE plpgsql
 STABLE$f$
         || CASE WHEN v_definer THEN $f$
@@ -14841,14 +14888,13 @@ SET cpu_operator_cost = 0.25
 SET jit = off
 AS $$
 DECLARE
-    v_coll    text[];
     v_cid     bigint[];
     v_chash   bytea[];
     v_ceiling int := COALESCE(NULLIF(pg_catalog.current_setting('nexus.gate_probe_max_rows', true), '')::int, 2000000);
 BEGIN
     IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
-        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
-          FROM (SELECT c.collection, c.collection_id, c.chash
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection_id, c.chash
           FROM nexus.chunks c
          WHERE true
          AND c.embedding_model = $5
@@ -14859,11 +14905,11 @@ BEGIN
          AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
          AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1))
          LIMIT $7) g$q$
-          INTO v_coll, v_cid, v_chash
+          INTO v_cid, v_chash
           USING p_text, p_collection_ids, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
     ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
-        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
-          FROM (SELECT c.collection, c.collection_id, c.chash
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection_id, c.chash
           FROM nexus.chunks c
          WHERE true
          AND c.embedding_model = $5
@@ -14875,11 +14921,11 @@ BEGIN
          AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1)
               OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace($1, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
          LIMIT $7) g$q$
-          INTO v_coll, v_cid, v_chash
+          INTO v_cid, v_chash
           USING p_text, p_collection_ids, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
     ELSE
-        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
-          FROM (SELECT c.collection, c.collection_id, c.chash
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection_id, c.chash
           FROM nexus.chunks c
          WHERE true
          AND c.embedding_model = $5
@@ -14890,18 +14936,18 @@ BEGIN
          AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
          AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1) OR $1 OPERATOR(nexus.<%) c.chunk_text)
          LIMIT $7) g$q$
-          INTO v_coll, v_cid, v_chash
+          INTO v_cid, v_chash
           USING p_text, p_collection_ids, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
     END IF;
-    IF pg_catalog.cardinality(v_coll) > v_ceiling THEN
+    IF pg_catalog.cardinality(v_cid) > v_ceiling THEN
         RAISE EXCEPTION 'text_gate_probe_by_collection: the gate admitted more than % rows', v_ceiling
             USING ERRCODE = 'program_limit_exceeded',
                   HINT = 'the engine answers with each collection''s own capped probe';
     END IF;
     RETURN QUERY
     WITH g AS (
-        SELECT u.coll, u.ch, pg_catalog.row_number() OVER (PARTITION BY u.cid) AS rn, u.cid
-          FROM ROWS FROM (pg_catalog.unnest(v_coll), pg_catalog.unnest(v_cid), pg_catalog.unnest(v_chash)) AS u(coll, cid, ch)
+        SELECT u.ch, pg_catalog.row_number() OVER (PARTITION BY u.cid) AS rn, u.cid
+          FROM ROWS FROM (pg_catalog.unnest(v_cid), pg_catalog.unnest(v_chash)) AS u(cid, ch)
          WHERE EXISTS (SELECT 1
                          FROM nexus.catalog_document_chunks lo
                          JOIN nexus.catalog_documents lod
@@ -14911,11 +14957,13 @@ BEGIN
                           AND lo.chash = u.ch
                           AND lod.deleted_at IS NULL)
     ), capped AS (
-        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.cid) AS n
+        SELECT g.ch, g.rn, g.cid, pg_catalog.count(*) OVER (PARTITION BY g.cid) AS n
           FROM g
          WHERE g.rn <= p_cap
     )
-    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+    SELECT (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = p_tenant AND r.collection_id = x.cid),
+           CASE WHEN x.n < p_cap THEN x.ch END,
+           x.cid
       FROM capped x
      WHERE x.n < p_cap OR x.rn = p_cap;
 END
@@ -14958,7 +15006,7 @@ DROP FUNCTION IF EXISTS nexus.text_gate_probe_by_collection_384_by_id(text,bigin
     </changeSet>
 
     <changeSet id="vectors-077-139" author="nexus-p2m1x.24">
-        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gate_probe_by_collection_768_by_id, the id-path twin of nexus.text_gate_probe_by_collection_768. Same arguments and RETURNS as the original except p_collection_ids bigint[] in place of p_collections text[]; it matches by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's (the posture is read back from the original, as its own changeset does); its EXECUTE ACL is copied from the original's pg_proc row. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
+        <comment>RDR-229 P3.5b (nexus-p2m1x.24; linda 2026-11-22): nexus.text_gate_probe_by_collection_768_by_id, the id-path twin of nexus.text_gate_probe_by_collection_768. Same arguments as the original except p_collection_ids bigint[] in place of p_collections text[]; RETURNS the original's columns and a trailing collection_id; it matches by collection_id only (no name arm, no registry lookup in the match), because P3.5c's Java calls it only after gate 3 has latched, which implies every stamp move is complete. LANGUAGE, volatility, SECURITY and SET are the original's (the posture is read back from the original, as its own changeset does); its EXECUTE ACL is copied from the original's pg_proc row. OUTPUT: its collection column is the registry's label for the row's id (nexus.catalog_collections.name by collection_id; the twin reads no name column of the chunk or of the manifest), so a one-row rename (P3.7) shows at once, and a trailing collection_id column carries the id. The match itself stays id-only. The original keeps its last definer's name path until P4.1. The rollback drops the twin. DATA EFFECT: none; one new function.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 DO $do$
 DECLARE
@@ -14979,7 +15027,7 @@ BEGIN
     p_cap          int,
     p_embedding_model text,
     p_tenant          text
-) RETURNS TABLE(collection text, chash bytea)
+) RETURNS TABLE(collection text, chash bytea, collection_id bigint)
 LANGUAGE plpgsql
 STABLE$f$
         || CASE WHEN v_definer THEN $f$
@@ -14995,14 +15043,13 @@ SET cpu_operator_cost = 0.25
 SET jit = off
 AS $$
 DECLARE
-    v_coll    text[];
     v_cid     bigint[];
     v_chash   bytea[];
     v_ceiling int := COALESCE(NULLIF(pg_catalog.current_setting('nexus.gate_probe_max_rows', true), '')::int, 2000000);
 BEGIN
     IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
-        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
-          FROM (SELECT c.collection, c.collection_id, c.chash
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection_id, c.chash
           FROM nexus.chunks c
          WHERE true
          AND c.embedding_model = $5
@@ -15013,11 +15060,11 @@ BEGIN
          AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
          AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1))
          LIMIT $7) g$q$
-          INTO v_coll, v_cid, v_chash
+          INTO v_cid, v_chash
           USING p_text, p_collection_ids, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
     ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
-        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
-          FROM (SELECT c.collection, c.collection_id, c.chash
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection_id, c.chash
           FROM nexus.chunks c
          WHERE true
          AND c.embedding_model = $5
@@ -15029,11 +15076,11 @@ BEGIN
          AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1)
               OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace($1, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
          LIMIT $7) g$q$
-          INTO v_coll, v_cid, v_chash
+          INTO v_cid, v_chash
           USING p_text, p_collection_ids, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
     ELSE
-        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
-          FROM (SELECT c.collection, c.collection_id, c.chash
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection_id), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection_id, c.chash
           FROM nexus.chunks c
          WHERE true
          AND c.embedding_model = $5
@@ -15044,18 +15091,18 @@ BEGIN
          AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
          AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1) OR $1 OPERATOR(nexus.<%) c.chunk_text)
          LIMIT $7) g$q$
-          INTO v_coll, v_cid, v_chash
+          INTO v_cid, v_chash
           USING p_text, p_collection_ids, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
     END IF;
-    IF pg_catalog.cardinality(v_coll) > v_ceiling THEN
+    IF pg_catalog.cardinality(v_cid) > v_ceiling THEN
         RAISE EXCEPTION 'text_gate_probe_by_collection: the gate admitted more than % rows', v_ceiling
             USING ERRCODE = 'program_limit_exceeded',
                   HINT = 'the engine answers with each collection''s own capped probe';
     END IF;
     RETURN QUERY
     WITH g AS (
-        SELECT u.coll, u.ch, pg_catalog.row_number() OVER (PARTITION BY u.cid) AS rn, u.cid
-          FROM ROWS FROM (pg_catalog.unnest(v_coll), pg_catalog.unnest(v_cid), pg_catalog.unnest(v_chash)) AS u(coll, cid, ch)
+        SELECT u.ch, pg_catalog.row_number() OVER (PARTITION BY u.cid) AS rn, u.cid
+          FROM ROWS FROM (pg_catalog.unnest(v_cid), pg_catalog.unnest(v_chash)) AS u(cid, ch)
          WHERE EXISTS (SELECT 1
                          FROM nexus.catalog_document_chunks lo
                          JOIN nexus.catalog_documents lod
@@ -15065,11 +15112,13 @@ BEGIN
                           AND lo.chash = u.ch
                           AND lod.deleted_at IS NULL)
     ), capped AS (
-        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.cid) AS n
+        SELECT g.ch, g.rn, g.cid, pg_catalog.count(*) OVER (PARTITION BY g.cid) AS n
           FROM g
          WHERE g.rn <= p_cap
     )
-    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+    SELECT (SELECT r.name FROM nexus.catalog_collections r WHERE r.tenant_id = p_tenant AND r.collection_id = x.cid),
+           CASE WHEN x.n < p_cap THEN x.ch END,
+           x.cid
       FROM capped x
      WHERE x.n < p_cap OR x.rn = p_cap;
 END
