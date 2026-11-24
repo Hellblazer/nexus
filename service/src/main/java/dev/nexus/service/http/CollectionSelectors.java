@@ -121,12 +121,13 @@ final class CollectionSelectors {
         "/v1/taxonomy/chunk_grounded", "/v1/taxonomy/audit", "/v1/taxonomy/rebuild/old_state",
         "/v1/taxonomy/assignments/cross-preview", "/v1/taxonomy/assignments/unassigned",
         "/v1/taxonomy/centroids/query", "/v1/taxonomy/centroids/by_collection",
-        "/v1/aspects/get", "/v1/aspects/list_by_collection");
+        "/v1/aspects/get", "/v1/aspects/list_by_collection",
+        "/v1/catalog/resolve_span");
 
     private static final String REGISTRY_ROW = "it answers the registry row itself or its state (the way a client learns a collection is retired), "
         + "which a doctor, a rename, a re-home and a restore read for a tombstone";
-    private static final String CATALOG_BOOKKEEPING = "a catalog document, manifest or audit read that the delete, re-home, restore and doctor flows run over "
-        + "a retired collection; not one of the reader classes R7 names (vector search and get, store list, topics, aspects). A candidate for the next cut";
+    private static final String CATALOG_BOOKKEEPING = "a catalog document-record, chash-list or audit read (no chunk text or metadata) that the delete, re-home, restore "
+        + "and doctor flows run over a retired collection; not one of the reader classes R7 names. resolve_chash is not label-addressed: its prefer_collection only breaks a tie";
     private static final String COUNT = "it counts or bookkeeps, and a doctor counts a tombstone's rows";
 
     /**
@@ -142,7 +143,7 @@ final class CollectionSelectors {
             m.put(route, REGISTRY_ROW);
         }
         m.put("/v1/catalog/collections/rehome/status", "the status of a re-home, which a later retire of either end must not hide");
-        for (String route : List.of("/v1/catalog/list", "/v1/catalog/resolve", "/v1/catalog/manifest/chashes", "/v1/catalog/resolve_span",
+        for (String route : List.of("/v1/catalog/list", "/v1/catalog/resolve", "/v1/catalog/manifest/chashes",
                 "/v1/catalog/resolve_chash", "/v1/catalog/gc_audit/list", "/v1/chash/registered_chashes")) {
             m.put(route, CATALOG_BOOKKEEPING);
         }
