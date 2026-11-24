@@ -10,8 +10,9 @@
     CONTINUE-gated exactly as vectors-078 (THE GATE, verbatim; see that file's header): skipped unrecorded and retried at each boot until
     the stamp is complete. The three ids are in db/rdr229/p35b-continue-changesets.txt beside vectors-078's, so P3.7's rename waits for them
     and tests/test_rdr229_p35b_continue_list.py keeps the list equal to the two files. Each is in the _CONTINUE_ALLOWLIST of
-    tests/test_changelog_continue_precondition_chunks_lint.py. The engine calls the new overload only where gate 3 has latched AND the
-    overload exists (TaxonomyCentroidRepository.annQuery); the text overloads of vectors-078-9..11 are kept, unused by the engine, for P4.1.
+    tests/test_changelog_continue_precondition_chunks_lint.py. The engine calls the new overload wherever gate 3 holds
+    (TaxonomyCentroidRepository.annQuery), with no fallback to the text overload: gate 3 requires these three ids recorded in
+    databasechangelog (ArbiterTwins.GATE3_WAITS_FOR_CHANGESETS, read by IdUniqueIndexPass.allValid); the text overloads of vectors-078-9..11 are kept, unused by the engine, for P4.1.
     DATA EFFECT: none (definitions only). After vectors-078, before the grants.
 -->
 <databaseChangeLog

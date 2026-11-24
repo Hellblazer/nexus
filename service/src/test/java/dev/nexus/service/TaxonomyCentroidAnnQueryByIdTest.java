@@ -25,7 +25,6 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -56,9 +55,8 @@ class TaxonomyCentroidAnnQueryByIdTest {
     /** One statement as JDBC received it: the SQL text and the values bound by position. */
     private record Seen(String sql, Map<Integer, Object> params) {}
 
-    /** The service pool's connection, recording every prepared statement and failing the ones {@link #failWhen} names. */
+    /** The service pool's connection, recording every prepared statement. */
     private final List<Seen> seen = new CopyOnWriteArrayList<>();
-    private volatile java.util.function.Predicate<String> failWhen = sql -> false;
 
     private PostgreSQLContainer<?> pg;
     private HikariDataSource pool;
@@ -140,7 +138,6 @@ class TaxonomyCentroidAnnQueryByIdTest {
     @BeforeEach
     void reset() {
         seen.clear();
-        failWhen = sql -> false;
     }
 
     private long registryId(int dim, String collection) throws Exception {
@@ -189,21 +186,6 @@ class TaxonomyCentroidAnnQueryByIdTest {
         }
     }
 
-    @Test
-    void gate3HoldsButTheOverloadIsMissing_annQueryAnswersFromTheTextOverload() {
-        // vectors-084 is CONTINUE-gated: gate 3 can latch a boot before it applies. The database answers 42883 for the
-        // seven-parameter call (failed at the connection, as the real one would), and annQuery retries the text overload.
-        var repo = new TaxonomyCentroidRepository(tenantScope, () -> true);
-        for (int dim : DIMS) {
-            seen.clear();
-            failWhen = sql -> sql.contains("taxonomy_ann_query_" + dim) && sql.chars().filter(c -> c == '?').count() == 7;
-            List<AnnHit> hits = repo.annQuery(TENANT, unit(dim), collection(dim), false, 10);
-            assertThat(hits).as("dim %d answers from the text overload", dim).extracting(AnnHit::topicId).containsExactly(1L);
-            assertThat(annStatements(dim)).as("dim %d: the text call ran (six parameters)", dim)
-                .anyMatch(s -> s.params().size() == 6);
-        }
-    }
-
     // ---- the recording DataSource ----------------------------------------------------------------------------------------
 
     private DataSource recording(DataSource delegate) {
@@ -218,9 +200,6 @@ class TaxonomyCentroidAnnQueryByIdTest {
         return (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[] {Connection.class},
             (proxy, method, args) -> {
                 if ("prepareStatement".equals(method.getName()) && args != null && args[0] instanceof String sql) {
-                    if (failWhen.test(sql)) {
-                        throw new SQLException("function does not exist (test)", "42883");
-                    }
                     return statement((PreparedStatement) invoke(real, method, args), sql);
                 }
                 return invoke(real, method, args);

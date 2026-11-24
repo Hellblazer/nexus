@@ -273,24 +273,13 @@ public final class TaxonomyCentroidRepository {
         // RDR-229 P3.5b form A plan fix (nexus-p2m1x.24/.25, linda's ruling): from gate 3 the registry row's id goes to the
         // function (vectors-084's overload), so the same-collection predicate is collection_id = $n, which the planner estimates
         // from the value. The text overload resolves the label in an InitPlan subselect it estimates at 1/ndistinct, and at the
-        // TOASTed widths (768, 1024) a seq scan with a top-N sort then undercuts the HNSW index. vectors-084 is CONTINUE-gated
-        // and applies at the first boot after the stamp completes, so gate 3 can hold a boot earlier: the text overload (the
-        // name-keyed body of vectors-038, or vectors-078-9..11's) answers until the overload exists.
-        Result<? extends Record> result;
-        if (gate3.holds()) {
-            try {
-                result = runAnn(TaxonomyAnnQueryById.call(dim, queryVec, collection, crossCollection, nResults, model, tenant,
-                    row.collectionId()), tenant, nResults, maxStatementMs);
-            } catch (org.jooq.exception.DataAccessException e) {
-                if (!UNDEFINED_FUNCTION.equals(e.sqlState())) {
-                    throw e;
-                }
-                log.warn("event=ann_by_id_overload_missing dim={} (vectors-084 not applied yet; the text overload answers)", dim);
-                result = runAnn(textCall(dim, queryVec, collection, crossCollection, nResults, model, tenant), tenant, nResults, maxStatementMs);
-            }
-        } else {
-            result = runAnn(textCall(dim, queryVec, collection, crossCollection, nResults, model, tenant), tenant, nResults, maxStatementMs);
-        }
+        // TOASTed widths (768, 1024) a seq scan with a top-N sort then undercuts the HNSW index. vectors-084 is CONTINUE-gated, so
+        // gate 3 requires its three changesets recorded (ArbiterTwins.GATE3_WAITS_FOR_CHANGESETS, read by IdUniqueIndexPass.allValid):
+        // once gate 3 holds the overload exists, and there is no fallback to the text overload.
+        Result<? extends Record> result = gate3.holds()
+            ? runAnn(TaxonomyAnnQueryById.call(dim, queryVec, collection, crossCollection, nResults, model, tenant, row.collectionId()),
+                tenant, nResults, maxStatementMs)
+            : runAnn(textCall(dim, queryVec, collection, crossCollection, nResults, model, tenant), tenant, nResults, maxStatementMs);
         List<AnnHit> hits = new ArrayList<>(result.size());
         for (Record rec : result) {
             double distance = rec.get("distance", Double.class);
@@ -298,9 +287,6 @@ public final class TaxonomyCentroidRepository {
         }
         return hits;
     }
-
-    /** SQLSTATE 42883, undefined_function: the by-id overload is not in the database yet. */
-    private static final String UNDEFINED_FUNCTION = "42883";
 
     /** The text-signature call (vectors-013's, redefined by vectors-038 and vectors-078-9..11): the label, not the id. */
     private static org.jooq.Table<?> textCall(int dim, Vector queryVec, String collection, boolean crossCollection, int nResults,
