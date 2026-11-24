@@ -11,6 +11,7 @@ import java.time.format.DateTimeParseException;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -100,8 +101,32 @@ public final class TargetSelection {
     public record Live(String name) implements Result {
     }
 
-    /** Only superseded candidates exist; {@code name} is the best of them and {@code supersededBy} its successor. */
-    public record Superseded(String name, String supersededBy) implements Result {
+    /**
+     * Only superseded candidates exist; {@code name} is the best of them and {@code supersededBy} the successor text its row
+     * shows. {@code collectionId} is the row's registry id, which {@link #decide} follows to the live successor (the text of a
+     * tombstone whose successor was deleted is its own dead label); null for a row with no id, which {@code decide} judges by
+     * the text.
+     */
+    public record Superseded(String name, String supersededBy, Long collectionId) implements Result {
+
+        /** A superseded row with no registry id: its successor is the one its text names. */
+        public Superseded(String name, String supersededBy) {
+            this(name, supersededBy, null);
+        }
+    }
+
+    /**
+     * The live successor of a retired row, by the row's registry id ({@code superseded_by_id}): the successor's CURRENT label, or
+     * empty when the row names no live successor (RDR-229 R7).
+     */
+    @FunctionalInterface
+    public interface Successors {
+        Optional<String> liveLabelOf(long retiredId);
+    }
+
+    /** What every refusal says of a retired collection that has no live successor, and never names a successor for. */
+    public static String retiredWithNoSuccessor(String name) {
+        return "collection " + name + " was retired and has no successor";
     }
 
     private static final Pattern VERSION = Pattern.compile("^v([0-9]+)$");
@@ -164,7 +189,7 @@ public final class TargetSelection {
             return new Live(live.get().name());
         }
         return candidates.stream().min(order)
-            .<Result>map(r -> new Superseded(r.name(), r.supersededBy()))
+            .<Result>map(r -> new Superseded(r.name(), r.supersededBy(), r.collectionId()))
             .orElseGet(Absent::new);
     }
 
@@ -318,14 +343,22 @@ public final class TargetSelection {
      * @param result      {@link #select}'s answer
      * @param source      this job's source collection
      * @param lockHolder  a job in a lock state whose source is the selected target, or null when none is
+     * @param successors  finds the live successor of a retired row by its id; a retired row with none is refused, whatever its
+     *                    successor text says (the text of a tombstone whose successor was deleted is its own dead label)
      */
-    public static Decision decide(Result result, String source, LockHolder lockHolder) {
+    public static Decision decide(Result result, String source, LockHolder lockHolder, Successors successors) {
         return switch (result) {
             case Absent a -> new Register();
             case Live l -> lockHolder == null ? new UseLive(l.name()) : heldBy(l.name(), lockHolder);
             case Superseded s -> {
-                if (!source.equals(s.supersededBy())) {
-                    yield new Refuse("target " + s.name() + " is superseded by " + s.supersededBy()
+                Optional<String> successor = s.collectionId() == null
+                    ? Optional.ofNullable(s.supersededBy()).filter(t -> !t.isEmpty())
+                    : successors.liveLabelOf(s.collectionId());
+                if (successor.isEmpty()) {
+                    yield new Refuse(retiredWithNoSuccessor(s.name()) + "; it cannot be this job's target");
+                }
+                if (!source.equals(successor.get())) {
+                    yield new Refuse("target " + s.name() + " is superseded by " + successor.get()
                         + ", not by this job's source " + source);
                 }
                 yield lockHolder == null ? new Revive(s.name()) : heldBy(s.name(), lockHolder);
