@@ -376,10 +376,18 @@ public final class ReembedHandler implements HttpHandler {
         String owner = String.valueOf(srcRow.get("owner_id"));
         String successor = String.valueOf(srcRow.get("superseded_by"));
         if (!successor.isEmpty()) {
+            // RDR-229 R7: the successor is found by id and named by its CURRENT label. The text of a tombstone whose successor was
+            // deleted is its own dead label, which is no successor: that source is refused as retired, naming none.
+            Optional<String> live = reader.liveSuccessorLabel(tenant, srcRow);
+            if (live.isEmpty()) {
+                throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
+                    "error", TargetSelection.retiredWithNoSuccessor(source) + "; a retired collection is not re-embedded",
+                    "collection", source)));
+            }
             throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
-                "error", "source collection " + source + " is already superseded by " + successor
+                "error", "source collection " + source + " is already superseded by " + live.get()
                     + "; a superseded collection is not re-embedded",
-                "collection", source, "superseded_by", successor)));
+                "collection", source, "superseded_by", live.get())));
         }
         String profileModel = profileModel(tenant, contentType);
         if (profileModel == null) {
@@ -417,7 +425,8 @@ public final class ReembedHandler implements HttpHandler {
             : Optional.ofNullable(firstMatch(locked, j -> j.sourceCollection().equals(candidate)))
                 .map(j -> new LockHolder(j.jobId(), j.state())).orElse(null);
 
-        TargetSelection.Decision decision = TargetSelection.decide(found, source, holder);
+        TargetSelection.Decision decision = TargetSelection.decide(found, source, holder,
+            id -> reader.liveSuccessorLabel(tenant, id));
         if (decision instanceof Refuse r) {
             Map<String, Object> refusal = orderedMap("error", r.reason(), "collection", candidate);
             if (holder != null) {
@@ -607,7 +616,9 @@ public final class ReembedHandler implements HttpHandler {
             throw new Reply(409, jsonOf(orderedMap(
                 "error", "job " + earlier.jobId() + " kept " + source + " superseded by " + earlier.targetCollection()
                     + ", which is "
-                    + (targetRow == null ? "no longer registered" : "itself superseded by " + targetRow.get("superseded_by"))
+                    + (targetRow == null ? "no longer registered"
+                        : reader.liveSuccessorLabel(tenant, targetRow).map(l -> "itself superseded by " + l)
+                            .orElse("itself retired and has no successor"))
                     + "; the source is not re-entered",
                 "job_id", earlier.jobId().toString(), "state", earlier.state())));
         }
