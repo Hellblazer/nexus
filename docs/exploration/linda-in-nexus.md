@@ -12,13 +12,13 @@ Nexus runs many cooperating processes. There is the Claude Code session you talk
 
 Every one of those shared places is read-many. Any number of readers see the same entry, and no reader can claim it. That is exactly right for notes, findings, and documents, and exactly wrong for coordination. Two agents that both read "take the next task" both take it. A message written for one agent is visible to every agent, and the one it was for does not know it is there until it looks. The harness's own messaging is point-to-point and momentary: it reaches one reader, at a time the harness chooses, and is then gone. Nothing records that a report was owed, so an agent that finishes without reporting leaves no trace. Nothing wakes a reader when a record arrives, so a correction sent mid-turn lands after the turn.
 
-The engine already had the missing operation, in one place. The queue that feeds structured extraction hands each row to exactly one worker with a single statement, `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`. Nothing a session, a hook, or an agent could call had that operation. The tuple space generalizes that statement into a primitive any process can reach, over records whose shapes the engine checks.
+The engine already had the missing operation, in one place. The queue that fed structured extraction handed each row to exactly one worker with a single statement, `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`. (That queue is now a tuple queue itself, RDR-235.) Nothing a session, a hook, or an agent could call had that operation. The tuple space generalizes that statement into a primitive any process can reach, over records whose shapes the engine checks.
 
 This is the role Linda fills in Nexus. Not a parallel programming model, but a coordination substrate that gives the processes around you an exclusive take and a wait, on the same durable, tenant-scoped database that holds everything else.
 
 ## How the suite leverages it
 
-Two consumers shipped with the design, a dispatch ledger and the mailbox, and the design's own scope clause says a further consumer needs its own RDR. The ledger has since been removed, and two further consumers have come through that door.
+Two consumers shipped with the design, a dispatch ledger and the mailbox, and the design's own scope clause says a further consumer needs its own RDR. The ledger has since been removed, and further consumers have come through that door: the board, queue and lock templates of RDR-211, the directory that resolves a session name, the CI boards, and the aspect-extraction queue.
 
 **The dispatch ledger, now removed.** The first consumer was a ledger: hooks at agent start and stop wrote a start tuple and a report tuple to the session's ledger, keyed on the agent's id, so an orchestrator could wait for a report and a later session could ask which agents had started and never reported. Those hooks were deleted in 7.70.0 (nexus-0r1uz). Nothing reads or writes the ledger now, and its template and rows were retired from the engine afterwards (nexus-onjvw).
 
