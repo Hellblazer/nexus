@@ -57,7 +57,7 @@ from nexus.db.gateway_backoff import (
     is_non_idempotent_sweep_path,
 )
 from nexus.db.client_identity import client_identity_headers
-from nexus.collection_errors import superseded_write_error_from_body
+from nexus.collection_errors import retired_no_successor_error_from_body, superseded_write_error_from_body
 from nexus.db.engine_reasons import QUARANTINE_RESTORE_BUSY_REASON, UNREGISTERED_COLLECTION_REASON, error_reason
 from nexus.logging_setup import emit_import_time_warning
 from nexus.rate_brake import DEADLINE_OUTCOME_HEADER, is_deadline_abort, parse_retry_after
@@ -2052,6 +2052,10 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: float = 12
         _superseded = superseded_write_error_from_body(e.code, err)
         if _superseded is not None:
             raise _superseded from e
+        # RDR-229 R7: a read by label of a retired collection that names no successor (the same body, no successor).
+        _retired = retired_no_successor_error_from_body(e.code, err)
+        if _retired is not None:
+            raise _retired from e
         # nexus-8ooxn: a 401/403 body can echo the rejected credential;
         # redact where it enters the message so every renderer sees it gone.
         msg = f"POST {path} → HTTP {e.code}: {redact_credentials(str(err.get('error', err)))}"
@@ -2185,6 +2189,9 @@ def _get(path: str, *, tenant: str = "default", timeout: float = 30) -> Any:
             err = json.loads(body_bytes)
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
+        _retired = retired_no_successor_error_from_body(e.code, err)
+        if _retired is not None:  # RDR-229 R7: see _post
+            raise _retired from e
         msg = f"GET {path} → HTTP {e.code}: {redact_credentials(str(err.get('error', err)))}"
         _unregistered = _unregistered_collection_message(e.code, err)
         if _unregistered:

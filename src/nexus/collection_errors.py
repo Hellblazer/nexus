@@ -120,3 +120,47 @@ def label_reserved_error_from_body(
         return None
     label = body.get("label")
     return LabelReservedError(label, user_chooses_label=user_chooses_label) if isinstance(label, str) and label else None
+
+
+class RetiredNoSuccessorError(RuntimeError):
+    """The engine refused a request because it names a collection that was retired and has no live successor (409
+    ``collection_superseded`` with no ``superseded_by``, RDR-229 R7, engine 0.1.202+).
+
+    A retired collection whose successor was deleted names none. Its id was always refused; from this engine a request
+    that names it by LABEL is refused too, where it used to be served from the tombstone with 200. There is nothing live
+    under the label, so nothing can be read from or written to it; the way out is to use a live collection. Never
+    retried. Exposes ``name`` and ``collection_id`` (None when the engine named none)."""
+
+    def __init__(self, name: str, collection_id: int | None = None) -> None:
+        self.name = name
+        self.collection_id = collection_id
+        super().__init__(retired_no_successor_message(name))
+
+
+def retired_no_successor_message(name: str) -> str:
+    """The one message for a collection retired with no successor, whichever route or command met it."""
+    return (
+        f"collection {name!r} was retired and has no successor, so there is nothing to read or write under that label. "
+        f"`nx collection list` shows the live collections; to bring its documents back, index their files into a live "
+        f"collection (`nx index repo <path>`, `nx index md <path>` or `nx index pdf <path>`). Nothing was changed."
+    )
+
+
+def retired_no_successor_error_from_body(status: int | None, body: Any) -> RetiredNoSuccessorError | None:
+    """The typed error for the engine's 409 ``collection_superseded`` body that names a retired collection and no
+    successor, else None.
+
+    Keyed on the status, ``reason == "collection_superseded"``, a non-empty ``collection``, and NO ``superseded_by`` and
+    NO ``successor_collection_id`` (absent, null or empty): a body that names a successor is
+    :func:`superseded_write_error_from_body`'s, and every other 409 is left to its own handler."""
+    from nexus.db.engine_reasons import COLLECTION_SUPERSEDED_REASON, error_reason  # noqa: PLC0415 — deferred: this module stays import-free for the CLI boundary
+
+    if status != 409 or not isinstance(body, dict) or error_reason(body) != COLLECTION_SUPERSEDED_REASON:
+        return None
+    if body.get("superseded_by") or body.get("successor_collection_id") not in (None, "", 0):
+        return None
+    name = body.get("collection")
+    if not (isinstance(name, str) and name):
+        return None
+    cid = body.get("collection_id")
+    return RetiredNoSuccessorError(name, cid if isinstance(cid, int) and not isinstance(cid, bool) else None)

@@ -10,7 +10,7 @@ from typing import Any
 import click
 import structlog
 
-from nexus.collection_errors import LabelReservedError, label_reserved_error_from_body
+from nexus.collection_errors import LabelReservedError, label_reserved_error_from_body, retired_no_successor_message
 from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.commands.store import _t3
 from nexus.config import DEFAULT_EXTRACTOR
@@ -2048,6 +2048,8 @@ def _reembed_job_error(exc: Exception) -> click.ClickException:
     if reserved is not None:
         return click.ClickException(str(reserved))
     text = str(body.get("error")) if isinstance(body, dict) and body.get("error") else str(exc)
+    if (retired := _retired_no_successor_of(code, body, text)) is not None:
+        return click.ClickException(retired_no_successor_message(retired))
     if code == 404 and not _ENGINE_404_MESSAGES.match(text):
         return click.ClickException(
             f"this engine does not serve the re-embed routes ({text}); upgrade it "
@@ -2058,6 +2060,25 @@ def _reembed_job_error(exc: Exception) -> click.ClickException:
     if isinstance(body, dict) and body.get("job_id"):
         return click.ClickException(f"{text} (job {body['job_id']}, {body.get('state', '?')})")
     return click.ClickException(text)
+
+
+_RETIRED_NO_SUCCESSOR_TEXT = re.compile(r"^collection (\S+) was retired and has no successor(?:;|$)")
+
+
+def _retired_no_successor_of(code: object, body: object, text: str) -> str | None:
+    """The collection a re-embed plan or start refused as retired with no successor (engine 0.1.202+), else None.
+
+    The engine answers a plain 409 ``{error, collection}`` with no ``reason`` and no ``job_id``; the only discriminator
+    is the text it builds (``TargetSelection.retiredWithNoSuccessor``: ``collection X was retired and has no
+    successor``, then ``; a retired collection is not re-embedded`` or ``; it cannot be this job's target``). A body
+    with a ``reason`` or a ``job_id`` is some other 409 and is left alone."""
+    if code != 409 or not isinstance(body, dict) or body.get("reason") or body.get("job_id"):
+        return None
+    found = _RETIRED_NO_SUCCESSOR_TEXT.match(text)
+    if found is None:
+        return None
+    named = body.get("collection")
+    return named if isinstance(named, str) and named else found.group(1)
 
 
 def _end_refused_reason(exc: Exception) -> str | None:
