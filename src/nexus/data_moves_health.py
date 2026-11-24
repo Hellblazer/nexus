@@ -9,6 +9,12 @@ The engine's move worker reports each open or failed data move as a ``/v1/status
   waits for the install and an engine restart and nothing is wrong with the data, so it is a warning until the engine's
   retry cap (about four hours), when the engine drops the class and the row is red. The class is the engine's field,
   never read from the words; an engine that predates it sends none, and its blocked move stays red.
+* A ``blocked:`` entry whose ``reason_class`` is ``waiting_for_builds`` (the name-key drop move, RDR-229 P3.7 row 23): its
+  completion waits for an index build in flight and ends none. Nothing failed and nothing is counted or paged, and the move
+  continues by itself once no build runs, so it is a note (``ok``), and its hint says to wait and offers no retry reset, which
+  would do nothing. ``waiting_for_builds_overdue`` is the same wait past six hours: a warning that carries the engine's text
+  (the age, the running count and the builders' pids) and says to look at the build; still nothing to reset. Both classes are
+  the engine's field, never read from the words.
 * A move listed in the status's ``data_moves_need_operator_moves`` (its worker has failed it transiently 20 times in a row,
   or hit a lock or statement timeout at ``on_complete`` 3 times in a row, which then stays latched until the move completes
   or its count resets; the engine decides, ``MoveRetryPolicy``) is a red
@@ -59,6 +65,10 @@ _ENGINE_STATE_ROWS: dict[str, tuple[str, str, str]] = {
 }
 
 SUMMARY_LABEL = "Data moves"
+#: ``reason_class`` of a ``blocked:`` entry whose move waits for an in-flight index build (``MoveReasons.WAITING_FOR_BUILDS``).
+WAITING_FOR_BUILDS = "waiting_for_builds"
+#: The same wait once it has gone on past six hours (``MoveReasons.WAITING_FOR_BUILDS_OVERDUE``).
+WAITING_FOR_BUILDS_OVERDUE = "waiting_for_builds_overdue"
 #: ``reason_class`` of a ``blocked:`` entry whose move waits for the pg_background extension to be installed (``MoveReasons.MISSING_PREREQUISITE``).
 MISSING_PREREQUISITE = "missing_prerequisite"
 
@@ -241,6 +251,27 @@ def check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Healt
         row_label = f"Data move {label}"
         if label in paged and state != "failed":
             rows.append(_needs_operator_row(label, paged[label], entry))
+        elif state == "blocked" and entry.get("reason_class") == WAITING_FOR_BUILDS:
+            rows.append(HealthResult(
+                label=row_label, ok=True, detail=f"waiting: {text}{_counts(entry)}",
+                fix_suggestions=[
+                    "Nothing failed. The move's completion waits for an index build that is running and ends none; it "
+                    "tries again by itself about every 30 seconds and completes once no build runs. Wait. No failure is "
+                    "counted and no page is raised, so there is no retry count to reset",
+                ],
+            ))
+        elif state == "blocked" and entry.get("reason_class") == WAITING_FOR_BUILDS_OVERDUE:
+            rows.append(HealthResult(
+                label=row_label, ok=False, warn=True, detail=f"waiting: {text}{_counts(entry)}",
+                fix_suggestions=[
+                    "Nothing failed and nothing was ended: the move still waits for an index build and continues by itself "
+                    "once none runs. It has waited longer than six hours, so look at the build the row names (its "
+                    "backend pids) rather than at the move: a very large build takes that long; a build that no longer "
+                    "advances is for an operator to judge, and the engine ends none. No failure is counted and no page "
+                    "is raised, so there is no retry count to reset. The engine log has event=data_move_completion_overdue "
+                    "on each attempt",
+                ],
+            ))
         elif state == "blocked" and entry.get("reason_class") == MISSING_PREREQUISITE:
             rows.append(HealthResult(
                 label=row_label, ok=False, warn=True, detail=f"blocked: {text}{_counts(entry)}",

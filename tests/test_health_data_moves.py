@@ -521,3 +521,58 @@ def test_the_engines_own_status_shape_is_read():
     assert sorted(fixture["data_moves_need_operator_moves"][0]) == sorted(
         ["label", "retries", "last_attempt_at", "next_retry_at", "sqlstate", "statement_timeout_ms",
          "terminates_index_builds", "step", "bound_ms", "retry_in_progress"])
+
+
+# ── nexus-p2m1x.27 row 23: the name-key drop move waits for an index build; a wait is a note, then a warning, never red ──
+
+_WAIT_WHAT = (
+    "blocked: rdr229-name-key-drop: waiting for in-flight index builds to finish (1 running); none is ended and no failure "
+    "is counted; waiting for 12 m (blocked since 2026-11-24T01:00:00Z)"
+)
+_OVERDUE_WHAT = (
+    "blocked: rdr229-name-key-drop: waiting for in-flight index builds to finish (2 running); none is ended and no failure "
+    "is counted; waiting for 7 h 12 m; overdue, more than 6 h; builder pids 4101,4102"
+)
+
+
+def _no_reset(row: HealthResult) -> bool:
+    return not any("UPDATE nexus.data_moves" in s or "transient_retries" in s and "= 0" in s for s in row.fix_suggestions)
+
+
+def test_a_move_waiting_for_a_build_is_a_note_that_says_wait_and_offers_no_retry_reset():
+    status = {"boot_work": [_classed("rdr229-name-key-drop", _WAIT_WHAT, "waiting_for_builds")]}
+
+    rows = check_data_moves(status)
+
+    row = _by_label(rows)["Data move rdr229-name-key-drop"]
+    assert row.ok is True and row.warn is False
+    assert row.detail.startswith("waiting: rdr229-name-key-drop: waiting for in-flight index builds to finish (1 running)")
+    assert any("Wait" in s and "by itself" in s for s in row.fix_suggestions)
+    assert _no_reset(row), "the retry count is 0 and nothing needs it: no reset SQL"
+    assert _red(rows) == [], "a wait is not a failure"
+    assert not any(r.warn for r in rows)
+
+
+def test_a_wait_past_six_hours_is_a_warning_with_the_engines_age_count_and_pids_and_still_no_retry_reset():
+    status = {"boot_work": [_classed("rdr229-name-key-drop", _OVERDUE_WHAT, "waiting_for_builds_overdue")]}
+
+    rows = check_data_moves(status)
+
+    row = _by_label(rows)["Data move rdr229-name-key-drop"]
+    assert row.ok is False and row.warn is True and row.fatal is False
+    assert "7 h 12 m" in row.detail and "(2 running)" in row.detail and "builder pids 4101,4102" in row.detail
+    assert any("six hours" in s and "engine ends none" in s for s in row.fix_suggestions)
+    assert _no_reset(row)
+    assert _red(rows) == [], "overdue is a warning: nx doctor still exits 0"
+
+
+def test_the_wait_is_keyed_on_the_class_not_the_words():
+    # an engine that predates the class sends none: the same text is the plain red blocked row it always was
+    status = {"boot_work": [_entry("rdr229-name-key-drop", _WAIT_WHAT)]}
+
+    row = _by_label(check_data_moves(status))["Data move rdr229-name-key-drop"]
+
+    assert row.ok is False and row.warn is False
+    # and the class on a move that is not blocked changes nothing
+    failed = {"boot_work": [_classed("m", "failed: m: boom", "waiting_for_builds")]}
+    assert [r.label for r in _red(check_data_moves(failed))] == ["Data move m"]
