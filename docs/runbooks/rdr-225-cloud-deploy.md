@@ -513,6 +513,8 @@ The walk is one transaction, so a failure inside it leaves the old layout intact
    tests/e2e/cloud-client-path-gate.sh`.
 4. Record the failure text and the probes in T2, find the cause, and cut a new tag. Nothing about the data changed.
 
+Once P3.1 has run on this install, a flip back past it needs the P3.1 down-step first (`docs/runbooks/rdr-229-p31-rollback.md`).
+
 ### 6.3 Committed: a tag flip is FORBIDDEN
 
 Why. The previous engine's write sites use the three-column key: `ON CONFLICT (tenant_id, collection, chash)` and

@@ -4,9 +4,9 @@
 
 A pre-P3.1 engine cannot write a row the P3.1 CHECKs guard (a NOT VALID CHECK applies to every new row version): its chunk
 INSERT, its supersede UPDATE and its carrier INSERTs fail with SQLSTATE 23514. The rollback after P3.1 is therefore this
-down-step (DROP CONSTRAINT IF EXISTS on every listed constraint) first and the tag flip second, with the open stamp moves
+down-step (DROP CONSTRAINT IF EXISTS on every listed constraint) first and the tag flip second, with every open rdr229 move
 paused before the down-step (the previous engine's move worker would otherwise run moves whose on_complete fails once the
-CHECKs are gone). conexus runs it; the runbook is docs/runbooks/rdr-229-p31-rollback.md.
+CHECKs are gone, and the name-key drop, whose completion closes the rollback window). conexus runs it; the runbook is docs/runbooks/rdr-229-p31-rollback.md.
 
 The down-step drops the CHECKs but DATABASECHANGELOG still records vectors-068-3 to -19 as run, so a later deploy of the
 P3.1 engine does not add them again, and a stamp move's on_complete then fails on a constraint that does not exist (42704).
@@ -189,12 +189,13 @@ def generate_verification(list_text: str) -> str:
 
 
 def generate_pause() -> str:
-    """Holds every open stamp move, every open P3.3a validation move (rdr229-fkvalidate-, which runs the same re-stamp) and every open P3.3c
-    swap move (rdr229-swap-, the same no-op re-stamp, whose on_complete adds the id composite and the child keys), so the previous engine's
-    move worker starts none of them (a stamp's on_complete would fail once the CHECKs are gone)."""
+    """Holds every open rdr229 move (label LIKE 'rdr229-%'): the stamp, validation (rdr229-fkvalidate-) and swap (rdr229-swap-) moves, whose
+    on_complete would fail once the CHECKs are gone, and every other one the previous engine's move worker would otherwise run, among them
+    rdr229-name-key-drop (its completion closes the rollback window) and the rdr229-p31-residue-* successors catalog-052 registers. A pattern,
+    not a list, so a move a later release registers is held too."""
     return (
         f"UPDATE nexus.data_moves SET paused_at = now(), paused_by = '{PAUSED_BY}'\n"
-        " WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%' OR label LIKE 'rdr229-swap-%') AND completed_at IS NULL AND paused_at IS NULL;\n"
+        " WHERE label LIKE 'rdr229-%' AND completed_at IS NULL AND paused_at IS NULL;\n"
     )
 
 
@@ -202,7 +203,7 @@ def generate_unpause() -> str:
     """Releases the rows generate_pause held, after the next P3.1 deploy; a hold someone else set (another paused_by) stays."""
     return (
         "UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL\n"
-        f" WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%' OR label LIKE 'rdr229-swap-%') AND paused_by = '{PAUSED_BY}';\n"
+        f" WHERE label LIKE 'rdr229-%' AND paused_by = '{PAUSED_BY}';\n"
     )
 
 

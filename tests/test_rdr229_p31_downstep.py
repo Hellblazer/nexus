@@ -165,12 +165,15 @@ def test_the_runbook_pauses_the_open_stamp_moves_before_the_down_step_and_says_w
     mod = _load()
     assert mod.runbook_problems(text, LIST.read_text(encoding="utf-8")) == []
     assert "paused_by = 'rdr229 down-step'" in mod.generate_pause() + mod.generate_unpause()
-    # P3.3a's validation moves run the same re-stamp, so the pause, its release and the window query hold them too
+    # one pattern, not a list: the previous engine's worker runs every open data_moves row, so the pause and its release match every rdr229 move
+    old_form = "(label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%' OR label LIKE 'rdr229-swap-%')"
     for statement in (mod.generate_pause(), mod.generate_unpause()):
-        assert "label LIKE 'rdr229-fkvalidate-%'" in statement
-        # P3.3c's swap moves run the same no-op re-stamp, so the pause and its release hold them too
-        assert "label LIKE 'rdr229-swap-%'" in statement
+        assert "label LIKE 'rdr229-%'" in statement
+        assert old_form not in statement
+        assert "rdr229-stamp-%" not in statement and "rdr229-fkvalidate-%" not in statement and "rdr229-swap-%" not in statement
+    # the window query stays stamp-only (plus the validation moves it names)
     window = text[text.index("Check the window first"):text.index("Zero rows means")]
+    assert "label LIKE 'rdr229-stamp-%'" in window
     assert "label LIKE 'rdr229-fkvalidate-%'" in window
     drifted = text.replace("paused_at IS NULL;", "paused_at IS NOT NULL;", 1)
     assert mod.runbook_problems(drifted, LIST.read_text(encoding="utf-8")), "a drifted pause statement is reported"

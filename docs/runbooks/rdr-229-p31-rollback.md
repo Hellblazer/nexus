@@ -68,15 +68,15 @@ open while the moves cannot run:
 ## Procedure
 
 1. **Check the window** (above). Zero completed stamp moves.
-2. **Pause the open stamp moves.** As `nexus_admin`. This holds every stamp move, every P3.3a validation move (`rdr229-fkvalidate-`) and every P3.3c swap move (`rdr229-swap-`) that is not complete, so no worker (this engine's
-   or the previous one's) starts one. The worker reads `paused_at` at the start of a move's turn and before each run (one CALL, one tenant and leaf),
+2. **Pause the open stamp moves, and every other open rdr229 move.** As `nexus_admin`. This holds every rdr229 move that is not complete (`label LIKE 'rdr229-%'`): the stamp moves, the P3.3a validation moves (`rdr229-fkvalidate-`), the P3.3c swap moves (`rdr229-swap-`) and the rest, so no worker (this engine's
+   or the previous one's) starts one. The previous engine's worker runs every open row of `data_moves`, so a hold on the three kinds alone would leave the others running, and one of them, the name-key drop (`rdr229-name-key-drop`), closes the rollback window when it completes. The pattern also holds moves a later release registers, such as the `rdr229-p31-residue-*` successors that catalog-052 registers. The worker reads `paused_at` at the start of a move's turn and before each run (one CALL, one tenant and leaf),
    so a run already in flight finishes first and the move stops at the run boundary; it keeps the rows it has stamped. The statement skips a move someone else has already paused, so a hold of the operator's own
    survives the unpause in step 8.
 
 <!-- p31-pause:begin -->
 ```sql
 UPDATE nexus.data_moves SET paused_at = now(), paused_by = 'rdr229 down-step'
- WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%' OR label LIKE 'rdr229-swap-%') AND completed_at IS NULL AND paused_at IS NULL;
+ WHERE label LIKE 'rdr229-%' AND completed_at IS NULL AND paused_at IS NULL;
 ```
 <!-- p31-pause:end -->
 
@@ -372,7 +372,7 @@ $q$;
 <!-- p31-unpause:begin -->
 ```sql
 UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL
- WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%' OR label LIKE 'rdr229-swap-%') AND paused_by = 'rdr229 down-step';
+ WHERE label LIKE 'rdr229-%' AND paused_by = 'rdr229 down-step';
 ```
 <!-- p31-unpause:end -->
 
