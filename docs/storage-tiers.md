@@ -248,8 +248,8 @@ start` to bring the stack up and `nx daemon service status` to verify health
 > `chromadb.PersistentClient` (local) or `chromadb.CloudClient` + Voyage
 > (cloud). RDR-155 P4b (shipped 2026-07-25) deleted that path outright: the
 > `chromadb` dependency is dropped (absent from `uv.lock`), and `nx daemon t3`
-> no longer exists as a command (`nx daemon --help` lists only `service` and
-> `aspect-worker`). `db/t3.py` survives as a module, but repurposed — it now
+> no longer exists as a command (`nx daemon --help` lists `service`,
+> `aspect-worker` and `restart-stale`). `db/t3.py` survives as a module, but repurposed — it now
 > backs the in-process `InMemoryVectorClient` test double used by the unit
 > suite, not a Chroma-backed serving path. A pre-PG install upgrading straight
 > to a current release is detected and refused with a two-hop redirect rather
@@ -263,7 +263,7 @@ start` to bring the stack up and `nx daemon service status` to verify health
 Collections are namespaced by corpus type using `__` (double underscore) as separator. Each collection's embedding model is fixed; the service routes by collection name:
 
 Conformant collection names (RDR-103) follow a 4-segment shape:
-`<content_type>__<owner_id>__<embedding_model>__v<n>`.
+`<content_type>__<owner_id>__<embedding_model>__v<n>`. That is the shape of the `code`, `docs` and `rdr` collections `nx index repo` mints and of every collection that predates 8.5.6. A **new knowledge subject** since 8.5.6 (RDR-229 P3.8) is registered by its attributes instead, and the engine mints the collection's id and its label, `c` followed by the id (`c4217`); the table below describes its content type, owner (the subject), model and version, which `nx collection list` shows in columns, not in the name. Every registry row now carries a `collection_id`; routes accept the id or the label, and a rename changes the label only. See [Choosing and Naming Collections](collections.md) Rule 3.
 
 | Pattern | Contents | Managed-cloud model | Local model, default | Local model, keyed |
 |---------|----------|---------------------|-----------------------|---------------------|
@@ -274,11 +274,11 @@ Conformant collection names (RDR-103) follow a 4-segment shape:
 
 (`<owner_id>` is a stable slug like `nexus-1-1`. See [RDR-103](rdr/rdr-103-catalog-collection-name-authority.md).)
 
-**Legacy shape (fallback, pre-RDR-103)**: 2-segment `<content_type>__<repo>-<hash>`, e.g. `code__myrepo-a1b2c3`. Still present on collections created before the conformance migration; new collections use the 4-segment shape above.
+**Legacy shape (fallback, pre-RDR-103)**: 2-segment `<content_type>__<repo>-<hash>`, e.g. `code__myrepo-a1b2c3`. Still present on collections created before the conformance migration; new repo collections use the 4-segment shape above, and new knowledge subjects the minted `c<id>` label.
 
 A collection is indexed and queried under the same embedding model: mixing models across one vector space produces near-random similarity scores. The same principle is enforced at query time: multi-collection combined queries are dispatched per embedding-model group by the MCP layer (a corpus spanning `voyage-code-3` and `voyage-context-3` collections issues one query per model and merges results, nexus-3l6gz), and the service rejects a mixed-model collection list outright (`requireHomogeneousModel`, engine-service ≥ 0.1.36).
 
-**TTL and expiry**: `nx store expire` removes expired entries from `knowledge__*` collections only. Code, docs, and RDR collections are never expired: they are refreshed via re-indexing.
+**TTL and expiry**: `nx store expire` removes expired entries from `knowledge` collections only (selected by the collection's content type, so minted `c<id>` collections count). Code, docs, and RDR collections are never expired: they are refreshed via re-indexing.
 
 **Use for**: semantic search across sessions, institutional knowledge.
 
@@ -325,7 +325,7 @@ The tuple space is the ninth T2 store (`db.tuples`, `HttpTupleStore`), for cross
 - **`mailbox/<address>`**: messages to an agent id or a session id, 7-day retention.
 - **`directory/<name>`** (RDR-208 Phase 1 Step 1): read-only session-directory lease entries, 7-day retention.
 - **`board/<topic>`**, **`queue/<name>`** and **`lock/<resource>`** (RDR-211): a broadcast board (7 days), a shared work queue (2 days) and a mutual-exclusion lock (7 days when idle).
-- **`board/ci/<topic>`** (RDR-220): CI status posts, 3-day retention.
+- **`board/ci/<topic>`** (RDR-220): CI status posts, 3-day retention; a topic ending `--owner` (owner, clear, ack and disclaim rows, RDR-252) keeps them 35 days.
 - **`aspects`** (RDR-235, a one-segment literal name): the one aspect-extraction queue per tenant, the collection in the task body, 90-day retention.
 
 See [Tuple space](tuple-space.md) for the full template table.

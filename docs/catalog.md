@@ -104,7 +104,7 @@ nx catalog link "Paper A" "Paper B" --type cites
 nx catalog link 1.1.5 1.2.3 --type implements
 ```
 
-Both arguments accept titles or tumblers. Link types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`, `formalizes`.
+Both arguments accept titles or tumblers. Link types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`, `formalizes`, plus `same-as` (written by the content-hash dedup pass), `contains` and `describes`, which the graph traversal includes by default; the type is free text, so any other string is accepted.
 
 Duplicate links are merged — the second creator is recorded in `co_discovered_by`. Linking to a deleted or non-existent document (a **dangling endpoint**) is refused by the engine (>= v0.1.61, nexus-9ssih) with a clear error naming both endpoints — older engines that don't emit the `dangling_endpoint` code accept the link silently. Bypassing the refusal (`allow_dangling=True`) is Python-API-only (`HttpCatalogClient.link()`); the `nx catalog link` CLI command has no flag for it.
 
@@ -141,7 +141,7 @@ You don't have to register documents manually. Every indexing pathway does it au
 
 | Command | What gets registered |
 |---------|---------------------|
-| `nx index repo .` | Code files, prose, RDRs — plus auto-generates code→RDR links and topic links |
+| `nx index repo .` | Code files, prose, RDRs — plus auto-generates `implements` links from each RDR to the code files it names by path (`filepath_extractor`), RDR-to-RDR links from RDR frontmatter (`rdr_dependency_extractor`), and topic links |
 | `nx index pdf paper.pdf` | PDF with title, author, page count |
 | `nx index rdr .` | RDR documents with frontmatter titles |
 | `nx index md file.md` | Markdown documents |
@@ -177,8 +177,8 @@ Agents also create links during their work — the debugger creates `relates` li
 | Type | Meaning | When to use | Created by |
 |------|---------|-------------|------------|
 | `cites` | Citation reference | Paper A references Paper B | `nx enrich bib` (auto), agents, manual |
-| `implements-heuristic` | Code→RDR (auto-detected) | Indexer found title substring match | Indexer hook (automatic) |
-| `implements` | Code→RDR (confirmed) | Code intentionally realizes a design doc | Developer agent, manual |
+| `implements-heuristic` | Code→RDR (legacy) | Written by an indexer pass turned off at engine v0.1.57 (nexus-ybj1b); existing edges remain and graph traversal excludes them by default | Nothing writes it now |
+| `implements` | Code→RDR (confirmed) | Code intentionally realizes a design doc | Indexer hook when an RDR names the file's path (`filepath_extractor`), developer agent, manual |
 | `supersedes` | Document replaced by another | Retiring old doc, consolidating duplicates | RDR close, `nx_tidy` MCP tool, manual |
 | `relates` | Related findings | Cross-cutting concerns, similar topics | Debugger, deep-analyst, manual |
 | `quotes` | Direct quotation with spans | Citing a specific passage as evidence | Manual |
@@ -197,13 +197,15 @@ nx catalog links --created-by user            # all manually created links
 Conventional `created_by` values:
 
 - `bib_enricher` — Semantic Scholar lookup created a `cites` from a citation match
-- `rdr_implements_pass` — generator pass walked accepted RDRs and emitted strict `implements`
+- `filepath_extractor` — the indexer hook found a source file path in an RDR and emitted `implements` (RDR to that file's document)
+- `rdr_dependency_extractor` — the indexer hook read `supersedes`, `superseded_by`, `parent_rdr` and `related_rdrs` off RDR frontmatter
+- `content_hash_dedup` — emitted `same-as` between documents with identical content
+- `dt_similar`, `dt_link` — `relates` edges from DEVONthink's See Also and its record links (`nx dt index`)
 - `code_rdr_heuristic` — looser pass; emitted `implements-heuristic` on path/symbol substring match. Legacy: the pass was turned off at engine v0.1.57 (nexus-ybj1b) and nothing writes the type now; existing edges remain and graph traversal excludes them by default (nexus-6ppk)
-- `manual` — user authored via `nx catalog link`
+- `user` — authored via `nx catalog link` (or the MCP `link` tool)
 - `auto-linker` — created at storage time from T1 link-context (RDR-053 storage-boundary auto-linker)
-- `llm_linker` — Claude-suggested edge; advisory, manual review recommended before traversing in an audit
 
-When auditing graph traversal, prefer `created_by IN ('bib_enricher', 'rdr_implements_pass', 'manual')` over heuristic creators.
+When auditing graph traversal, prefer `created_by IN ('bib_enricher', 'filepath_extractor', 'user')` over heuristic creators.
 
 `catalog_links.link_type` is free text: no enum or CHECK constrains it (`catalog-001-baseline.xml`), so a write with any type succeeds. What a release knows is two allow-lists, which must be kept in step: `_KNOWN_LINK_TYPES` in `src/nexus/plans/purposes.py` (plans that name a type outside it warn and drop it, so future releases don't break old plans) and `DEFAULT_GRAPH_LINK_TYPES` in `service/src/main/java/dev/nexus/service/db/CatalogRepository.java` (the types a traversal that names none follows). A type outside the Java list is stored and returned by `link_query`, but an engine graph traversal that names no types does not follow it. To add a new type: add it to both lists (the Java one ships in an engine release), decide on `created_by` provenance, and update `conexus/plans/purposes.yml` if any existing purpose should include it.
 
@@ -281,14 +283,14 @@ In `.nexus.yml`:
 
 ```yaml
 taxonomy:
-  auto_label: true                       # Label with Claude haiku (default)
+  auto_label: true                       # Label through the LLM backend (default)
   local_exclude_content_types: [code]    # Skip code collections in local mode (general-purpose local embeddings cluster code poorly)
   local_exclude_collections: []          # Glob patterns on collection labels to skip in local mode
 ```
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `auto_label` | `true` | Auto-label topics with Claude haiku after discover. Requires the `claude` CLI. |
+| `auto_label` | `true` | Auto-label topics after discover through the LLM backend (the `claude` CLI, an `anthropic_api_key`, or `openai_compat`). Set `false` to keep c-TF-IDF labels. |
 | `local_exclude_content_types` | `["code"]` | Content types to skip in local mode, matched against each collection's catalog row, never its name. Cloud mode ignores this setting. |
 | `local_exclude_collections` | `[]` | Glob patterns on collection labels to skip in local mode. Cloud mode ignores this setting. Setting it (even to `[]`) without `local_exclude_content_types` makes your config own the exclusion, so `[]` enables code taxonomy locally. |
 
@@ -448,8 +450,17 @@ Locked format decisions (design of record: T2
   A row that is not `live` is skipped, counted and named, never registered
   live. A label with no row on the target is registered under the target's
   active embedding model (the notes are re-embedded from text) and the report
-  names each collection whose model changed. A bundle of format 1 or 2 still
-  imports through the name path, for the minor releases RDR-229 sets.
+  names each collection whose model changed. A label of the minted form (`c`
+  plus digits) is the source install's own, so it is not kept: the notes go to
+  the label this install mints for the same attributes, and the report names the
+  pair. A label that a rename left reserved (`label_reserved`) refuses that
+  collection only. The bundle header carries `exported_by` (the client version
+  and, when the engine reports one, its release); readers ignore it. `nx catalog
+  import` reads the header before it connects, and a bundle newer than this
+  client is refused with the `format_version` it holds and the newest this
+  client reads ("Upgrade conexus, then import it again"), exit 1. A bundle of
+  format 1 or 2 still imports through the name path, for the minor releases
+  RDR-229 sets.
 - **No embeddings.** Import writes each note through the note writer
   (the one `store_put` uses), which re-embeds — the bundle is portable across embedding models. For an
   embedding-preserving per-collection backup use `nx store export COLLECTION`
