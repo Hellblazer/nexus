@@ -1163,14 +1163,24 @@ The key moves table by table in strangler order:
   ends a build or pages, however long the wait runs. A deferral never raises
   a page and never clears one already raised: a move that three counted
   55P03s latched needs-operator keeps its page (step, bound and
-  `terminates_index_builds`) while it defers, because the worker's blocked
-  report passes the page the move holds with `entered` false, so the worker
-  logs no second `data_move_needs_operator`; before commit 2809da38ee that
-  report carried no page and `MoveStates` cleared it, which dropped the
-  move from `/v1/status` and `nx doctor` until the build ended
-  (`DataMoveWorker.java:610`, `:624-634`; `MoveStates.java:70-86`; no second
-  line from the worker or the sampler is asserted at
-  `MoveNeedsOperatorIntegrationTest.java:737-771`; T2 `229-research-337`).
+  `terminates_index_builds`) while it defers: the worker's finish passes the
+  page the move holds into its blocked report (`keptPage`, `entered` false),
+  and `MoveStates` keeps it, so the move stays in the needs-operator list.
+  The finish BLOCKED branch logs no page itself (it logs `data_move_blocked`
+  for a blocked finish that is not a deferral, and a deferral logs its own
+  line), and `entered` is read only on the failure path
+  (`DataMoveWorker.java:529`). The status sampler logs no second page
+  either: the move is still listed, so `MoveBootWork.announce` finds it
+  announced and `retainAnnounced` keeps that announcement
+  (`MoveBootWork.java:344-353`). Before commit 2809da38ee that report
+  carried no page and `MoveStates` cleared it, which dropped the page from
+  the needs-operator list (`data_moves_need_operator_moves`) and the
+  doctor's red row, while the move stayed in `boot_work` as
+  `waiting_for_builds` (`DataMoveWorker.java:606-611`, `:624-634`;
+  `MoveStates.java:70-86`; no second line from the worker (`:771`) or the
+  sampler (`:773`, asserted in the helper at `:142-146`) is asserted at
+  `MoveNeedsOperatorIntegrationTest.java:737-773`; T2
+  `229-research-337`).
   The first deferral of
   an unbroken run is kept in memory, per label, and each deferral reports
   its age (`BuildWait.java:72`, `:96-118`). Every deferral reason gives the
@@ -1180,7 +1190,9 @@ The key moves table by table in strangler order:
   in place of INFO `data_move_completion_deferred`, `/v1/status` gives the
   `boot_work` entry `reason_class` `waiting_for_builds` and then
   `waiting_for_builds_overdue`, and `nx doctor` shows a note and then a
-  warning, neither offering the retry reset (`MoveReasons.java:48-60`,
+  warning, neither offering the retry reset, for a move that holds no page (a
+  paged move shows the red needs-an-operator row with the reset,
+  `data_moves_health.py:252-253`) (`MoveReasons.java:48-60`,
   `:80-82`, `:166-190`; `data_moves_health.py:254-274`;
   `docs/wire-contract-pending.md:118`). The pids are the one backend id
   the unauthenticated `/v1/status` carries (linda, 2026-11-24;
@@ -1954,8 +1966,9 @@ while the engine serves:
     run. P3.1 builds the counts; the reader contract for a tombstone that
     names no successor is split: P3.5c's part (its bullet) is on the stack
     for the re-embed readers, and the label-addressed read refusal, the
-    `RETIRED_NO_SUCCESSOR` marker and its typed client error move to the
-    next paired cut (bead nexus-p2m1x.25; Sam, "Split"; linda; T2
+    `RETIRED_NO_SUCCESSOR` marker on the wire, its typed client error and
+    not-retried read, and the per-reader tests move to the cut paired with
+    8.5.6 (bead nexus-p2m1x.25; Sam, "Split"; linda, 2026-11-24; T2
     `229-research-328`, `229-research-336`).
 
     The check is not read only at boot. The move worker knows in process
@@ -2055,7 +2068,8 @@ while the engine serves:
     offers (`DataMoveWorker.java:610`, `:624-634`;
     `data_moves_health.py:252-254`; commit 2809da38ee, with its doctor test in
     9c8bc0d04b at `tests/test_health_data_moves.py:581`).
-    Its page, if it comes, says the move ends no index builder: the
+    The name-key drop move's page, if it comes (from counted 55P03s, as
+    above), says the move ends no index builder: the
     restarted engine reads `terminates_index_builds` false for it by its
     definition, and true for another chunk-family move
     (`MoveBootWork.java:326`; `MoveBootWorkTest.java:519-545`;
@@ -2233,8 +2247,9 @@ engine takes the next `collection_id` and sets the label to `c` followed by
 that id in decimal (`c4812`), in the one insert. It is opaque: it carries
 no content type, owner, model or version. Listings show the attributes
 beside it (`nx collection list`, `collection_list`, `nx catalog show`).
-`nx collection list` already shows content type, owner, model, dimension
-and state (`commands/collection.py:91-95`); the id column is new (P3.12). A
+`nx collection list` shows content type, owner, model, dimension
+and state (`commands/collection.py:92-96`) and, first, the id (`:91`,
+P3.12; `-` for a null id). A
 user who wants a readable label sets one with `nx collection rename`; a subject or repo collection is found by its attributes
 either way (item 5), so a label is never needed to find one. Every client
 path that renders a conformant name for a new collection
@@ -3622,8 +3637,16 @@ its acceptance is that test green plus the census pin it lowers.
     against it once a tombstone with no successor still holds chunks (bead
     nexus-p2m1x.25, comments of 2026-11-24 04:53, 10:52 and 10:53 UTC;
     owner elsinore). No code of it is in this tree: `git grep
-    RETIRED_NO_SUCCESSOR -- . ':!docs/rdr'` finds nothing. What P3.5c ships
-    is the re-embed readers' part, on the stack. The re-embed retargeting
+    RETIRED_NO_SUCCESSOR -- . ':!docs/rdr'` finds nothing, and `service/`,
+    `src/` and `tests/` hold no such marker. Only the partial R7 ships in
+    this cut, on the stack: a re-embed refusal names the successor's label
+    or says the collection is retired with no successor, the by-id 409, and
+    `TargetSelection` refusing a target with no successor. Deferred to the
+    cut paired with 8.5.6 (bead nexus-p2m1x.25, linda's ruling of
+    2026-11-24): the label-addressed read refusal, the marker on the wire,
+    the typed client error and the client's not-retried read of it, and the
+    per-reader tests Sam's wording put in this cut (the re-embed readers
+    keep the tests named below). The re-embed retargeting
     guard named the stored `superseded_by` text as the successor, which for
     a tombstone whose successor was deleted is its own dead label. It now
     finds the successor by `superseded_by_id` (`CollectionSuccessor`,
@@ -3804,11 +3827,23 @@ its acceptance is that test green plus the census pin it lowers.
   with every id filled.
 - P3.12 Day 2 surfaces, after P3.5a and P3.6: an id column in `nx
   collection list` (it already shows content type, owner, model, dimension
-  and state, `commands/collection.py:91-95`), an `nx doctor` census of null
+  and state, `commands/collection.py:92-96`), an `nx doctor` census of null
   ids per table and of live labels held by more than one row, and `nx
   collection delete` by label or id (it takes a name today,
-  `commands/collection.py:547-550`). T2 `229-research-48`. Test: each
+  `commands/collection.py:556-559`). T2 `229-research-48`. Test: each
   surface on a fixture with a null id and a minted label.
+  Shipped in part (commit e643d66b67, on develop; bead nexus-p2m1x.32): the
+  ID column, first in the list (`commands/collection.py:91`; `-` for a null
+  id), and the doctor rows in `collection_id_health.py` (the unstamped rows
+  per table, the live-label clash that names both ids, and the live-label
+  index from `live_label_index_present` on `/v1/status`; tests
+  `tests/test_collection_cmd.py:120`, `tests/test_health_collection_ids.py`).
+  Not shipped: `nx collection delete` by id. `delete_cmd` still takes only a
+  name (`@click.argument("name")`, `commands/collection.py:556-559`). Only
+  the engine's delete route takes an id (commit 1b740b8a65, P3.5a), and the
+  catalog client sends only `name` (`catalog/http_catalog_client.py:813`).
+  The by-id delete is deferred; no bead for it is
+  cited in this RDR (bead not found).
 - P3.R Review gate for Phase 3. The rest of Phase 3 ships as one engine
   cut: the -r13 reland and P3.3 through P3.12 (P3.7's rename refusal, the
   name-key drop move's registration and the one-row rename included) are
@@ -4062,7 +4097,7 @@ reference the registry's name (P4.1).
 | `nx taxonomy project --prune-below-threshold` | Prints the removed count per collection | Prints "N skipped" when the engine lacks exact mode (cloud, until the conexus edge allowlists the flag), "did not confirm exact matching; using the guarded prune" when the verification prune is not echoed, and "N refused" for a collection whose row cannot be read | N/A | `GET /version` reads `taxonomy_prune_exact_supported` | N/A |
 | `lifecycle_state` at registration | `nx collection list` | `nx catalog show` | Existing lifecycle verbs | `nx doctor` row versus name diagnostic | Recovery bundle |
 | RDR-229 completion state and the P3.1 down-step | `nx doctor` rows: the three gates, labels incomplete, CHECKs missing, VALIDATE waits, dangling and self-id tombstones | `/v1/status` `rdr229_completion` (no tenant numbers); the caller's own counts on `GET /v1/catalog/rdr229_completion_counts` | The down-step and re-add SQL, conexus-run inside the window (`docs/runbooks/rdr-229-p31-rollback.md`) | The runbook's verify query; `nexus.rdr229_restamp(table)` finishes an orphaned table | PITR outside the window |
-| `collection_id` and label | `nx collection list` (id, label, attributes; the id column is P3.12's) | `nx catalog show` | `nx collection delete` (by label or id, P3.12) | `nx doctor` null-id and label-clash census (P3.12) | Recovery bundle (carries the row from P3.9); tenant backup, `nx backup` (exports the id from P3.1's cut; restores by id from P3.5+P3.7; P3.11) |
+| `collection_id` and label | `nx collection list` (id, label, attributes; the id column is P3.12's) | `nx catalog show` | `nx collection delete` (by label; by id is deferred, P3.12) | `nx doctor` null-id and label-clash census (P3.12) | Recovery bundle (carries the row from P3.9); tenant backup, `nx backup` (exports the id from P3.1's cut; restores by id from P3.5+P3.7; P3.11) |
 
 ### New Dependencies
 
@@ -4645,4 +4680,19 @@ large, and moved under a ratchet.
 - 2026-11-24: `vectors-084` and the move routes' refusal folded from the stacked code (grant 3, nexus-p2m1x.24 and .25; T2 `229-research-334`): the P3.5b list holds fifteen changesets, twelve of `vectors-078` and three of `vectors-084`, all on the one precondition; gate 3 also waits for `vectors-084-1` to `-3`, the by-id `taxonomy_ann_query_<dim>` overloads; the document and owner moves answer 409 and 404 by id from the latch.
 - 2026-11-24: row 14 and the per-leaf foreign key folded from the stacked code (grant 3, nexus-p2m1x.21 and .23; T2 `229-research-335`): the composite `chunks_collection_id_fk` is reached leaf by leaf, the swap adding each leaf's key `NOT VALID` and registering a validation move per leaf and the adoption move `rdr229-fkadopt-chunks`, which adds the parent key over validated leaf keys under its own 200 ms lock wait and the tight 1400 ms bound, ends only the index builders that block it, and puts itself back while a leaf is not ready; the chunks swap label stays incomplete until the composite is validated, with a count in its reason; validations that block no writer carry no statement bound (`vectors-081-1`), run before their claim, and are cancelled by a stop, a pause or a supersede; the maintenance-window inference, the needs-operator sentence, P3.2's list and the P3.3c sentences follow. Row 14: every other writer, except the history tables' (stamped unlocked, exempt by ruling), reads its registry rows FOR KEY SHARE in the same order (tolerantly where the id is only a record), the retiring verbs' locks stated as the code has them (a delete by id FOR UPDATE with its siblings key-shared), 409 `collection_busy` on a collection delete and 409 on a re-embed re-entry (both paired with client 8.5.6), the chash rename's 503 `rename_busy`, the pre-latch document and owner moves by label, and `persist_split`'s 400; the census's reach counted (273 write sites: 48 require, 33 verb, 49 sql, 34 move, 19 history exempt by ruling, 90 unproven).
 - 2026-11-24: rows 21 and 23 folded from the stacked code (grant 3, nexus-p2m1x.25 and .27; T2 `229-research-336`): the R7 re-embed readers are on the stack (the retargeting guard finds the successor by `superseded_by_id` and names its current label, or says "retired and has no successor" and names none, for a source and for a re-entry's target; `TargetSelection.decide` refuses a retired target with no live successor; the ledger line is [additive]); the label-addressed read refusal is not in this cut, moved by linda to the paired cut with the `RETIRED_NO_SUCCESSOR` marker and its typed client error (it was never in Sam's "Split" wording; the P3.5c bullet and item 6's sentences say so); the pipeline cleanup and remap `clearLeg` of a label with no registry row delete only dangling rows from gate 3. Row 23 (Sam, "Fix: wait, don't end"): the name-key drop move is the one chunk-family move whose completion waits while a build runs (the per-leaf validation moves also end no builder, and the adoption move ends only the builders that block its lock; the bounded moves other than those and the drop move end them); while a builder runs a `CREATE INDEX` its completion defers with no count, no page and no `data_moves` write, its lock wait is held under `deadlock_timeout`, and past six hours the status, nx doctor and the log say so; a pause, failure, supersede or restart resets the wait's age; the held sentences ("an index is built a second time only after a kill", "so a chunk-family `on_complete` cannot end it"), the needs-operator sentences and P3.7's bullet follow. P4.1's own drop move is not given the wait here. Row 25 (test-only analyze changes) changes nothing the RDR states. VerifyingFinisher, DataMoveWorker, MoveEvents and `data_moves_health.py` cites moved by the stack; the census counts at the tip.
-- 2026-11-24: row 23's page follow-up folded from the stacked code (grant 3, nexus-p2m1x.27; T2 `229-research-337`): a deferral never raises a page and never clears one already raised; a name-key drop move latched needs-operator by three counted 55P03s keeps its page in `/v1/status` and nx doctor while its completion waits for a build, the worker's blocked report passing the held page with `entered` false so no second `data_move_needs_operator` is logged (`DataMoveWorker.java:610`, `:624-634`; commit 2809da38ee; tests ce7c7b8c83 and, for the doctor's red row over the waiting note, 9c8bc0d04b); item 6's wait paragraph and "A blocked move" and P3.7's coverage sentence follow.
+- 2026-11-24: row 23's page follow-up folded from the stacked code (grant 3, nexus-p2m1x.27; T2 `229-research-337`): a deferral never raises a page and never clears one already raised; a name-key drop move latched needs-operator by three counted 55P03s keeps its page in `/v1/status` and nx doctor while its completion waits for a build, the worker's blocked report passing the held page with `entered` false so no second `data_move_needs_operator` is logged (`DataMoveWorker.java:610`, `:624-634`; commit 2809da38ee; tests ce7c7b8c83 and, for the doctor's red row over the waiting note, 9c8bc0d04b); item 6's wait paragraph and "A blocked move" and P3.7's coverage sentence follow. (the worker's `entered` false as the cause of the missing second line is superseded by the last line below)
+- 2026-11-24: Phase 3 is on develop at 9c8bc0d04b, one stack that ships as engine-service-v0.1.202 (Sam's ruling, T2 `nexus/sam-ruling-rename-ships-0202-856-2026-11-23`; ledger commit 61d320ae5f; the tag does not exist yet, the newest is v0.1.201, which already holds bfb7cf7766, 7dd82ae70f and b3333e389d). One landing line per step follows, each with a representative commit.
+- 2026-11-24: P3.3a landed (nexus-p2m1x.19): the seven NOT VALID id-twin foreign keys and their validation moves, 00c339bb95; the tenant backup declares the six twins, ca71cffde0.
+- 2026-11-24: P3.3b landed (nexus-p2m1x.20): the per-leaf id unique-index pass, `vectors-073` and the swap-move placeholder, 64a3a46e8f.
+- 2026-11-24: P3.3c landed (nexus-p2m1x.21): the swap moves carry their work, 171a2cf49b; the manifest id key deferred, 7d877f86e3; the `chunk_orphaned_at` child index, c86f924ef2.
+- 2026-11-24: P3.4 landed (nexus-p2m1x.22): the `collection_id` indexes and gate 3, b3798288fe.
+- 2026-11-24: P3.5a landed (nexus-p2m1x.23): read-only `collection_id` on rows, bfb7cf7766 (in v0.1.201); the delete route takes an id, 1b740b8a65.
+- 2026-11-24: P3.5b landed (nexus-p2m1x.24): the SQL readers read the id, forms A and B, 734bf034e9.
+- 2026-11-24: P3.5c landed (nexus-p2m1x.25): the readers and the two upserts switch to the id from gate 3, 368cf7da04, with `IdReaders.PRESENT = true` (`IdReaders.java:23`). Only the partial R7 landed (55d04ff3ae); `RETIRED_NO_SUCCESSOR`, its typed client error and not-retried read, the label-addressed read refusal and the per-reader tests wait for the cut paired with 8.5.6 (linda, 2026-11-24; no code of the marker is in the tree).
+- 2026-11-24: P3.6 landed (nexus-p2m1x.26): the label rule and the partial UNIQUE on live labels, 7dd82ae70f (in v0.1.201); the client's rule, accc91dc29.
+- 2026-11-24: P3.7 landed (nexus-p2m1x.27): the name-key drop move, readiness and restart notice, a3e3ce2ead; the one-row rename, label reservation and `vectors-079`, 7034e09340; the kept needs-operator page, 2809da38ee.
+- 2026-11-24: P3.8 landed (nexus-p2m1x.28): `register_collection` registers by attributes and a new knowledge subject is written to the minted label, b3333e389d (in v0.1.201); a re-embed refused on a shared lookup tuple, aaa4f4fc93.
+- 2026-11-24: P3.9 landed (nexus-p2m1x.29): bundle format 3 with the registry rows, 328bb67294; the header names its writer and a too-new bundle is one message, dcfafe556d.
+- 2026-11-24: P3.11 landed (nexus-p2m1x.31): the catalog epoch, 6c0097da0e; a restore maps ids by id, cf038854a5.
+- 2026-11-24: P3.12 landed in part (nexus-p2m1x.32): the ID column and the doctor census rows, e643d66b67. `nx collection delete` by id did not ship: `delete_cmd` takes only a name (`src/nexus/commands/collection.py:556-559`); no bead for it is cited in this RDR.
+- 2026-11-24: wording follow-up (grant 3, matching the code on develop 9c8bc0d04b; T2 `229-research-338`, from halcyon's docs audit and the counted observations of fix check `229-fix-check-0b49917e9d`): the landing lines above; P3.5c states only the partial R7 as shipped; P3.12 says what shipped and defers the by-id delete; the kept page's cause is the finish BLOCKED branch logging no page and the sampler finding the move still announced (`MoveBootWork.announce`, `retainAnnounced`), not `entered`; the pre-fix loss was the page and the doctor's red row, while `boot_work` kept `waiting_for_builds`; the doctor's note and warning are for a move with no page; the drop move's page is named as such; the sampler assertion is cited.
