@@ -219,8 +219,38 @@ class NameKeyDropMoveWaitsForBuildsIntegrationTest extends DataMoveIntegrationBa
 
     // ── (b) no build in flight: the drop completes, an idle builder session notwithstanding ──────────────
 
+    // ── the lock wait is clamped to 900 ms at every place the drop's bound is read (F-C of folio's confirm of f648c7edfc) ──
+
+    private static String lockTimeoutOf(org.jooq.DSLContext tx) {
+        return tx.select(DSL.function("current_setting", String.class, DSL.val("lock_timeout"))).fetchOne().value1();
+    }
+
     @Test
     @Order(6)
+    void theDropsLockWaitIsHeldAtNineHundredMs_inTheCompletionTransactionAndAfterTheRecheck_andInThePageBound_atAStatementBoundOf4000() {
+        registerTheDropMove();
+        ctx().update(table("nexus", "data_moves")).set(DSL.field(DSL.name("statement_timeout_ms"), Integer.class), 4000)
+            .where(LABEL.eq(NameKeyDropMove.LABEL)).execute();
+        assertThat(VerifyingFinisher.lockTimeoutMs(4000)).as("non-vacuity: unclamped, half of 4000 ms is 2000 ms").isEqualTo(2000);
+        List<String> seen = new ArrayList<>();
+        var finisher = new VerifyingFinisher();
+        finisher.recheckHook = tx -> seen.add(lockTimeoutOf(tx));   // what complete() set for the transaction
+        finisher.afterRecheckHook = tx -> {
+            seen.add(lockTimeoutOf(tx));                            // what the re-check set again for on_complete
+            throw new IllegalStateException("the test ends the transaction here: nothing is dropped");
+        };
+
+        finish(finisher, NameKeyDropMove.LABEL, SESSION_TABLE, List.of());
+
+        assertThat(seen).as("both call sites ran, and each held the wait under 900 ms").containsExactly("900ms", "900ms");
+        var move = DataMoveRegistry.reload(ctx(), NameKeyDropMove.LABEL).orElseThrow();
+        assertThat(move.statementTimeoutMs()).isEqualTo(4000);
+        assertThat(MoveRetryPolicy.boundMs(FailureHandler.Stage.ON_COMPLETE, move, "55P03")).as("the bound the page names").isEqualTo(900);
+        assertThat(keysPresent()).as("nothing was dropped").isPositive();
+    }
+
+    @Test
+    @Order(7)
     void noBuildInFlight_theDropCompletes_andTheKeysAreDropped_evenWithAnIdleBuilderSession() throws Exception {
         registerTheDropMove();
         try (Connection idle = idleBuilderSession(BUILDER + "-idle")) {

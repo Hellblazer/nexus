@@ -119,6 +119,9 @@ final class VerifyingFinisher implements MoveFinisher {
     /** Test seam: runs with the completion transaction's context at the start of the re-check, before its first check of the session. */
     Consumer<DSLContext> recheckHook;
 
+    /** Test seam: runs with the completion transaction's context at the end of the re-check, after it set the move's bounds again for {@code on_complete}. */
+    Consumer<DSLContext> afterRecheckHook;
+
     /** The wait of a move that does not end index builds (the name-key drop); its clock and detector are test seams. */
     final BuildWait buildWait = new BuildWait();
 
@@ -673,6 +676,10 @@ final class VerifyingFinisher implements MoveFinisher {
                 throw new RecheckFailed(FailureHandler.Stage.VERIFICATION_NONEMPTY, null,
                     "verification of " + move.label() + " in the completion transaction found old-shape rows in "
                         + move.drivingTableLabel() + ": " + shown + " (written after the first pass)");
+            }
+            Consumer<DSLContext> after = afterRecheckHook;
+            if (after != null) {
+                after.accept(tx);
             }
         } catch (RecheckFailed e) {
             throw e;
