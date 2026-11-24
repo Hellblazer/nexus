@@ -132,6 +132,28 @@ class DataMoveWorkerBehaviourIntegrationTest extends DataMoveIntegrationBase {
     }
 
     @Test
+    void aPausedMove_isForgottenByTheFinisher_soWhatItKeptPerMoveDoesNotOutliveThePause() {
+        register("b-forget", "plain_rows", 10, 0);
+        DataMoveTestFixtures.pause(ctx(), "b-forget", true);
+        List<String> forgotten = new CopyOnWriteArrayList<>();
+        MoveFinisher recording = new MoveFinisher() {
+            @Override
+            public Result finish(Context context) {
+                return Result.leftOpen();
+            }
+
+            @Override
+            public void forget(String label) {
+                forgotten.add(label);
+            }
+        };
+
+        worker(installed(), null, FailureHandler.BLOCK_ALWAYS, recording).runCycle();
+
+        assertThat(forgotten).as("the worker skipped finish() for the paused move and told the finisher").contains("b-forget");
+    }
+
+    @Test
     void aSupersedeInsertedWhileAnotherMoveRuns_isSeenAtTheSupersededMovesTurn() throws Exception {
         register("b-a", "plain_rows", 2_000, 100);
         register("b-b", "tenant_rows", 50, 0);

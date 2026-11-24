@@ -107,6 +107,12 @@ public interface MoveFinisher {
     /** Cancels a completion statement in flight (the engine is stopping); a finisher with none does nothing. */
     default void cancelInFlight() { }
 
+    /**
+     * The worker no longer completes this move now: it is paused or gone, and {@link #finish} will not be called for it until it
+     * runs again. A finisher that keeps something per move across calls drops it, so a pause does not leave a stale start behind.
+     */
+    default void forget(String label) { }
+
     /** Does nothing: the runs are done and the move stays open. */
     MoveFinisher RUNS_ONLY = context -> Result.leftOpen();
 }

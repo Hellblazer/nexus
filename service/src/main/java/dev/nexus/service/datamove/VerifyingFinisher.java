@@ -131,6 +131,12 @@ final class VerifyingFinisher implements MoveFinisher {
         return result;
     }
 
+    /** A paused or forgotten move's run of deferrals ends: the worker skips {@link #finish} for it, so the start would outlive the pause. */
+    @Override
+    public void forget(String label) {
+        buildWait.clear(label);
+    }
+
     private Result finishOnce(Context context) {
         if (context.stopped().getAsBoolean()) {
             return Result.leftOpen();

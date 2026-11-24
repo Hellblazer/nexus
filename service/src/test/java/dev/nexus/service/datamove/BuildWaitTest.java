@@ -122,4 +122,30 @@ class BuildWaitTest {
         assertThat(BuildWait.isDeferral(MoveFinisher.Result.completed())).isFalse();
         assertThat(BuildWait.isDeferral(MoveFinisher.Result.leftOpen())).isFalse();
     }
+
+    @Test
+    void aDropPausedMidDeferral_isForgottenByTheFinisher_soItIsNotOverdueTheInstantItResumes() {
+        VerifyingFinisher finisher = new VerifyingFinisher();
+        at(finisher.buildWait, T0);
+        finisher.buildWait.defer(LABEL, TWO, BuildWait.Path.BEFORE_LOCKS);
+
+        // the worker skips finish() for a paused move; it calls forget() instead
+        finisher.forget(LABEL);
+        at(finisher.buildWait, T0.plus(Duration.ofHours(7)));
+
+        assertThat(finisher.buildWait.age(LABEL)).as("the pause ended the run of deferrals").isNull();
+        assertThat(finisher.buildWait.defer(LABEL, TWO, BuildWait.Path.BEFORE_LOCKS).reason()).as("resumed: a new run, not overdue")
+            .contains("deferred_minutes=0").doesNotContain("overdue");
+    }
+
+    @Test
+    void withoutTheForget_theStartOutlivesThePause_andTheResumedMoveReadsOverdueAtOnce() {
+        // the control for the test above: it fails if forget() is what keeps the run from carrying over
+        VerifyingFinisher finisher = new VerifyingFinisher();
+        at(finisher.buildWait, T0);
+        finisher.buildWait.defer(LABEL, TWO, BuildWait.Path.BEFORE_LOCKS);
+        at(finisher.buildWait, T0.plus(Duration.ofHours(7)));
+
+        assertThat(finisher.buildWait.defer(LABEL, TWO, BuildWait.Path.BEFORE_LOCKS).reason()).contains("overdue");
+    }
 }

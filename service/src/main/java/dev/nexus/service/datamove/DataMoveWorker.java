@@ -343,7 +343,7 @@ public final class DataMoveWorker implements AutoCloseable {
                 break;
             }
             if (move.paused()) {
-                states.paused(move);
+                pausedMove(move);
                 continue;
             }
             if (!due(move)) {
@@ -439,7 +439,7 @@ public final class DataMoveWorker implements AutoCloseable {
             }
             move = current.get();
             if (move.paused()) {
-                states.paused(move);
+                pausedMove(move);
                 return;
             }
             boolean alreadyWorking = states.state(move.label()).filter(s -> s.kind() == MoveStates.Kind.WORKING).isPresent();
@@ -488,6 +488,13 @@ public final class DataMoveWorker implements AutoCloseable {
     private void forgetMove(String label) {
         states.forget(label);
         failures.forget(label);
+        finisher.forget(label);
+    }
+
+    /** The move is paused: its state says so, and the finisher's per-move memory (a wait's start) does not outlive the pause. */
+    private void pausedMove(DataMove move) {
+        states.paused(move);
+        finisher.forget(move.label());
     }
 
     /** {@link #fail} for a failure that is already built (the finisher's). */
@@ -599,7 +606,7 @@ public final class DataMoveWorker implements AutoCloseable {
             }
             case LEFT_OPEN -> states.runsComplete(move);
             case REPORT -> report(result.failure());
-            case PAUSED -> states.paused(result.move());
+            case PAUSED -> pausedMove(result.move());
             case GONE -> forgetMove(move.label());
             // on_complete re-opened the move (completed_at back to NULL): no completion event, no listener, no retry reset; the next pass takes it
             case REOPENED -> forgetMove(move.label());
@@ -675,7 +682,7 @@ public final class DataMoveWorker implements AutoCloseable {
         }
         DataMove move = current.get();
         if (move.paused()) {
-            states.paused(move);
+            pausedMove(move);
             return false;
         }
         if (existing != null && existing.cancelledAt() != null) {
