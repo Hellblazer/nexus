@@ -263,7 +263,8 @@ echo "RDR-229 completion work (nexus-p2m1x):"
 cw_deadline=$(( $(date +%s) + 60 ))
 cw_seen=0
 while [ "$(date +%s)" -lt "$cw_deadline" ]; do
-  if curl -fsS "${A[@]}" "$U/v1/status" 2>/dev/null | grep -qF '"rdr229_completion":{"gate1":'; then cw_seen=1; break; fi
+  cw_status=$(curl -fsS "${A[@]}" "$U/v1/status" 2>/dev/null || true)
+  if [[ "$cw_status" == *'"rdr229_completion":{"gate1":'* ]]; then cw_seen=1; break; fi
   sleep 1
 done
 cw_bad=$(grep -c -E -- 'ExceptionInInitializerError|is not on the classpath|event=rdr229_completion_not_started|event=leaf_index_pass_not_started' "$SMOKE_TMP/svc.log" || true)
@@ -277,7 +278,8 @@ if [ "$cw_seen" = "1" ]; then
   echo "  ok   /v1/status reports rdr229_completion (the completion check ran its first sample)"
 else
   echo "  FAIL /v1/status has no rdr229_completion field after 60 s; the completion work did not start:"
-  curl -s "${A[@]}" "$U/v1/status" 2>/dev/null | head -c 600 || true; echo; fail=1
+  cw_status=$(curl -s "${A[@]}" "$U/v1/status" 2>/dev/null || true)
+  echo "${cw_status:0:600}"; fail=1
 fi
 
 echo "jOOQ runtime path:"
