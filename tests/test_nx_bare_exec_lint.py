@@ -712,6 +712,9 @@ _TREE_ALLOWED: dict[tuple[str, str, str], str] = {
     # -- the argv is an absolute path to an interpreter or an installed binary ------
     ("nexus/_install/layout_core.py", "declared_console_scripts_detail", "unresolved-spawn-argv"):
         "head is the generation's own venv interpreter, an absolute path (bootstrap-safe module)",
+    ("nexus/_install/lease_core.py", "self_test", "unresolved-spawn-argv"):
+        "head is <generation>/bin/python (Scripts/python.exe), built from the absolute generation path and "
+        "checked to be a file first (bootstrap-safe module)",
     ("nexus/_session_end_launcher.py", "_spawn_detached_cleanup", "unresolved-spawn-argv"):
         "head is sys.executable, absolute (module runs before nexus imports; see its docstring)",
     ("nexus/commands/index.py", "_spawn_deferred_labeling", "unresolved-spawn-argv"):
