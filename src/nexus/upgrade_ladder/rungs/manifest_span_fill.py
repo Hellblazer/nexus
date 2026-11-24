@@ -84,7 +84,7 @@ import httpx
 import structlog
 
 from nexus.catalog.types import manifest_span
-from nexus.collection_errors import SupersededCollectionWriteError
+from nexus.collection_errors import RetiredNoSuccessorError, SupersededCollectionWriteError
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
     managed_service,
@@ -491,8 +491,8 @@ class ManifestSpanFillRung:
                     asked.update(in_flight)
                     try:
                         result = writer.append_manifest_many(request, collection=collection)
-                    except (SupersededCollectionWriteError, httpx.HTTPStatusError) as exc:
-                        # the client turns the engine's 409 collection_superseded into SupersededCollectionWriteError;
+                    except (SupersededCollectionWriteError, RetiredNoSuccessorError, httpx.HTTPStatusError) as exc:
+                        # the client turns the engine's 409 collection_superseded into SupersededCollectionWriteError (or, with no successor, RetiredNoSuccessorError);
                         # any other 409 arrives as the bare status error
                         if isinstance(exc, httpx.HTTPStatusError) and (
                             exc.response is None or exc.response.status_code != 409

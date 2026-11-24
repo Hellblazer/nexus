@@ -142,7 +142,8 @@ def retired_no_successor_message(name: str) -> str:
     return (
         f"collection {name!r} was retired and has no successor, so there is nothing to read or write under that label. "
         f"`nx collection list` shows the live collections; to bring its documents back, index their files into a live "
-        f"collection (`nx index repo <path>`, `nx index md <path>` or `nx index pdf <path>`). Nothing was changed."
+        f"collection (`nx index md <path>` or `nx index pdf <path>`). `nx index repo` is refused while the repository's "
+        f"own collection is this retired one. Nothing was changed."
     )
 
 
