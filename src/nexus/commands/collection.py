@@ -2854,7 +2854,7 @@ def rewrite_metadata_cmd(
     Operationalises the nexus-40t metadata schema rationalisation on
     already-indexed corpora. Chunks ingested before 4.3.1 keep their
     pre-canonical metadata (cargo keys, flat git_*, oversized records)
-    until this command is run; ``nx index --force`` is a silent no-op
+    until this command is run; ``nx index repo --force`` is a silent no-op
     when the pipeline-state DB still has the content_hash on file.
 
     \\b

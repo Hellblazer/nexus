@@ -59,6 +59,33 @@ def _engine_model_mismatch_detail(exc: Exception) -> str | None:
     return str(body.get("error") or COLLECTION_MODEL_MISMATCH_REASON)
 
 
+def _engine_restart_refusal(exc: Exception) -> str | None:
+    """What to say when *exc* is the engine's 409 ``rename_refused`` with ``missing: restart``, else ``None``.
+
+    The engine has a changeset it has not applied yet and refuses every rename until it restarts. Retrying does not help
+    and nothing on the client is wrong, so the usual "fix the error and retry" would send the person looking for a fault.
+    The restart is the operator's to order. Any other ``missing`` value (the engine is missing something a restart does not
+    supply, or could not read it) keeps the generic refusal text with the engine's own reason.
+    """
+    import json  # noqa: PLC0415 — stdlib, branch-local
+
+    from nexus.db.engine_reasons import RENAME_REFUSED_REASON, error_reason  # noqa: PLC0415 — deferred: error path only
+
+    response = getattr(exc, "response", None)
+    if response is None or getattr(response, "status_code", None) != 409:
+        return None
+    try:
+        body = json.loads(response.text)
+    except Exception:  # noqa: BLE001 — an unparseable body is simply not ours
+        return None
+    if error_reason(body) != RENAME_REFUSED_REASON or body.get("missing") != "restart":
+        return None
+    return (
+        "The engine has a change it has not applied yet, and renames open after its next restart. "
+        "The operator orders that restart; run the rename again once it has happened."
+    )
+
+
 def _engine_refusal_detail(exc: Exception) -> str | None:
     """The status line and the engine's reason when *exc* is a 4xx whose JSON body carries ``error`` (nexus-02454),
     else ``None``. ``str(HTTPStatusError)`` is only httpx's status line, so a label the engine refused read as
@@ -211,6 +238,11 @@ def rename_collection_data_plane(
     except LabelReservedError:
         raise  # the engine refused the new label whole (409 label_reserved); its message is the answer, and a retry cannot help
     except Exception as exc:
+        restart = _engine_restart_refusal(exc)
+        if restart is not None:
+            raise click.ClickException(
+                f"service rename refused -- collection {old!r} is unchanged and nothing was renamed. {restart}"
+            ) from exc
         detail = _engine_model_mismatch_detail(exc) or _engine_refusal_detail(exc) or str(exc)
         raise click.ClickException(
             f"service rename failed -- collection {old!r} is unchanged "
