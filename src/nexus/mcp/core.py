@@ -4861,7 +4861,7 @@ def search_topic_scoped(
     )] = "knowledge,code,docs",
     limit: Annotated[int, Field(description="Max rows returned.")] = 10,
     structured: Annotated[bool, Field(
-        description="Return {ids, tumblers, distances, collections} for the plan runner.",
+        description="Return {ids, tumblers, distances, collections, contents} for the plan runner.",
     )] = False,
 ) -> "str | dict":
     """Vector search restricted to chunks already assigned to a topic label.
@@ -4879,7 +4879,9 @@ def search_topic_scoped(
     - `ids` are chunk hashes, not document tumblers.
     - A topic label present in more than one collection can drop a
       just-below-`limit` row from a collection whose true rank would have
-      included it — see the module comment above this tool for why.
+      included it: each collection returns its own top `limit` rows, the
+      results are merged, then cut to `limit`, so a row ranked `limit + 1`
+      in its collection is lost even if it would beat another's.
     """
     try:
         from nexus.db.http_vector_client import VectorServiceError, is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -5158,8 +5160,8 @@ def search_aspect_scoped(
       since RDR-155 P4b).
     - Excludes any document with no `document_aspects` row or a NULL
       `doc_id` there — by design, not a bug; coverage is uneven across
-      corpora (weakest for `knowledge__` collections; see the module
-      comment above this tool).
+      corpora (weakest for knowledge collections, the notes and papers
+      stored with `store_put`).
     - `field` must be one of the five allowlisted columns; an unrecognized
       value is rejected before the network call.
     - `ids`/`tumblers` in the structured result are document tumblers, not
@@ -5327,7 +5329,10 @@ def query(
         ),
     )] = "",
     depth: Annotated[int, Field(description="BFS depth for `follow_links` traversal.")] = 1,
-    subtree: Annotated[str, Field(description="Tumbler prefix; search only documents in this subtree (e.g. \"1.1\").")] = "",
+    subtree: Annotated[str, Field(description=(
+        "Search only documents in this subtree: a tumbler prefix of one or two segments (e.g. \"1.1\") or a "
+        "registered owner name. A document address of three or more segments is refused."
+    ))] = "",
     structured: Annotated[bool, Field(description="Return the structured dict instead of the human-readable string.")] = False,
 ) -> "str | dict":
     """Document-level semantic search: which documents match, not which passages.
@@ -6346,7 +6351,7 @@ def store_put(
         description=(
             "Optional stable identifier this document names, such as \"CUST-0018\", stamped into the "
             "catalog document's metadata (never a chunk's). At most 256 characters, no control "
-            "characters, and refused on a code__ collection. Unset: a collection configured with an "
+            "characters, and refused on a code collection (by content type, whatever its label). Unset: a collection configured with an "
             "entity-key pattern stamps the title when the whole title matches it. A re-put without "
             "it removes the stored key."
         ),
@@ -7300,7 +7305,7 @@ def store_get_many(
     max_chars_per_doc: Annotated[int, Field(description="Per-document truncation cap, in characters.")] = 4000,
     structured: Annotated[bool, Field(
         description=(
-            "Return {contents, missing, section_types, section_type_basis} instead of the "
+            "Return {contents, missing, section_types, section_type_basis, source_notes} instead of the "
             "human-readable string; section_types aligns 1:1 with contents/ids "
             "(\"\" when missing, unstamped, or when the documents that own the "
             "chunk disagree on its section type); section_type_basis aligns with "
@@ -8439,7 +8444,7 @@ def scratch(
         ),
     )] = "session",
 ) -> str:
-    """T1 session scratch pad: ephemeral, within-session-only notes.
+    """T1 session scratch pad: ephemeral notes, kept for this session by default (`scope="identity"` keeps them across /clear and restart).
 
     Use `memory_put`/`memory_search` instead for anything that must survive
     past this session; use `store_put` for permanent T3 knowledge. Use
@@ -8565,8 +8570,8 @@ def scratch(
 def scratch_manage(
     action: Annotated[str, Field(description="One of \"flag\", \"promote\".")],
     entry_id: Annotated[str, Field(description="Scratch entry id.")],
-    project: Annotated[str, Field(description="Target T2 project namespace (required for \"promote\").")] = "",
-    title: Annotated[str, Field(description="Target T2 entry title (required for \"promote\").")] = "",
+    project: Annotated[str, Field(description="T2 project namespace: the promote target (required for \"promote\"), and the flush destination for \"flag\" (default scratch_sessions).")] = "",
+    title: Annotated[str, Field(description="T2 entry title: the promote target (required for \"promote\"), and the flush title for \"flag\".")] = "",
     scope: Annotated[str, Field(
         description="\"session\" (default) or \"identity\" (the identity's scratch: promote only, never flag).",
     )] = "session",
@@ -8702,7 +8707,7 @@ def plan_save(
     ttl: Annotated[int | None, Field(description="Time-to-live in days. None (default) is permanent.")] = None,
     scope_tags: Annotated[str, Field(
         description=(
-            "Comma-separated scope-tag string (e.g. \"rdr__arcaneum,code__nexus\"). "
+            "Comma-separated scope-tag string (e.g. \"rdr__,code__\"; each tag is a collection-name prefix, case-insensitive). "
             "Empty infers from plan_json's retrieval steps."
         ),
     )] = "",

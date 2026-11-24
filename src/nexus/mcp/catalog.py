@@ -638,13 +638,9 @@ def catalog_update(
     field was given to update.
 
     ``alias_of`` points a duplicate entry at its canonical one, which the
-    catalog follows on resolve. It is the right answer whenever the same
-    document is registered twice — a re-fetched source, a moved file — and
-    it was reachable only from Python (``HttpCatalogClient.set_alias``)
-    until now. The visible cost of that: recovering a paper whose source
-    path had expired produced a second entry for it, and the choice was
-    between leaving a duplicate in search results and deleting the old
-    entry along with the three links pointing at it. Aliasing is neither.
+    catalog follows on resolve. Use it when the same document is registered
+    twice (a re-fetched source, a moved file) and you want neither a
+    duplicate in search results nor a delete that drops the links.
     """
     cat, err = _require_catalog()
     if err:
