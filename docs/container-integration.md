@@ -4,7 +4,7 @@ Running nexus from inside a container — Docker dev container, Claude
 Cowork VM, CI agent, multi-agent Co-Work session — and sharing T1 / T2 /
 T3 state with the host CLI Claude and any other nexus consumers.
 
-This page assumes a service-mode install on the host (conexus 6.0+, current through 7.x).
+This page assumes a service-mode install on the host (conexus 6.0 and later).
 
 > **Post-RDR-152 topology — there is one service to reach.** All three
 > storage tiers now serve through the native **nexus-service** (Java +
