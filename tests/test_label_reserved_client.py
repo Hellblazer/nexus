@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-229 P3.7 (engine 0.1.202): a label the engine reserves (409 ``label_reserved``).
 
-After the one-row rename A to B, B's rows still carry the name A until P4.1, so A is reserved: a register, revive, mint,
+After the one-row rename A to B, B's rows still carry the name A until P4.1, so A is reserved: a register or revive (upsert),
 supersede successor, rename target or per-collection import of A answers 409 ``label_reserved`` with ``{error, reason,
 label}`` and writes nothing. The normal way to meet it is rename A to B, then index the repo that was A (the index run
 registers A again). The client turns the 409 into ONE message (the label, why, the two ways out), never retries, and
