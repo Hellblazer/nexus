@@ -19,6 +19,10 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * RDR-229 P3.7 (nexus-p2m1x.27), the after-serve registration pass of the name-key drop move ({@link NameKeyDropPass}; linda 2026-11-22, addendum 2):
@@ -133,6 +137,55 @@ class NameKeyDropPassIntegrationTest {
 
         assertThat(rows()).isZero();
         assertThat(pass.runOnce()).as("a failed tick does not finish the pass: the next tick tries again").isEqualTo(NameKeyDropPass.Outcome.FAILED);
+    }
+
+    /**
+     * folio's review FU1: the one INSERT runs under a lock wait and a statement bound, and the connection has a socket bound, so a statement stuck
+     * behind a {@code data_moves} lock fails the tick instead of holding {@code passLock} and the scheduler thread until restart. The holder
+     * inserts the same label in an open transaction (a typed insert, no raw SQL), which the pass's {@code ON CONFLICT} insert must wait for.
+     * The tick runs on its own thread and is awaited for a bounded time; the holder is rolled back on every path, so a pass that did not honour
+     * its bound ends with the failed assertion, not a hung build.
+     */
+    @Test
+    void aStatementStuckBehindADataMovesLockFailsTheTick_registersNothing_andTheNextTickRegistersOnce() throws Exception {
+        int lockTimeoutMs = 500;
+        var pass = new NameKeyDropPass(admin, () -> snapshot(true, true), VERSION, lockTimeoutMs);
+        var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        Connection holder = pg.createConnection("");
+        try {
+            holder.setAutoCommit(false);
+            assertThat(NameKeyDropMove.registerIfAbsent(snapshot(true, true), DSL.using(holder, SQLDialect.POSTGRES), "9.9.9-holder"))
+                .as("non-vacuity: the holder's uncommitted insert is the conflicting row").isTrue();
+
+            long started = System.nanoTime();
+            CompletableFuture<NameKeyDropPass.Outcome> tick = CompletableFuture.supplyAsync(pass::runOnce, executor);
+            NameKeyDropPass.Outcome outcome;
+            try {
+                outcome = tick.get(30, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                throw new AssertionError("the tick is still waiting on the holder's lock 30 s on: the pass has no lock bound", e);
+            } catch (ExecutionException e) {
+                throw new AssertionError("the tick threw instead of answering FAILED", e);
+            }
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+
+            assertThat(outcome).as("the lock wait timed out: the tick fails, it does not hang").isEqualTo(NameKeyDropPass.Outcome.FAILED);
+            assertThat(elapsedMs).as("it waited its lock bound (non-vacuity: it did wait on the holder), and not much longer").isGreaterThanOrEqualTo(lockTimeoutMs / 2)
+                .isLessThan(20_000);
+            assertThat(rows()).as("the holder's row is uncommitted and the pass's insert was refused: nothing is registered").isZero();
+
+            holder.rollback();   // the peer lets go
+            assertThat(pass.runOnce()).as("a failed tick does not finish the pass: the next tick, the lock free, registers").isEqualTo(NameKeyDropPass.Outcome.REGISTERED);
+            assertThat(rows()).isEqualTo(1);
+            assertThat(pass.runOnce()).isEqualTo(NameKeyDropPass.Outcome.FINISHED);
+        } finally {
+            try {
+                holder.rollback();
+            } finally {
+                holder.close();
+                executor.shutdownNow();
+            }
+        }
     }
 
     @Test

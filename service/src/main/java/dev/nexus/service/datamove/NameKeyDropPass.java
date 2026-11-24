@@ -3,6 +3,7 @@
 package dev.nexus.service.datamove;
 
 import dev.nexus.service.db.AdminConnection;
+import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.SchemaMigrator;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -36,6 +37,10 @@ import java.util.function.Supplier;
  * ({@link Outcome#MIGRATING}), and a lock that cannot be read counts as held (unknown is never "not held"). The pass takes no session lock of its own: the one
  * statement is idempotent, so a peer engine's pass, a second boot and this one add exactly one row between them.
  *
+ * <p><b>Bounds.</b> The connection has a socket read bound and keepalive, and the one statement runs in a transaction with a lock wait of
+ * {@link #LOCK_TIMEOUT_MS} and a statement bound of {@link #STATEMENT_TIMEOUT_MS} ({@link PgSession#setStatementAndLockBounds}). A statement stuck
+ * behind a {@code data_moves} lock fails the tick ({@link Outcome#FAILED}); the next tick tries again.
+ *
  * <p><b>Reporting.</b> The registered move is a {@code data_moves} row, which the data-move worker runs and {@code MoveBootWork} reports in
  * {@code boot_work} like every move; the pass has no entry of its own (one that never finished would read as work in progress to {@code nx upgrade}).
  * Once the row exists, however it got there, the pass is {@link Outcome#FINISHED} and later ticks open no connection (until the engine restarts).
@@ -65,7 +70,17 @@ public final class NameKeyDropPass implements AutoCloseable {
         FAILED
     }
 
+    /**
+     * The bounds on the one INSERT (linda 2026-11-22, folio's review FU1): a statement stuck behind a {@code data_moves} lock must fail this
+     * tick, not hold {@code passLock} and the scheduler thread until restart. Both are transaction-local, set through {@link PgSession}.
+     */
+    static final int STATEMENT_TIMEOUT_MS = 10_000;
+    static final int LOCK_TIMEOUT_MS = 5_000;
+    /** The socket read bound and keepalive on the connection: a half-open peer ends the read instead of parking the thread. */
+    static final String SOCKET_TIMEOUT_SECONDS = "60";
+
     private final AdminConnection admin;
+    private final int lockTimeoutMs;
     private final Supplier<CompletionCheck.Result> latest;
     private final String engineVersion;
     private final Object passLock = new Object();
@@ -77,6 +92,12 @@ public final class NameKeyDropPass implements AutoCloseable {
      * @param engineVersion the registering engine's version, written into the row's {@code changeset_id}; blank is a wiring defect
      */
     public NameKeyDropPass(AdminConnection admin, Supplier<CompletionCheck.Result> latest, String engineVersion) {
+        this(admin, latest, engineVersion, LOCK_TIMEOUT_MS);
+    }
+
+    /** As the public constructor with the lock wait bound given (a test shortens it). */
+    NameKeyDropPass(AdminConnection admin, Supplier<CompletionCheck.Result> latest, String engineVersion, int lockTimeoutMs) {
+        this.lockTimeoutMs = lockTimeoutMs;
         this.admin = Objects.requireNonNull(admin, "admin");
         this.latest = Objects.requireNonNull(latest, "latest");
         NameKeyDropMove.changesetId(engineVersion);   // refused now, not at the first tick
@@ -140,9 +161,12 @@ public final class NameKeyDropPass implements AutoCloseable {
             props.setProperty("ApplicationName", APPLICATION_NAME);
             props.setProperty("connectTimeout", "10");
             props.setProperty("loginTimeout", "30");
+            props.setProperty("socketTimeout", SOCKET_TIMEOUT_SECONDS);
+            props.setProperty("tcpKeepAlive", "true");
             try (Connection conn = DriverManager.getConnection(admin.url(), props)) {
-                conn.setAutoCommit(true);
+                conn.setAutoCommit(false);   // one transaction: the bounds below are transaction-local, and a close before the commit rolls back
                 DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+                PgSession.setStatementAndLockBounds(ctx, STATEMENT_TIMEOUT_MS, lockTimeoutMs);
                 boolean migrating;
                 try {
                     migrating = SchemaMigrator.migrationLockHolderPid(ctx) >= 0;
@@ -155,6 +179,7 @@ public final class NameKeyDropPass implements AutoCloseable {
                     return Outcome.MIGRATING;
                 }
                 boolean inserted = NameKeyDropMove.registerIfAbsent(snapshot, ctx, engineVersion);
+                conn.commit();
                 finished = true;   // the row exists now, by this insert or an earlier one
                 if (inserted) {
                     log.info("event=name_key_drop_registered label={} engine_version={}", NameKeyDropMove.LABEL, engineVersion);
