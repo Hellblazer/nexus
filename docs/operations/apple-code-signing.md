@@ -208,9 +208,11 @@ the SIGNED binary and asserts a real bge-768 embed executed — the JNI
 `System.load()`s that Library Validation would refuse. A skipped embed is a
 FAILURE there, not a pass.
 
-This cannot be a CI job: mac-arm64 is `smoke: false` in the release workflow
-(macos-14 runners have no Docker), and `codesign` runs after the linux-only
-smoke, so CI never boots the signed mac bytes at all. `codesign --verify` cannot
+This cannot be a CI job: the mac-arm64 leg builds on the lab pool's `lab-mac-m`
+class, which has no Docker, so `smoke` is false there; a separate job smokes the
+unsigned artifact on hellmini (and `smoke` is true only when a dispatch names
+hellmini itself). `codesign` runs after the linux-only smoke, so CI never boots
+the signed mac bytes at all. `codesign --verify` cannot
 see a runtime dlopen refusal.
 
 ## 6. If the gate fails, switch signing off
