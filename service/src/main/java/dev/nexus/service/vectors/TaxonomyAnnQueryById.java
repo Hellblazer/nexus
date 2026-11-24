@@ -14,6 +14,8 @@ import org.jooq.impl.DefaultDataType;
 import org.jooq.impl.SQLDataType;
 import org.jooq.impl.TableImpl;
 
+import java.util.List;
+
 /**
  * The call of {@code nexus.taxonomy_ann_query_<dim>(p_embedding, p_collection, p_cross_collection, p_n, p_embedding_model,
  * p_tenant, p_collection_id bigint)}, the overload vectors-084 adds (RDR-229 P3.5b, nexus-p2m1x.24/.25). It is written by hand and
@@ -25,6 +27,21 @@ import org.jooq.impl.TableImpl;
 public final class TaxonomyAnnQueryById extends TableImpl<Record> {
 
     private static final long serialVersionUID = 1L;
+
+    /** A declared parameter or result column of the function: its name and its PostgreSQL type as {@code format_type} spells it. */
+    public record Declared(String name, String pgType) {}
+
+    /**
+     * The signature this class calls, which {@code TaxonomyAnnQueryByIdSignatureTest} compares with the live catalog on a database where
+     * vectors-084 applied: the IN parameters in call order ({@link #call} binds one value to each, in this order)...
+     */
+    public static final List<Declared> PARAMETERS = List.of(
+        new Declared("p_embedding", "nexus.vector"), new Declared("p_collection", "text"), new Declared("p_cross_collection", "boolean"),
+        new Declared("p_n", "integer"), new Declared("p_embedding_model", "text"), new Declared("p_tenant", "text"),
+        new Declared("p_collection_id", "bigint"));
+
+    /** ...and the RETURNS TABLE columns, in order (the fields of the table this class is). */
+    public static final List<Declared> COLUMNS = List.of(new Declared("topic_id", "bigint"), new Declared("distance", "double precision"));
 
     final TableField<Record, Long> topicId = createField(DSL.name("topic_id"), SQLDataType.BIGINT, this, "");
     final TableField<Record, Double> distance = createField(DSL.name("distance"), SQLDataType.DOUBLE, this, "");
