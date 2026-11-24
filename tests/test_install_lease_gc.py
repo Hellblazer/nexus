@@ -240,7 +240,7 @@ def test_the_lock_is_held_while_the_tree_is_deleted(tmp_path: Path, config: Path
         real_walk = gc_core._remove_all_but_lease
 
         def walking(root, lease_name, on_error):
-            during.append(lease_core.probe(a))
+            during.append(lease_core.probe(root))  # the generation being reaped, each time
             return real_walk(root, lease_name, on_error)
 
         monkeypatch.setattr(gc_core, "_remove_all_but_lease", walking)
