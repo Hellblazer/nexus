@@ -117,7 +117,8 @@ def _catalog_collection_rows() -> tuple[dict[str, dict], str]:
 @collection.command("list")
 @click.option(
     "--all", "show_all", is_flag=True,
-    help="Also list retired names (a rename's old name) that hold no chunks.",
+    help="Also list retired collections that hold no chunks: a source a re-embed job superseded (and, on an engine "
+         "older than 0.1.202, a rename's old name).",
 )
 def list_cmd(show_all: bool) -> None:
     """List T3 collections: live and stored chunk counts, and the catalog's
@@ -131,10 +132,13 @@ def list_cmd(show_all: bool) -> None:
     consistent-looking name. A collection with no catalog row prints ``-``
     in every column; a catalog row with no chunks prints 0.
 
-    nexus-sis0m.3: a rename keeps the old name's catalog row as a retired
-    tombstone (superseded_by names the new one). An empty tombstone is not a
-    collection and is left out unless ``--all``; one still holding chunks is
-    listed, with STATE ``superseded-><new name>``.
+    nexus-sis0m.3: a collection retired by a re-embed job keeps its catalog
+    row as a tombstone (superseded_by names the successor). An empty tombstone
+    is not a collection and is left out unless ``--all``; one still holding
+    chunks is listed, with STATE ``superseded-><successor>``. A rename on
+    engine 0.1.202 or later rewrites the collection's one registry row in
+    place and keeps its id, so the old name leaves no row; only an older
+    engine leaves a tombstone for a rename's old name.
     """
     # nexus-sis0m.1: strict, so a service error is reported rather than read
     # as "No collections found." at exit 0.
@@ -277,14 +281,17 @@ def info_cmd(name: str) -> None:
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
-        # nexus-sis0m.3: a renamed collection's old name keeps a retired
-        # catalog row naming its successor; say where it went.
+        # nexus-sis0m.3: a collection retired by a re-entry job, or renamed on an engine older than 0.1.202, keeps
+        # a retired catalog row naming its successor; say where it went. A one-row rename leaves no row.
         successor = str(_catalog_collection_rows()[0].get(name, {}).get("superseded_by") or "")
         if successor:
             raise click.ClickException(
                 f"collection {name!r} was renamed to {successor} — use: nx collection info {shlex.quote(successor)}"
             )
-        raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
+        raise click.ClickException(
+            f"collection not found: {name!r} — use: nx collection list "
+            "(a collection renamed on engine 0.1.202 or later leaves no row under its old name)"
+        )
 
     # nexus-sis0m F8: the collection's own catalog row names its model. The
     # local branch used to print the local embedder's name (MiniLM) for
@@ -590,6 +597,10 @@ def delete_cmd(name: str, yes: bool) -> None:
     (one gc_audit row per sibling). Deleting a ``quarantine-*`` collection
     itself is the audited manual route for quarantined rows whose origin is
     gone (gc_audit: quarantine_collection_delete).
+
+    The engine refuses (409 ``collection_busy``, nothing removed) while a
+    re-embed job holds the collection as its source or target; the message
+    says whether to wait, resume or abort the job.
     """
     if not yes:
         click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
@@ -867,7 +878,8 @@ def prune_cmd(yes: bool, dry_run: bool) -> None:
     listed collections (cascade-purges taxonomy/chash/pipeline/catalog
     state the same way ``nx collection delete`` does). --dry-run is an
     explicit, always-safe alias for the default and takes precedence over
-    --yes if both are passed.
+    --yes if both are passed. A collection a re-embed job holds is refused by
+    the engine (409 ``collection_busy``) and named, not deleted.
     """
     t3 = _t3()
     mismatches, skipped, active_label = _find_dimension_mismatched_collections(t3)
@@ -994,9 +1006,19 @@ def rename_collection_data_plane(
 def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     """Rename a collection in-place via the engine's native rename.
 
-    O(1) metadata update — no embedding re-upload, no Voyage cost.
-    Cascades the new name through T2 taxonomy, chash_index, and the
-    catalog.
+    O(1) metadata update — no embedding re-upload, no Voyage cost. On engine
+    0.1.202 or later, once its completion step has run, it rewrites the
+    collection's one registry row in place and keeps its id, so no chunk,
+    taxonomy, chash or catalog row is rewritten (they follow the id) and the
+    old name leaves no row; an older engine cascades the new name through
+    those stores and leaves a retired row for the old name.
+
+    The engine refuses a new name it reserves (409 ``label_reserved``: a
+    collection renamed away from that label still has rows that carry it
+    until a later release relabels them), and refuses every rename (409
+    ``rename_refused``, ``missing: restart``) until it restarts after an
+    upgrade whose completion step has not run; the restart is the
+    operator's to order.
 
     Cross-prefix renames (e.g. ``code__`` ↔ ``docs__``) change the
     embedding-model space and are rejected unless ``--force-prefix-change``
@@ -1132,7 +1154,11 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
          "text off this machine. Without it, a Voyage collection (or one whose embedder cannot be told) that holds a "
          "flagged document refuses before anything is deleted.")
 def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> None:
-    """Delete and re-index a collection from its source files."""
+    """Delete and re-index a collection from its source files.
+
+    Refused before anything is removed while a re-embed job holds the
+    collection (engine 409 ``collection_busy``); the message names the job.
+    """
     from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
 
     # RDR-204 Phase 3 (nexus-ft04v.26), class (a): this command deletes
@@ -2693,7 +2719,9 @@ def reembed_cmd(
     The source is deleted only when it holds no document row and the engine's
     checks pass. It is kept, superseded, when a tombstoned document still
     holds it (kept_tombstoned: --all re-enters the job once the trash is
-    purged or a document restored), with --keep-source, or when rows naming
+    purged or a document restored; engine 0.1.202 refuses the re-entry when
+    the job's target is retired or has no registry row, and --all then skips
+    that source and names the remedy), with --keep-source, or when rows naming
     it match no document the job moved (kept_residue; --force-delete deletes
     them with it). A source the parity check refuses (failed, parity_mismatch)
     is deleted by nothing: --resume re-runs the check, --abort leaves it
