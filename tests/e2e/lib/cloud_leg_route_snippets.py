@@ -426,6 +426,25 @@ assert answer is None, f"merge of topics nothing holds answered {answer!r}, not 
 print("topics/merge of a missing topic answered 404")
 """
 
+_MOVE_REFUSAL = r"""
+import httpx
+from nexus.commands.catalog import _get_catalog
+# RDR-229 P3.5a (nexus-p2m1x.23): the move routes now read the registry rows of the collections they write in before the latch; a dry run of a
+# document or owner nothing holds reaches the route and answers its existing 409 (a missing document or owner), changing nothing.
+try:
+    _get_catalog().@call@
+except httpx.HTTPStatusError as exc:
+    assert exc.response.status_code == 409, f"@verb@ of nothing answered {exc.response.status_code}: {exc.response.text[:200]}"
+    print("@verb@ of nothing refused 409")
+else:
+    raise SystemExit("@verb@ of nothing was accepted")
+"""
+
+MOVE_DOCUMENT_REFUSAL = (_MOVE_REFUSAL.replace("@verb@", "documents/move").replace(
+    "@call@", 'move_document("1.999999.999999", new_source_uri="file:///nx-probe/none", new_file_path="/nx-probe/none", dry_run=True)'))
+MOVE_OWNER_REFUSAL = (_MOVE_REFUSAL.replace("@verb@", "owners/move").replace(
+    "@call@", 'move_owner("1.999999", new_root="/nx-probe/none", new_repo_hash="0000000000000000", dry_run=True)'))
+
 #: RDR-229 P3.5a row 14 (nexus-p2m1x.23): the ledger lines of the taxonomy split's 400, the topic delete's and merge's 404, and the trash purge's
 #: registry read; route -> (step name, snippet, stdout the probe prints). The split probe files a topic under a second collection it registers and
 #: removes the topic again; the delete and merge probes name topics nothing holds; the purge-trash probe is a read-only preview and cannot reach the
@@ -435,4 +454,6 @@ ROW14_PROBES = {
     "POST /v1/taxonomy/topics/delete": ("route-taxonomy-topic-delete-missing", TOPIC_DELETE_MISSING, "topics/delete of a missing topic answered 404"),
     "POST /v1/taxonomy/topics/merge": ("route-taxonomy-topic-merge-missing", TOPIC_MERGE_MISSING, "topics/merge of a missing topic answered 404"),
     "POST /v1/catalog/purge-trash": ("route-purge-trash-dry-run", PURGE_TRASH_DRY_RUN, "purge-trash dry run answered"),
+    "POST /v1/catalog/documents/move": ("route-documents-move-refusal", MOVE_DOCUMENT_REFUSAL, "documents/move of nothing refused 409"),
+    "POST /v1/catalog/owners/move": ("route-owners-move-refusal", MOVE_OWNER_REFUSAL, "owners/move of nothing refused 409"),
 }
