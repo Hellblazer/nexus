@@ -1669,8 +1669,9 @@ while the engine serves:
     visible to the admin role, not that it is clean. Names come only from
     read-only listing queries that `nx doctor` prints for `nexus_admin` to
     run. P3.1 builds the counts; the reader contract for a tombstone that
-    names no successor (`RETIRED_NO_SUCCESSOR` and a test per reader) waits
-    for P3.5c.
+    names no successor is split: P3.5c's part (its bullet) is not yet on
+    the stack, and the `RETIRED_NO_SUCCESSOR` marker and its typed client
+    error move to the next cut (Sam, "Split"; T2 `229-research-328`).
 
     The check is not read only at boot. The move worker knows in process
     when a move completes: the completion transaction sets `completed_at`
@@ -2827,7 +2828,7 @@ its acceptance is that test green plus the census pin it lowers.
   completion check, which reports in its own `rdr229_completion` field,
   with the read set and gates later releases extend (item 6, "Readers
   during the stamp"); and R7's pre-flight counts, with the reader contract
-  left to P3.5c. Test: an upgrade
+  split between P3.5c and the next cut (P3.5c). Test: an upgrade
   boot registers the move and rewrites no row of a large table; a killed run
   resumes from its last committed batch; an insert and an update without the
   id are refused; a name-path rename gives every rewritten row, and the
@@ -3091,13 +3092,16 @@ its acceptance is that test green plus the census pin it lowers.
     (`TelemetryRepository.java:715-748`), the reaper lists collections by id
     (`ReaperRepository.java:83-99`), the legacy survey takes the gate
     (`LegacyChunkSurvey.java:172`), and departed spans key by id
-    (`DepartedWriterSpans.java:501`). T2 `229-research-327`. It also owns the
-    reader contract for a tombstone that names no successor, whose
-    `superseded_by_id` is its own id (R7): a `RETIRED_NO_SUCCESSOR` marker
-    on the wire, `collection_superseded` read as "retired, no successor" and
-    not retried, the retargeting guard's message, `TargetSelection`, and one
-    test per reader class. P3.1 builds only R7's pre-flight counts and the
-    doctor's listing queries (item 6).
+    (`DepartedWriterSpans.java:501`). T2 `229-research-327`. For a tombstone
+    that names no successor, whose `superseded_by_id` is its own id (R7),
+    the reader contract is split (Sam, "Split"; T2 `229-research-328`).
+    P3.5c ships the guard messages, which name no dead successor;
+    `TargetSelection`'s refusal of a source or target with no successor; a
+    label-addressed read of such a tombstone, which refuses with today's
+    409 `collection_superseded` body; and one test per reader class. None of
+    this is on the stack yet. The `RETIRED_NO_SUCCESSOR` marker on the wire
+    and its typed client error move to the next cut. P3.1 builds only R7's
+    pre-flight counts and the doctor's listing queries (item 6).
 - P3.6 Label rule, after P2.9 and P2.10: partial UNIQUE on live `(tenant_id, name)`;
   `validate_collection_name` becomes the label rule (item 7). Test: a
   100-character label and a non-conformant label are accepted, a control
@@ -3998,3 +4002,4 @@ large, and moved under a ratchet.
 - 2026-11-24: P4.1's redefinition step split after fix check `229-fix-check-901bcd7e97` (linda, replacing the earlier pin; T2 `229-research-325`): a CONTINUE changeset may not name a chunk-family table, so P4.1's first changeset is a plain one redefining the five survivors that name none, and the drop move's `on_complete` opens by redefining every other survivor, one CREATE OR REPLACE each with its final body, before the views, child keys, primary key swap and triggers; the `pg_proc` test reads a table-qualified drop list P4.1 creates, excludes the four history name columns by name, also fails on a call to a dropped function, and treats RESTRICT as a backstop.
 - 2026-11-24: P4.1's residual from fix check `229-fix-check-57ba196206` fixed in the text (Sam, option 1 on ask `rdr229-p41-first-changeset-gate`; linda's ruling; T2 `229-research-326`): P4.1 has no first changeset; every survivor, the five that name no chunk-family table included, is redefined once as the drop move's `on_complete` opens, after gate 3, which waits for `vectors-078-8` and so for the stamps and the two `vectors-078` changesets that redefine survivors; the view rows are redefined once, in the views step; the vacuous dependent-redefinition clause is dropped; the census line counts 33 move rows; item 6 names P4.1's CONTINUE changesets only.
 - 2026-11-24: P3.5c folded from the stacked code (grant 3, nexus-p2m1x.25; T2 `229-research-327`): the readers switch from the latched gate 3 through `CollectionKey`, `CollectionSelector` and `CollectionIdReads`; the reader census and its dispositions; the label metadata-key extension; the eight reads held to P3.7 (`vectors-083`), with linda's expiry ruling, and the reaper's held to P4.1; the ten `TwinKeyUpsert` arbiters, the id arm writing the label; I7 and I8; the registry caches emptied before serve; the verbs by id and their 409 `collection_id_mismatch`; gate 3's quarantine origin-id clause, to be retired by row 13's backfill; the origin id as JSON null, not absent, and in a restore; `IdReaders.PRESENT` true; `collectionForTuple`'s tie-break credited to P3.8. The R7 reader contract is held from this fold pending a ruling.
+- 2026-11-24: the R7 reader contract split (Sam, "Split", relayed by linda; T2 `229-research-328`): P3.5c keeps the guard messages, `TargetSelection`'s no-successor refusal, the label-addressed read refusing with today's 409 `collection_superseded` body and one test per reader class, none yet on the stack; the `RETIRED_NO_SUCCESSOR` marker and its typed client error move to the next cut.
