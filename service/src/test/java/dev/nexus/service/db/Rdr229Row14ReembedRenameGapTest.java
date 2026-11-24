@@ -4,8 +4,10 @@ package dev.nexus.service.db;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.PgActivityProbe;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.SupersedeSeeds;
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.DSLContext;
 import org.jooq.JSONB;
 import org.jooq.SQLDialect;
@@ -22,6 +24,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
@@ -42,7 +48,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * of a manifest purge), {@code ReembedJobRepository.reenter} and the earlier-job mark of {@code startMarking}.
  *
  * <p><b>Verb race</b> (an in-flight writer, which holds its registry row {@code FOR KEY SHARE}, against a verb that takes the row
- * {@code FOR UPDATE}): {@code ChashRepository.renameCollection} must wait for the writer, which it did not.
+ * {@code FOR UPDATE}): {@code ChashRepository.renameCollection} must wait for the writer, which it did not; and the span clear
+ * ({@code DepartedWriterSpans.update}) must wait for a verb holding the row of the collection whose chunk rows it rewrites.
  *
  * <p>The one-row rename is not on this base, so the superuser does what it does ({@code RenameGapSeededChildRowsTest}): every foreign key
  * that references a name-bearing registry key goes, on this class's own database, and the registry row takes its new label in place.
@@ -215,6 +222,60 @@ class Rdr229Row14ReembedRenameGapTest {
         int underNewHolder = su(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(T).and(CHUNKS.COLLECTION_ID.eq(newHolder))));
         assertThat(underNewHolder).as("nothing was filed under the new holder").isZero();
         assertThat(renamed).isNotEqualTo(x);
+    }
+
+    /**
+     * The verb race of the same census row: the clear rewrites the chunk rows of the collection the departed rows were in, so it reads that
+     * collection's registry row FOR KEY SHARE ({@code lockDeparted}) before its UPDATE. It is called directly: a manifest purge reads the
+     * collections of the document's rows first (lockForCleanup), and that wait would stand in for the one under test. A verb holding the row
+     * FOR UPDATE makes the clear wait (the chunk row is untouched while it does), and it clears once the verb lets go.
+     */
+    @Timeout(120)
+    @Test
+    void departedSpanClear_meetingAVerbHoldingTheDepartedCollectionsRow_waits_thenClearsTheSpans() throws Exception {
+        String x = registered("race");
+        String hex = hexOf("row14 departed span race " + x);
+        Map<String, Object> spans = new LinkedHashMap<>();
+        spans.put("line_start", P_SPAN[0]);
+        spans.put("line_end", P_SPAN[1]);
+        spans.put("chunk_start_char", P_SPAN[2]);
+        spans.put("chunk_end_char", P_SPAN[3]);
+        su(ctx -> { PgContainerHelper.insertChunks(ctx, T, x, List.of(hex), List.of("row14 span race chunk"), List.of(new float[384]), List.of(spans)); return null; });
+        // A holds the chunk with no span of its own; the departed row (P's, gone) carried the span the chunk row bears
+        String docA = "row14-race-a-" + n.incrementAndGet();
+        doc(docA, x);
+        catalog.writeManifest(T, docA, x, List.of(row(0, hex, null)));
+        var gone = List.of(new DepartedWriterSpans.Gone(x, java.util.HexFormat.of().parseHex(hex), P_SPAN[0], P_SPAN[1], P_SPAN[2], P_SPAN[3]));
+        assertThat(chunkMetadata(hex).data()).as("setup: the chunk row bears the span").contains("line_start");
+
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<Integer> clear;
+            try (Connection verb = pg.createConnection("")) {
+                verb.setAutoCommit(false);
+                DSL.using(verb, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(x)).forUpdate().fetch();
+                clear = pool.submit(() -> scope.withTenant(T, ctx -> DepartedWriterSpans.clear(ctx, T, gone, Gate3.never())));
+                try {
+                    // a backend in a lock wait whose statement is the registry row read FOR KEY SHARE: the clear's wait on the verb's lock on that row
+                    assertThat(PgActivityProbe.waitsOnALock(pg, "%key share%catalog_collections%"))
+                        .as("the span clear waits on the registry row the verb holds, read FOR KEY SHARE (done: %s)", clear.isDone()).isTrue();
+                    assertThat(clear.isDone()).as("and has not finished").isFalse();
+                    assertThat(chunkMetadata(hex).data()).as("the chunk row was left alone while the verb held the row").contains("line_start");
+                } finally {
+                    verb.rollback();
+                }
+            }
+            assertThat(clear.get(60, TimeUnit.SECONDS)).as("the clear followed once the verb let go: one chunk row").isEqualTo(1);
+            assertThat(chunkMetadata(hex).data()).as("and did its work").doesNotContain("line_start").doesNotContain("chunk_end_char");
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    private JSONB chunkMetadata(String hex) throws Exception {
+        return su(ctx -> ctx.select(CHUNKS.METADATA).from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(T)).and(CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(hex))).fetchOne(CHUNKS.METADATA));
     }
 
     // ── ReembedJobRepository.reenter ────────────────────────────────────────
