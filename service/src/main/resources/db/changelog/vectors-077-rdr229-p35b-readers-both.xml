@@ -3485,7 +3485,7 @@ BEGIN
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
        AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, c.collection, c.chash, c.last_written_at, NULL))
+                 c.tenant_id, p_collection, c.chash, c.last_written_at, NULL))
      ORDER BY c.chash
      LIMIT v_row_limit;
 
@@ -3621,7 +3621,7 @@ BEGIN
          WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
            AND c.chash = v.chash
            AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, c.collection, c.chash, c.last_written_at, NULL))
+                 c.tenant_id, p_collection, c.chash, c.last_written_at, NULL))
         RETURNING c.tenant_id, c.collection, c.chash, c.embedding_model,
                   left(c.chunk_text, 80) AS text_prefix
     ),
@@ -3651,7 +3651,7 @@ BEGIN
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
        AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, c.collection, c.chash, c.last_written_at, NULL));
+                 c.tenant_id, p_collection, c.chash, c.last_written_at, NULL));
 
     -- nexus-a6mon requirement 5: instrument it. The unbounded form logged only
     -- the edge's 499 -- no completion line, no timing, nothing between the cut
@@ -3986,7 +3986,7 @@ BEGIN
         -- stored chunk the denominator (the reaper's reading, vectors-024-1).
         SELECT count(*),
                count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                     c.tenant_id, c.collection, c.chash, c.last_written_at, NULL)))
+                     c.tenant_id, p_collection, c.chash, c.last_written_at, NULL)))
           INTO v_total, v_reapable
           FROM nexus.chunks c
          WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''));
@@ -6515,7 +6515,7 @@ BEGIN
     IF p_dry_run THEN
         SELECT count(*),
                count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                     c.tenant_id, c.collection, c.chash, c.last_written_at, p_grace)))
+                     c.tenant_id, p_collection, c.chash, c.last_written_at, p_grace)))
           INTO v_total, v_reapable
           FROM nexus.chunks c
          WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''));
@@ -6539,7 +6539,7 @@ BEGIN
     -- on what is true while no manifest writer can move the ground.
     SELECT count(*),
            count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, c.collection, c.chash, c.last_written_at, p_grace)))
+                 c.tenant_id, p_collection, c.chash, c.last_written_at, p_grace)))
       INTO v_total, v_reapable
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''));
@@ -6564,7 +6564,7 @@ BEGIN
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
        AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, c.collection, c.chash, c.last_written_at, p_grace))
+                 c.tenant_id, p_collection, c.chash, c.last_written_at, p_grace))
      ORDER BY c.chash
      LIMIT v_row_limit;
 
@@ -6643,7 +6643,7 @@ BEGIN
              WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
                AND c.chash = v.chash
                AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                     c.tenant_id, c.collection, c.chash, c.last_written_at, p_grace))
+                     c.tenant_id, p_collection, c.chash, c.last_written_at, p_grace))
             RETURNING c.chash, c.chunk_text, c.embedding_384, c.embedding_768, c.embedding_1024,
                       c.metadata, c.created_at, c.embedding_model
         ),
@@ -7823,7 +7823,7 @@ BEGIN
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
        AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, c.collection, c.chash, c.last_written_at, NULL));
+                 c.tenant_id, p_collection, c.chash, c.last_written_at, NULL));
 
     IF NOT EXISTS (SELECT 1 FROM _wbfpw16_victim) THEN
         RETURN QUERY SELECT 0::bigint, NULL::jsonb;
@@ -7982,7 +7982,7 @@ BEGIN
          WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
            AND c.chash = v.chash
            AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, c.collection, c.chash, c.last_written_at, NULL))
+                 c.tenant_id, p_collection, c.chash, c.last_written_at, NULL))
         RETURNING c.tenant_id, c.collection, c.collection_id, c.chash, c.embedding_model,
                   left(c.chunk_text, 80) AS text_prefix
     ),
