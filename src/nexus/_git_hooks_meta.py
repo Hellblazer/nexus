@@ -51,3 +51,12 @@ def effective_hooks_dir(repo: Path) -> Path:
             hpath = (repo / hpath).resolve()
         return hpath
     return git_common_dir(repo) / "hooks"
+
+
+#: The hooks that index a repo after a commit, merge or rewrite. ``nx hooks install`` installs these.
+INDEX_HOOK_NAMES: tuple[str, ...] = ("post-commit", "post-merge", "post-rewrite")
+#: The hook that holds a push while a develop red is open and records the push once it lands (RDR-252, nexus-igea9).
+#: It can refuse a push, so it is installed only on request or where a group the caller belongs to serves the repo.
+PRE_PUSH_HOOK = "pre-push"
+#: Every hook nexus manages with this sentinel: what ``update``, ``uninstall``, ``status``, the sweep and ``nx doctor`` walk.
+MANAGED_HOOK_NAMES: tuple[str, ...] = (*INDEX_HOOK_NAMES, PRE_PUSH_HOOK)

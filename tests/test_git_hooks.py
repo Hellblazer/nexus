@@ -575,7 +575,7 @@ class TestUpdateAll:
         )
         monkeypatch.setattr("nexus.commands.hooks._effective_hooks_dir", _hooks_dir)
         summary = refresh_all_managed_hooks(echo=False)
-        assert summary == {"repos": 1, "refreshed": 1, "errors": 1, "malformed": 2}
+        assert summary == {"repos": 1, "refreshed": 1, "errors": 1, "malformed": 2, "installed": 0}
 
     @pytest.mark.parametrize(
         "summary,expected,absent",

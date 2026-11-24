@@ -1055,6 +1055,12 @@ def _refresh_all_git_hooks() -> None:
                 f"\n{summary['malformed']} malformed hook(s) left for hand "
                 "repair (see `nx hooks update-all`)."
             )
+        if summary.get("installed"):
+            # nexus-igea9: the pre-push hold + push-record hook goes into repos a group you belong to serves.
+            click.echo(
+                f"\nInstalled the pre-push hook (hold check and push record) in {summary['installed']} repo(s) "
+                "a group you belong to serves; `nx hooks uninstall <path>` removes it."
+            )
     except Exception as exc:  # noqa: BLE001 — best-effort git-hook refresh; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_git_hook_refresh_failed", error=str(exc))
 

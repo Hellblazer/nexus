@@ -20,7 +20,13 @@ import click
 # reach the live binding at call time (a bare ``from … import …``
 # captures the function at import time and bypasses patches).
 from nexus import _git_hooks_meta as _ghm
-from nexus._git_hooks_meta import SENTINEL_BEGIN, SENTINEL_END
+from nexus._git_hooks_meta import (
+    INDEX_HOOK_NAMES,
+    MANAGED_HOOK_NAMES,
+    PRE_PUSH_HOOK,
+    SENTINEL_BEGIN,
+    SENTINEL_END,
+)
 
 
 def _effective_hooks_dir(repo):
@@ -57,7 +63,11 @@ def _git_common_dir_raw(repo):
     """Delegate to ``nexus._git_hooks_meta.git_common_dir``."""
     return _ghm.git_common_dir(repo)
 
-_HOOK_NAMES = ("post-commit", "post-merge", "post-rewrite")
+# The hooks ``nx hooks install`` puts in by default: the ones that index after a commit. ``MANAGED_HOOK_NAMES`` adds the
+# pre-push hook (RDR-252 item 4, nexus-igea9), which can refuse a push, so it is installed only on ``--pre-push`` or by
+# ``nx upgrade`` in a repo a group the caller belongs to serves (:func:`_wants_pre_push`); everything that maintains or
+# reports on installed hooks (update, uninstall, status, the upgrade refresh, ``nx doctor``) walks all of them.
+_HOOK_NAMES = INDEX_HOOK_NAMES
 
 _STANZA = """\
 {begin}
@@ -144,8 +154,11 @@ def _stanza_for(hook_name: str) -> str:
     identical for every hook. (The per-commit review stanza that
     ``post-commit`` carried from nexus-jh86x to 2026-09-05 was deleted
     with the reviewer; the parameter stays so the two callers that resolve
-    a hook's body by name keep one call shape.)"""
-    del hook_name
+    a hook's body by name keep one call shape.) The pre-push hook has its own stanza (:mod:`nexus.pre_push_hook.stanza`)."""
+    if hook_name == PRE_PUSH_HOOK:
+        from nexus.pre_push_hook.stanza import STANZA  # noqa: PLC0415 -- deferred: only the pre-push hook needs the module
+
+        return STANZA
     return _STANZA
 
 
@@ -165,9 +178,11 @@ def _git_common_dir(repo: Path) -> Path:
 
 def _remove_stanza(content: str) -> str:
     """Remove the nexus sentinel stanza from *content*."""
+    # A stanza with text on both sides (the pre-push stanza sits right after the shebang) leaves one newline behind, so
+    # the two neighbouring lines do not run together.
     return re.sub(
         rf"\n?{re.escape(SENTINEL_BEGIN)}.*?{re.escape(SENTINEL_END)}\n?",
-        "",
+        lambda m: "\n" if m.start() > 0 and m.end() < len(content) else "",
         content,
         flags=re.DOTALL,
     )
@@ -194,7 +209,7 @@ def _refuse_malformed(hooks_dir: Path) -> None:
     before any verb has rewritten anything, so a refusal never leaves a
     half-updated set behind."""
     bad = [
-        hooks_dir / n for n in _HOOK_NAMES
+        hooks_dir / n for n in MANAGED_HOOK_NAMES
         if (hooks_dir / n).is_file()
         and _has_unterminated_sentinel((hooks_dir / n).read_text(encoding="utf-8"))
     ]
@@ -284,6 +299,16 @@ def _install_hook(hooks_dir: Path, hook_name: str) -> str:
     if SENTINEL_BEGIN in content:
         return "already installed"
 
+    if hook_name == PRE_PUSH_HOOK:
+        # Beside an existing body, ahead of it (a body that ends in exec or exit would never reach a stanza after it),
+        # and only in a shell script: a python hook cannot carry shell.
+        from nexus.pre_push_hook.stanza import insert_stanza, is_shell_hook  # noqa: PLC0415 -- deferred: only the pre-push hook needs the module
+
+        if not is_shell_hook(content):
+            return "skipped (the existing hook is not a shell script)"
+        hook_file.write_text(insert_stanza(content), encoding="utf-8")
+        return "appended"
+
     # Append to existing hook
     hook_file.write_text(content.rstrip("\n") + "\n" + _stanza_for(hook_name) + "\n", encoding="utf-8")
     return "appended"
@@ -324,13 +349,20 @@ def hooks() -> None:
 
 @hooks.command("install")
 @click.argument("path", type=click.Path(file_okay=False, path_type=Path), default=".")
-def hooks_install(path: Path) -> None:
+@click.option(
+    "--pre-push", "pre_push", is_flag=True,
+    help="Also install the pre-push hook: it refuses a push to a branch whose CI board has an open red the pusher did not "
+    "cause (`nx ci check-hold`), and records each push that lands (`nx ci record-push`). `nx upgrade` installs it by itself "
+    "only in a repo a group you belong to serves.",
+)
+def hooks_install(path: Path, pre_push: bool) -> None:
     """Install nexus git hooks into PATH (default: current directory).
 
     Installs post-commit, post-merge, and post-rewrite hooks that run
     ``nx index repo`` in the background after each qualifying git operation.
     Appends a sentinel-bounded stanza to existing hook files without
-    overwriting them.
+    overwriting them. With ``--pre-push`` it also installs the pre-push hook,
+    placed ahead of an existing pre-push body.
     """
     repo = path.resolve()
 
@@ -347,9 +379,9 @@ def hooks_install(path: Path) -> None:
     hooks_dir.mkdir(parents=True, exist_ok=True)
     click.echo(f"Installing hooks for {repo}…")
 
-    for name in _HOOK_NAMES:
+    for name in (*_HOOK_NAMES, *((PRE_PUSH_HOOK,) if pre_push else ())):
         action = _install_hook(hooks_dir, name)
-        symbol = "✓" if action != "already installed" else "·"
+        symbol = "✓" if action in ("created", "appended") else "·"
         click.echo(f"  {symbol} {name}  ({action})")
 
     click.echo("Done. Indexing will run in the background after each commit.")
@@ -369,7 +401,7 @@ def hooks_uninstall(path: Path) -> None:
 
     click.echo(f"Removing nexus hooks from {repo}…")
 
-    for name in _HOOK_NAMES:
+    for name in MANAGED_HOOK_NAMES:
         action = _uninstall_hook(hooks_dir, name)
         symbol = "✓" if action != "not installed" else "·"
         click.echo(f"  {symbol} {name}  ({action})")
@@ -403,7 +435,7 @@ def hooks_update(path: Path) -> None:
     hooks_dir.mkdir(parents=True, exist_ok=True)
     click.echo(f"Updating nexus hooks in {repo}…")
 
-    for name in _HOOK_NAMES:
+    for name in MANAGED_HOOK_NAMES:
         hook_file = hooks_dir / name
         if not hook_file.exists():
             click.echo(f"  · {name}  (not installed; skipped)")
@@ -423,24 +455,34 @@ def hooks_update(path: Path) -> None:
     click.echo("Done. New stanza in effect from the next commit.")
 
 
-def _refresh_managed_hooks(hooks_dir: Path) -> list[tuple[str, str]]:
+def _refresh_managed_hooks(hooks_dir: Path, *, install_pre_push: bool = False) -> list[tuple[str, str]]:
     """Refresh every nexus-managed hook in *hooks_dir* to the current stanza.
 
     Only rewrites hooks that already carry the sentinel block; never touches
-    unmanaged or absent hook files. Returns a list of ``(hook_name, action)``
-    where action is ``refreshed:<install-action>`` | ``unmanaged`` |
-    ``malformed`` (begin sentinel without an end; left untouched) |
-    ``not installed``.
+    unmanaged or absent hook files, with one exception: with *install_pre_push*
+    the pre-push hook is installed when it carries no stanza yet (beside an
+    existing body, or new). Returns a list of ``(hook_name, action)`` where
+    action is ``refreshed:<install-action>`` | ``installed:<install-action>`` |
+    ``unmanaged`` | ``malformed`` (begin sentinel without an end; left
+    untouched) | ``not installed``.
     """
     results: list[tuple[str, str]] = []
-    for name in _HOOK_NAMES:
+    for name in MANAGED_HOOK_NAMES:
         hook_file = hooks_dir / name
+        wanted = install_pre_push and name == PRE_PUSH_HOOK
         if not hook_file.exists():
-            results.append((name, "not installed"))
+            if wanted:
+                results.append((name, f"installed:{_install_hook(hooks_dir, name)}"))
+            else:
+                results.append((name, "not installed"))
             continue
         content = hook_file.read_text(encoding="utf-8")
         if SENTINEL_BEGIN not in content:
-            results.append((name, "unmanaged"))
+            if wanted:
+                action = _install_hook(hooks_dir, name)
+                results.append((name, "unmanaged" if action.startswith("skipped") else f"installed:{action}"))
+            else:
+                results.append((name, "unmanaged"))
             continue
         if _has_unterminated_sentinel(content):
             # Not refreshable, and not "refreshed:already installed" either.
@@ -450,6 +492,25 @@ def _refresh_managed_hooks(hooks_dir: Path) -> list[tuple[str, str]]:
         action = _install_hook(hooks_dir, name)
         results.append((name, f"refreshed:{action}"))
     return results
+
+
+def _served_bases() -> frozenset[str] | None:
+    """The bases the local identity's live groups serve, or None when they cannot be read (a seam: tests replace it)."""
+    from nexus.pre_push_hook.serving import served_bases  # noqa: PLC0415 -- deferred: the groups client is not needed by the other verbs
+
+    return served_bases()
+
+
+def _wants_pre_push(repo: Path, served: frozenset[str] | None) -> bool:
+    """Whether ``nx upgrade`` installs the pre-push hook in *repo*: a base of the repo (``<repo>-<branch>`` from its origin
+    URL, for each branch the CI adapter watches) is served by a live group the local identity belongs to. The hook can
+    refuse pushes, so a repo no such group serves, one with no readable origin, and a failed read of the groups all stay
+    untouched (nexus-igea9)."""
+    if not served:
+        return False
+    from nexus.pre_push_hook.serving import repo_bases  # noqa: PLC0415 -- deferred: see _served_bases
+
+    return bool(served & repo_bases(repo))
 
 
 def _iter_managed_repo_roots() -> list[Path]:
@@ -509,7 +570,9 @@ def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, int]:
     one hook refreshed), ``refreshed``, ``errors`` (repos skipped) and
     ``malformed`` (hooks left for hand repair) counts.
     """
-    summary = {"repos": 0, "refreshed": 0, "errors": 0, "malformed": 0}
+    summary = {"repos": 0, "refreshed": 0, "errors": 0, "malformed": 0, "installed": 0}
+    served: frozenset[str] | None = None
+    served_read = False
     for repo in _iter_managed_repo_roots():
         try:
             # nexus-g76yf: the lower layer raises a raw ``RuntimeError``
@@ -529,7 +592,9 @@ def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, int]:
                 if echo:
                     click.echo(f"  ! {repo}  (hooks dir not writable; skipped)")
                 continue
-            results = _refresh_managed_hooks(hooks_dir)
+            if not served_read:   # one read of the groups per sweep, on the first repo
+                served, served_read = _served_bases(), True
+            results = _refresh_managed_hooks(hooks_dir, install_pre_push=_wants_pre_push(repo, served))
         except (click.ClickException, RuntimeError) as exc:
             summary["errors"] += 1
             if echo:
@@ -547,6 +612,10 @@ def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, int]:
                     )
 
         refreshed = [n for n, a in results if a.startswith("refreshed")]
+        installed = [n for n, a in results if a.startswith("installed")]
+        summary["installed"] += len(installed)
+        if installed and echo:
+            click.echo(f"  ✓ {repo}  (installed {', '.join(installed)})")
         if refreshed:
             summary["repos"] += 1
             summary["refreshed"] += len(refreshed)
@@ -592,7 +661,7 @@ def hooks_status(path: Path) -> None:
 
     stale: list[str] = []
     malformed: list[str] = []
-    for name in _HOOK_NAMES:
+    for name in MANAGED_HOOK_NAMES:
         s = _hook_status(hooks_dir, name)
         symbol = "✓" if s.startswith(("owned", "appended")) else "·"
         if s == "malformed":

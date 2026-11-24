@@ -1124,7 +1124,9 @@ fi
 # order").
 _record_base="$(git rev-parse -q --verify "refs/remotes/$remote/$branch^{commit}" 2>/dev/null || true)"
 
-git push -q "$remote" "$tip:refs/heads/$branch"
+# NX_PUSH_VIA_SCRIPT tells the managed pre-push hook (nexus-igea9, nexus.pre_push_hook.stanza) to stand down: this script
+# has run the hold check above and writes the push record below, so the hook must not check or record this push again.
+NX_PUSH_VIA_SCRIPT=1 git push -q "$remote" "$tip:refs/heads/$branch"
 echo "PUSH_OK n=${#range[@]} tip=$tip"
 
 # The lock is released now, before the push record, so a slow tuple space while the record is written

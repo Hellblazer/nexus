@@ -1981,7 +1981,7 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
     from nexus.repos import list_repos_dual_with_catalog_roots  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
-    hook_names = ("post-commit", "post-merge", "post-rewrite")
+    hook_names = _ghm.MANAGED_HOOK_NAMES  # the index hooks and pre-push (nexus-igea9)
     registry_path = nexus_config_dir() / "repos.json"
 
     # nexus-mkj6u shakeout: extract the canonical stanza from the

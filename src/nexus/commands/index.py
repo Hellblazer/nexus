@@ -1875,7 +1875,7 @@ def index_repo_cmd(
             try:
                 from nexus.commands.hooks import SENTINEL_BEGIN, _effective_hooks_dir  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
                 hdir = _effective_hooks_dir(path)
-                hook_names = ("post-commit", "post-merge", "post-rewrite")
+                from nexus._git_hooks_meta import INDEX_HOOK_NAMES as hook_names  # noqa: PLC0415, E402 — call-time import; the tip is about indexing: pre-push alone does not silence it
                 any_managed = any(
                     SENTINEL_BEGIN in (hdir / n).read_text(encoding="utf-8")
                     for n in hook_names
