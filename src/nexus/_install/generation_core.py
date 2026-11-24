@@ -62,6 +62,7 @@ _STAMP_SUFFIXES = ("", "a", "b", "c", "d", "e", "f", "g", "h")
 
 _LAYOUT: object | None = None
 _GC: object | None = None
+_LEASE: object | None = None
 
 
 def _sibling(name: str):
@@ -117,6 +118,13 @@ def _gc():
     if _GC is None:
         _GC = _sibling("gc_core")
     return _GC
+
+
+def _lease():
+    global _LEASE
+    if _LEASE is None:
+        _LEASE = _sibling("lease_core")
+    return _LEASE
 
 
 class GenerationError(Exception):
@@ -729,6 +737,15 @@ def build_generation(
         # installed, or the installer rebuild rung skips the generation.
         if not version and kind == "registry":
             version = _installed_version(gen)
+        # The lease (hook, .pth, then .nx-lease; the lease file last) goes in after
+        # the packages and BEFORE the receipt, so a generation is never real without
+        # it. A failure warns and builds on: an unleased generation is guarded by the
+        # process census exactly as it was before leases existed.
+        try:
+            _emit(_lease().install_and_verify(gen, platform=platform))
+        except Exception as exc:  # noqa: BLE001 -- a staged installer from a release without lease_core
+            _emit([f"install_generation: WARNING: {gen.name} is not leased ({type(exc).__name__}: {exc}); "
+                   "the process census alone guards it"])
         rendered = layout._cli_render_receipt(
             version, spec, kind, source, ",".join(extras_list), python_full,
             base_interpreter, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock)),

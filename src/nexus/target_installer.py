@@ -85,10 +85,18 @@ from nexus.util.nx_argv import argv_off_cwd
 __all__ = ["BUILD_PYTHON", "Staged", "TargetFetchError", "staged_installer"]
 
 #: What the POSIX build needs beside ``install_generation.sh`` (it sources
-#: ``layout.sh``, which dispatches to ``layout_core.py``, and reads the overrides).
-POSIX_FILES = ("install_generation.sh", "layout.sh", "layout_core.py", "overrides.txt")
+#: ``layout.sh``, which dispatches to ``layout_core.py``, and reads the overrides;
+#: ``lease_core.py`` writes the generation's lease and copies ``_nx_lease.py`` into
+#: it). A file missing here makes the staged installer unusable and the build falls
+#: back to the old one, which writes no lease.
+POSIX_FILES = (
+    "install_generation.sh", "layout.sh", "layout_core.py", "lease_core.py", "_nx_lease.py", "overrides.txt",
+)
 #: What the Windows build loads: the core and the siblings it reaches lazily.
-WINDOWS_FILES = ("generation_core.py", "layout_core.py", "gc_core.py", "winproc_core.py", "overrides.txt")
+WINDOWS_FILES = (
+    "generation_core.py", "layout_core.py", "gc_core.py", "lease_core.py", "_nx_lease.py", "winproc_core.py",
+    "overrides.txt",
+)
 
 #: The Python the build runs with (``install_generation.sh --python`` and
 #: ``generation_core.build_generation`` both default to it); the fetch uses the

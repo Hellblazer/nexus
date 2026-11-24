@@ -70,6 +70,8 @@ OLD_SCRIPT = TARGET_SCRIPT.replace("        --extras)  shift 2 ;;\n", "")
 SUPPORT = {
     "nexus/_install/layout.sh": "# stand-in\n",
     "nexus/_install/layout_core.py": "# stand-in\n",
+    "nexus/_install/lease_core.py": "# stand-in\n",
+    "nexus/_install/_nx_lease.py": "# stand-in\n",
     "nexus/_install/overrides.txt": "",
 }
 
@@ -335,6 +337,8 @@ def build_generation(source, *, version="", extras=(), python_version="3.12", co
 WINDOWS_SUPPORT = {
     "nexus/_install/layout_core.py": "# stand-in\n",
     "nexus/_install/gc_core.py": "# stand-in\n",
+    "nexus/_install/lease_core.py": "# stand-in\n",
+    "nexus/_install/_nx_lease.py": "# stand-in\n",
     "nexus/_install/winproc_core.py": "# stand-in\n",
     "nexus/_install/overrides.txt": "",
 }
