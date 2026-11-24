@@ -18,7 +18,7 @@ This is the role Linda fills in Nexus. Not a parallel programming model, but a c
 
 ## How the suite leverages it
 
-Two consumers shipped with the design, a dispatch ledger and the mailbox, and the design's own scope clause says a further consumer needs its own RDR. The ledger has since been removed, and further consumers have come through that door: the board, queue and lock templates of RDR-211, the directory that resolves a session name, the CI boards, and the aspect-extraction queue.
+Two consumers shipped with the design, a dispatch ledger and the mailbox, and the design's own scope clause says a further consumer needs its own RDR. The ledger has since been removed, and other consumers have been added since: the board, queue and lock templates of RDR-211, the directory that resolves a session name, the CI boards, and the aspect-extraction queue.
 
 **The dispatch ledger, now removed.** The first consumer was a ledger: hooks at agent start and stop wrote a start tuple and a report tuple to the session's ledger, keyed on the agent's id, so an orchestrator could wait for a report and a later session could ask which agents had started and never reported. Those hooks were deleted in 7.70.0 (nexus-0r1uz). Nothing reads or writes the ledger now, and its template and rows were retired from the engine afterwards (nexus-onjvw).
 
