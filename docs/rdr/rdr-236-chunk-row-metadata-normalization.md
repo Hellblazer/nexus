@@ -1524,8 +1524,12 @@ diverged key table fails CI.
       0 on a keyless entry; an entry's existing keys win),
       .32, .43 (the three routes and the one order), nexus-p89h4 (absorbed
       into .25's manifest EXISTS).
-- [ ] The dry run and the live run of the backfill (A7) read by Sam before
-      Phase 4 Step 1.
+- [x] The dry run and the live run of the backfill (A7) read by Sam before
+      Phase 4 Step 1. (Step 0 and Step 1a have landed, nexus-6pfgb.65,
+      4e8ada6b30 and cc983667a6; the keyless residue was accepted at the dry
+      run, see Phase 4 Step 1 below. The live run is the operator's
+      `nx catalog backfill-meta --apply`, which the upgrade ladder does not
+      run.)
 - [x] The six census queries of the schema analysis run read-only on the
       live tenant before this RDR locks (chunk_text_hash versus chash;
       repeated chash within a document; manifest collection versus
@@ -2251,3 +2255,4 @@ log mode, the CHECK is what covers direct SQL; neither alone does both.
   chunk_index CHECK ships as the operator routes
   `/v1/admin/manifest-chunk-index-check/*`, and the labels_written CHECK as
   an operator step of the same shape whose add refuses on a counted violator.
+- 2026-11-24: wording to the tree at the 8.5.6 docs audit (nexus-856): the Prerequisite on the backfill's dry and live run is ticked, because Phase 4 Step 0 and Step 1a have landed and the residue was accepted at the dry run. Phase 4 Step 2c (enforcement) and the deletion of `catalog_ttl_stale` have not landed, so status stays accepted.
