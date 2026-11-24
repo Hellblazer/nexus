@@ -250,27 +250,44 @@ else:
 
 PERSIST_SPLIT_REFUSAL = r"""
 import httpx
+from nexus.commands.catalog import _get_catalog
+from nexus.corpus import t3_collection_name
+from nexus.db import make_t3
 from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
-# RDR-229 P3.5a (nexus-p2m1x.23): persist_split acts on a topic only when it is a topic of the named collection, and refuses
-# otherwise (400 for a topic of another collection, or a typed 404/409/422 for a collection or a registry row that cannot
-# take the write), before any row moves. The probe names a topic nothing holds under a collection nothing registers, so
-# whatever refusal answers, it moved and deleted nothing.
+# RDR-229 P3.5a (nexus-p2m1x.23): persist_split answers 400 for a topic that is not a topic of the named collection, before any row moves
+# (an engine without the check lets the split act on the topic whatever collection the request names, so it answers 200 and fails this
+# probe). Both collections are registered, so the refusal that answers is the topic check and not the registry's 404/422: the probe's own
+# collection (the one the store-put step registered) is named, and the topic belongs to a second collection the probe registers under the
+# run label and removes the topic of again. The split carries no child specs and is refused before it reads them.
+cat = _get_catalog()
 store = HttpTaxonomyStore()
-name = "@label@-split-probe"
+home = t3_collection_name("cloud-leg-probe", t3=make_t3(), for_write=True)
+row = cat.get_collection(home)
+if row is None:
+    raise SystemExit(f"{home} is not registered: the store-put step has not run")
+other = "@label@-split-other"
+cat.register_collection(other, content_type=row["content_type"], owner_id=row["owner_id"],
+                        embedding_model=row["embedding_model"], model_version=row["model_version"])
+ids = store.persist_discovered_topics(other, [{"label": "split-probe", "doc_ids": []}])
+if not ids:
+    raise SystemExit(f"no topic was filed under {other}: the probe has nothing of another collection to split")
 try:
-    store.persist_split({"topic_id": 2**62, "collection_name": name, "child_specs": []})
+    store.persist_split({"topic_id": ids[0], "collection_name": home, "child_specs": []})
 except httpx.HTTPStatusError as exc:
-    assert exc.response.status_code in (400, 404, 409, 422), f"persist_split answered {exc.response.status_code}, not a typed refusal"
-    print("persist_split refused", exc.response.status_code)
+    assert exc.response.status_code == 400, f"persist_split of another collection's topic answered {exc.response.status_code}, not 400"
+    print("persist_split refused 400")
 else:
-    raise SystemExit("persist_split accepted a topic nothing holds under a collection nothing registers")
+    raise SystemExit("persist_split acted on a topic of another collection: the engine does not check the topic's collection")
+finally:
+    store.delete_topic(ids[0])
 """
 
 PURGE_TRASH_DRY_RUN = r"""
 from nexus.commands import catalog as _cat_cmd
 # RDR-229 P3.5a (nexus-p2m1x.23): POST /v1/catalog/purge-trash reads the registry rows of the collections its aged tombstones
-# reach (FOR KEY SHARE) before a real purge deletes. The probe is the engine's read-only preview (dry_run true: nothing is
-# deleted, no registry row is locked), which proves the route answers its counts; the wait itself is the engine test's.
+# reach (FOR KEY SHARE) before a REAL purge deletes. This probe cannot reach that wait: it is the engine's read-only preview (dry_run
+# true: nothing is deleted and no registry row is read or locked), kept because a real purge in a cloud tenant is not a probe. It proves
+# the route is mapped and answers its counts; the registry read is the engine tests' (SweepAndPurgeRegistryFirstTest and the trash purge test).
 result = _cat_cmd._get_catalog_writer().purge_trash(older_than_days=36500, dry_run=True)
 assert isinstance(result, dict) and result.get("dry_run") is True, f"purge-trash dry run answered {result!r}"
 print("purge-trash dry run answered", sorted(result))
@@ -436,10 +453,30 @@ MOVE_ROUTE_PROBES: dict[str, tuple[str, str, str]] = {
 }
 
 
-#: RDR-229 P3.5a row 14 (nexus-p2m1x.23): the ledger lines of the taxonomy split's 400 and the trash purge's registry read; route ->
-#: (step name, snippet, stdout the probe prints). Neither probe can change a row: a topic nothing holds under a collection nothing
-#: registers, and a read-only preview.
+TOPIC_DELETE_MISSING = r"""
+from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+# RDR-229 P3.5a (nexus-p2m1x.23): topics/delete answers 404 for a topic that is gone or filed under another collection by the time it deletes
+# (the client reads a 404 as "no such topic" and returns None). A topic id nothing holds: it deletes and moves nothing.
+answer = HttpTaxonomyStore().delete_topic(2**62)
+assert answer is None, f"delete of a topic nothing holds answered {answer!r}, not a missing topic"
+print("topics/delete of a missing topic answered 404")
+"""
+
+TOPIC_MERGE_MISSING = r"""
+from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+# RDR-229 P3.5a (nexus-p2m1x.23): as TOPIC_DELETE_MISSING, for topics/merge of two topic ids nothing holds.
+answer = HttpTaxonomyStore().merge_topics(2**62, 2**62 - 1)
+assert answer is None, f"merge of topics nothing holds answered {answer!r}, not a missing topic"
+print("topics/merge of a missing topic answered 404")
+"""
+
+#: RDR-229 P3.5a row 14 (nexus-p2m1x.23): the ledger lines of the taxonomy split's 400, the topic delete's and merge's 404, and the trash purge's
+#: registry read; route -> (step name, snippet, stdout the probe prints). The split probe files a topic under a second collection it registers and
+#: removes the topic again; the delete and merge probes name topics nothing holds; the purge-trash probe is a read-only preview and cannot reach the
+#: registry wait of a real purge (see its comment).
 ROW14_PROBES = {
-    "POST /v1/taxonomy/topics/persist_split": ("route-taxonomy-persist-split", PERSIST_SPLIT_REFUSAL, "persist_split refused"),
+    "POST /v1/taxonomy/topics/persist_split": ("route-taxonomy-persist-split", PERSIST_SPLIT_REFUSAL, "persist_split refused 400"),
+    "POST /v1/taxonomy/topics/delete": ("route-taxonomy-topic-delete-missing", TOPIC_DELETE_MISSING, "topics/delete of a missing topic answered 404"),
+    "POST /v1/taxonomy/topics/merge": ("route-taxonomy-topic-merge-missing", TOPIC_MERGE_MISSING, "topics/merge of a missing topic answered 404"),
     "POST /v1/catalog/purge-trash": ("route-purge-trash-dry-run", PURGE_TRASH_DRY_RUN, "purge-trash dry run answered"),
 }
