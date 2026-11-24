@@ -19,6 +19,7 @@ import dev.nexus.service.db.CollectionSuccessor;
 import dev.nexus.service.db.ExpectedCollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnknownCollectionIdException;
+import dev.nexus.service.db.UnregisteredCollectionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -151,6 +152,15 @@ public final class CollectionSelectorFilter extends Filter {
 
         /** The live successor the retired row {@code retiredId} names by {@code superseded_by_id}, if it names one. */
         Optional<CollectionSuccessor.Successor> successorOf(String tenant, long retiredId);
+
+        /**
+         * The row a LABEL resolves to (the live row, else the newest tombstone, as every label read resolves it), or empty when no row has
+         * it. Used for the read routes that refuse a retired collection ({@link RetiredLabelReadGuard}); a stub that never answers a row
+         * disables that refusal.
+         */
+        default Optional<CollectionRow> byLabel(String tenant, String label) {
+            return Optional.empty();
+        }
     }
 
     private final Rows rows;
@@ -163,6 +173,18 @@ public final class CollectionSelectorFilter extends Filter {
 
             @Override public Optional<CollectionSuccessor.Successor> successorOf(String tenant, long retiredId) {
                 return CollectionSuccessor.of(scope, tenant, retiredId);
+            }
+
+            @Override public Optional<CollectionRow> byLabel(String tenant, String label) {
+                Optional<CollectionRow> hit = registry.cachedByLabel(tenant, label);   // the cache never holds a tombstone
+                if (hit.isPresent()) {
+                    return hit;
+                }
+                try {
+                    return Optional.of(scope.withTenant(tenant, ctx -> registry.resolveLabel(ctx, tenant, label)));
+                } catch (UnregisteredCollectionException none) {
+                    return Optional.empty();
+                }
             }
         });
     }
@@ -204,16 +226,29 @@ public final class CollectionSelectorFilter extends Filter {
         HttpExchange next = exchange;
         Resolver resolver = new Resolver(tenant);
         try {
+            List<String> labels = List.of();
+            boolean refusesRetired = CollectionSelectors.RETIRED_LABEL_REFUSED.contains(exchange.getRequestURI().getPath());
             if (route.where() == CollectionSelectors.Where.QUERY
                 || (route.where() == CollectionSelectors.Where.EITHER && !hasBody(exchange.getRequestMethod()))) {
                 String rewritten = rewriteQuery(route, resolver, exchange.getRequestURI().getRawQuery());
                 if (rewritten != null) {
                     next = new WithQuery(exchange, rewritten);
                 }
+                if (refusesRetired) {
+                    labels = RetiredLabelReadGuard.labelsInQuery(route, next.getRequestURI().getRawQuery());
+                }
             } else if (hasBody(exchange.getRequestMethod())) {
                 byte[] in = exchange.getRequestBody().readAllBytes();
-                exchange.setStreams(new ByteArrayInputStream(rewriteBody(route, resolver, in)), null);
+                byte[] out = rewriteBody(route, resolver, in);
+                exchange.setStreams(new ByteArrayInputStream(out), null);
+                if (refusesRetired) {
+                    labels = RetiredLabelReadGuard.labelsInBody(route, out);
+                }
             }
+            // RDR-229 R7: a read by LABEL of a retired collection that names no live successor is refused as the same read by id is
+            RetiredLabelReadGuard.refusal(rows, tenant, resolver.expected.keySet(), labels).ifPresent(body -> {
+                throw new Refusal(409, body);
+            });
         } catch (Refusal refusal) {
             HttpUtil.send(exchange, refusal.status, refusal.body);
             return;

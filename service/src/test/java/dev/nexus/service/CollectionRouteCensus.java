@@ -576,7 +576,7 @@ final class CollectionRouteCensus {
         java.util.Map.entry("db/TaxonomyCollectionLock.java", new Resolving(1, "the taxonomy persist routes (split, rebuild, discovered): the advisory lock keyed by id, then the registry check")),
         java.util.Map.entry("db/TelemetryRepository.java", new Resolving(5, "the /v1/telemetry rows, the rename route and the telemetry ETL")),
         java.util.Map.entry("db/TupleRepository.java", new Resolving(3, "the tuple space's collection-keyed tuples; no collection route")),
-        java.util.Map.entry("http/CollectionSelectorFilter.java", new Resolving(1, "the route boundary: the one resolver of collection_id")),
+        java.util.Map.entry("http/CollectionSelectorFilter.java", new Resolving(2, "the route boundary: the one resolver of collection_id, and the label read of the retired-label refusal (RetiredLabelReadGuard: resolveLabel on the read routes of RETIRED_LABEL_REFUSED; a read, no lock)")),
         java.util.Map.entry("vectors/CollectionSelector.java", new Resolving(2, "the vector routes' id-keyed predicates: the id the request named, else the live row's")),
         java.util.Map.entry("vectors/ChunkKeySweep.java", new Resolving(1, "the chunk-key sweep (excluded: ChunkKeysAdminHandler#handleSweep)")),
         java.util.Map.entry("vectors/EmbedderRouter.java", new Resolving(1, "the embed route and the vector writes' model dispatch")),
