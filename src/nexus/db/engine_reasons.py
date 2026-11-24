@@ -66,12 +66,6 @@ UNKNOWN_COLLECTION_ID_REASON: str = "unknown_collection_id"
 #: the route boundary and the write changes nothing about where the write goes.)
 COLLECTION_ID_MISMATCH_REASON: str = "collection_id_mismatch"
 
-#: A collection rename (the catalog's, or a per-store ``rename_collection`` route) refused from gate 3 until the one-row rename
-#: can run (HTTP 409, RDR-229 P3.5a). Also carries ``missing``: ``name_key_drop_move`` while the move has no ``completed_at``,
-#: else ``restart`` (a P3.5b changeset has not applied), or ``latch_row_missing`` when the rename readiness says the move is
-#: complete but the install has no gate 3 latch row (an inconsistency, as after a partial restore). Nothing was renamed.
-RENAME_REFUSED_REASON: str = "rename_refused"
-
 #: A catalog rename reached the one-row regime (the gate 3 latch row exists and the rename readiness is complete) with no one-row
 #: rename to run (HTTP 409, RDR-229 P3.5a): the engine refuses rather than rewrite name columns the one-row regime's keys depend
 #: on. Nothing was renamed.
