@@ -607,7 +607,7 @@ public final class DataMoveWorker implements AutoCloseable {
                 if (!BuildWait.isDeferral(result)) {   // a deferral logs its own one line (BuildWait.defer)
                     MoveEvents.blocked(move.label(), "FINISH", null, move.transientRetries(), null, result.reason());
                 }
-                states.blocked(move, result.reason());
+                states.blocked(move, result.reason(), keptPage(move));
             }
             case LEFT_OPEN -> states.runsComplete(move);
             case REPORT -> report(result.failure());
@@ -619,6 +619,18 @@ public final class DataMoveWorker implements AutoCloseable {
         if (result.outcome() == MoveFinisher.Outcome.COMPLETED || result.outcome() == MoveFinisher.Outcome.LEFT_OPEN) {
             clearRetries(move, ctx);   // a clean pass resets the count; no failure reached the handler to do it
         }
+    }
+
+    /**
+     * The page the move already carries, for a finish that blocks it without a failure (a deferral behind an index build, or any
+     * other not-now): no failure was counted, so nothing about the move's needs-an-operator state changed, and
+     * {@link MoveStates} clears the page of a blocked report that brings none. The move's count is unchanged and its early latch
+     * is still held, so the state, {@code /v1/status} and {@code nx doctor} keep it; {@code entered} is false, so nothing is
+     * announced again. Null when the move holds no page.
+     */
+    private FailureHandler.PageInfo keptPage(DataMove move) {
+        return states.state(move.label()).filter(MoveStates.State::needsOperator)
+            .map(s -> new FailureHandler.PageInfo(true, false, s.step(), s.boundMs(), s.terminatesIndexBuilds())).orElse(null);
     }
 
     private void notifyCompleted(DataMove move) {
