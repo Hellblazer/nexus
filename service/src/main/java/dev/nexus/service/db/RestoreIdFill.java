@@ -83,8 +83,10 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * of the backup holds is {@link #ORPHAN_CODE}, and one whose name another row of the table carries with a different collection's
  * id is {@link #AMBIGUOUS_CODE}; each names the table and column, the count and an example, and nothing is written.
  *
- * <p>The quarantine tag {@link QuarantineOrigin#ORIGIN_ID_KEY} of a chunk's metadata: an id the map holds is mapped, any other id
- * is stripped (never resolved by the tag's name, which may be stale), and a tag with no id key is left as it is.
+ * <p>The quarantine tag {@link QuarantineOrigin#ORIGIN_ID_KEY} of a chunk's metadata: an id the map holds is mapped to the id this
+ * restore drew, and any other id is set to JSON null (marked, never removed, and never resolved by the tag's name, which may be
+ * stale). A tag with the label ({@code origin_collection}) and no id key gets the id this restore drew for the file's registry row of
+ * that label, or JSON null when the file has none; a row with neither is left as it is ({@link #refillOriginTag}).
  *
  * <p>Entry for a table: {@link #fill}, which returns the map and the registry's relabels ({@link Filled}). The name and id columns come from {@code db/rdr229/p31-checks.tsv}, the one list the
  * expand's changesets are pinned to.
