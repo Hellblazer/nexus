@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from nexus._install import gc_core, lease_core
-from tests._lease_support import NT, blind_snapshot, holder, make_generation, make_tools, venv_python
+from tests._lease_support import NT, blind_snapshot, holder, make_generation, make_tools, venv_python, wait_until_free
 from tests._module_seam import setattr_in
 
 POSIX = pytest.mark.skipif(sys.platform == "win32", reason="patches fcntl.flock")
@@ -74,6 +74,7 @@ def test_a_killed_holder_frees_its_generation(tmp_path: Path) -> None:
     tools, (a, *_rest) = make_tools(tmp_path)
     with holder(venv_python(a)):
         assert _actions(_plan(tools))["20261101T000000Z"] == "keep"
+    assert wait_until_free(a) == "free"
     assert _actions(_plan(tools))["20261101T000000Z"] == "reap"
 
 

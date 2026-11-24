@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 import venv
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -75,3 +76,16 @@ def stop(proc: subprocess.Popen) -> None:
     for stream in (proc.stdin, proc.stdout, proc.stderr):
         if stream is not None:
             stream.close()
+
+
+def wait_until_free(gen: Path, *, timeout: float = 15.0) -> str:
+    """The lease state once no interpreter holds it. A killed holder's lease is
+    released when the KERNEL finishes tearing the process down, which on Windows
+    trails the kill (the venv launcher is the pid we killed; the interpreter it
+    started notices its stdin closed a moment later). Returns the last state read."""
+    deadline = time.monotonic() + timeout
+    while True:
+        state = lease_core.probe(gen)
+        if state != "held" or time.monotonic() >= deadline:
+            return state
+        time.sleep(0.05)

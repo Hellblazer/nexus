@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from nexus._install import gc_core, lease_core
-from tests._lease_support import blind_snapshot, holder, make_generation, make_tools, venv_python
+from tests._lease_support import blind_snapshot, holder, make_generation, make_tools, venv_python, wait_until_free
 from tests._module_seam import setattr_in
 
 WIN = "win32"
@@ -150,7 +150,7 @@ class TestRealWindows:
         gen = make_generation(tmp_path, "20261101T000000Z", receipt=False)
         with holder(venv_python(gen)):
             assert lease_core.probe(gen) == "held"
-        assert lease_core.probe(gen) == "free"
+        assert wait_until_free(gen) == "free"
 
     def test_plan_keeps_a_leased_generation_the_census_cannot_see(self, tmp_path: Path) -> None:
         tools, (a, *_rest) = make_tools(tmp_path)
