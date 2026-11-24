@@ -52,7 +52,6 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 
-
 /**
  * Shared factory for per-class Testcontainers PostgreSQL containers.
  *
@@ -192,23 +191,12 @@ public final class PgContainerHelper {
         return newContainer(PgBackgroundImage.dockerImageName());
     }
 
-    /**
-     * A database this helper just created. {@code CollectionRegistry}'s caches are process-wide and carry no database identity (an
-     * engine's {@code start()} and {@code stop()} empty them, row 15), so a test that builds a repository on its own database without an
-     * engine, after another class cached the same tenant and id from another database, would be answered from that cache. Emptying it
-     * here, where every test database is created, closes that for the test JVM; production serves one engine per JVM.
-     */
-    private static <C extends PostgreSQLContainer<?>> C freshDatabase(C container) {
-        dev.nexus.service.db.CollectionRegistry.evictAll();
-        return container;
-    }
-
     /** {@link #newDataMoveContainer()}, started. The caller stops it. */
     @SuppressWarnings("resource")
     public static PostgreSQLContainer<?> startDataMove() {
         PostgreSQLContainer<?> c = newDataMoveContainer();
         c.start();
-        return freshDatabase(c);
+        return FreshDatabases.fresh(c);
     }
 
     /**
@@ -223,7 +211,7 @@ public final class PgContainerHelper {
         command.addAll(serverArgs);
         c.setCommand(command.toArray(new String[0]));
         c.start();
-        return freshDatabase(c);
+        return FreshDatabases.fresh(c);
     }
 
     /**
@@ -496,7 +484,7 @@ public final class PgContainerHelper {
                     throw new IllegalStateException("RDR-229 P3.5b form A variant of the clone failed: " + e.getMessage(), e);
                 }
             }
-            return freshDatabase(clone);
+            return FreshDatabases.fresh(clone);
         } catch (SQLException e) {
             throw new IllegalStateException("nexus-yhmav shared-cluster acquire failed", e);
         }
@@ -563,7 +551,7 @@ public final class PgContainerHelper {
     public static PostgreSQLContainer<?> startDedicated() {
         PostgreSQLContainer<?> c = newContainer();
         c.start();
-        return freshDatabase(c);
+        return FreshDatabases.fresh(c);
     }
 
     /**
@@ -578,7 +566,7 @@ public final class PgContainerHelper {
         command.addAll(serverArgs);
         c.setCommand(command.toArray(new String[0]));
         c.start();
-        return freshDatabase(c);
+        return FreshDatabases.fresh(c);
     }
 
     /**
@@ -602,7 +590,7 @@ public final class PgContainerHelper {
             return startDedicated();
         }
         try {
-            return freshDatabase(SharedCluster.acquireEmptyDatabase(exclusiveRoles));
+            return FreshDatabases.fresh(SharedCluster.acquireEmptyDatabase(exclusiveRoles));
         } catch (SQLException e) {
             throw new IllegalStateException("nexus-7xfh7 shared-cluster empty-database acquire failed: " + e.getMessage(), e);
         }
@@ -642,7 +630,7 @@ public final class PgContainerHelper {
                         installTestObjectsAfterProductSchema(oc);
                     }
                 }
-                return freshDatabase(c);
+                return FreshDatabases.fresh(c);
             } catch (Exception e) {
                 c.stop();
                 throw new IllegalStateException("nexus-0ty8z dedicated owner-migrated database failed: " + e.getMessage(), e);
@@ -656,7 +644,7 @@ public final class PgContainerHelper {
                 c.stop();
                 throw new IllegalStateException("nexus-0ty8z owner provisioning on the clone failed: " + e.getMessage(), e);
             }
-            return freshDatabase(c);
+            return FreshDatabases.fresh(c);
         } catch (SQLException e) {
             throw new IllegalStateException("nexus-0ty8z owner-migrated acquire failed: " + e.getMessage(), e);
         }
@@ -667,9 +655,8 @@ public final class PgContainerHelper {
     public static PostgreSQLContainer<?> startDedicated(String tmpfsSize, long memoryBytes) {
         PostgreSQLContainer<?> c = newContainer(DockerImageName.parse(IMAGE), tmpfsSize, memoryBytes);
         c.start();
-        return freshDatabase(c);
+        return FreshDatabases.fresh(c);
     }
-
 
     /**
      * Return a pooled superuser DataSource.
