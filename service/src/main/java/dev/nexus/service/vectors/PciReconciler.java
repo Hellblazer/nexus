@@ -640,7 +640,7 @@ public final class PciReconciler {
     private volatile Runnable passEnded = () -> { };
 
     private final PciIdBuilds idBuilds = new PciIdBuilds();
-    private volatile dev.nexus.service.datamove.Gate3 canaryLatch = dev.nexus.service.datamove.Gate3.never();
+    private volatile dev.nexus.service.datamove.Gate3 canaryLatch = () -> false;   // never holds until bound
 
     /** RDR-229 P3.4: gate 2 of the completion check, read at the start of each pass; until it holds no id build is planned. */
     public void idBuildGate(java.util.function.BooleanSupplier gate2) {

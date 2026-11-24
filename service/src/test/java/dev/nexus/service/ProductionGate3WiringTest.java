@@ -53,9 +53,6 @@ class ProductionGate3WiringTest {
         "http/ChashConformanceHandler.java", "vectors/ChunkConstraintAdmin.java", "vectors/ChunkKeySweep.java",
         "vectors/ChunkOwnerLabel.java", "vectors/ManifestLabelStage.java",
         "vectors/PciIdBuilds.java", "vectors/PciQueryRingReader.java",
-        // RDR-229 P3.4 (the id canary): the ring's admission latch is Gate3.never() until Main binds the reconciler's with followLatch,
-        // as PciReconciler's own canaryLatch field is
-        "vectors/PciQueryRing.java",
         "vectors/PciReconciler.java", "vectors/PgVectorRepository.java", "vectors/ReaperRepository.java",
         "vectors/TaxonomyCentroidRepository.java", "vectors/TopicRouteArm.java");
 

@@ -81,7 +81,7 @@ public final class PciQueryRing {
     private final Object flushLock = new Object();
     private final Object lifecycle = new Object();
     /** The reconciler's latch (gate 3 latched, id readers present), bound by Main once the reconciler exists, read at each admission. */
-    private volatile dev.nexus.service.datamove.Gate3 gate3 = dev.nexus.service.datamove.Gate3.never();
+    private volatile dev.nexus.service.datamove.Gate3 gate3 = () -> false;   // never holds until bound
     private volatile Thread writer;       // set once by start()
     private volatile boolean stopped;
 
