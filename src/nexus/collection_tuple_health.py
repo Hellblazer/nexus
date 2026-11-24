@@ -13,13 +13,17 @@ belong. The row is a warning while a duplicate exists and is absent otherwise: a
 (it is what holds it back), no duplicate means the index exists or waits only for the move, and the data-move rows
 already show a move that is open, blocked or failed.
 
-A second warning covers an index that waits for a reason nothing else names. ``GET /v1/status`` carries
+A second warning covers an index that is absent with nothing else naming why. ``GET /v1/status`` carries
 ``collection_tuple_index_present`` (an ``[additive]`` boolean); when it is ``false``, no duplicate is held by the catalog
-listing, and ``boot_work`` has no open or failed entry for the re-own move, the engine's guard is waiting for something
-unnamed, for example its duplicate counter erroring under ``onError="CONTINUE"``. The row points at the engine's boot log.
-An absent key is an engine that predates the field: no row. The status body carries one boolean and no tenant text.
-A pending ``rdr229-restart`` notice, or another RDR-229 move still open, also explains the wait (a fresh install's first
-boot, nexus-p2m1x.48): the one restart that notice names builds the index too, so there is one instruction, not two.
+listing, and ``boot_work`` has no re-own entry, no ``rdr229-restart`` notice and no other RDR-229 move, the row is still a
+warning and says what to do (nexus-p2m1x.48): the engine builds the index at its next start, and the row names the restart
+command. That is the window on a fresh install between the moves finishing (the re-own move completes seconds after boot 1,
+after the Liquibase walk skipped the changeset) and the first restart, which no ``rdr229-restart`` notice covers because every
+P3.5b changeset applied at boot 1. A second suggestion keeps the older diagnosis for an index still absent after a restart:
+read the boot log for ``collections-001-2``; a precondition error (for example its duplicate counter erroring under
+``onError="CONTINUE"``) is indistinguishable from the client. An absent key is an engine that predates the field: no row. The
+status body carries one boolean and no tenant text. A pending ``rdr229-restart`` notice, or another RDR-229 move still open,
+explains the wait and shows no row: the one restart that notice names builds the index too, so there is one instruction, not two.
 
 Kept out of :mod:`nexus.health` (a file near its size cap). The candidate set is ``CatalogRepository.collectionForTuple``'s:
 a row with no supersession and a lifecycle other than ``quarantine``; a dormant or disputed row still holds its tuple.
@@ -158,17 +162,21 @@ def check_collection_tuples(rows: object = _UNSET, engine_status: object = None)
 
 
 def _index_wait_row() -> HealthResult:
+    from nexus.corpus import _SERVICE_RESTART_COMMAND  # noqa: PLC0415 — deferred to avoid circular import
+
     return HealthResult(
         label=INDEX_WAIT_LABEL, ok=False, warn=True,
         detail=(
             "the engine's live-tuple unique index is absent, no live tuple is shared and the re-own move "
-            f"({REOWN_MOVE_LABEL}) is neither open nor failed: it waits for a reason nothing here names"
+            f"({REOWN_MOVE_LABEL}) is neither open nor failed: the engine builds the index at its next start"
         ),
         fix_suggestions=[
-            "Read the engine's boot log for the Liquibase output of changeset collections-001-2 (a precondition that "
-            "errored, for example its duplicate counter, is skipped and retried at every boot, never halted), and for "
-            "an index build that was refused. Nothing is lost and nothing fails while it waits: the engine already refuses to "
-            "register a second live collection on a tuple, with or without the index. Fix what the log names and restart "
-            "the engine; no other step applies the index",
+            f"Restart the engine: {_SERVICE_RESTART_COMMAND}. The re-own move has completed, so the changeset "
+            "collections-001-2 applies at that start. Nothing is lost and nothing fails while it waits: the engine already "
+            "refuses to register a second live collection on a tuple, with or without the index",
+            "If the index is still absent after a restart, read the engine's boot log for the Liquibase output of changeset "
+            "collections-001-2 (a precondition that errored, for example its duplicate counter, is skipped and retried at "
+            "every boot, never halted; the client cannot tell the two apart), and for an index build that was refused. Fix "
+            "what the log names and restart the engine; no other step applies the index",
         ],
     )

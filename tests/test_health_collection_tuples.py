@@ -296,3 +296,22 @@ def test_the_unexplained_row_stays_when_no_reown_entry_no_restart_and_no_rdr229_
 def test_a_duplicate_still_wins_over_a_pending_restart() -> None:
     rows = check_collection_tuples([_row("docs__a"), _row("docs__b")], engine_status=_status(False, [_RESTART]))
     assert [r.label for r in rows] == [LABEL]
+
+
+# ── after the moves finish, before the first restart (nexus-p2m1x.48) ─────────────────────────────────────────────────
+# marginalia's cold install of engine-service-v0.1.202: boot 1 skips collections-001-2 (the re-own move was still running
+# at the Liquibase walk), every RDR-229 move then completes and boot_work is [] at every capture, and rdr229-restart is
+# never posted (every P3.5b changeset applied at boot 1). Boot 2 builds the index. In that window the row stays a warning
+# but names the restart; the boot log is the second suggestion, for an index still absent after a restart.
+
+
+def test_the_window_between_the_moves_finishing_and_the_first_restart_says_the_engine_builds_the_index_at_its_next_start() -> None:
+    from nexus.corpus import _SERVICE_RESTART_COMMAND  # the command nx doctor names elsewhere (health.py bge-degraded row)
+
+    (r,) = _wait_rows([_row("docs__a")], _status(False, []))  # boot2-pre-restart: index absent, boot_work [], no duplicate
+
+    assert r.ok is False and r.warn is True and r.fatal is False
+    assert "next start" in r.detail and "waits for a reason nothing here names" not in r.detail
+    assert _SERVICE_RESTART_COMMAND in r.fix_suggestions[0]
+    assert "boot log" in r.fix_suggestions[1] and "collections-001-2" in r.fix_suggestions[1]
+    assert "still absent after a restart" in r.fix_suggestions[1]
