@@ -21,7 +21,7 @@ from __future__ import annotations
 import shlex
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 import structlog
 
@@ -168,6 +168,33 @@ def stale_rows(rows: Iterable[dict], profile: dict[str, str]) -> list[dict]:
     return sorted(out, key=lambda r: str(r.get("name", "")))
 
 
+def rows_by_label(rows: Iterable[dict]) -> dict[str, list[dict]]:
+    """Registry rows grouped by label: a label can name several (a rename's retired row beside a current one)."""
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(str(r.get("name")), []).append(r)
+    return out
+
+
+def pick_row(
+    rows_by_name: Mapping[str, dict | list[dict]], name: str, *, superseded_by: str | None = None,
+) -> dict | None:
+    """The row to judge for *name*: with *superseded_by*, the row superseded by that collection (a kept source);
+    otherwise the current (non-superseded) one, else the first. ``None`` when *name* has no row."""
+    found = rows_by_name.get(name)
+    if found is None:
+        return None
+    candidates_ = [found] if isinstance(found, dict) else list(found)
+    if superseded_by is not None:
+        for r in candidates_:
+            if r.get("superseded_by") == superseded_by:
+                return r
+    for r in candidates_:
+        if not is_superseded(r):
+            return r
+    return candidates_[0] if candidates_ else None
+
+
 @dataclass(frozen=True)
 class Reentry:
     """A source a ``kept_tombstoned`` job left superseded, listed again as that job's re-entry (not a new job).
@@ -192,23 +219,24 @@ class Candidates:
     skipped_reentries: list[tuple[Reentry, str]] = field(default_factory=list)
 
 
-def target_unusable(job: dict, rows_by_name: dict[str, dict]) -> str | None:
+def target_unusable(job: dict, rows_by_name: Mapping[str, dict | list[dict]]) -> str | None:
     """Why *job*'s target can no longer take a re-entry, or None when it can.
 
-    ``its target B is retired`` when B's registry row is superseded or its lifecycle state is ``retired``;
-    ``its target B is not registered`` when B has no row. The engine refuses the re-entry in both cases."""
+    ``its target B is retired`` when B's registry row is superseded (a retired row is a superseded one: the
+    lifecycle states are live, quarantine, dormant and disputed); ``its target B is not registered`` when B has no
+    row. A label with several rows (a rename leaves a retired row under the old name) is judged by its current one. The engine refuses the re-entry in both cases."""
     target = str(job.get("target_collection"))
-    row = rows_by_name.get(target)
+    row = pick_row(rows_by_name, target)
     if row is None:
         return f"its target {target} is not registered"
-    if is_superseded(row) or row.get("lifecycle_state") == "retired":
+    if is_superseded(row):
         return f"its target {target} is retired"
     return None
 
 
 def reentry_candidates(
     jobs: Iterable[dict],
-    rows_by_name: dict[str, dict],
+    rows_by_name: Mapping[str, dict | list[dict]],
     live_docs: Callable[[str], int],
     all_docs: Callable[[str], int],
 ) -> list[Reentry]:
@@ -230,7 +258,7 @@ def reentry_candidates(
     for source, job in newest.items():
         if job.get("state") != "done" or job.get("disposition") != "kept_tombstoned" or source in locked:
             continue
-        row = rows_by_name.get(source)
+        row = pick_row(rows_by_name, source, superseded_by=job.get("target_collection"))
         if row is None or row.get("superseded_by") != job.get("target_collection"):
             continue
         if live_docs(source) > 0:
@@ -264,7 +292,7 @@ def candidates(
     for row in stale_rows(rows, profile):
         job = holder.get(str(row.get("name")))
         (result.held.append((row, job)) if job is not None else result.stale.append(row))
-    by_name = {str(r.get("name")): r for r in rows}
+    by_name = rows_by_label(rows)
     for entry in reentry_candidates(jobs, by_name, live_docs, all_docs):
         why = target_unusable(entry.job, by_name)
         if why is None:
@@ -498,6 +526,25 @@ class OffProfile:
     unjudged: list[dict] = field(default_factory=list)
     unread: str = ""
     held: dict[str, dict] = field(default_factory=dict)
+    #: Name of each superseded source that holds a live document again but whose kept job cannot be re-entered (its
+    #: target is retired or gone), to the reason. Still off-profile: ``--all`` skips it, so only the doctor can say so.
+    blocked: dict[str, str] = field(default_factory=dict)
+
+
+def blocked_report(verdict: OffProfile, name_list: Callable[[list[str]], str]) -> tuple[list[str], list[str]]:
+    """The doctor's ``(detail parts, fix suggestions)`` for the restored sources ``--all`` skips, ``([], [])`` for none.
+
+    Their kept job cannot be re-entered (the engine refuses it: its target is retired or gone), so the re-entry remedy
+    the doctor gives other restored sources cannot work. They are named with the reason, under another remedy."""
+    named = sorted(f"{r.get('name')} ({verdict.blocked[str(r.get('name'))]})" for r in verdict.rows if str(r.get("name")) in verdict.blocked)
+    if not named:
+        return [], []
+    return (
+        [f"{len(named)} superseded source(s) hold a live document again but the kept job cannot be re-entered, so "
+         f"re-embed --all skips them: {name_list(named)}"],
+        ["rebuild the source(s) from their files under the current profile: nx collection reindex <name> "
+         "(nx index repo for a code collection)"],
+    )
 
 
 def off_profile_rows(
@@ -563,8 +610,12 @@ def judge_off_profile_rows(
         return OffProfile(stale_rows(rows, profile), unjudged, unread)
     out = list(found.stale) + [row for row, _job in found.held]
     out += [r.source_row for r in found.reentries if r.kind == "running"]
+    # A running re-entry the engine would refuse (its target is retired or gone) is still a live document nothing
+    # serves: it stays off-profile, with the reason, so the doctor and the hint do not lose it when --all skips it.
+    blocked = {str(r.source_row.get("name")): why for r, why in found.skipped_reentries if r.kind == "running"}
+    out += [r.source_row for r, _why in found.skipped_reentries if r.kind == "running"]
     held = {str(row.get("name")): job for row, job in found.held}
-    return OffProfile(sorted(out, key=lambda r: str(r.get("name", ""))), held=held)
+    return OffProfile(sorted(out, key=lambda r: str(r.get("name", ""))), held=held, blocked=blocked)
 
 
 def local_jobs() -> list[dict]:

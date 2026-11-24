@@ -25,7 +25,6 @@ def runner() -> CliRunner:
 class TestReentrySkip:
     @pytest.mark.parametrize(("target_row", "why"), [
         ("superseded", f"its target {KEPT_TGT} is retired"),
-        ("retired", f"its target {KEPT_TGT} is retired"),
         (None, f"its target {KEPT_TGT} is not registered"),
     ])
     def test_a_reentry_whose_target_is_retired_or_gone_is_skipped_with_one_line_and_not_sent(
@@ -39,15 +38,27 @@ class TestReentrySkip:
         assert result.exit_code == 0, result.output
         db.reembed_reenter.assert_not_called()
         lines = [ln for ln in result.output.splitlines() if "not re-entered" in ln]
-        assert lines == [f"{KEPT_SRC}: not re-entered: {why}"], result.output
+        assert len(lines) == 1 and lines[0].startswith(f"{KEPT_SRC}: not re-entered: {why}; "), result.output
         assert "re-entry of job" not in result.output, "it is not offered as a re-entry either"
+
+    def test_the_skip_line_names_a_remedy_that_exists_for_each_kind_of_re_entry(self, runner):
+        """A cutover re-entry holds no document (the job would only delete the source); a running one holds a live
+        document the job would have moved. The remedies are commands that exist."""
+        for live, total, kind, remedy in [
+            (0, 0, "cutover", f"`nx collection delete {KEPT_SRC}`"),
+            (1, 2, "running", f"`nx collection reindex {KEPT_SRC}`"),
+        ]:
+            jobs, cat = _kept_tombstoned_world(live=live, total=total, target_row="superseded")
+            result = _invoke(runner, _engine(jobs=jobs), cat, ["--all"])
+            (line,) = [ln for ln in result.output.splitlines() if "not re-entered" in ln]
+            assert remedy in line, (kind, line)
 
     def test_a_dry_run_names_the_skip_not_a_reentry(self, runner):
         jobs, cat = _kept_tombstoned_world(target_row="superseded")
         db = _engine(jobs=jobs)
         result = _invoke(runner, db, cat, ["--all"])
         assert result.exit_code == 0, result.output
-        assert f"{KEPT_SRC}: not re-entered: its target {KEPT_TGT} is retired" in result.output
+        assert f"{KEPT_SRC}: not re-entered: its target {KEPT_TGT} is retired; " in result.output
         assert "would be re-entered" not in result.output
 
     def test_a_skipped_reentry_is_still_a_name_skip_may_use(self, runner):

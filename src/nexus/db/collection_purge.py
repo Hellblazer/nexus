@@ -16,6 +16,7 @@ environment (no catalog, no daemon) still deletes what it can.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import structlog
@@ -54,7 +55,7 @@ class CascadeCounts:
     #: timed out): the delete is UNCONFIRMED, not merely missing derived rows.
     #: Callers must not report the collection as deleted (nexus-oq5gd).
     service_delete_failed: bool = False
-    #: ``{"collection", "job_id", "message"}`` when the engine refused the delete with 409 ``collection_busy``:
+    #: ``{"collection", "job_id", "message", "state"}`` (``state`` is "" when the engine's text did not name one) when the engine refused the delete with 409 ``collection_busy``:
     #: a re-embed job in a non-terminal state holds the collection, and nothing was removed (RDR-229 P3.5a row 14,
     #: engine 0.1.202). Set with ``service_delete_failed``; a caller that can say why reads this one.
     collection_busy: dict[str, str] | None = None
@@ -62,7 +63,7 @@ class CascadeCounts:
 
 
 def collection_busy_of(exc: BaseException, name: str) -> dict[str, str] | None:
-    """The engine's 409 ``collection_busy`` answer to a delete, as ``{collection, job_id, message}``, else None.
+    """The engine's 409 ``collection_busy`` answer to a delete, as ``{collection, job_id, message, state}``, else None.
 
     The catalog client raises ``httpx.HTTPStatusError`` and the vector client ``VectorServiceError``; both carry the
     decoded body, so the answer is read by its ``reason``, never by the status alone (a 409 is also the
@@ -81,10 +82,20 @@ def collection_busy_of(exc: BaseException, name: str) -> dict[str, str] | None:
     if status != 409 or not isinstance(body, dict) or error_reason(body) != COLLECTION_BUSY_REASON:
         return None
     job_id = body.get("job_id")
+    message = str(body.get("error") or "")
+    # The body has no state field (engine 0.1.202); its text reads "...: re-embed job <id> (<state>) is moving documents
+    # from A to B. Abort or finish the job first." The state is read from that only when it is one the fence holds.
+    from nexus.reembed_job import LOCK_STATES  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    state = body.get("state")
+    if not isinstance(state, str) or state not in LOCK_STATES:
+        found = re.search(r"re-embed job \S+ \((\w+)\) is moving", message)
+        state = found.group(1) if found and found.group(1) in LOCK_STATES else ""
     return {
         "collection": str(body.get("collection") or name),
         "job_id": str(job_id) if job_id else "",
-        "message": str(body.get("error") or ""),
+        "message": message,
+        "state": state,
     }
 
 

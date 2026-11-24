@@ -10310,7 +10310,7 @@ def _check_embedding_profile() -> list[HealthResult]:
     # ``re-embed --keep-source`` this row clears with the hint (a superseded source is not drift, except one a
     # restore put a live document back in).
     from nexus.config import is_local_mode  # noqa: PLC0415 — deferred: patched in tests at the module attribute
-    from nexus.reembed_job import is_superseded, judge_off_profile_collections  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.reembed_job import blocked_report, is_superseded, judge_off_profile_collections  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     profile_model = {str(ct): str(prow["embedding_model"]) for ct, prow in by_ct.items()}
     verdict = judge_off_profile_collections(reader, rows=rows, profile=profile_model, read_jobs=True)
@@ -10328,14 +10328,12 @@ def _check_embedding_profile() -> list[HealthResult]:
     live_rows = [r for r in verdict.rows if not is_superseded(r)]
     stale = sorted(_off(r) for r in live_rows if str(r.get("name")) not in verdict.held)
     held = sorted(_held(r) for r in live_rows if str(r.get("name")) in verdict.held)
-    restored = sorted(_off(r) for r in verdict.rows if is_superseded(r))
+    restored = sorted(_off(r) for r in verdict.rows if is_superseded(r) and str(r.get("name")) not in verdict.blocked)
+    blocked_part, blocked_fix = blocked_report(verdict, _name_list)  # restored sources whose kept job cannot be re-entered
     # nexus-s08oe: with the job table (or the counts) unread the superseded rows were not judged. Say so rather
     # than let a clean 'none' stand over rows nobody looked at.
-    not_judged = (
-        f"superseded sources not judged ({verdict.unread} unread): {len(verdict.unjudged)} superseded collection(s) skipped"
-        if verdict.unjudged else ""
-    )
-    if stale or held or restored:
+    not_judged = f"superseded sources not judged ({verdict.unread} unread): {len(verdict.unjudged)} superseded collection(s) skipped" if verdict.unjudged else ""
+    if stale or held or restored or blocked_part:
         parts: list[str] = []
         fixes: list[str] = []
         if stale:
@@ -10361,6 +10359,8 @@ def _check_embedding_profile() -> list[HealthResult]:
                 f"until a re-embed moves it): {_name_list(restored)}"
             )
             fixes.append("move the restored document(s) with the kept job's re-entry: nx collection re-embed --all")
+        parts.extend(blocked_part)
+        fixes.extend(blocked_fix)
         if not_judged:
             parts.append(not_judged)
         results.append(HealthResult(
