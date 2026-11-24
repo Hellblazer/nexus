@@ -1671,7 +1671,8 @@ while the engine serves:
     run. P3.1 builds the counts; the reader contract for a tombstone that
     names no successor is split: P3.5c's part (its bullet) is not yet on
     the stack, and the `RETIRED_NO_SUCCESSOR` marker and its typed client
-    error move to the next cut (Sam, "Split"; T2 `229-research-328`).
+    error move to the next cut (bead nexus-p2m1x.25; Sam, "Split"; T2
+    `229-research-328`).
 
     The check is not read only at boot. The move worker knows in process
     when a move completes: the completion transaction sets `completed_at`
@@ -2828,7 +2829,7 @@ its acceptance is that test green plus the census pin it lowers.
   completion check, which reports in its own `rdr229_completion` field,
   with the read set and gates later releases extend (item 6, "Readers
   during the stamp"); and R7's pre-flight counts, with the reader contract
-  split between P3.5c and the next cut. Test: an upgrade
+  split between P3.5c and the next cut (bead nexus-p2m1x.25). Test: an upgrade
   boot registers the move and rewrites no row of a large table; a killed run
   resumes from its last committed batch; an insert and an update without the
   id are refused; a name-path rename gives every rewritten row, and the
@@ -3100,7 +3101,9 @@ its acceptance is that test green plus the census pin it lowers.
     label-addressed read of such a tombstone, which refuses with today's
     409 `collection_superseded` body; and one test per reader class. None of
     this is on the stack yet. The `RETIRED_NO_SUCCESSOR` marker on the wire
-    and its typed client error move to the next cut. P3.1 builds only R7's
+    and its typed client error move to the next cut: a paired wire change
+    for the cut after 0.1.202 / 8.5.6, owner elsinore, recorded on bead
+    nexus-p2m1x.25 (comment of 2026-11-24 04:53 UTC). P3.1 builds only R7's
     pre-flight counts and the doctor's listing queries (item 6).
 - P3.6 Label rule, after P2.9 and P2.10: partial UNIQUE on live `(tenant_id, name)`;
   `validate_collection_name` becomes the label rule (item 7). Test: a
