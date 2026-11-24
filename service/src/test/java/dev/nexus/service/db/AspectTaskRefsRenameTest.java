@@ -778,4 +778,66 @@ class AspectTaskRefsRenameTest {
             List.of(Map.of("doc_id", docId, "rows", rows)), Map.of(docId, order)).response();
         assertThat((List<?>) response.get("failed_doc_ids")).as("move of " + docId).isEmpty();
     }
+
+    /**
+     * A delete by id against a claim-fenced aspect write of the same collection (RDR-229 P3.5a row 14, B1): the writer holds its task row
+     * and then wants the collection's registry row FOR KEY SHARE. The delete takes the collection's task rows BEFORE the registry row, so it
+     * waits on the task row holding nothing, the writer's key share is granted, and both finish. A delete that held the registry row FOR UPDATE
+     * first and then waited for the task row would close a cycle with the writer (40P01, which the deadlock retry would turn into a clean
+     * answer): the retry listener is what shows none happened.
+     */
+    @Test
+    void aDeleteById_againstAClaimFencedAspectWrite_takesTheTaskRowsBeforeTheRegistryRow_andNeitherDeadlocks() throws Exception {
+        String tenant = freshTenant("delete-lock-order");
+        String a = coll("dlo");
+        register(tenant, a);
+        long id = su(ctx -> CollectionIds.require(ctx, tenant, a));
+        outTask(tenant, a, "1.9.1");
+        var claimed = tuples.inp(tenant, "aspects", Map.of("queue", "aspects"), WORKER, 600L).orElseThrow();
+
+        List<String> retries = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DeadlockRetry.setRetryListenerForTests(retries::add);
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CompletableFuture<Void> writer = CompletableFuture.runAsync(() -> scope.withTenant(tenant, ctx -> {
+                ctx.select(TUPLES.ID).from(TUPLES)
+                    .where(TUPLES.TENANT_ID.eq(tenant)).and(TUPLES.CLAIM_ID.eq(claimed.claimId())).forUpdate().fetch();
+                locked.countDown();
+                try {
+                    assertThat(release.await(30, TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException e) {
+                    throw new IllegalStateException(e);
+                }
+                // the fenced write's registry read, after its task row
+                ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).forKeyShare().fetch();
+                return null;
+            }), pool);
+            assertThat(locked.await(30, TimeUnit.SECONDS)).as("the writer holds the task row").isTrue();
+
+            CompletableFuture<Map<String, Integer>> delete =
+                CompletableFuture.supplyAsync(() -> catalog.deleteCollectionById(tenant, a, id, false), pool);
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%no key update%"))
+                .as("the delete is waiting on the task row").isTrue();
+            assertThat(delete.isDone()).as("the delete is blocked behind the writer").isFalse();
+            release.countDown();
+
+            writer.get(30, TimeUnit.SECONDS);
+            Map<String, Integer> counts = delete.get(30, TimeUnit.SECONDS);
+
+            assertThat(counts).as("the delete answered").isNotNull();
+            int tasks = su(ctx -> ctx.fetchCount(TUPLES, TUPLES.TENANT_ID.eq(tenant).and(TUPLES.SUBSPACE.eq("aspects"))));
+            assertThat(tasks).as("the collection's task went with it").isZero();
+            boolean registered = su(ctx -> ctx.fetchExists(CATALOG_COLLECTIONS,
+                CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id))));
+            assertThat(registered).as("the collection is gone").isFalse();
+            assertThat(retries).as("no 40P01: the deadlock retry never ran for this delete")
+                .noneMatch(c -> c.contains("catalog.deleteCollection"));
+        } finally {
+            DeadlockRetry.setRetryListenerForTests(null);
+            pool.shutdownNow();
+        }
+    }
 }
