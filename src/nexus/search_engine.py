@@ -46,10 +46,7 @@ from nexus.db.http_vector_client import (
     per_collection_route_enabled,
     route_lexical_enabled,
 )
-from nexus.errors import (
-    SearchEmbeddingProfileMismatchError,
-    is_embedding_profile_mismatch_error_text,
-)
+from nexus.errors import SearchEmbeddingProfileMismatchError, is_embedding_profile_mismatch_error_text
 from nexus.topic_route import TopicRouteTally, is_prose, unrouted_reason
 from nexus.topic_route import validate as validate_topic_route
 from nexus.types import SearchResult
@@ -1376,7 +1373,13 @@ def _is_permanent_poisoning_error(exc: VectorServiceError) -> bool:
     dimension mismatch as for other bad-request shapes, and ``code`` is
     ``None`` for every transport-level failure regardless of cause.
     """
-    return "dim" in str(exc).lower()
+    return not isinstance(exc, RetiredNoSuccessorError) and "dim" in str(exc).lower()  # its text names a collection, which may contain "dim"
+
+
+def _failed_part(col: str, exc: VectorServiceError) -> dict:
+    """A failed part; a retired collection's own ``error_kind`` keeps the merge from reading "dim" out of its name."""
+    kind = {"error_kind": "collection_retired"} if isinstance(exc, RetiredNoSuccessorError) else {}
+    return {"col": col, "error": str(exc), **kind}
 
 
 # nexus-vply6 fix round 2: the marker + text classifier moved to
@@ -1851,7 +1854,7 @@ def search_cross_corpus(
                                            where=effective_where, sensitivity=sensitivity, **chash_kw)
         except SensitivityExcludeUnavailable:
             raise  # RDR-243 review r1 F5: a refusal is not a lexical-leg failure, and `retry without --lexical` would be wrong advice
-        except (VectorServiceError, RetiredNoSuccessorError) as lex_exc:
+        except VectorServiceError as lex_exc:
             raise LexicalLegUnavailableError(
                 f"the lexical leg failed for {cols}: {lex_exc}. Refusing "
                 "rather than returning vector-only rows, which would look "
@@ -1942,8 +1945,7 @@ def search_cross_corpus(
             # collection, so it is not one collection's failure to isolate, and a per-collection fallback
             # would re-probe and could return a partial result that looks complete.
             raise
-        except (VectorServiceError, RetiredNoSuccessorError) as exc:
-            # RDR-229 R7: a batched request naming one retired, successor-less label is refused whole (409); the per-collection fallback below serves the rest.
+        except VectorServiceError as exc:
             # nexus-pebfx.8 / nexus-9tsdf (nexus-d9xt2 follow-on): one
             # unservable collection in the batch (embedding-space mismatch,
             # or a stale orphaned dimension-mismatched collection) fails
@@ -1958,9 +1960,9 @@ def search_cross_corpus(
                 # timeout) is retried normally on the next call instead
                 # of being permanently downgraded to singleton-only
                 # batching.
-                if isinstance(exc, VectorServiceError) and _is_permanent_poisoning_error(exc):
+                if _is_permanent_poisoning_error(exc):
                     _record_poisoned_collection(cols[0], exc)
-                return [{"col": cols[0], "error": str(exc)}]
+                return [_failed_part(cols[0], exc)]
             # nexus-d9xt2 review/critique fold-in: resubmit the per-
             # collection fallback to a bounded worker pool instead of a
             # plain serial loop. A serial loop here runs INSIDE the one
@@ -2226,8 +2228,8 @@ def search_cross_corpus(
             return None
         except SensitivityExcludeUnavailable:
             raise  # RDR-243 review r1 F5: a refused read is not this group's failure
-        except (VectorServiceError, RetiredNoSuccessorError) as exc:
-            if allow_split and len(group) > 1 and isinstance(exc, VectorServiceError) and _is_mixed_model_error(exc):
+        except VectorServiceError as exc:
+            if allow_split and len(group) > 1 and _is_mixed_model_error(exc):
                 _log.warning(
                     "search_per_collection_mixed_model_group",
                     collections=len(group),
@@ -2237,7 +2239,7 @@ def search_cross_corpus(
                 )
                 _record_mixed_model_group(group)
                 return _split_per_collection()
-            return [{"col": c, "error": str(exc)} for c in group]
+            return [_failed_part(c, exc) for c in group]
         if envelope is None:
             return None
 
