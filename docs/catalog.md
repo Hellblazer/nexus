@@ -201,7 +201,7 @@ Conventional `created_by` values:
 - `rdr_dependency_extractor` — the indexer hook read `supersedes`, `superseded_by`, `parent_rdr` and `related_rdrs` off RDR frontmatter
 - `content_hash_dedup` — emitted `same-as` between documents with identical content
 - `dt_similar`, `dt_link` — `relates` edges from DEVONthink's See Also and its record links (`nx dt index`)
-- `code_rdr_heuristic` — looser pass; emitted `implements-heuristic` on path/symbol substring match. Legacy: the pass was turned off at engine v0.1.57 (nexus-ybj1b) and nothing writes the type now; existing edges remain and graph traversal excludes them by default (nexus-6ppk)
+- `index_hook` — the looser indexer pass; emitted `implements-heuristic` (code to RDR) on a path or module-name match. Legacy: the pass was turned off at engine v0.1.57 (nexus-ybj1b) and nothing writes the type now; existing edges remain and graph traversal excludes them by default (nexus-6ppk)
 - `user` — authored via `nx catalog link` (or the MCP `link` tool)
 - `auto-linker` — created at storage time from T1 link-context (RDR-053 storage-boundary auto-linker)
 
@@ -527,7 +527,7 @@ Repairs `document_chunks` manifest gaps left by a persistently-failed manifest-w
 ### Bulk operations
 
 ```bash
-nx catalog link-bulk-delete --type implements-heuristic --created-by indexer --dry-run   # clears the legacy heuristic edges
+nx catalog link-bulk-delete --type implements-heuristic --created-by index_hook --dry-run   # clears the legacy heuristic edges
 ```
 
 Preview and bulk-delete links by type and/or creator. Always use `--dry-run` first.
