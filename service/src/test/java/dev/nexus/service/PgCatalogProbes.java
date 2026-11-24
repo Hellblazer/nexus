@@ -558,12 +558,26 @@ public final class PgCatalogProbes {
      * routine exists. Same single-overload caveat as {@link #routineSecurityDefiner}.
      */
     public static RoutineConfigAndSource routineConfigAndSource(DSLContext ctx, String schema, String name) {
+        return routineConfigAndSource(ctx, schema, name, DSL.noCondition());
+    }
+
+    /**
+     * As {@link #routineConfigAndSource(DSLContext, String, String)} for the overload that takes {@code arguments} arguments: a name
+     * with two overloads (vectors-084's taxonomy_ann_query_&lt;dim&gt; beside the text-signature one) is not a single-overload routine.
+     */
+    public static RoutineConfigAndSource routineConfigAndSource(DSLContext ctx, String schema, String name, int arguments) {
+        return routineConfigAndSource(ctx, schema, name,
+            DSL.field(DSL.name("p", "pronargs"), Integer.class).eq(arguments));
+    }
+
+    private static RoutineConfigAndSource routineConfigAndSource(DSLContext ctx, String schema, String name, org.jooq.Condition more) {
         Field<String[]> proconfig = DSL.field(DSL.name("p", "proconfig"), String[].class);
         Field<String> prosrc = DSL.field(DSL.name("p", "prosrc"), String.class);
         Record r = ctx.select(proconfig, prosrc)
             .from(pgProcJoined())
             .where(routineIn(schema))
             .and(DSL.field(DSL.name("p", "proname"), String.class).eq(name))
+            .and(more)
             .fetchOne();
         if (r == null) {
             return null;

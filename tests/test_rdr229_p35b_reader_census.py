@@ -203,11 +203,12 @@ def test_after_p35b_a_form_a_object_reads_no_name_but_the_label_or_a_writers_sta
 
 
 _P35B_FILES = (_REPO / "service" / "src" / "main" / "resources" / "db" / "changelog" / "vectors-077-rdr229-p35b-readers-both.xml",
-               _REPO / "service" / "src" / "main" / "resources" / "db" / "changelog" / "vectors-078-rdr229-p35b-readers-continue.xml")
+               _REPO / "service" / "src" / "main" / "resources" / "db" / "changelog" / "vectors-078-rdr229-p35b-readers-continue.xml",
+               _REPO / "service" / "src" / "main" / "resources" / "db" / "changelog" / "vectors-084-rdr229-ann-query-by-id.xml")
 
 
 def _redefined_by_p35b() -> set[tuple[str, str]]:
-    """(kind, object) of every function, view and trigger vectors-077 or vectors-078 creates or replaces, comments stripped."""
+    """(kind, object) of every function, view and trigger vectors-077, 078 or 084 creates or replaces, comments stripped."""
     out: set[tuple[str, str]] = set()
     for f in _P35B_FILES:
         text = re.sub(r"<!--.*?-->", "", f.read_text(), flags=re.S)

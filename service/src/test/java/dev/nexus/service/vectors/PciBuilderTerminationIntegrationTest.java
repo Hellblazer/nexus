@@ -677,7 +677,7 @@ class PciBuilderTerminationIntegrationTest {
      */
     /**
      * The self-retrying changesets a fresh walk leaves pending: aspects-005-2 and collections-001-2 wait for their data moves, and
-     * RDR-229 P3.5b's twelve CONTINUE-gated vectors-078 changesets wait for the stamp moves, read from the shipped list
+     * RDR-229 P3.5b's CONTINUE-gated vectors-078 and vectors-084 changesets wait for the stamp moves, read from the shipped list
      * ({@code dev.nexus.service.P35bContinueChangesets}), never typed here.
      */
     static final java.util.Set<String> SELF_RETRYING = selfRetrying();
@@ -687,7 +687,7 @@ class PciBuilderTerminationIntegrationTest {
             "db/changelog/aspects-005-retire-aspect-queue-table.xml::aspects-005-2",
             "db/changelog/collections-001-tuple-unique-index.xml::collections-001-2"));
         for (String id : dev.nexus.service.P35bContinueChangesets.ids()) {
-            ids.add("db/changelog/vectors-078-rdr229-p35b-readers-continue.xml::" + id);
+            ids.add(dev.nexus.service.P35bContinueChangesets.file(id) + "::" + id);
         }
         return java.util.Set.copyOf(ids);
     }

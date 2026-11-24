@@ -279,7 +279,8 @@ class GrantsNexusSvcUpgradeIntegrationTest {
                 "db/changelog/collections-002-collection-id-seq-heal-function.xml",
                 "db/changelog/collections-003-tuple-lock-stripes.xml",
                 "db/changelog/vectors-077-rdr229-p35b-readers-both.xml",
-                "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml")) {
+                "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml",
+                "db/changelog/vectors-084-rdr229-ann-query-by-id.xml")) {
             if (!stripped.contains(unborn)) {
                 stripped.add(unborn);
             }

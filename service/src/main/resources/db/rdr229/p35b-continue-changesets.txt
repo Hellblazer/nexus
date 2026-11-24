@@ -1,6 +1,6 @@
-# RDR-229 P3.5b (nexus-p2m1x.24): the CONTINUE-gated changesets of vectors-078-rdr229-p35b-readers-continue.xml.
+# RDR-229 P3.5b (nexus-p2m1x.24): the CONTINUE-gated changesets of vectors-078-rdr229-p35b-readers-continue.xml and vectors-084-rdr229-ann-query-by-id.xml.
 # P3.7's one-row rename waits until every id here is in databasechangelog (an empty or missing list is refused).
-# Kept equal to the file by tests/test_rdr229_p35b_continue_list.py.
+# Kept equal to the two files by tests/test_rdr229_p35b_continue_list.py.
 vectors-078-1
 vectors-078-2
 vectors-078-3
@@ -13,3 +13,6 @@ vectors-078-11
 vectors-078-13
 vectors-078-14
 vectors-078-15
+vectors-084-1
+vectors-084-2
+vectors-084-3
