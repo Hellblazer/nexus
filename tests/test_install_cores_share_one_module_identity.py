@@ -36,6 +36,11 @@ def test_the_package_world_shares_one_layout_core() -> None:
     assert census_core._sibling_layout() is package_layout
     assert gc_core._census() is census_core
     assert shims_core._layout() is package_layout
+    # The lease's gc half is reached the same way, from the two cores that use it.
+    from nexus._install import generation_core, lease_core
+
+    assert gc_core._lease() is lease_core
+    assert generation_core._lease() is lease_core
 
 
 def test_the_package_world_shares_one_error_class() -> None:
@@ -60,6 +65,10 @@ layout_via_gc = gc["_layout"]()
 census_via_gc = gc["_census"]()
 layout_via_census = census_via_gc._sibling_layout()
 layout_via_shims = shims["_layout"]()
+gen = runpy.run_path({str(_INSTALL / "generation_core.py")!r}, run_name="gen_probe")
+lease_via_gc = gc["_lease"]()
+assert lease_via_gc is gen["_lease"](), "generation_core loaded its own lease_core"
+assert lease_via_gc is gc["_lease"](), "lease_core is not cached"
 assert layout_via_gc is layout_via_census, "two layout_core objects at bootstrap"
 assert layout_via_gc is layout_via_shims, "shims_core loaded its own layout_core"
 assert layout_via_gc.LayoutError is layout_via_census.LayoutError
