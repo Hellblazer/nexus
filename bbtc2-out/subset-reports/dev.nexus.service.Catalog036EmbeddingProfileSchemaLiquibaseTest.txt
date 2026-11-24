@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.Catalog036EmbeddingProfileSchemaLiquibaseTest
+-------------------------------------------------------------------------------
+Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 6.036 s -- in dev.nexus.service.Catalog036EmbeddingProfileSchemaLiquibaseTest

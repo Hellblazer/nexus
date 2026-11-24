@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.Catalog046ManifestSectionLabelsSchemaLiquibaseTest
+-------------------------------------------------------------------------------
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 4.342 s -- in dev.nexus.service.Catalog046ManifestSectionLabelsSchemaLiquibaseTest

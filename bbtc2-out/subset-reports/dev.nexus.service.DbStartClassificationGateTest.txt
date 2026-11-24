@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.DbStartClassificationGateTest
+-------------------------------------------------------------------------------
+Tests run: 8, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.072 s -- in dev.nexus.service.DbStartClassificationGateTest

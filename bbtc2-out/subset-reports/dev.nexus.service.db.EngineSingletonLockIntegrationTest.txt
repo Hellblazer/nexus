@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.db.EngineSingletonLockIntegrationTest
+-------------------------------------------------------------------------------
+Tests run: 25, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 4.472 s -- in dev.nexus.service.db.EngineSingletonLockIntegrationTest

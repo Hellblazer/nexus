@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.CatalogRepositoryTest
+-------------------------------------------------------------------------------
+Tests run: 219, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 8.272 s -- in dev.nexus.service.CatalogRepositoryTest

@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.vectors.OrtShutdownSafetyTest
+-------------------------------------------------------------------------------
+Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 33.72 s -- in dev.nexus.service.vectors.OrtShutdownSafetyTest

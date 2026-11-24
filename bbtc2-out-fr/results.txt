@@ -1,0 +1,5 @@
+F1 applied=1
+F1 exit=1 [ERROR] Tests run: 4, Failures: 1, Errors: 0, Skipped: 0
+    [ERROR]   HnswServingGucParityTest.everyFetchingTenantBlockBoundsItsStatementsFirst:219 [withTenant blocks that fetch (exactSelectFrom/.selectFrom(fn)) without first calling both PgSession.setSearchStatementTimeout (nexus-g17tf) and PgSession.setSearchPlanCacheMode (nexus-6nkn3)] 
+F1 restored same=True
+falsify done

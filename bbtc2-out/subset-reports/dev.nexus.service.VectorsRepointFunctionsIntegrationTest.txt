@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.VectorsRepointFunctionsIntegrationTest
+-------------------------------------------------------------------------------
+Tests run: 11, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 31.53 s -- in dev.nexus.service.VectorsRepointFunctionsIntegrationTest

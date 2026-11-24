@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.TaxonomyAssignCrossLateralHnswTest
+-------------------------------------------------------------------------------
+Tests run: 6, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 6.287 s -- in dev.nexus.service.TaxonomyAssignCrossLateralHnswTest

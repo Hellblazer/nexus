@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.CatalogDocumentSensitivityWriteRulesTest
+-------------------------------------------------------------------------------
+Tests run: 24, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.948 s -- in dev.nexus.service.CatalogDocumentSensitivityWriteRulesTest

@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.SchemaMigratorIntegrationTest
+-------------------------------------------------------------------------------
+Tests run: 25, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 55.31 s -- in dev.nexus.service.SchemaMigratorIntegrationTest

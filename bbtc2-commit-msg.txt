@@ -1,0 +1,28 @@
+perf(vectors): the shared lexical probe gathers gated rows with a parallel plan and skips the capped pre-statement (nexus-bbtc2)
+
+On a leaf where the trigram half names many candidates the by-collection
+probe's cost is the word_similarity recheck: for 'advisory lock' over
+413,938 rows the GIN bitmap takes 66 ms and names 39,575 candidates, the
+recheck (~200 us a 1,500-character row) takes ~7.5 s of 8.1 s, liveness
+0.16 s. No collection is dense there (most gated: 243 of 12,060), so no
+per-collection stop saves work; it can only be spread.
+
+text_gate_probe_by_collection_<dim> (vectors-060-1, edited in place,
+unpushed) now runs in two steps: an EXECUTE of constant text with USING
+gathers (collection, chash) of the gated rows into arrays, then the
+liveness EXISTS and the per-collection cap run over them. chunk_live_owners
+is parallel-unsafe, so it stays out of step 1; a static PL/pgSQL SELECT INTO
+is planned serially (7.7 s against 2.8 s as EXECUTE INTO); function-level
+parallel_setup_cost/parallel_tuple_cost/min_parallel_table_scan_size 0 and
+cpu_operator_cost 0.25 make the parallel bitmap heap scan the chosen plan.
+Rows identical to the 0db9112f8 body for D/C/E on the seeded leaf; D
+7.8 s -> 2.9 s, C and E unchanged (~0.14 / 0.11 s).
+
+runSharedProbe drops the capped text_gate_probe statement it ran first
+(5.1 s on D, and it decides nothing the per-collection answer does not);
+SharedLexicalProbe loses its SELECTIVE kind.
+
+chas lab-m, bbtc2_query_e --collections 120 --scale 6, 9 timed runs,
+median s (min-max), hybrid vs route: D 6.58 (6.27-7.09) vs 5.55
+(5.31-6.14); E 4.68 vs 3.74; C 4.50 vs 4.43. Engine subset 363 tests
+green; both identity falsifications red when applied.

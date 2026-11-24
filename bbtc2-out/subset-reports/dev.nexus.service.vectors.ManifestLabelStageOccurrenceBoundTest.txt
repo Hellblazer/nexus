@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.vectors.ManifestLabelStageOccurrenceBoundTest
+-------------------------------------------------------------------------------
+Tests run: 10, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 3.315 s -- in dev.nexus.service.vectors.ManifestLabelStageOccurrenceBoundTest

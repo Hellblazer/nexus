@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.http.CatalogHandlerLinksBatchRoutesTest
+-------------------------------------------------------------------------------
+Tests run: 9, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 10.35 s -- in dev.nexus.service.http.CatalogHandlerLinksBatchRoutesTest

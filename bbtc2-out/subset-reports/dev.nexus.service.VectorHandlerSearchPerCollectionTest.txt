@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.VectorHandlerSearchPerCollectionTest
+-------------------------------------------------------------------------------
+Tests run: 30, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 7.944 s -- in dev.nexus.service.VectorHandlerSearchPerCollectionTest

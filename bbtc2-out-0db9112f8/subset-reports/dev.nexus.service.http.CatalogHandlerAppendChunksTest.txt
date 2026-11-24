@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.http.CatalogHandlerAppendChunksTest
+-------------------------------------------------------------------------------
+Tests run: 31, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.408 s -- in dev.nexus.service.http.CatalogHandlerAppendChunksTest

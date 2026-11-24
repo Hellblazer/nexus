@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.CollectionRegistryFkTest
+-------------------------------------------------------------------------------
+Tests run: 37, Failures: 0, Errors: 0, Skipped: 6, Time elapsed: 1.363 s -- in dev.nexus.service.CollectionRegistryFkTest

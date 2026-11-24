@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.vectors.PgVectorRepositoryWherePlanTest
+-------------------------------------------------------------------------------
+Tests run: 33, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.009 s -- in dev.nexus.service.vectors.PgVectorRepositoryWherePlanTest

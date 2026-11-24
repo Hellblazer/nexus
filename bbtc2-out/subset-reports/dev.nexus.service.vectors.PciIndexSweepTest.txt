@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.vectors.PciIndexSweepTest
+-------------------------------------------------------------------------------
+Tests run: 42, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.126 s -- in dev.nexus.service.vectors.PciIndexSweepTest

@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.vectors.Rdr192LiveCExplainEvidenceIntegrationTest
+-------------------------------------------------------------------------------
+Tests run: 24, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 100.4 s -- in dev.nexus.service.vectors.Rdr192LiveCExplainEvidenceIntegrationTest

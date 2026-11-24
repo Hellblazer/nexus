@@ -1,0 +1,13 @@
+jar_exit=0
+harness_w2 exit=0
+== medians (timed runs)
+D  hybrid=6.220  route=5.235  vector=3.575  hybrid: route_call=3.360 slowest_lex_batch=0.961 batches=40  route: fanout_ms=4672 lex_sum_arm_ms=612 lex_slowest=19 vec_sum_arm_ms=12937 workers=['4'] shared_probe=['per_collection'] shared_probe_ms=3170  hybrid-route: fanout_ms=3334 vec_sum_arm_ms=12322
+E  hybrid=4.782  route=3.773  vector=3.473  hybrid: route_call=3.617 slowest_lex_batch=0.299 batches=40  route: fanout_ms=3657 lex_sum_arm_ms=179 lex_slowest=4 vec_sum_arm_ms=13161 workers=['4'] shared_probe=['per_collection'] shared_probe_ms=137  hybrid-route: fanout_ms=3590 vec_sum_arm_ms=13503
+C  hybrid=4.372  route=4.526  vector=3.736  hybrid: route_call=3.357 slowest_lex_batch=0.322 batches=40  route: fanout_ms=3973 lex_sum_arm_ms=541 lex_slowest=16 vec_sum_arm_ms=13292 workers=['4'] shared_probe=['per_collection'] shared_probe_ms=180  hybrid-route: fanout_ms=3326 vec_sum_arm_ms=12337
+[out] bbtc2-out-fr-m/w2.json
+harness_w0 exit=0
+== medians (timed runs)
+D  hybrid=6.590  route=9.950  vector=3.751  hybrid: route_call=3.727 slowest_lex_batch=1.010 batches=40  route: fanout_ms=9374 lex_sum_arm_ms=13751 lex_slowest=4447 vec_sum_arm_ms=13037 workers=['4'] shared_probe=['per_collection'] shared_probe_ms=8707  hybrid-route: fanout_ms=3701 vec_sum_arm_ms=13865
+E  hybrid=4.569  route=3.728  vector=3.558  hybrid: route_call=3.415 slowest_lex_batch=0.298 batches=40  route: fanout_ms=3605 lex_sum_arm_ms=194 lex_slowest=6 vec_sum_arm_ms=12978 workers=['4'] shared_probe=['per_collection'] shared_probe_ms=144  hybrid-route: fanout_ms=3378 vec_sum_arm_ms=12660
+C  hybrid=4.237  route=4.426  vector=3.320  hybrid: route_call=3.276 slowest_lex_batch=0.307 batches=40  route: fanout_ms=3888 lex_sum_arm_ms=577 lex_slowest=20 vec_sum_arm_ms=12773 workers=['4'] shared_probe=['per_collection'] shared_probe_ms=173  hybrid-route: fanout_ms=3243 vec_sum_arm_ms=12071
+[out] bbtc2-out-fr-m/w0.json

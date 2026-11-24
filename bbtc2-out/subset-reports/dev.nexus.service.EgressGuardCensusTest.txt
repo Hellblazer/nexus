@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.EgressGuardCensusTest
+-------------------------------------------------------------------------------
+Tests run: 34, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 3.076 s -- in dev.nexus.service.EgressGuardCensusTest

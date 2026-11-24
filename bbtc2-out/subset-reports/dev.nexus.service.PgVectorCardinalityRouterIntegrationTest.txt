@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.PgVectorCardinalityRouterIntegrationTest
+-------------------------------------------------------------------------------
+Tests run: 34, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 2.531 s -- in dev.nexus.service.PgVectorCardinalityRouterIntegrationTest

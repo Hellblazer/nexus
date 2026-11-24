@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.TelemetryRepositoryTest
+-------------------------------------------------------------------------------
+Tests run: 110, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.451 s -- in dev.nexus.service.TelemetryRepositoryTest

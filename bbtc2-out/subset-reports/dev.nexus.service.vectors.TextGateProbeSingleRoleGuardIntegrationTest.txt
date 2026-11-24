@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.vectors.TextGateProbeSingleRoleGuardIntegrationTest
+-------------------------------------------------------------------------------
+Tests run: 17, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 84.23 s -- in dev.nexus.service.vectors.TextGateProbeSingleRoleGuardIntegrationTest

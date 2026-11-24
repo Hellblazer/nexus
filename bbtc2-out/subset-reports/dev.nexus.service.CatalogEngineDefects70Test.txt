@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.CatalogEngineDefects70Test
+-------------------------------------------------------------------------------
+Tests run: 67, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.370 s -- in dev.nexus.service.CatalogEngineDefects70Test

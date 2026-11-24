@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.ManifestSearchShortPageIntegrationTest
+-------------------------------------------------------------------------------
+Tests run: 23, Failures: 0, Errors: 0, Skipped: 1, Time elapsed: 30.47 s -- in dev.nexus.service.ManifestSearchShortPageIntegrationTest

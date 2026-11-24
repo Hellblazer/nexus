@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: dev.nexus.service.Tk070P6aTtlDaysCountedDeleteTest
+-------------------------------------------------------------------------------
+Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.121 s -- in dev.nexus.service.Tk070P6aTtlDaysCountedDeleteTest

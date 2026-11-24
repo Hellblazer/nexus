@@ -1,0 +1,40 @@
+fix(vectors): the shared lexical probe takes its worker count from the engine, bounds its gather, and leaves the fallback arms budget (nexus-bbtc2 round 1)
+
+Review and critique of 0db9112f8 + bf1906f88 found one blocker and several
+bounds missing from the shared probe. vectors-060-1 is edited in place (not
+pushed).
+
+- The probe's fetch now binds the table to fn and calls ctx.selectFrom(fn),
+  so HnswServingGucParityTest's fetch-ordering sweep really scans it; the
+  sweep now also names LexicalGateProbe.java and fails if the block is not
+  seen. Moving the bound after the fetch turns it red.
+- max_parallel_workers_per_gather is no longer a function SET (it would
+  override an operator's lower setting upward). The engine sets it with SET
+  LOCAL for the probe's transaction from NX_SEARCH_ROUTE_PROBE_WORKERS
+  (default 2, 0 serial, clamped to 16). The six functions gain SET jit = off.
+- Step 1 gathers from a subquery limited to 2,000,000 rows and raises
+  SQLSTATE 54000 past that; the engine answers FALLBACK (each arm runs its own
+  capped probe) and logs reason=gate_ceiling. The ceiling reads the custom
+  setting nexus.gate_probe_max_rows when set (a test seam).
+- The probe's statement bound is at most half the remaining fan-out/request
+  budget, so a probe that times out leaves the fallback arms budget. A
+  timeout, a ceiling hit or any error makes every arm run its own probe.
+- One helper (probeCap) for selectiveGateMax + 1, used by the per-arm and the
+  shared probe. runSharedProbe and the textGateProbe*Fn helpers move out of
+  PgVectorRepository (-108 lines) into LexicalGateProbe.
+- The lexical log line says shared_probe=not_started when the probe never ran
+  and gains shared_dense; wording corrected (cpu_operator_cost applies to both
+  statements; the changelog comment no longer says a probe "hits its cap").
+- Tests: a row with no live owner is neither returned nor counted toward the
+  cap; the by-collection rows are the same under debug_parallel_query=on;
+  the cap boundary at exactly selectiveGateMax and +1 (shared_dense); the
+  ceiling raise and the engine's fallback with rows identical to the per-arm
+  path; pg_proc.proconfig of the six functions (jit off, no worker setting),
+  one body across dimensions, posture equal to the probes' in both postures,
+  and the invoker copy executed.
+
+chas lab-m, 120 collections scale 6, nine timed runs, median s, hybrid vs
+route, NX_SEARCH_ROUTE_PROBE_WORKERS=2: D 6.22 vs 5.24, E 4.78 vs 3.77 (both
+faster, ranges do not overlap), C 4.37 vs 4.53 (tied, Mann-Whitney p 0.9).
+With workers 0: D 6.59 vs 9.95 (the probe alone 8.7 s; D loses), E 4.57 vs
+3.73, C 4.24 vs 4.43. D's gain needs free parallel workers. Measurements are in the T2 record fixround-bf1906f88-nexus-bbtc2-2026-11-14-r1.
