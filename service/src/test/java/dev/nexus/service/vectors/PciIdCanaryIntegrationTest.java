@@ -135,9 +135,15 @@ class PciIdCanaryIntegrationTest extends PciIdIndexSupport {
         String tenant = newTenant("canary");
         String coll = name("canary");
         long id = clustered(tenant, coll, ROWS);
-        try (java.sql.Connection su = pg.createConnection("")) {   // statistics, so the planner prices the partial HNSW index against the primary key
+        // Statistics, so the planner prices the partial HNSW index against the primary key, and the manifest tables the search's
+        // ownership EXISTS joins. Those are left to autoanalyze otherwise: until it runs they read reltuples=0 (the template's
+        // empty state), the planner takes the 12000 manifest rows for one per document, and the by-id statement drives a nested
+        // loop from catalog_documents and sorts, naming no HNSW index; the canary then reads index_not_used (nexus-p2m1x.22).
+        try (java.sql.Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.analyzeTable(su, org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "chunks")));
+            for (String table : List.of("chunks", "catalog_documents", "catalog_document_chunks", "catalog_collections")) {
+                PgContainerHelper.analyzeTable(su, org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", table)));
+            }
         }
         PciSettings s = settings(16);
         PciIndexSweep sweep = PciIndexSweep.create(svcDs, s);
