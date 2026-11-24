@@ -166,7 +166,7 @@ def self_test(gen: Path | str, *, platform: str | None = None, timeout: float = 
     try:
         proc = subprocess.Popen(  # noqa: S603 -- the generation's own interpreter
             [str(python), "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True,
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",  # the child writes one ASCII word
         )
     except OSError as exc:
         return f"unverified: {exc}"
