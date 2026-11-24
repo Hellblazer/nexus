@@ -6,6 +6,7 @@ import static dev.nexus.service.CollectionRouteFixture.json;
 import static dev.nexus.service.CollectionRouteFixture.label;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_REMAP;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_LINKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -204,6 +205,43 @@ class Rdr229P35cPreGateRenameGapTest {
             assertThat(linksBetween(x1, x2)).as("the renamed collection's link is purged").isZero();
             assertThat(linksBetween(y[0], y[1])).as("the new holder's link is untouched").isEqualTo(1);
         }
+    }
+
+    private long collectionOfTopic(long topicId) {
+        Long id = fx.asSuperuser(ctx -> ctx.select(TOPICS.COLLECTION_ID).from(TOPICS).where(TOPICS.ID.eq(topicId)).fetchOne(TOPICS.COLLECTION_ID));
+        return id;
+    }
+
+    /**
+     * The conflict-skip select of {@code persistRebuildTopics} (4a) and {@code persistDiscoveredTopics} (4b): two specs with one label insert one
+     * root topic and the second reuses it. The row is filed under the locked row's current label C with X's id; the select found it by the
+     * REQUEST's label B before gate 3 (ced0ada045), so after a one-row rename it found nothing (IllegalStateException, 500) or the new holder Y's
+     * root topic of the same label. Both topic ids must be X's topic.
+     */
+    private void assertDuplicateLabelSpecsReuseTheRenamedCollectionsTopic(String route, String stem) {
+        String b = registered(stem);
+        long x = fx.idOf(b);
+        try (CollectionRouteFixture.RenameGap gap = fx.renameInPlaceBeforeTheWritesRead(List.of(x), List.of(b), "pg-" + stem + "-" + (n++),
+                g -> seedTopic(g.newHolders().iterator().next(), "dup"))) {   // the new holder has a root topic of the same label under B
+            Resp r = fx.post(route, "{\"collection_id\":" + x + ",\"specs\":[{\"label\":\"dup\",\"doc_ids\":[]},{\"label\":\"dup\",\"doc_ids\":[]}]}");
+
+            assertThat(gap.ran()).as("setup: the rename ran before the write's by-id read (%s)", r.body()).isTrue();
+            assertThat(r.status()).as(r.body()).isEqualTo(200);
+            com.fasterxml.jackson.databind.JsonNode ids = r.json().path("topic_ids");
+            assertThat(ids.size()).as(r.body()).isEqualTo(2);
+            assertThat(ids.get(1).asLong()).as("the second spec reused the first's topic").isEqualTo(ids.get(0).asLong());
+            assertThat(collectionOfTopic(ids.get(0).asLong())).as("and that topic is the renamed collection's, not the new holder's").isEqualTo(x);
+        }
+    }
+
+    @Test
+    void persistRebuildById_beforeGate3_inTheRenameGap_reusesTheRenamedCollectionsRootTopic_onADuplicateLabel() {
+        assertDuplicateLabelSpecsReuseTheRenamedCollectionsTopic("/v1/taxonomy/topics/persist_rebuild", "rebuild");
+    }
+
+    @Test
+    void persistDiscoveredById_beforeGate3_inTheRenameGap_reusesTheRenamedCollectionsRootTopic_onADuplicateLabel() {
+        assertDuplicateLabelSpecsReuseTheRenamedCollectionsTopic("/v1/taxonomy/topics/persist_discovered", "discovered");
     }
 
     private void recordLeg(String source, String target, String marker) {
