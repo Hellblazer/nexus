@@ -686,7 +686,7 @@ def test_nx_aura_list_through_the_command_shows_each_base_and_its_group(
     row = next(ln for ln in res.output.splitlines() if ln.startswith("tmpl"))
     assert "loaded for nexus-develop (push-train), recording-rig-main (recording-rig-train)" in row, row
     assert "not loaded" not in row
-    as_json = json.loads(CliRunner().invoke(aura_group, ["list", "--json"]).output)
+    as_json = json.loads(CliRunner().invoke(aura_group, ["list", "--json"]).stdout)
     [entry] = [r for r in as_json if r["name"] == "tmpl"]
     assert entry["loaded"]["loaded"] is True and entry["loaded"]["bases"] == [
         {"base": "nexus-develop", "group": "push-train"}, {"base": "recording-rig-main", "group": "recording-rig-train"}]
