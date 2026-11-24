@@ -7,13 +7,6 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
 
-import liquibase.Contexts;
-import liquibase.LabelExpression;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -33,7 +26,6 @@ import java.sql.Connection;
  */
 class Catalog051CuratorOwnerNotReplaceableTest {
 
-    private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
     private static final String TENANT = "catalog049-tenant";
 
     private static final String CURATOR_DOCS = "docs__corpus-cafe0001__voyage-context-3__v1";
@@ -43,59 +35,39 @@ class Catalog051CuratorOwnerNotReplaceableTest {
 
     @Test
     void aCuratorOwnedCollectionKeepsItsOwner_aSlugOwnedOneIsStillDerivedFromItsDocuments() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
-        try {
-            final String role = "nexus_admin_catalog049_test";
-            final String pass = "nexus_admin_catalog049_test_pass";
-            Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(pg, role, pass);
-            var cfg = new com.zaxxer.hikari.HikariConfig();
-            cfg.setJdbcUrl(pg.getJdbcUrl());
-            cfg.setUsername(role);
-            cfg.setPassword(pass);
-            cfg.setMaximumPoolSize(2);
-            cfg.setPoolName("nexus-admin-catalog049-test");
-            try (var adminDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
-                try (Connection conn = adminDs.getConnection()) {
-                    Database database = DatabaseFactory.getInstance()
-                        .findCorrectDatabaseImplementation(new JdbcConnection(conn));
-                    try (Liquibase liquibase = new Liquibase(MASTER_CHANGELOG, new ClassLoaderResourceAccessor(), database)) {
-                        liquibase.update(new Contexts(), new LabelExpression());
-                    }
-                }
-                try (Connection su = pg.createConnection("")) {
-                    su.setAutoCommit(true);
-                    DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-                    owner(ctx, "1.32", "knowledge", "curator");
-                    owner(ctx, "1.33", "some-repo", "repo");
+        PostgreSQLContainer<?> pg = PgContainerHelper.start();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            owner(ctx, "1.32", "knowledge", "curator");
+            owner(ctx, "1.33", "some-repo", "repo");
 
-                    // (1) the AFTER trigger: a repo owner's documents land in a curator-owned collection
-                    collection(ctx, CURATOR_DOCS, "docs", "1-32");
-                    document(ctx, "1.33.1", CURATOR_DOCS);
-                    document(ctx, "1.33.2", CURATOR_DOCS);
-                    assertThat(ownerOf(ctx, CURATOR_DOCS)).as("documents landing do not re-own a curator's collection")
-                        .isEqualTo("1-32");
+            // (1) the AFTER trigger: a repo owner's documents land in a curator-owned collection
+            collection(ctx, CURATOR_DOCS, "docs", "1-32");
+            document(ctx, "1.33.1", CURATOR_DOCS);
+            document(ctx, "1.33.2", CURATOR_DOCS);
+            assertThat(ownerOf(ctx, CURATOR_DOCS)).as("documents landing do not re-own a curator's collection")
+                .isEqualTo("1-32");
 
-                    // (2) the BEFORE trigger: the owner_id is written again while documents exist
-                    collection(ctx, CURATOR_RESET, "docs", "1-3");
-                    document(ctx, "1.33.9", CURATOR_RESET);
-                    assertThat(ownerOf(ctx, CURATOR_RESET)).as("a tumbler-shaped owner stands").isEqualTo("1-3");
-                    ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.OWNER_ID, "1-32")
-                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(CURATOR_RESET)).execute();
-                    assertThat(ownerOf(ctx, CURATOR_RESET)).as("re-setting the owner_id to a curator's segment is kept")
-                        .isEqualTo("1-32");
+            // (2) the BEFORE trigger: the owner_id is written again while documents exist
+            collection(ctx, CURATOR_RESET, "docs", "1-3");
+            document(ctx, "1.33.9", CURATOR_RESET);
+            assertThat(ownerOf(ctx, CURATOR_RESET)).as("a tumbler-shaped owner stands").isEqualTo("1-3");
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.OWNER_ID, "1-32")
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(CURATOR_RESET)).execute();
+            assertThat(ownerOf(ctx, CURATOR_RESET)).as("re-setting the owner_id to a curator's segment is kept")
+                .isEqualTo("1-32");
 
-                    // (3) the BEFORE trigger on INSERT: the documents already exist when the collection registers
-                    document(ctx, "1.33.7", CURATOR_LATE);
-                    collection(ctx, CURATOR_LATE, "docs", "1-32");
-                    assertThat(ownerOf(ctx, CURATOR_LATE)).as("a registration over existing documents keeps its owner")
-                        .isEqualTo("1-32");
+            // (3) the BEFORE trigger on INSERT: the documents already exist when the collection registers
+            document(ctx, "1.33.7", CURATOR_LATE);
+            collection(ctx, CURATOR_LATE, "docs", "1-32");
+            assertThat(ownerOf(ctx, CURATOR_LATE)).as("a registration over existing documents keeps its owner")
+                .isEqualTo("1-32");
 
-                    // (4) the nexus-6pbwx legacy case is unchanged: a slug is derived from the documents
-                    collection(ctx, SLUG_CODE, "code", "arcaneum-2ad2825c");
-                    document(ctx, "1.15.1", SLUG_CODE);
-                    assertThat(ownerOf(ctx, SLUG_CODE)).as("a slug owner is still replaceable").isEqualTo("1-15");
-                }
-            }
+            // (4) the nexus-6pbwx legacy case is unchanged: a slug is derived from the documents
+            collection(ctx, SLUG_CODE, "code", "arcaneum-2ad2825c");
+            document(ctx, "1.15.1", SLUG_CODE);
+            assertThat(ownerOf(ctx, SLUG_CODE)).as("a slug owner is still replaceable").isEqualTo("1-15");
         } finally {
             pg.stop();
         }

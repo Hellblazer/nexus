@@ -36,9 +36,6 @@ class Catalog051RenameGuardTest {
     private static final String SVC_ROLE = "svc_catalog049r_test";
     private static final String SVC_PASS = "svc_catalog049r_test_pass";
     private static final String MODEL = "voyage-code-3";
-    private static final String UNIQUE_INDEX = "CREATE UNIQUE INDEX catalog_collections_live_tuple_uq "
-        + "ON nexus.catalog_collections (tenant_id, content_type, owner_id, embedding_model, model_version) "
-        + "WHERE lifecycle_state = 'live' AND superseded_by = ''";
 
     private PostgreSQLContainer<?> pg;
     private com.zaxxer.hikari.HikariDataSource svcDs;
@@ -77,8 +74,8 @@ class Catalog051RenameGuardTest {
     /** Order 2: the index is created here and stays for the rest of the class, so the no-index case runs first. */
     @Test @Order(2)
     void renameOfASlugCollectionWhoseDestinationTupleAThirdCollectionHolds_keepsTheSlug_withTheIndex() throws Exception {
-        try (Connection su = pg.createConnection(""); var st = su.createStatement()) {
-            st.execute(UNIQUE_INDEX);
+        try (Connection su = pg.createConnection("")) {
+            Catalog051OwnerGuardTest.createLiveTupleIndex(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES));
         }
         renameKeepsTheSlug("cat049r-index", "1.42.1", "1-42", "42");
     }
