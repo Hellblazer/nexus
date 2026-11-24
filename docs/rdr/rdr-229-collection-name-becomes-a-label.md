@@ -1683,10 +1683,10 @@ while the engine serves:
     would stay on every install, and on a bundle without pg_background it
     would defer the very swap that lets the stamp moves run. The moves
     themselves, which are work, stay `boot_work` entries. The field holds
-    the three gates, the labels still incomplete, the CHECKs missing, the
-    tables whose VALIDATE waits and, from P3.7, `rename_missing`, whose
-    `restart` value is the restart request, each with operator text that names the
-    `nexus.rdr229_restamp` step. `/v1/status` is unauthenticated, so the
+    the three gates, the labels still incomplete, the CHECKs missing and the
+    tables whose VALIDATE waits, each with operator text that names the
+    `nexus.rdr229_restamp` step, and, from P3.7, `rename_missing`, what a
+    rename waits for. `/v1/status` is unauthenticated, so the
     field names no collection or tenant and carries no number that describes
     tenants; the counts come from the authenticated, tenant-scoped
     `GET /v1/catalog/rdr229_completion_counts`. An absent field means "not
@@ -1729,14 +1729,21 @@ while the engine serves:
     (`P35bChangesets.java:31-37`) and `databasechangelog` in each completion
     sample under a 2 s statement bound, and counts an id applied when its
     `exectype` is EXECUTED, RERAN or MARK_RAN (`CompletionCheck.java:777`,
-    `:819-833`; T2 `229-research-320`, `229-research-329`). When gate 1 holds and a listed P3.5b
-    changeset is not yet applied, P3.7's engine asks for a restart in two
-    places: `rdr229_completion.rename_missing` is `restart`, which nx doctor
-    shows, and `boot_work` carries the entry `rdr229-restart`, naming how
-    many of the listed changesets have not applied
-    (`CompletionCheck.java:432-434`; `CompletionBootWork.java:82`,
-    `:471-483`). That entry is the one exception to the rule above: a
-    notice that does no work and is safe to stop, which `nx upgrade`'s
+    `:819-833`; T2 `229-research-320`, `229-research-329`). P3.7's engine
+    asks for that restart in two places, on different conditions. When gate
+    1 holds and a listed P3.5b changeset is not yet applied, `boot_work`
+    carries the entry `rdr229-restart`, naming how many of the listed
+    changesets have not applied (`CompletionCheck.java:432-434`;
+    `CompletionBootWork.java:82`, `:471-483`). `rdr229_completion.rename_missing`,
+    which nx doctor shows, reads `none` until gate 3 has latched
+    (`CompletionBootWork.java:199-203`), and then `restart` only once the
+    drop move has `completed_at` and a listed changeset is still unapplied
+    (`CompletionCheck.java:412-425`). On a half-stamped store the restart is
+    asked for by the notice alone: gate 3 latches only at the boot that
+    applies `vectors-078` (P3.5). The notice is the one exception among the
+    check's reports to the rule above (`id-unique-index-held`, above, is
+    another entry the same skips pass over): a notice that does no work and
+    is safe to stop, which `nx upgrade`'s
     `engine_busy_reason` and the boot-write harness's `boot_work_settled`
     skip by its id (`pg_bundle_refresh.py:393-397`, `:418`;
     `upgrade_boot_writes.py:531-542`). P4.0 owns no separate request (Sam,
@@ -3314,14 +3321,15 @@ its acceptance is that test green plus the census pin it lowers.
   floor lifts in the running process once it holds (item 6). From a
   half-stamped store the chain needs one restart: the boot after the
   stamp moves complete, which applies P3.5b's CONTINUE changesets. P3.7's
-  engine asks for that restart, as `rename_missing` `restart` and as the
-  `rdr229-restart` notice, and P4.0 owns no separate request (item 6; Sam,
+  engine asks for that restart with the `rdr229-restart` notice
+  (`rename_missing` reads `none` until gate 3 has latched), and P4.0 owns
+  no separate request (item 6; Sam,
   T2 `nexus/sam-ruling-rdr229-restart-request-follows-p37-code-2026-11-24`). Test, over
   the whole chain: the P4.0 engine booted on a half-stamped store (the
   stamp move paused part-way) refuses collection-scoped routes naming the
   floor and reports the stamp move in `boot_work`; when the stamp
-  completes it asks for a restart, `rename_missing` `restart` and the
-  `rdr229-restart` notice; after that one restart, gates 1 to 3,
+  completes `boot_work` carries the `rdr229-restart` notice and
+  `rename_missing` stays `none`; after that one restart, gates 1 to 3,
   the name-key drop move and the floor follow in one process with no
   further restart, and it then serves by the id.
 - P4.1 After P3.11 and P4.0; its acceptance includes RDR-248's committed fixture
@@ -3569,8 +3577,9 @@ None.
 - **Scenario**: an engine with P4.0 boots on a store with only half its
   chunks stamped — **Verify**: it serves migration-only, refusing
   collection-scoped routes with an error that names the floor, the stamp
-  move keeps running in `boot_work`, it asks for one restart, as
-  `rename_missing` `restart` and the `rdr229-restart` notice, once the stamp completes, and after that restart it reaches gate 3, the
+  move keeps running in `boot_work`, it asks for one restart with the
+  `rdr229-restart` notice once the stamp completes, `rename_missing`
+  staying `none`, and after that restart it reaches gate 3, the
   name-key drop move and the floor in one process and serves by the id.
 - **Scenario**: rename a collection that has chunk and `canary_query_ring`
   rows after P3.7 — **Verify**: one registry
@@ -3860,7 +3869,7 @@ of residue on a prefix-free segment on every install (P1.2) and its repair
 behind a boot floor (P4.0). Items the accept-time fix check found now
 have one: the order of P4.1's registry drops (P4.1), the reconcile path
 (P2.10), the rename refused in the gate 3 window (P3.7), the in-process
-re-read of the check and P4.0's one restart (item 6, P4.0), the
+re-read of the check and the chain's one restart (item 6, P4.0), the
 backfill verb (P2.10), the repair moves' sizing and order (P2.10), and
 the repair against P3.1's CHECK (P3.1). The seven DISCOVER residuals,
 S-2 to S-8, go to beads at accept (Contradiction Check).
