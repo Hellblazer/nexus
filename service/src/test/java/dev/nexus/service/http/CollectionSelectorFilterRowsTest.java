@@ -244,6 +244,43 @@ class CollectionSelectorFilterRowsTest {
         }
     }
 
+    /**
+     * Every route of {@link CollectionSelectors#RETIRED_LABEL_REFUSED}, sent its OWN label field (read from its table slot, as the filter
+     * reads it: a query parameter or a body key, a single label or a list) naming a retired row with no successor: each answers the
+     * no-successor 409 and its handler never runs. The count must equal the set's size, so a route the loop cannot send (a slot with no
+     * top-level label field, a route missing from the table) fails instead of passing unexercised.
+     */
+    @Test
+    void r7_everyRefusedRouteRefusesItsOwnLabelField_andItsHandlerNeverRuns() throws Exception {
+        int before = handlerCalls;
+        int exercised = 0;
+        java.util.List<String> notRefused = new java.util.ArrayList<>();
+        for (String path : CollectionSelectors.RETIRED_LABEL_REFUSED) {
+            CollectionSelectors.Route route = CollectionSelectors.ROUTES.get(path);
+            assertThat(route).as("%s is a route of the table", path).isNotNull();
+            java.util.List<CollectionSelectors.Slot> top = route.slots().stream().filter(sl -> !sl.nested()).toList();
+            assertThat(top).as("%s has a top-level label slot", path).isNotEmpty();
+            CollectionSelectors.Slot slot = top.get(0);
+            Resp r;
+            if (route.where() == CollectionSelectors.Where.QUERY) {
+                r = get(path + "?" + slot.labelField() + "=" + enc("retired-eight"));
+            } else {
+                String value = slot.list() ? "[\"retired-eight\"]" : "\"retired-eight\"";
+                r = post(path, "{\"" + slot.labelField() + "\":" + value + "}");
+            }
+            exercised++;
+            if (r.status() != 409 || !"collection_superseded".equals(r.json().path("reason").asText())
+                    || r.json().path("collection_id").asLong() != 8 || r.json().has("superseded_by")
+                    || r.json().has("successor_collection_id")) {
+                notRefused.add(path + " -> " + r.status() + " " + r.body());
+            }
+        }
+        assertThat(notRefused).as("routes that did not answer the no-successor 409").isEmpty();
+        assertThat(exercised).as("every refused route was exercised").isEqualTo(CollectionSelectors.RETIRED_LABEL_REFUSED.size());
+        assertThat(exercised).as("non-vacuity").isGreaterThanOrEqualTo(27);
+        assertThat(handlerCalls).as("no handler ran").isEqualTo(before);
+    }
+
     @Test
     void d3_aRetiredIdAnswers409OnAQueryRoute_aBodyRoute_aListRoute_aNestedRoute_andTheDelete() throws Exception {
         int before = handlerCalls;
