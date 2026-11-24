@@ -36,6 +36,10 @@ NAMING_ALLOWED = {
     "service/src/test/java/dev/nexus/service/db/ManifestCheckAdminIntegrationBase.java",
     "tests/test_manifest_check_no_trigger.py",
     "tests/test_catalog_ttl_check_shapes.py",
+    # the RDR-229 P3.5c Java reader census lists every variable-key jsonb read by file and method, this step's admin
+    # among them (a read of its own fixed keys); a census names a site and calls nothing (nexus-p2m1x.25)
+    "scripts/rdr229_p35c_java_reader_census.py",
+    "service/src/test/resources/rdr229/p35c-java-reader-census-excluded.tsv",
     # the chunk routes' own scan lists the one class that borrows its comparison; the file name is spelled in two parts
     # because that scan reads this file too
     "tests/test_retire_" + "keys_no_trigger.py",
