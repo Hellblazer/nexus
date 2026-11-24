@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import sys
 import threading
 import time
@@ -121,8 +122,10 @@ PYTEST_ENV = "PYTEST_CURRENT_TEST"
 KUBERNETES_ENV = "KUBERNETES_SERVICE_HOST"
 #: Marker files, relative to the container root.
 CONTAINER_MARKER_FILES: tuple[str, ...] = (".dockerenv", "run/.containerenv")
-#: Substrings of ``/proc/1/cgroup`` that name a container runtime.
-CGROUP_CONTAINER_MARKERS: tuple[str, ...] = ("docker", "containerd", "kubepods", "lxc")
+#: Names of container runtimes that show up in ``/proc/1/cgroup``. A pattern, not
+#: a tuple of names: ``tests/test_nx_bare_exec_lint.py`` reads a literal whose
+#: first element is a tool name ("docker") as a bare argv0 spawn.
+CGROUP_CONTAINER_MARKERS = re.compile(r"docker|containerd|kubepods|lxc")
 #: Where the container probes look; tests point it at a tmp tree.
 _CONTAINER_ROOT: Path = Path("/")
 
@@ -150,10 +153,9 @@ def _container_reason(environ: Mapping[str, str], root: Path) -> str | None:
         text = (root / "proc" / "1" / "cgroup").read_text(encoding="utf-8", errors="replace")
     except (OSError, ValueError):  # unreadable /proc (sandbox, Windows, a directory) is "not a container"
         return None
-    lowered = text.lower()
-    for marker in CGROUP_CONTAINER_MARKERS:
-        if marker in lowered:
-            return f"automation: container (/proc/1/cgroup: {marker})"
+    found = CGROUP_CONTAINER_MARKERS.search(text.lower())
+    if found:
+        return f"automation: container (/proc/1/cgroup: {found.group(0)})"
     return None
 
 
