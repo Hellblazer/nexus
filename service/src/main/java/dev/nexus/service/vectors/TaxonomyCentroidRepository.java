@@ -263,19 +263,58 @@ public final class TaxonomyCentroidRepository {
         // looked the registry up and found no centroid either). For a cross-collection query it is a change: an
         // unregistered source used to get other collections' centroids of the same width, and now gets none (a
         // wire-ledger entry records it).
-        String model;
+        final CollectionRow row;
         try {
-            model = CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel();
+            row = CollectionRegistry.lookup(tenantScope, tenant, collection);
         } catch (dev.nexus.service.db.UnregisteredCollectionException e) {
             return List.of();
         }
-        org.jooq.Table<?> fn = switch (dim) {
+        final String model = row.embeddingModel();
+        // RDR-229 P3.5b form A plan fix (nexus-p2m1x.24/.25, linda's ruling): from gate 3 the registry row's id goes to the
+        // function (vectors-084's overload), so the same-collection predicate is collection_id = $n, which the planner estimates
+        // from the value. The text overload resolves the label in an InitPlan subselect it estimates at 1/ndistinct, and at the
+        // TOASTed widths (768, 1024) a seq scan with a top-N sort then undercuts the HNSW index. vectors-084 is CONTINUE-gated
+        // and applies at the first boot after the stamp completes, so gate 3 can hold a boot earlier: the text overload (the
+        // name-keyed body of vectors-038, or vectors-078-9..11's) answers until the overload exists.
+        Result<? extends Record> result;
+        if (gate3.holds()) {
+            try {
+                result = runAnn(TaxonomyAnnQueryById.call(dim, queryVec, collection, crossCollection, nResults, model, tenant,
+                    row.collectionId()), tenant, nResults, maxStatementMs);
+            } catch (org.jooq.exception.DataAccessException e) {
+                if (!UNDEFINED_FUNCTION.equals(e.sqlState())) {
+                    throw e;
+                }
+                log.warn("event=ann_by_id_overload_missing dim={} (vectors-084 not applied yet; the text overload answers)", dim);
+                result = runAnn(textCall(dim, queryVec, collection, crossCollection, nResults, model, tenant), tenant, nResults, maxStatementMs);
+            }
+        } else {
+            result = runAnn(textCall(dim, queryVec, collection, crossCollection, nResults, model, tenant), tenant, nResults, maxStatementMs);
+        }
+        List<AnnHit> hits = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            double distance = rec.get("distance", Double.class);
+            hits.add(new AnnHit(rec.get("topic_id", Long.class), 1.0 - distance));
+        }
+        return hits;
+    }
+
+    /** SQLSTATE 42883, undefined_function: the by-id overload is not in the database yet. */
+    private static final String UNDEFINED_FUNCTION = "42883";
+
+    /** The text-signature call (vectors-013's, redefined by vectors-038 and vectors-078-9..11): the label, not the id. */
+    private static org.jooq.Table<?> textCall(int dim, Vector queryVec, String collection, boolean crossCollection, int nResults,
+                                              String model, String tenant) {
+        return switch (dim) {
             case 384  -> TAXONOMY_ANN_QUERY_384.call(queryVec, collection, crossCollection, nResults, model, tenant);
             case 768  -> TAXONOMY_ANN_QUERY_768.call(queryVec, collection, crossCollection, nResults, model, tenant);
             case 1024 -> TAXONOMY_ANN_QUERY_1024.call(queryVec, collection, crossCollection, nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
+    }
+
+    private Result<? extends Record> runAnn(org.jooq.Table<?> fn, String tenant, int nResults, int maxStatementMs) {
+        return tenantScope.withTenant(tenant, ctx -> {
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours. First, so the
             // GUC round trips below run under its network bound too (nexus-u9zkn).
@@ -302,12 +341,6 @@ public final class TaxonomyCentroidRepository {
             PgSession.setSearchPlanCacheMode(ctx);
             return ctx.selectFrom(fn).fetch();
         });
-        List<AnnHit> hits = new ArrayList<>(result.size());
-        for (Record rec : result) {
-            double distance = rec.get("distance", Double.class);
-            hits.add(new AnnHit(rec.get("topic_id", Long.class), 1.0 - distance));
-        }
-        return hits;
     }
 
     /**
