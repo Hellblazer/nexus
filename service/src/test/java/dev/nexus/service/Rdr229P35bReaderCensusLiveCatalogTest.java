@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Pattern;
 
@@ -51,6 +52,23 @@ class Rdr229P35bReaderCensusLiveCatalogTest {
 
     private static final String CHECKS_LIST = "db/rdr229/p31-checks.tsv";
     private static final String CENSUS = "rdr229/p35b-reader-census.tsv";
+
+    /**
+     * The objects the census lists (their last definer before vectors-078) that the form-A changesets vectors-078-1, -2, -4, -7, -9, -10,
+     * -11, -13, -14 and -15 redefine to read no name column, so under {@code -Dnexus.test.formA.applied=true} the catalog query does not
+     * find them: absent by design, and only these.
+     */
+    private static final Set<String> ABSENT_UNDER_FORM_A = Set.of(
+        "function\tnexus.catalog_collection_doc_owner",                          // 078-1
+        "function\tnexus.catalog_collections_owner_from_docs",                   // 078-2
+        "trigger\tnexus.catalog_documents.catalog_documents_owner_to_collection", // 078-4
+        "function\tnexus.catalog_collection_tuple_duplicates_unscoped",          // 078-7
+        "function\tnexus.taxonomy_ann_query_384",                                // 078-9
+        "function\tnexus.taxonomy_ann_query_768",                                // 078-10
+        "function\tnexus.taxonomy_ann_query_1024",                               // 078-11
+        "view\tnexus.collection_doc_counts",                                     // 078-13
+        "view\tnexus.collection_health_meta",                                    // 078-14
+        "view\tnexus.topics_with_counts");                                       // 078-15
 
     private PostgreSQLContainer<?> pg;
     private final Map<String, String> live = new LinkedHashMap<>();
@@ -80,6 +98,11 @@ class Rdr229P35bReaderCensusLiveCatalogTest {
 
     @Test
     void theQueryExaminedTheCatalog_notAnEmptySet() {
+        // The fresh walk (formAApplied() false) never skips here. Under form A the trigger below is redefined onto the id column and the
+        // views read the label only, so the "known readers" list is not true of that clone; everyCensusObjectIsLive pins what is absent.
+        org.junit.jupiter.api.Assumptions.assumeFalse(Rdr229CompleteStamps.formAApplied(),
+            "the census lists each reader's pre-vectors-078 last definer; under form A the 078 redefinitions (078-1, -2, -4, -7, -9, -10, "
+                + "-11, -13, -14, -15) no longer read a name column, so they are absent by design");
         assertThat(nameColumns).as("the name columns of the checks list").containsExactlyInAnyOrder(
             "collection", "physical_collection", "source_collection", "superseded_by", "target_collection");
         assertThat(census).as("non-vacuity: the census file has rows").hasSizeGreaterThan(50);
@@ -112,6 +135,15 @@ class Rdr229P35bReaderCensusLiveCatalogTest {
                 missing.add(key.replace('\t', ' '));
             }
         }
+        if (Rdr229CompleteStamps.formAApplied()) {
+            // the census lists each reader's pre-vectors-078 last definer; the ten 078 redefinitions read no name column, so they are
+            // absent by design, and exactly they: a census object missing for any other reason fails here.
+            assertThat(missing.stream().map(k -> k.replace(' ', '\t')).collect(java.util.stream.Collectors.toSet()))
+                .as("form A: the census objects the catalog query did not find are exactly the ten vectors-078 redefinitions")
+                .isEqualTo(ABSENT_UNDER_FORM_A);
+            return;
+        }
+        // the fresh walk: every one is live (formAApplied() is false, so nothing was redefined and nothing is absent)
         assertThat(missing).as("census objects the catalog query did not find (%d live, %d census)", live.size(), census.size())
             .isEmpty();
     }

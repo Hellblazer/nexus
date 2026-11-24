@@ -631,6 +631,10 @@ class CompletionCheckIntegrationTest {
     /** linda 2026-11-23: gate3_why names the changeset a twin of the runtime-built id unique indexes still waits for. */
     @Test
     void gate3WhyNamesTheChangesetTheIdTwinsWaitFor() {
+        // The fresh walk (formAApplied() false, so this never skips there) leaves vectors-078-8 unrecorded and a twin waits for it.
+        org.junit.jupiter.api.Assumptions.assumeFalse(dev.nexus.service.Rdr229CompleteStamps.formAApplied(),
+            "on the form-A clone vectors-078-8 is recorded (Rdr229CompleteStamps.java:88-91), so no twin waits "
+                + "(ArbiterTwins.java:45-46, IdUniqueIndexPass.java:258-270); the precondition needs a fresh walk");
         IdIndexCatalogReads.forgetWaitedChangesets(ctx);
         List<String> waiting = IdUniqueIndexPass.waitingChangesets(ctx);
         assertThat(waiting).as("non-vacuity: a twin waits for a changeset that is not recorded").isNotEmpty();

@@ -115,6 +115,10 @@ class PristineCloneSkipTest {
 
     @Test
     void aPristineClonesCatalogEqualsTheSameCloneAfterARealSecondApply() throws Exception {
+        // The fresh walk (formAApplied() false) never skips here: only the form-A switch makes start() run a second update.
+        org.junit.jupiter.api.Assumptions.assumeFalse(Rdr229CompleteStamps.formAApplied(),
+            "completeAndApplyFormA already ran a second Liquibase update inside start() (Rdr229CompleteStamps.java:85), "
+                + "so the clone is not the pristine template copy");
         requireShared();
         PostgreSQLContainer<?> pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
