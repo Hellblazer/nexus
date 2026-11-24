@@ -234,14 +234,17 @@ public final class RemapRepository {
         int deleted = tenantScope.withTenant(tenant, ctx -> {
             // P3.5a: a request naming either leg by id reads that id first, FOR KEY SHARE, in this transaction
             CollectionRegistry.requireAllForWrite(ctx, tenant, java.util.List.of(sourceCollection, targetCollection));   // both legs, id order
-            RequestedCollectionRead.require(ctx, tenant, sourceCollection);
-            RequestedCollectionRead.require(ctx, tenant, targetCollection);
-            // the rows of each leg by the history rule (CollectionKey#eqHistory): the id of the row each leg names (the requested id for a
-            // request by id), and the stored name of a row whose collection is gone, so the dangling rows of a deleted collection clear too
+            // each leg by the CURRENT label of the row the request names (a row renamed in place since the route boundary resolved its id
+            // bears another label, and before gate 3 the history rule below is name = label: ced0ada045 matched the request's); a leg whose
+            // collection is gone keeps the label the request carried, which the history rule matches against the dangling rows' stored name
+            String source = RequestedCollectionRead.require(ctx, tenant, sourceCollection).map(CollectionRow::label).orElse(sourceCollection);
+            String target = RequestedCollectionRead.require(ctx, tenant, targetCollection).map(CollectionRow::label).orElse(targetCollection);
+            // the rows of each leg by the history rule (CollectionKey#eqHistory): the id of the row each leg names, and the stored name of a
+            // row whose collection is gone, so the dangling rows of a deleted collection clear too
             return ctx.deleteFrom(CHASH_REMAP)
                .where(CHASH_REMAP.TENANT_ID.eq(tenant)
-                       .and(sourceIs(tenant, sourceCollection))
-                       .and(targetIs(tenant, targetCollection)))
+                       .and(sourceIs(tenant, source))
+                       .and(targetIs(tenant, target)))
                .execute();
         });
         log.info("event=remap_clear_leg tenant={} source={} target={} deleted={}",
