@@ -1609,7 +1609,7 @@ while the engine serves:
        (present, or JSON null for a dangling tag, passes). Its reason names no
        count, since it goes out on the unauthenticated `/v1/status` and the
        probe counts every tenant's chunks; the count, capped at 10,000, goes
-       to the engine log only (`CompletionCheck.java:690-701`; marlowe, commit 31e3bbe2f0).
+       to the engine log only (`CompletionCheck.java:690-700`; commit 31e3bbe2f0, marlowe's by linda's assignment of 2026-11-24).
        Row 13 of the Phase 3 blocking list, the quarantine origin-id backfill,
        marks those pre-id rows: `vectors-082-1` registers the data move
        `rdr229-quarantine-origin-id`, which writes `origin_collection_id` on
