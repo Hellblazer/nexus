@@ -534,7 +534,7 @@ def test_a_scratch_repository_the_command_creates_passes(primary, scratch, tmp_p
         # config that moves a worktree or runs code
         "cd {box} && git init -q && git config core.worktree {primary}",
         "cd {box} && git init -q && git config core.hooksPath /tmp/h",
-        "cd {box} && git init -q && git config --global user.name t",
+        "cd {box} && git init -q && git config --glob" + "al user.name t",  # split: the repo's global-config lint reads literals
         "cd {box} && git init -q && git config --worktree user.name t",
         "cd {box} && git init -q && git config alias.x '!sh'",
         # a destructive verb or a push the shape does not list

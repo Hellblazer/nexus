@@ -6,9 +6,8 @@ standalone ``git`` token is followed anywhere by a write-verb word. That rule is
 structure-agnostic on purpose, and it over-matched: 97% of 2,199 denials in three
 weeks were not the harm it exists for (``git merge-base A $m``, ``git stash list |
 head``, ``grep push scripts/git-push-develop.sh``, ``cd <worktree> && git add``,
-``git fetch``, a scratch ``git init``). Sam ruled six fixes (T2
-``nexus/sam-ruling-subagent-git-guard-fixes-2026-11-25``); this module is the
-admission half of them. It only ever ADDS a pass; a command it does not admit
+``git fetch``, a scratch ``git init``). Sam ruled six fixes on 2026-11-25; this
+module is the admission half of them. It only ever ADDS a pass; a command it does not admit
 reaches the unchanged guard, which decides as before.
 
 How it stays safe. ``analyze`` first reads the command with a STRICT lexer: a

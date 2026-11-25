@@ -594,8 +594,7 @@ expansion denies, so ``git fetch origin "$BRANCH"`` and ``git fetch origin $(git
 rev-parse --abbrev-ref HEAD)`` are false denials in the shared tree, taken on
 purpose because the text cannot show whether the expansion is a refspec.
 
-nexus-5y47c (2026-11-25, Sam's ruling, T2 ``nexus/sam-ruling-subagent-git-guard-fixes-
-2026-11-25``): the rule above lifted its freeze for six fixes, after 2,199 denials in
+nexus-5y47c (2026-11-25, Sam's ruling): the rule above lifted its freeze for six fixes, after 2,199 denials in
 three weeks of which 97% were not the harm it exists for. Everything above still
 decides; ``_git_admit`` (its own module, read its docstring first) only ADDS a pass,
 after the rule above has denied, through ``_admission``. It lexes the command strictly
