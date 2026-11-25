@@ -69,9 +69,9 @@ mcp__plugin_conexus_nexus__store_list(collection="<subject>"
 mcp__plugin_conexus_nexus__scratch(action="put", content="working note"
 mcp__plugin_conexus_nexus__scratch_manage(action="flag", entry_id="<id>"       # auto-promote to T2 at session end
 
-# Plan library (T2)
-mcp__plugin_conexus_nexus__plan_search(query="retrieval"                       # find reusable plans
-mcp__plugin_conexus_nexus__plan_save(query="...", plan_json="{...}", verb="research", answer_kind="synthesis", project="..."  # persist a reusable RETRIEVAL plan (verb and answer_kind REQUIRED, unknown allowed; impl-plans -> beads/T2)
+# Answer-plan library (T2)
+mcp__plugin_conexus_nexus__answer_plan_search(query="retrieval"                       # find reusable plans
+mcp__plugin_conexus_nexus__answer_plan_save(query="...", plan_json="{...}", verb="research", answer_kind="synthesis", project="..."  # persist a reusable RETRIEVAL plan (verb and answer_kind REQUIRED, unknown allowed; impl-plans -> beads/T2)
 ```
 
 ## When to reach for each

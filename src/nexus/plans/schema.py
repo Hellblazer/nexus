@@ -332,7 +332,7 @@ def _validate_template_answer_kind(template: dict[str, Any]) -> None:
     of a curated one. ``unknown`` is allowed (a template may say it declares
     nothing); an explicit ``answer_kind: null`` is refused, here and so by the
     seed loader's validation. The declaration is never a dimension. This check
-    runs where a template is loaded; read paths such as ``nx plan hygiene``
+    runs where a template is loaded; read paths such as ``nx answer-plan hygiene``
     do not run it.
     """
     plan_json = template.get("plan_json")

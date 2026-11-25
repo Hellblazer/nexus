@@ -350,10 +350,10 @@ def _plan_save(
     plan: dict[str, Any], tags: str = "", answer_kind: str = "discovery/listing", project: str = "nexus",
     session: tuple[str, tuple[str, ...]] = ("nexus", ()),
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Run the plan_save MCP tool against a recording library; returns (reply, save_plan kwargs per call)."""
+    """Run the answer_plan_save MCP tool against a recording library; returns (reply, save_plan kwargs per call)."""
     from unittest.mock import MagicMock
 
-    from nexus.mcp.core import plan_save
+    from nexus.mcp.core import answer_plan_save
 
     saved: list[dict[str, Any]] = []
     db = MagicMock()
@@ -373,7 +373,7 @@ def _plan_save(
         patch("nexus.mcp.core._nx_answer_session_project", return_value=session[0]),
         patch("nexus.mcp.core._nx_answer_session_project_aliases", return_value=session[1]),
     ):
-        return plan_save(
+        return answer_plan_save(
             query="q", plan_json=json.dumps(plan), verb="research", tags=tags, answer_kind=answer_kind,
             project=project,
         ), saved
@@ -411,9 +411,9 @@ class TestPlanSaveWritesASavedDeclaration:
         assert saved == []
 
     def test_a_save_with_no_kind_is_refused_like_one_with_no_verb(self) -> None:
-        from nexus.mcp.core import plan_save
+        from nexus.mcp.core import answer_plan_save
 
-        out = plan_save(query="q", plan_json=json.dumps({"steps": _ANSWERING}), verb="research", project="nexus")
+        out = answer_plan_save(query="q", plan_json=json.dumps({"steps": _ANSWERING}), verb="research", project="nexus")
         assert out.startswith("Plan not saved") and "answer_kind" in out and "required" in out
 
     @pytest.mark.parametrize("kind", ["lookup", "synthesis", "comparison", "audit", "debug"])
@@ -491,11 +491,11 @@ class TestPlanSaveWritesASavedDeclaration:
                 assert verdict.eligible is (here and request_kind.value == kind), (kind, request_kind, request_project)
 
     def test_the_tool_documents_the_argument_and_its_refusals(self) -> None:
-        from nexus.mcp.core import plan_save
+        from nexus.mcp.core import answer_plan_save
 
-        assert "answer_kind" in plan_save.__doc__ and "saved" in plan_save.__doc__
-        assert "ends in retrieval" in plan_save.__doc__ or "retrieval-only" in plan_save.__doc__
-        assert "reads the last step only" in plan_save.__doc__ or "last step is retrieval-only" in plan_save.__doc__
+        assert "answer_kind" in answer_plan_save.__doc__ and "saved" in answer_plan_save.__doc__
+        assert "ends in retrieval" in answer_plan_save.__doc__ or "retrieval-only" in answer_plan_save.__doc__
+        assert "reads the last step only" in answer_plan_save.__doc__ or "last step is retrieval-only" in answer_plan_save.__doc__
 
 
 @pytest.mark.t2_tenant
@@ -504,14 +504,14 @@ def test_a_real_saved_row_read_back_through_the_library_carries_its_project_and_
     compare (a fake row that carries ``project`` would pass with a library that dropped it)."""
     import re
 
-    from nexus.mcp.core import plan_save
+    from nexus.mcp.core import answer_plan_save
     from nexus.mcp_infra import t2_ctx
     from nexus.plans.eligibility import EligibilityFilter
     from nexus.plans.match import Match
 
     with patch("nexus.mcp.core._nx_answer_session_project", return_value="savedproj"), \
          patch("nexus.mcp.core._nx_answer_session_project_aliases", return_value=()):
-        out = plan_save(
+        out = answer_plan_save(
             query="where did the saved-provenance round-trip land", plan_json=json.dumps({"steps": _ANSWERING}),
             verb="query", answer_kind="lookup", project="savedproj", tags="roundtrip",
         )
@@ -580,7 +580,7 @@ class TestTheShapeVeto:
 
 class TestPlanSaveNeverStoresProvenanceTags:
     """nexus-3ihve: ``grown`` and ``builtin-template`` are provenance a writer earns (the grow site, the seed
-    loader), never one a caller of ``plan_save`` can claim. Other tags pass through untouched."""
+    loader), never one a caller of ``answer_plan_save`` can claim. Other tags pass through untouched."""
 
     _STEPS = [{"tool": "search", "args": {"query": "$intent"}}]
 
@@ -616,9 +616,9 @@ class TestPlanSaveNeverStoresProvenanceTags:
         assert not el.eligibility(PlanAnswerKind.LOOKUP, standing.kind, standing.provenance).eligible
 
     def test_the_tool_description_names_the_reserved_tags(self) -> None:
-        from nexus.mcp.core import plan_save
+        from nexus.mcp.core import answer_plan_save
 
-        assert "grown" in plan_save.__doc__ and "builtin-template" in plan_save.__doc__
+        assert "grown" in answer_plan_save.__doc__ and "builtin-template" in answer_plan_save.__doc__
 
 
 class TestTemplatesDeclareOnlyAtTemplateLevel:

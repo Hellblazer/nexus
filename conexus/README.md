@@ -54,7 +54,7 @@ story.
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — print the T1 contract, due threads and an `nx brief` index at session start (T2 notes, ready beads, the Knowledge Map and tool notes load on demand), prime beads where the beads plugin is off, warn when T2 is unreachable, health-check dependencies
 - **Permission auto-approval** — the nexus and nexus-catalog MCP tools (and `sequentialthinking`) skip the confirmation prompt, except `daemon_uninstall`, `setup` and `setup_status`; the plugin never auto-approves a Bash command
-- **Two bundled MCP servers** — `nexus` (46 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
+- **Two bundled MCP servers** — `nexus` (49 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
 
 ### Pick your entry point
 
@@ -428,11 +428,11 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 
 | Server | Purpose | Tools |
 |--------|---------|-------|
-| `nexus` | Retrieval + storage (core) | 46 tools — see below |
+| `nexus` | Retrieval + storage (core) | 49 tools — see below |
 | `nexus-catalog` | Catalog access (RDR-062) | `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` |
 | `sequential-thinking` | Compaction-resilient reasoning chains | `sequentialthinking` |
 
-### `nexus` MCP tool catalog (46 tools)
+### `nexus` MCP tool catalog (49 tools)
 
 | Category | Tools |
 |----------|-------|
@@ -441,7 +441,7 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 | Memory (T2) | `memory_put`, `memory_get`, `memory_search`, `memory_delete`, `memory_consolidate` |
 | Scratch (T1) | `scratch`, `scratch_manage` |
 | Collections | `collection_list` |
-| Plans (RDR-078) | `plan_save`, `plan_search`, `plan_delete`, `traverse` |
+| Plans (RDR-078) | `answer_plan_save`, `answer_plan_search`, `answer_plan_delete`, `traverse`; the old `plan_save`, `plan_search` and `plan_delete` work as deprecated aliases for one more client release |
 | Procedures (RDR-240) | `procedure_run` |
 | Tuple space (RDR-205/206/211/213) | `tuple_out`, `tuple_rd`, `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_renew`, `tuple_release`, `tuple_registry`, `tuple_list`, `tuple_stats`, `tuple_subscribe`, `tuple_unsubscribe`, `tuple_subscriptions`, `mailbox_send` |
 | Operators (RDR-079/088/093) | none on the MCP surface (nexus-ivi4s): `summarize`, `extract`, `rank`, `compare`, `generate`, `filter`, `groupby`, `aggregate`, `check`, `verify` run as plan steps inside `nx_answer` |
@@ -458,7 +458,7 @@ separate tools).  See
 
 ### Nexus MCP Servers (`nx-mcp`, `nx-mcp-catalog`)
 
-The nexus core server exposes 46 MCP tools and the nexus-catalog server exposes 10 catalog tools, 56 tools an agent calls. Some functions are Python-only, not tools, including the 10 operators that `nx_answer` plans run. The core server also registers 2 internal `hook_*` tools that the plugin's own hooks call; they are not for agents. These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+The nexus core server exposes 49 MCP tools and the nexus-catalog server exposes 10 catalog tools, 59 tools an agent calls. Some functions are Python-only, not tools, including the 10 operators that `nx_answer` plans run. The core server also registers 2 internal `hook_*` tools that the plugin's own hooks call; they are not for agents. These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
 
 **Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 

@@ -32,7 +32,8 @@ _TOOL_TIER = {
     "scratch_put": "T1",
     "memory_put": "T2",
     "store_put": "T3",
-    "plan_save": "plan",
+    "answer_plan_save": "plan",  # rows written before the answer_plan_save rename
+    "answer_plan_save": "plan",
 }
 
 

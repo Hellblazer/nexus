@@ -127,7 +127,7 @@ def t2_handle() -> Iterator[Any]:
     each named in ``storage_boundary_lint.T2DATABASE_CONSTRUCTION_ALLOWLIST``
     — this helper is for the user-facing memory/plan surface only.
 
-    Note: ``nx plan`` commands open T2 directly (named-allowlisted) and
+    Note: ``nx answer-plan`` commands open T2 directly (named-allowlisted) and
     do NOT go through this helper — they must tolerate offline mode.
     """
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time

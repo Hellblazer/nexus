@@ -130,7 +130,7 @@ Route here when the question involves: specific authors, paper citations, "what 
 
 ## Pipeline Pattern Catalog
 
-These patterns are stored in the T2 plan library and are returned by `plan_search` when matching queries are detected. Run `mcp__plugin_conexus_nexus__plan_search` for a matching template before dispatching a multi-agent pipeline.
+These patterns are not in the answer-plan library: `mcp__plugin_conexus_nexus__answer_plan_search` returns only the retrieval plans `nx_answer` matches, never an agent pipeline. Pick the pattern from this table.
 
 | Pattern | Agents | When to Use | Prerequisites |
 |---------|--------|-------------|---------------|
@@ -200,7 +200,7 @@ Git: isolation `/conexus:git-worktrees`; done `/conexus:finishing-branch`. Anoth
 
 For a question whose answer must be REDUCED FROM MANY DOCUMENTS: cross-corpus synthesis over `knowledge__` / `docs__` / `rdr__`, ranking or comparing across documents, RDR research where minutes are acceptable. It matches the plan library (threshold 0.40), runs the matched plan (or plans inline on a miss), and bundles contiguous operators into one `claude -p`.
 
-Not for file:line answers (Serena or Grep), anything already in a local RDR, bead or T2 memory, or single-fact lookups: `search` / `query` answer in seconds (mean about 8s). Measured on 142 runs (2026-04 to 2026-08): p50 80s, p95 217s, max 371s; 35% miss the plan gate and pay about 53s more for the inline planner; a call can hit its 300s timeout and return nothing. Budget minutes. Do not call `plan_match` yourself: you lose run recording and the fallback on miss. `mcp__plugin_conexus_nexus__plan_save` only a genuinely reusable retrieval plan, with a `verb`; implementation and phased-execution plans live in beads and T2.
+Not for file:line answers (Serena or Grep), anything already in a local RDR, bead or T2 memory, or single-fact lookups: `search` / `query` answer in seconds (mean about 8s). Measured on 142 runs (2026-04 to 2026-08): p50 80s, p95 217s, max 371s; 35% miss the plan gate and pay about 53s more for the inline planner; a call can hit its 300s timeout and return nothing. Budget minutes. Do not call `plan_match` yourself: you lose run recording and the fallback on miss. `mcp__plugin_conexus_nexus__answer_plan_save` only a genuinely reusable retrieval plan, with a `verb`; implementation and phased-execution plans live in beads and T2.
 
 ## Working Rules
 

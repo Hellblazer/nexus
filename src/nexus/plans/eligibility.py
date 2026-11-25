@@ -21,7 +21,7 @@ request kind          eligible declared plan kinds
 ``unknown``           curated synthesis and curated unknown only
 ====================  =========================================
 
-That table is for curated plans and, with the limits below, grown ones. A **saved** plan (``plan_save`` with a
+That table is for curated plans and, with the limits below, grown ones. A **saved** plan (``answer_plan_save`` with a
 declared kind, or a template in a project, RDR or repo tier; nexus-0vh80, Sam 2026-11-03) is a column of its own:
 
 ====================  =========================================
@@ -81,7 +81,7 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
 
 * ``curated``: the ``builtin-template`` tag AND a declaration that says ``curated``. Only the builtin tier writes
   one: the seed loader declares a project, RDR or repo template ``saved`` whatever tags its author wrote
-  (nexus-0vh80; a row seeded before that, which still says ``curated``, reads curated until ``nx plan reseed``
+  (nexus-0vh80; a row seeded before that, which still says ``curated``, reads curated until ``nx answer-plan reseed``
   rewrites it);
 * ``saved``: a declaration that validates and says ``saved``, with any tags except ``grown`` (the grown tag makes it
   unattested, as for any declaration but a grown one);
@@ -115,7 +115,7 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
 * ``unattested``: nothing valid was declared. It is neither curated nor grown, its kind is ``unknown``, and
   every request kind refuses it (nexus-rflvp: ``unattested_plan`` for ``lookup`` and ``discovery/listing``,
   the reasons it always had for the others). A builtin seeded before nexus-jypmj.2.1 is this until
-  ``nx plan reseed`` (or the upgrade ladder) writes its declaration; the exclusion reason is then
+  ``nx answer-plan reseed`` (or the upgrade ladder) writes its declaration; the exclusion reason is then
   ``undeclared_builtin``, and the library precondition below keeps the whole gate in shadow while any
   reseedable builtin is undeclared, so such a builtin keeps its lookups until the reseed (an orphan builtin no
   reseed can fix is not counted by that check, and loses them). Plan save writes a ``saved`` declaration now
@@ -274,7 +274,7 @@ def eligibility_enforced(environ: Mapping[str, str]) -> bool:
     return True
 
 
-#: What clears ``library_not_reseeded`` (nexus-jypmj.16). ``nx plan reseed`` rewrites every builtin it can, and
+#: What clears ``library_not_reseeded`` (nexus-jypmj.16). ``nx answer-plan reseed`` rewrites every builtin it can, and
 #: that is the whole remedy for a library seeded before the declarations. Three things leave a row undeclared
 #: through a reseed, all reported by the reseed itself (``seed_plan_templates`` echoes them): a template the
 #: installed conexus rejects (a ``seed load error``; the row is never written, so only a build whose template
@@ -285,13 +285,13 @@ def eligibility_enforced(environ: Mapping[str, str]) -> bool:
 #: fits). The words in quotes are the reseed's own; tests/test_rdr232_library_remedy.py runs the seed loader
 #: through each case.
 LIBRARY_REMEDY = (
-    "nx plan reseed. If the gate stays in shadow, read the reseed's warnings: a 'seed load error' for a template "
+    "nx answer-plan reseed. If the gate stays in shadow, read the reseed's warnings: a 'seed load error' for a template "
     "means the installed conexus rejects it, and only an upgraded conexus clears it; a 'not reconciled' warning "
-    "(description already belongs to library row id=N) clears when row N is deleted and nx plan reseed is run "
-    "again, but inspect row N first with nx plan show N, because it can be a plan someone grew and a delete cannot "
-    "be undone, and run nx plan delete N only when it is not; a 'not reconciled' warning that says the plan listing "
+    "(description already belongs to library row id=N) clears when row N is deleted and nx answer-plan reseed is run "
+    "again, but inspect row N first with nx answer-plan show N, because it can be a plan someone grew and a delete cannot "
+    "be undone, and run nx answer-plan delete N only when it is not; a 'not reconciled' warning that says the plan listing "
     "hit its page cap is not about one row: the project holds more plan rows than one listing returns, so find the "
-    "ones you no longer need with nx plan list, delete them with nx plan delete, and run nx plan reseed again."
+    "ones you no longer need with nx answer-plan list, delete them with nx answer-plan delete, and run nx answer-plan reseed again."
 )
 
 _warned_libraries: set[tuple[int, tuple[str, ...]]] = set()
@@ -317,7 +317,7 @@ BUILTIN_TAG = "builtin-template"
 GROWN_TAG = "grown"
 
 #: Tags only a writer that attests may set: the grow site stamps ``grown`` with a grown declaration, the seed
-#: loader stamps ``builtin-template`` with a curated one. ``plan_save`` removes both from a caller's tags
+#: loader stamps ``builtin-template`` with a curated one. ``answer_plan_save`` removes both from a caller's tags
 #: (nexus-3ihve); the writers call the library directly and are not affected. ``ad-hoc`` is not here: it
 #: reads as nothing in :func:`classify_plan`.
 RESERVED_PROVENANCE_TAGS: frozenset[str] = frozenset({BUILTIN_TAG, GROWN_TAG})
@@ -512,7 +512,7 @@ _reseedable: frozenset[str] | None = None
 def reseedable_dimensions() -> frozenset[str] | None:
     """The canonical dimensions a reseed writes or deletes at the global tier; ``None`` if they cannot be read.
 
-    The shipped builtin templates (read from the directory ``nx plan reseed`` itself loads, the same way
+    The shipped builtin templates (read from the directory ``nx answer-plan reseed`` itself loads, the same way
     ``nx doctor --check-plan-library`` reads it, scope forced to ``global``) plus the retired templates the
     reconcile deletes (``seed_loader.RETIRED_TEMPLATE_DIMENSIONS``). A builtin-tagged row at any other
     dimensions is an orphan: the seed loader leaves it in place, so a reseed cannot give it a declaration.

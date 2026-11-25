@@ -86,7 +86,7 @@ def _load_tier(
     *scope*, we log ``plan_scope_path_mismatch`` and pass the path
     scope as an in-memory override to :func:`load_seed_directory`.
     The user's YAML file is never mutated — path-wins is a load-time
-    policy, not a disk rewrite. A subsequent ``nx plan lint`` (RDR-079
+    policy, not a disk rewrite. A subsequent ``nx answer-plan lint`` (RDR-079
     scope) can offer to fix the declared scope interactively.
     """
     if not directory.exists():

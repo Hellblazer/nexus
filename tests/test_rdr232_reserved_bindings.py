@@ -174,9 +174,9 @@ def test_validate_plan_steps_refuses_with_the_key_named(name: str, where: str) -
 
 @pytest.mark.parametrize(("name", "where"), CASES)
 def test_plan_save_tool_refuses_with_the_key_named(name: str, where: str) -> None:
-    from nexus.mcp.core import plan_save
+    from nexus.mcp.core import answer_plan_save
 
-    out = plan_save(
+    out = answer_plan_save(
         query="q", plan_json=json.dumps(_plan_declaring(name, where)),
         verb="research",
     )

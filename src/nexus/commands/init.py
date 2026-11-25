@@ -966,7 +966,7 @@ def _seed_builtin_plans_best_effort() -> None:
 
     A virgin install previously left the global plan tier at zero rows:
     ``nx init``/``nx init --service`` never called the seed loader — only
-    the manual ``nx plan reseed`` verb did
+    the manual ``nx answer-plan reseed`` verb did
     (:func:`nexus.commands.catalog._seed_plan_templates`). Consequences,
     measured on a bare box: ``nx_answer``'s plan-match gate missed 100% of
     the time (~53s / ~1.26 USD inline-planner tax per call, RDR-196
@@ -985,7 +985,7 @@ def _seed_builtin_plans_best_effort() -> None:
     standalone ``nx doctor --check-plan-library`` remain the durable,
     always-visible signal if this best-effort call ever fails.
     """
-    from nexus.commands.catalog import _seed_plan_templates  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps; matches `nx plan reseed`'s own import site
+    from nexus.commands.catalog import _seed_plan_templates  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps; matches `nx answer-plan reseed`'s own import site
 
     try:
         seeded = _seed_plan_templates()
@@ -993,7 +993,7 @@ def _seed_builtin_plans_best_effort() -> None:
         click.echo(
             f"\nWARNING: builtin plan-template seeding failed ({exc}). "
             "`nx_answer` will pay the inline-planner tax on every call "
-            "until this is fixed. Run `nx plan reseed` once the service "
+            "until this is fixed. Run `nx answer-plan reseed` once the service "
             "is reachable, or `nx doctor --check-plan-library` for "
             "diagnostics.",
             err=True,
@@ -1300,7 +1300,7 @@ def _finish_local_init(reporter: StepReporter) -> None:
         _converge_ladder_best_effort()
     # nexus-e1ti4: seed the builtin plan-template library now that the ladder
     # has converged — a virgin box otherwise pays the inline-planner tax on
-    # every nx_answer call until someone runs `nx plan reseed` by hand.
+    # every nx_answer call until someone runs `nx answer-plan reseed` by hand.
     with reporter.step("Seed the builtin plan library"):
         _seed_builtin_plans_best_effort()
     reporter.summary()

@@ -152,7 +152,7 @@ For questions that require multiple retrieval steps — comparing sources, extra
 
 ### Builtin scenario plans (RDR-078)
 
-`nx plan reseed` seeds YAML plan templates under `conexus/plans/builtin/` — see [plan-centric-retrieval.md](plan-centric-retrieval.md) for the current builtin plan catalog.
+`nx answer-plan reseed` seeds YAML plan templates under `conexus/plans/builtin/` — see [plan-centric-retrieval.md](plan-centric-retrieval.md) for the current builtin plan catalog.
 
 ### Verb skills
 

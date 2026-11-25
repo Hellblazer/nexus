@@ -379,11 +379,11 @@ def _json_equal(stored: str | None, desired: str | None) -> bool:
 #:
 #: WHY THESE FOUR: they served the plan-author / plan-inspect /
 #: plan-promote skills, and those skills call a `plan_match` MCP tool that
-#: has never existed — the server registers plan_save, plan_search and
-#: plan_delete only. So nothing has ever invoked them successfully, there
+#: has never existed — the server registers answer_plan_save, answer_plan_search and
+#: answer_plan_delete only. So nothing has ever invoked them successfully, there
 #: are no users to break, and what they described (survey the library,
-#: rank promotion candidates, show a plan's metrics) is `nx plan list` /
-#: `nx plan show` / `nx plan hygiene`, which work.
+#: rank promotion candidates, show a plan's metrics) is `nx answer-plan list` /
+#: `nx answer-plan show` / `nx answer-plan hygiene`, which work.
 #:
 #: An entry here is permanent. Re-shipping a template at the same
 #: dimensions would have it deleted on the next reconcile, so a revived
@@ -471,7 +471,7 @@ def load_seed_directory(
     if reconcile:
         # Retired templates are a GLOBAL-tier statement, so this runs on
         # EVERY reconcile call — once per tier directory, not once per
-        # `nx plan reseed`. Idempotent by construction (a reaped row is
+        # `nx answer-plan reseed`. Idempotent by construction (a reaped row is
         # gone, and a second pass finds nothing), so the repetition costs
         # a lookup per retired dimension and nothing else.
         _reap_retired(library, result)

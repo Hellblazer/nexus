@@ -226,8 +226,8 @@ LONG_RUNNING_TOOLS: tuple[str, ...] = ("nx_answer", "nx_enrich_beads", "nx_plan_
 #: never an accident.
 SYNC_TOOL_WORST_CASE: dict[str, str] = {
     **{n: "one engine call, seconds" for n in (
-        "collection_list", "memory_delete", "memory_get", "memory_put", "memory_search", "plan_delete",
-        "plan_save", "plan_search", "scratch", "scratch_manage", "store_get", "store_get_many", "store_list",
+        "collection_list", "memory_delete", "memory_get", "memory_put", "memory_search", "answer_plan_delete",
+        "answer_plan_save", "answer_plan_search", "plan_delete", "plan_save", "plan_search", "scratch", "scratch_manage", "store_get", "store_get_many", "store_list",
         "tuple_ack", "tuple_list", "tuple_nack", "tuple_out", "tuple_registry", "tuple_release", "tuple_renew",
         "tuple_stats", "tuple_subscribe", "tuple_subscriptions", "tuple_unsubscribe", "mailbox_send",
         "hook_auto_approve", "hook_subagent_start", "daemon_uninstall", "memory_consolidate",

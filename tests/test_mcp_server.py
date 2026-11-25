@@ -37,9 +37,9 @@ from nexus.mcp_server import (
     memory_get,
     memory_put,
     memory_search,
-    plan_save,
-    plan_delete,
-    plan_search,
+    answer_plan_save,
+    answer_plan_delete,
+    answer_plan_search,
     query,
     scratch,
     scratch_manage,
@@ -261,7 +261,7 @@ def subject_collection(t3):
 def _patch_t2(t2_path, monkeypatch):
     import nexus.mcp.core as mod
     monkeypatch.setattr(mod, "_t2_ctx", lambda: T2Database(t2_path))
-    # nexus-j5geq: plan_save now routes through the daemon write seam;
+    # nexus-j5geq: answer_plan_save now routes through the daemon write seam;
     # in this daemonless E2E, execute the write callback directly.
     monkeypatch.setattr(mod, "_t2_index_write", lambda fn, **_kw: fn(T2Database(t2_path)))
 
@@ -2263,7 +2263,7 @@ def test_memory_search_with_a_negative_offset_is_a_usage_error_and_sends_nothing
 # ── Result size cap (nexus-2xjge) ───────────────────────────────────────────
 #
 # None of these tools clamp a caller-supplied ``limit`` (nor, for
-# store_list(docs=True)/memory_search/plan_search, is the underlying fetch
+# store_list(docs=True)/memory_search/answer_plan_search, is the underlying fetch
 # paginated at all before Python does its own slicing) -- see
 # nexus.mcp.core._TEXT_RESULT_CAP_CHARS's docstring for the full audit.
 # Each pair below monkeypatches the cap down to a small value so a handful
@@ -2577,23 +2577,23 @@ def test_plan_search_caps_oversized_result(t2_path, monkeypatch):
 
     monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
     for i in range(10):
-        plan_save(
+        answer_plan_save(
             query=f"capping plan query {i}",
             plan_json='{"steps": [{"tool": "search", "args": {"query": "$input"}}]}',
             verb="analyze", answer_kind="unknown", project="capplanproj", tags="cap",
         )
-    out = plan_search(query="capping plan", project="capplanproj", limit=10)
-    assert "[plan_search: result capped at 100 chars" in out
+    out = answer_plan_search(query="capping plan", project="capplanproj", limit=10)
+    assert "[answer_plan_search: result capped at 100 chars" in out
     assert out.endswith("narrow the query, lower limit, or page with offset=...]")
 
 
 @pytest.mark.t2_tenant
 def test_plan_search_under_cap_is_unaffected(t2_path):
-    plan_save(
+    answer_plan_save(
         query="a small plan", plan_json='{"steps": []}',
         verb="analyze", answer_kind="unknown", project="nocapplanproj",
     )
-    out = plan_search(query="small plan", project="nocapplanproj")
+    out = answer_plan_search(query="small plan", project="nocapplanproj")
     assert "result capped" not in out
 
 
@@ -2639,22 +2639,22 @@ def test_scratch_list_under_cap_is_unaffected(t1):
 
 @pytest.mark.t2_tenant
 def test_plan_save_and_search(t2_path):
-    result = plan_save(
+    result = answer_plan_save(
         query="compare error handling",
         plan_json='{"steps": [{"tool": "search", "args": {"query": "$input"}}]}',
         verb="analyze", answer_kind="unknown",
         project="testproj", tags="search,compare",
     )
     assert "Saved plan:" in result
-    assert "compare error handling" in plan_search(query="error handling", project="testproj")
+    assert "compare error handling" in answer_plan_search(query="error handling", project="testproj")
 
 
 @pytest.mark.t2_tenant
 def test_plan_save_refuses_verbless(t2_path):
-    # nexus-fiovt: the MCP plan_save tool must refuse a verb-less write — the
+    # nexus-fiovt: the MCP answer_plan_save tool must refuse a verb-less write — the
     # source of the NULL-verb pollution (implementation plans keyed by task
     # description that false-match non-verb-filtered nx_answer questions).
-    result = plan_save(
+    result = answer_plan_save(
         query="RDR-999 phased execution plan: do the thing",
         plan_json='{"steps": []}',
         project="testproj",
@@ -2662,35 +2662,35 @@ def test_plan_save_refuses_verbless(t2_path):
     assert "Plan not saved" in result
     assert "verb" in result.lower()
     # And it did NOT persist — a search finds nothing.
-    assert "No matching plans" in plan_search(query="RDR-999 phased execution", project="testproj")
+    assert "No matching plans" in answer_plan_search(query="RDR-999 phased execution", project="testproj")
 
 
 @pytest.mark.t2_tenant
 def test_plan_search_empty(t2_path):
-    assert "No matching plans" in plan_search(query="nonexistent")
+    assert "No matching plans" in answer_plan_search(query="nonexistent")
 
 
 @pytest.mark.t2_tenant
 def test_plan_delete_round_trip(t2_path):
-    # nexus-v92zj: plan_save's destructive counterpart — a throwaway probe
+    # nexus-v92zj: answer_plan_save's destructive counterpart — a throwaway probe
     # entry must be removable via MCP without direct DB access.
-    plan_save(
+    answer_plan_save(
         query="throwaway shakeout probe entry",
         plan_json='{"steps": [{"tool": "search", "args": {"query": "$input"}}]}',
         verb="query", answer_kind="unknown",
         project="testproj", tags="shakeout-probe",
     )
-    out = plan_search(query="shakeout probe", project="testproj")
+    out = answer_plan_search(query="shakeout probe", project="testproj")
     plan_id = int(out.split("]")[0].lstrip("["))
-    result = plan_delete(plan_id=plan_id)
+    result = answer_plan_delete(plan_id=plan_id)
     assert f"Deleted plan id={plan_id}" in result
     assert "throwaway shakeout probe" in result
-    assert "No matching plans" in plan_search(query="shakeout probe", project="testproj")
+    assert "No matching plans" in answer_plan_search(query="shakeout probe", project="testproj")
 
 
 @pytest.mark.t2_tenant
 def test_plan_delete_not_found(t2_path):
-    assert "Not found: plan id 999999" in plan_delete(plan_id=999999)
+    assert "Not found: plan id 999999" in answer_plan_delete(plan_id=999999)
 
 
 # ── _get_catalog error propagation ───────────────────────────────────────────
@@ -2974,7 +2974,7 @@ async def test_mcp_server_round_trip():
                 "search", "query", "store_put", "store_get", "store_list",
                 "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
                 "scratch", "scratch_manage", "collection_list",
-                "plan_save", "plan_search", "plan_delete",
+                "answer_plan_save", "answer_plan_search", "answer_plan_delete",
             }
             for expected in expected_core_tools:
                 assert expected in tool_names, f"core tool missing: {expected}"
@@ -3072,7 +3072,7 @@ def test_mcp_shim_imports():
         search, query, store_put, store_get, store_list, store_delete,
         memory_put, memory_get, memory_delete, memory_search, memory_consolidate,
         scratch, scratch_manage, collection_list, collection_info,
-        collection_verify, plan_save, plan_search,
+        collection_verify, answer_plan_save, answer_plan_search,
         catalog_search, catalog_show, catalog_list, catalog_register,
         catalog_update, catalog_link, catalog_links, catalog_unlink,
         catalog_link_audit, catalog_link_bulk, catalog_link_query,

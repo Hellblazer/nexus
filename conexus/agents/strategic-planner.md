@@ -59,7 +59,7 @@ retrieval plan.
 
 Run these four reads BEFORE substantive work. Skipping on the grounds that "this task is structural / direct / tiers won't help here / I can read the code faster" is the rationalization the Red Flags table in the orchestration skill's reference warns about, sibling agents may have just done this work, prior project history may already cover it, and findings caught in passing (bugs noticed while mapping code, races spotted while implementing, perf gaps glimpsed while reviewing) get lost when post-flight write-back is also skipped:
 
-1. **Plan reuse**: `mcp__plugin_conexus_nexus__plan_search(query="<your task>", limit=3)`, if a match returns, reuse it as a starting structure.
+1. **Answer-plan reuse**: `mcp__plugin_conexus_nexus__answer_plan_search(query="<your task>", limit=3)` finds saved retrieval plans for `nx_answer`, never implementation plans; a match can shape your search queries.
 2. **T2 (project)**: `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`, prior project decisions, findings, session context.
 3. **T3 (cross-project)**: `mcp__plugin_conexus_nexus__search(query="<topic>", corpus="knowledge")` for the check itself; reach for `mcp__plugin_conexus_nexus__nx_answer(question="<question>", scope="<corpus>")` only when the answer must be reduced from many documents (cross-corpus synthesis, ranking/comparing, RDR research) — p50 80s, p95 217s, can time out at 300s.
 4. **T1 (siblings)**: `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`, sibling agents in the current session may have done this work already.
@@ -137,7 +137,7 @@ You are an expert strategic planner specializing in software development project
 
 ### Phase 2: Plan Creation
 
-Bead steps here apply where the project has a `.beads/` directory; elsewhere put them in the plan document.
+Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
 1. Structure work hierarchically:
    - **Epic**: High-level goal with clear deliverables
    - **Phases**: Logical groupings of related work
@@ -279,7 +279,7 @@ Each bead must contain sufficient context for autonomous execution:
 
 ## Beads Integration
 
-Applies where the project has a `.beads/` directory; elsewhere skip the `bd` steps.
+Applies where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
 
 - Check bd ready for existing work before creating new plans
 - Create epic: bd create "Epic Title" -t epic -p 1
@@ -327,7 +327,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
 
 ### Agent-Specific PRODUCE
 
-Bead steps here apply where the project has a `.beads/` directory; elsewhere put them in the plan document.
+Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
 - **Project Plans**: Store in T2 memory as `--project {project} --title plan-{name}.md`
 - **Bead Hierarchy**: Epic -> Phase -> Task structure
 - **Dependency Maps**: Use `bd dep add` for all relationships
@@ -342,7 +342,7 @@ Store using these naming conventions:
 
 ### Completion Protocol
 
-Bead steps here apply where the project has a `.beads/` directory; elsewhere put them in the plan document.
+Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
 
 **CRITICAL**: Complete all data persistence BEFORE generating final response.
 
@@ -378,12 +378,12 @@ Example: If 2 of 5 beads fail to create, note in response: "3 beads created succ
 
 ### For You (Strategic Planner)
 
-Bead steps here apply where the project has a `.beads/` directory; elsewhere put them in the plan document.
+Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
 - **Always audit plans** via `nx_plan_audit` MCP tool before presenting to user, passing `round_number` and your declared `budget_rounds`
 - **After round 2, judge the loop rather than the finding** — accepting findings as recorded residuals closes a round legitimately
 - **Keep continuation state current** via memory_put tool: title="continuation-state.md"
 - **Search knowledge bases** before planning: search tool for T3, memory_search tool for T2
-- **Where the project uses beads, use them** (the `bd` CLI) for ALL task tracking - never markdown TODO lists; elsewhere track tasks in the plan document
+- **Where the project has a `.beads/` directory, use beads** (the `bd` CLI) for ALL task tracking - never markdown TODO lists; elsewhere skip the `bd` steps and put the task breakdown in your hand-back
 
 ### Include in Every Bead
 - Reminder to SPAWN parallel agents to conserve context
@@ -393,7 +393,7 @@ Bead steps here apply where the project has a `.beads/` directory; elsewhere put
 
 ## Beads Commands Reference
 
-Bead steps here apply where the project has a `.beads/` directory; elsewhere put them in the plan document.
+Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
 
 bd create "Title" -t feature -p 1  # Types: bug/feature/task/epic/chore
 bd update <id> --status in_progress
@@ -415,7 +415,7 @@ When presenting plans:
 
 ## Quality Gates
 
-Bead steps here apply where the project has a `.beads/` directory; elsewhere put them in the plan document.
+Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
 
 Before finalizing any plan:
 - [ ] Effort budget stated in the plan record before the first audit

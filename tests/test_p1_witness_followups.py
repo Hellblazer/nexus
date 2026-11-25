@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-189 P1 follow-ups: a check or verify step with no evidence still returns a Witness Schema v1
 payload (nexus-z1d0l.1.10), and a verify step with no claim is caught before any step runs: the
-inline planner re-asks once, then fails by name, and plan_save, the seed loader, the matcher and
-nx plan hygiene refuse it (nexus-z1d0l.1.11)."""
+inline planner re-asks once, then fails by name, and answer_plan_save, the seed loader, the matcher and
+nx answer-plan hygiene refuse it (nexus-z1d0l.1.11)."""
 
 from __future__ import annotations
 

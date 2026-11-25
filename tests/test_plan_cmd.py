@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for ``nx plan`` CLI commands. RDR-092 Phase 0d.2.
+"""Tests for ``nx answer-plan`` CLI commands. RDR-092 Phase 0d.2.
 
 Ported to the engine substrate (nexus-i711w Stage 2 sub-stage A3): the
 SQLite ``PlanLibrary`` was deleted, so seeding goes through
@@ -10,8 +10,8 @@ the same env, so the CliRunner invocations read and write exactly the
 rows the ``plan_db`` fixture seeds (the shape test_plan_disable.py
 established).
 
-The ``nx plan repair`` verb group DIED with the SQLite store
-([21098] verb fates: `nx plan repair` D) — its tests are tombstoned
+The ``nx answer-plan repair`` verb group DIED with the SQLite store
+([21098] verb fates: `nx answer-plan repair` D) — its tests are tombstoned
 below, not ported.
 """
 from __future__ import annotations
@@ -79,16 +79,16 @@ def _seed_plan_row(
 # ── TestPlanRepair DELETED (nexus-i711w Stage 2 sub-stage A3) ───────────────
 #
 # Its three tests (idempotent backfill, low-conf-first report, missing-DB
-# clean exit) drove ``nx plan repair dimensions``, which re-ran the
+# clean exit) drove ``nx answer-plan repair dimensions``, which re-ran the
 # ``_backfill_plan_dimensions`` heuristic against the local SQLite T2 file.
-# The whole ``nx plan repair`` group (and its `_open_plans_db` sqlite3
+# The whole ``nx answer-plan repair`` group (and its `_open_plans_db` sqlite3
 # helper) was deleted with the SQLite PlanLibrary ([21098] verb fates);
 # the live library is engine-served and content repairs are engine-side
 # operations. The SQLite seed helpers ``_seed_plans`` /
 # ``_insert_null_dim_plan`` died with them.
 
 
-# ── nx plan list / show / delete / reseed (nexus-la28) ─────────────────────
+# ── nx answer-plan list / show / delete / reseed (nexus-la28) ─────────────────────
 
 
 @pytest.mark.t2_tenant
@@ -99,7 +99,7 @@ class TestPlanList:
         (Was ``test_list_empty_db`` asserting the missing-local-file
         message — that state died with the local snapshot.)
         """
-        result = runner.invoke(main, ["plan", "list"])
+        result = runner.invoke(main, ["answer-plan", "list"])
         assert result.exit_code == 0, result.output
         assert "no plans match" in result.output.lower()
 
@@ -115,7 +115,7 @@ class TestPlanList:
             scope="personal", project="personal", tags="",
         )
 
-        result = runner.invoke(main, ["plan", "list"])
+        result = runner.invoke(main, ["answer-plan", "list"])
         assert result.exit_code == 0, result.output
         assert "builtin" in result.output
         assert "grown" in result.output
@@ -136,7 +136,7 @@ class TestPlanList:
             scope="personal", project="personal", tags="",
         )
 
-        result = runner.invoke(main, ["plan", "list", "--origin", "grown"])
+        result = runner.invoke(main, ["answer-plan", "list", "--origin", "grown"])
         assert result.exit_code == 0, result.output
         assert "grown-x" in result.output
         assert "research-default" not in result.output
@@ -153,7 +153,7 @@ class TestPlanList:
             verb="research", tags="builtin-template",
         )
 
-        result = runner.invoke(main, ["plan", "list", "--name", "hybrid"])
+        result = runner.invoke(main, ["answer-plan", "list", "--name", "hybrid"])
         assert result.exit_code == 0, result.output
         assert "hybrid-factual-lookup" in result.output
         assert "research-default" not in result.output
@@ -165,7 +165,7 @@ class TestPlanList:
             plan_db, name="some-plan", query="q", verb="research",
             tags="builtin-template",
         )
-        result = runner.invoke(main, ["plan", "list", "--json"])
+        result = runner.invoke(main, ["answer-plan", "list", "--json"])
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout)
         assert isinstance(data, list)
@@ -185,7 +185,7 @@ class TestPlanShow:
             plan_json='{"steps": [{"tool": "search", "args": {}}]}',
         )
 
-        result = runner.invoke(main, ["plan", "show", str(plan_id)])
+        result = runner.invoke(main, ["answer-plan", "show", str(plan_id)])
         assert result.exit_code == 0, result.output
         assert "show-target" in result.output
         assert "search" in result.output  # plan_json content rendered
@@ -198,14 +198,14 @@ class TestPlanShow:
             verb="lookup", tags="builtin-template",
         )
 
-        result = runner.invoke(main, ["plan", "show", "hybrid"])
+        result = runner.invoke(main, ["answer-plan", "show", "hybrid"])
         assert result.exit_code == 0, result.output
         assert "hybrid-factual-lookup" in result.output
 
     def test_show_no_match(
         self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
-        result = runner.invoke(main, ["plan", "show", "missing"])
+        result = runner.invoke(main, ["answer-plan", "show", "missing"])
         assert result.exit_code != 0
         assert "no plan" in result.output.lower()
 
@@ -220,7 +220,7 @@ class TestPlanDelete:
             scope="personal", project="personal",
         )
 
-        result = runner.invoke(main, ["plan", "delete", str(plan_id), "-y"])
+        result = runner.invoke(main, ["answer-plan", "delete", str(plan_id), "-y"])
         assert result.exit_code == 0, result.output
         assert "Removed 1" in result.output
 
@@ -231,7 +231,7 @@ class TestPlanDelete:
     def test_delete_missing_id(
         self, runner: CliRunner, plan_db: T2Database,
     ) -> None:
-        result = runner.invoke(main, ["plan", "delete", "999999999", "-y"])
+        result = runner.invoke(main, ["answer-plan", "delete", "999999999", "-y"])
         assert result.exit_code != 0
         assert "no plan" in result.output.lower()
 
@@ -244,7 +244,7 @@ class TestPlanDelete:
         )
         # Decline the confirmation prompt.
         result = runner.invoke(
-            main, ["plan", "delete", str(plan_id)], input="n\n",
+            main, ["answer-plan", "delete", str(plan_id)], input="n\n",
         )
         assert result.exit_code != 0  # Click abort returns non-zero
         # Verify the row is still there.
@@ -261,10 +261,10 @@ class TestPlanReseed:
         on ``UNIQUE (project, dimensions)`` against the fresh tenant.
         """
         # First run installs the builtin set.
-        first = runner.invoke(main, ["plan", "reseed"])
+        first = runner.invoke(main, ["answer-plan", "reseed"])
         assert first.exit_code == 0, first.output
         # Second run is a no-op (idempotent).
-        second = runner.invoke(main, ["plan", "reseed"])
+        second = runner.invoke(main, ["answer-plan", "reseed"])
         assert second.exit_code == 0, second.output
         assert "Seeded 0" in second.output
 
@@ -278,7 +278,7 @@ class TestPlanReseed:
 
 # ── nexus-o02xe: service-mode facade routing (RDR-179 Phase 1) ───────────────
 #
-# Every `nx plan` verb used to hardcode PlanLibrary(path=default_db_path()) —
+# Every `nx answer-plan` verb used to hardcode PlanLibrary(path=default_db_path()) —
 # in service mode that is the frozen pre-migration SQLite snapshot, so the CLI
 # read (and reseed/repair WROTE) a dead file while the live library sat in the
 # engine. These tests pin the routing: service backend -> HttpPlanLibrary,
@@ -327,7 +327,7 @@ def _service_plans(monkeypatch, tmp_path):
 
 
 def test_plan_list_routes_to_service(runner, _service_plans):
-    result = runner.invoke(main, ["plan", "list"])
+    result = runner.invoke(main, ["answer-plan", "list"])
     assert result.exit_code == 0, result.output
     assert "T2 database not found" not in result.output
     assert _StubHttpPlanLibrary.instances, "HttpPlanLibrary never constructed"
@@ -335,7 +335,7 @@ def test_plan_list_routes_to_service(runner, _service_plans):
 
 
 def test_plan_delete_routes_to_service(runner, _service_plans):
-    result = runner.invoke(main, ["plan", "delete", "7", "--yes"])
+    result = runner.invoke(main, ["answer-plan", "delete", "7", "--yes"])
     assert result.exit_code == 0, result.output
     assert "Removed 1 row(s)." in result.output
     calls = _StubHttpPlanLibrary.instances[0].calls
@@ -343,8 +343,8 @@ def test_plan_delete_routes_to_service(runner, _service_plans):
 
 
 # test_plan_repair_refuses_in_service_mode DELETED (nexus-i711w sub-stage
-# A3): its subject was the service-mode REFUSAL of `nx plan repair` — the
-# whole repair group is deleted, so `nx plan repair ...` is now a Click
+# A3): its subject was the service-mode REFUSAL of `nx answer-plan repair` — the
+# whole repair group is deleted, so `nx answer-plan repair ...` is now a Click
 # usage error, not a routed verb with a refusal branch.
 
 
@@ -371,7 +371,7 @@ def test_plan_reseed_reconciles_by_default(runner, monkeypatch):
     from nexus.commands.catalog import _SeedSummary
 
     seen = _stub_seed(monkeypatch, _SeedSummary(inserted=1, updated=3, protected=[]))
-    result = runner.invoke(main, ["plan", "reseed"])
+    result = runner.invoke(main, ["answer-plan", "reseed"])
 
     assert result.exit_code == 0, result.output
     assert seen["reconcile"] is True
@@ -384,7 +384,7 @@ def test_plan_reseed_force_still_accepted_and_redundant(runner, monkeypatch):
     from nexus.commands.catalog import _SeedSummary
 
     seen = _stub_seed(monkeypatch, _SeedSummary(inserted=0, updated=2, protected=[]))
-    result = runner.invoke(main, ["plan", "reseed", "--force"])
+    result = runner.invoke(main, ["answer-plan", "reseed", "--force"])
 
     assert result.exit_code == 0, result.output
     assert seen["reconcile"] is True
@@ -394,7 +394,7 @@ def test_plan_reseed_insert_only_opts_out(runner, monkeypatch):
     from nexus.commands.catalog import _SeedSummary
 
     seen = _stub_seed(monkeypatch, _SeedSummary(inserted=0, updated=0, protected=[]))
-    result = runner.invoke(main, ["plan", "reseed", "--insert-only"])
+    result = runner.invoke(main, ["answer-plan", "reseed", "--insert-only"])
 
     assert result.exit_code == 0, result.output
     assert seen["reconcile"] is False
@@ -423,7 +423,7 @@ def test_classify_origin_reads_tag_tokens_and_the_declaration(row, expected) -> 
 
 
 class _FakePlanLibrary:
-    """Rows for ``nx plan list`` with no engine: the origin labels are the subject, not storage (nexus-7bwe).
+    """Rows for ``nx answer-plan list`` with no engine: the origin labels are the subject, not storage (nexus-7bwe).
     A tenant-backed version of this test raised the tenant ceiling on develop (5360 against 5359)."""
 
     def __init__(self, rows: list[dict]) -> None:
@@ -450,8 +450,8 @@ def test_list_origin_grown_matches_the_shape_the_grow_path_writes(monkeypatch) -
     lib = _FakePlanLibrary([_row(1, "grown-in-project", "ad-hoc,grown", "ART"), _row(2, "not-builtin", "my-builtin-templates")])
     monkeypatch.setattr(plan_cmd, "_open_plan_library", lambda: lib)
     runner = CliRunner()
-    result = runner.invoke(main, ["plan", "list", "--origin", "grown"])
+    result = runner.invoke(main, ["answer-plan", "list", "--origin", "grown"])
     assert result.exit_code == 0, result.output
     assert "grown-in-project" in result.output and "not-builtin" not in result.output
-    result = runner.invoke(main, ["plan", "list", "--origin", "builtin"])
+    result = runner.invoke(main, ["answer-plan", "list", "--origin", "builtin"])
     assert result.exit_code == 0 and "not-builtin" not in result.output

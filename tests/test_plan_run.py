@@ -490,12 +490,12 @@ async def test_default_dispatcher_wraps_str_return_as_text_dict() -> None:
     Note: as of RDR-079 P1, retrieval tools (search, query) are auto-
     promoted to structured=True and return dict directly. This test
     covers the OTHER path: non-retrieval tools that still return str
-    (e.g., `plan_search` when called without structured flag)."""
+    (e.g., `answer_plan_search` when called without structured flag)."""
     from nexus.plans.runner import _default_dispatcher
 
-    # plan_search — not in _RETRIEVAL_TOOLS, returns str by default.
+    # answer_plan_search — not in _RETRIEVAL_TOOLS, returns str by default.
     result = await _default_dispatcher(
-        "plan_search", {"query": "no-such-plan-xyz", "project": "none"},
+        "answer_plan_search", {"query": "no-such-plan-xyz", "project": "none"},
     )
     assert isinstance(result, dict), (
         "default dispatcher must normalize str return into dict form"
@@ -601,7 +601,7 @@ async def test_default_dispatcher_passes_through_dict_return() -> None:
     via the dispatcher."""
     from nexus.plans.runner import _default_dispatcher
 
-    # Use plan_search via _default_dispatcher is fine (returns str wrapped),
+    # Use answer_plan_search via _default_dispatcher is fine (returns str wrapped),
     # but the contract pin is that dict returns pass through verbatim. We
     # test this by inspecting that _default_dispatcher for a real dict-
     # returning tool (traverse) does NOT add an extra 'text' field.

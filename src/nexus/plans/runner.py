@@ -1193,7 +1193,7 @@ def find_embedded_step_ref(plan: "str | dict[str, Any] | None") -> PlanRunStepRe
     raise for it, else ``None`` (nexus-jypmj.4).
 
     The pre-run form of :func:`_reject_unsubstitutable_step_refs`, which it calls on each step's raw
-    args: ``plan_save``, the plan matcher, ``nx plan hygiene`` and the inline planner's output all
+    args: ``answer_plan_save``, the plan matcher, ``nx answer-plan hygiene`` and the inline planner's output all
     ask it rather than carry a second copy of the rule. *plan* is the ``plan_json`` text or its
     decoded mapping. Anything that is not a plan with a ``steps`` list of mappings returns ``None``:
     shape problems belong to the schema validator, not to this scan.
@@ -1228,7 +1228,7 @@ def find_claimless_verify(plan: "str | dict[str, Any] | None") -> int | None:
     The host never invents a claim, and a step without one cannot be a check: ``plan_run`` refuses it
     when it reaches it, after the steps before it have run and been paid for, and a bundle would show
     the model an empty claim. So every door a plan comes through asks this first: the inline planner,
-    ``plan_save``, the seed loader, the matcher and ``nx plan hygiene``. A claim that is not a
+    ``answer_plan_save``, the seed loader, the matcher and ``nx answer-plan hygiene``. A claim that is not a
     non-blank string counts as none (a deferred-ref mapping exists only inside a running bundle,
     never in plan JSON). The tool name is read as ``plan_run`` reads it, an ``mcp__`` prefix
     stripped (matched by suffix, so this is no new name-parse site). Anything that is not a plan with a ``steps`` list returns ``None``, as
@@ -1292,8 +1292,8 @@ def find_operator_arg_defect(plan: "str | dict[str, Any] | None") -> tuple[int, 
     else ``None`` (nexus-iy2ep, extending nexus-z1d0l.1.11).
 
     ``plan_run`` refuses such a step only when it reaches it, after the steps before it have run and been paid
-    for, so every door a plan comes through asks this first (the inline planner, ``plan_save``, the seed loader,
-    the matcher and ``nx plan hygiene``). Three defects, in step order:
+    for, so every door a plan comes through asks this first (the inline planner, ``answer_plan_save``, the seed loader,
+    the matcher and ``nx answer-plan hygiene``). Three defects, in step order:
 
     * a verify step with no non-blank ``claim`` (the host never invents one);
     * a verify step with neither ``ids`` nor ``evidence`` that does not directly follow a non-witness operator step

@@ -8,16 +8,16 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 48 | Storage tiers, retrieval, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 51 | Storage tiers, retrieval, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`). No separate install. The `.mcpb` extension registers only `nexus` — catalog tools (`search`, `link`, etc. on the `nexus-catalog` server) are unavailable in Claude Desktop until the plugin also ships a second `.mcpb` entry.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (48 tools)
+## `nexus` — retrieval + storage (51 tools)
 
-Of the 48 registered tools, 46 are for agents; 2 are internal `hook_*` tools the plugin's own hooks call.
+Of the 51 registered tools, 49 are for agents; 2 are internal `hook_*` tools the plugin's own hooks call. Three of the 49 are the deprecated `plan_*` aliases.
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -58,9 +58,10 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | Tool | Purpose |
 |---|---|
 | `collection_list` | List all T3 collections visible to the current credentials |
-| `plan_save` | Persist a plan template or ad-hoc plan (TTL-bounded) for later reuse |
-| `plan_search` | Retrieve cached plans by PostgreSQL full-text search (`ts_rank` relevance). Since 7.27.0 (nexus-vi8fp) an any-lexeme OR fallback fires when the default AND query returns nothing — reachable from this browsing tool only; `plan_match` structurally cannot reach it |
-| `plan_delete` | Delete a plan-library entry by id (cleanup counterpart to `plan_save`) |
+| `answer_plan_save` | Persist a retrieval plan (TTL-bounded) for `nx_answer` to reuse. Implementation plans go in beads, not here. Formerly `plan_save` |
+| `answer_plan_search` | Retrieve cached plans by PostgreSQL full-text search (`ts_rank` relevance). Since 7.27.0 (nexus-vi8fp) an any-lexeme OR fallback fires when the default AND query returns nothing — reachable from this browsing tool only; `plan_match` structurally cannot reach it |
+| `answer_plan_delete` | Delete an answer-plan library entry by id (cleanup counterpart to `answer_plan_save`). Formerly `plan_delete` |
+| `plan_save`, `plan_search`, `plan_delete` | Deprecated names of the three `answer_plan_*` tools: each works, appends a deprecation line naming its replacement, and is removed one client release after this one |
 | `procedure_run` | Run a library procedure (RDR-240, RDR-242): a reviewed Lua script in a sandbox that reads through read-only verbs and returns a JSON value; `name` and `args`. The description lists the shipped procedures with their header summaries; `nx run --list` lists what runs from a checkout's `.nexus/procedures` too, which needs `NX_PROCEDURES_REPO_ROOT=1`. An error comes back as `<kind>: <detail>` |
 | `traverse` | Walk the catalog link graph from seed tumblers with typed link filters or a named purpose. Depth capped at 3. Returns `{tumblers, ids, collections}` for downstream retrieval |
 
@@ -169,7 +170,7 @@ reference context it used to print is loaded on demand, one topic at a time.
 
 ### Hook-tier tools (internal plumbing, RDR-215)
 
-The remaining 2 of the 48 registered tools are `hook_*` entries
+The remaining 2 of the 51 registered tools are `hook_*` entries
 (`src/nexus/mcp/hooks.py`, `nexus.mcp.hooks.HOOK_TOOLS`). Each ports a
 conexus plugin `hooks.json` entry to a `hook_*` MCP tool.
 `hook_subagent_start` is what `hooks.json` WIRES for `SubagentStart` (an
@@ -185,8 +186,8 @@ and divergence-language hook tools (`hook_pre_close_verification`,
 `hook_divergence_language_guard`) at cleanup steps A2 and A3; the wire
 snapshot moved with them. There is no reason to call either remaining tool by
 hand, and their own tool descriptions say so ("not meant to be invoked
-directly"). Listed here only so the 48-tool count reconciles with the tables
-above, which cover the 46 tools an agent calls directly:
+directly"). Listed here only so the 51-tool count reconciles with the tables
+above, which cover the 49 tools an agent calls directly:
 
 | Tool | Fires on |
 |---|---|
@@ -282,21 +283,21 @@ entry. Pass one subject collection's name to narrow any of these tools to it.
 | Persist a research finding | `nexus` | `store_put` |
 | Remember for next session | `nexus` | `memory_put` |
 | Share a hypothesis with a sibling agent | `nexus` | `scratch` |
-| Cache a query plan for reuse | `nexus` | `plan_save` |
+| Cache a query plan for reuse | `nexus` | `answer_plan_save` |
 | Send a mid-turn message to an agent | `nexus` | `tuple_out` to `mailbox/<agent id>` |
 
 Content (chunks, documents, notes) is on `nexus`; metadata and relationships (entries, typed links, tumblers) are on `nexus-catalog`. `query` crosses the boundary — it uses catalog metadata to scope a content search.
 
 ## Pagination
 
-Seven tools return paged results and accept `offset`: `search`, `store_list`, `memory_search` and `plan_search` on the nexus server, and `search`, `list` and `link_query` on the nexus-catalog server. The nexus tools end with a footer; the catalog tools add a `_pagination` entry carrying `next_offset` instead. Footer:
+Seven tools return paged results and accept `offset`: `search`, `store_list`, `memory_search` and `answer_plan_search` on the nexus server, and `search`, `list` and `link_query` on the nexus-catalog server. The nexus tools end with a footer; the catalog tools add a `_pagination` entry carrying `next_offset` instead. Footer:
 
 ```
 --- showing 1-20 of 57. next: offset=20
 --- showing 41-57 of 57. (end)
 ```
 
-Pass `offset=N` back to the same tool to fetch the next page. Default page size is 20 for `store_list`, `memory_search` and catalog `search`, 50 for catalog `list` and `link_query`, and 5 for `plan_search`; `search`'s page-size parameter is `limit` (default 10).
+Pass `offset=N` back to the same tool to fetch the next page. Default page size is 20 for `store_list`, `memory_search` and catalog `search`, 50 for catalog `list` and `link_query`, and 5 for `answer_plan_search`; `search`'s page-size parameter is `limit` (default 10).
 
 ## Permission auto-approval
 

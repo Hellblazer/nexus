@@ -3,7 +3,7 @@
 """Plan promotion gates — RDR-079 P6 (nexus-rxk).
 
 Closes RDR-078 Gap D (promotion lifecycle). Defines the purely-functional
-gate evaluator used by ``nx plan promote``. The CLI is a thin wrapper
+gate evaluator used by ``nx answer-plan promote``. The CLI is a thin wrapper
 that surfaces the verdict to stdout and — when the gate passes and
 ``--dry-run`` is NOT set — writes a YAML template into the target tier.
 

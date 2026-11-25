@@ -144,7 +144,7 @@ class TestExplicitFlags:
         from nexus.commands.tier_status import tier_status_cmd
         _seed_t2(isolated_t2, [
             ("sess-X", "store_put", "T3", None, None, "permanent"),
-            ("sess-X", "plan_save", "plan", None, "nexus", "research-default"),
+            ("sess-X", "answer_plan_save", "plan", None, "nexus", "research-default"),
             ("sess-Y", "memory_put", "T2", None, "nexus", "noise"),
         ])
         monkeypatch.setenv("NX_SESSION_ID", "sess-Y")  # ignored

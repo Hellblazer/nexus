@@ -555,7 +555,7 @@ def _axis(reports, name):
 def test_plan_library_axis_converges_on_every_upgrade():
     """The whole point: a user never has to know their library is stale.
 
-    Reconcile used to be opt-in behind `nx plan reseed --force`, which only
+    Reconcile used to be opt-in behind `nx answer-plan reseed --force`, which only
     helps someone who already knows. Every install that never ran it kept
     an April 2026 snapshot — two templates missing, nine rows drifted, and
     nx_answer's single-query fast path unreachable the entire time.
@@ -585,7 +585,7 @@ def test_plan_library_failure_never_blocks_the_upgrade():
     reports = converge_preconditions(**_converge_kwargs(_plan_library_fn=_boom))
     axis = _axis(reports, "plan-library")
     assert axis.applicable and not axis.current
-    assert "nx plan reseed" in axis.detail
+    assert "nx answer-plan reseed" in axis.detail
 
 
 # ── nexus-jw44t follow-up: _default_lease marks the evidence flag ─────────

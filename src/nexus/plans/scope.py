@@ -80,7 +80,7 @@ def normalize_scope_tags(scope_tags: str) -> str:
     This logic was written out three times — ``PlanLibrary.save_plan``,
     ``PlanLibrary.set_scope_tags``, and ``HttpPlanLibrary.save_plan`` — and
     the fourth site that needed it, ``HttpPlanLibrary.set_scope_tags``, simply
-    did not get a copy, so service-mode ``nx plan set-scope`` stored raw
+    did not get a copy, so service-mode ``nx answer-plan set-scope`` stored raw
     values (nexus-aqbrk, found porting the plan-library tests to the engine
     substrate). Hence one function.
     """

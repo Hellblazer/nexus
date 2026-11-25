@@ -93,7 +93,7 @@ This file documents common error handling patterns for agents.
 `indexed_at + ttl_days`, so there is no stored expiry timestamp to guard in SQL. `ttl_days=0` is
 rejected outright (RDR-194 D5, nexus-tk070.p6b) — never coerced to permanent. (`HttpVectorClient.put`
 did the same until it was retired, nexus-nt76j.) `store_put`'s `ttl` parameter is a string (`"permanent"`, `"Nd"`, `"Nw"`), not the
-integer-or-None shape `memory_put`/`plan_save` use.
+integer-or-None shape `memory_put`/`answer_plan_save` use.
 
 **Engine (T3 store) connectivity failure**:
 - Error: search or store_put fails with a connection error

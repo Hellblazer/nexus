@@ -734,7 +734,7 @@ def test_scope_fit_case_insensitive_bare_family_prefix(library) -> None:
 
 def test_scope_fit_preserves_stored_case(library) -> None:
     """Stored scope_tags value is untouched by case-insensitive compare.
-    The Match object reports the real mixed-case name so plan_search /
+    The Match object reports the real mixed-case name so answer_plan_search /
     authoring output shows the actual collection reference."""
     from nexus.plans.matcher import plan_match
 
@@ -1225,7 +1225,7 @@ def test_superset_empty_verb_falls_back_to_strict_equality() -> None:
 # run a junk plan via one shared common word (confidence=None auto-admit,
 # and a wrong-but-runnable plan records SUCCESS, so nothing retires it).
 # Sam's decision C (2026-08-31): recall widening is for HUMAN browsing
-# surfaces (search_plans any_lexeme=True — the plan_search MCP tool);
+# surfaces (search_plans any_lexeme=True — the answer_plan_search MCP tool);
 # plan_match stays AND-only and pays the inline planner for vocabulary-gap
 # questions. These tests pin BOTH halves of that boundary.
 

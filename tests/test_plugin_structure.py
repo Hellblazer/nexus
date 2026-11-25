@@ -729,7 +729,7 @@ class TestRetiredWrapperSkillsLiveInTheOrchestrationSkill:
     _REFERENCE = (
         "Skill Routing", "REDUCED FROM MANY DOCUMENTS", "p50 80s", "Sequential thinking",
         "T2 ttl", "Common Mistakes", "Red Flags", "phase-review-gate", "rdr-create",
-        "mcp__plugin_conexus_nexus__plan_search", "mcp__plugin_conexus_nexus__nx_answer",
+        "mcp__plugin_conexus_nexus__answer_plan_search", "mcp__plugin_conexus_nexus__nx_answer",
     )
 
     def test_every_moved_rule_is_present(self) -> None:

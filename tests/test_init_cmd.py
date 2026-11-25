@@ -1752,7 +1752,7 @@ class TestBuiltinPlanSeeding:
         _REAL_SEED()  # must not raise
         err = capsys.readouterr().err
         assert "builtin plan-template seeding failed" in err
-        assert "nx plan reseed" in err
+        assert "nx answer-plan reseed" in err
 
     def test_helper_reports_zero_seeded_quietly(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys

@@ -1,5 +1,104 @@
 {
   "nexus": {
+    "answer_plan_delete": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "plan_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plan_id"
+        ],
+        "type": "object"
+      },
+      "qualname": "answer_plan_delete"
+    },
+    "answer_plan_save": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "answer_kind": {
+            "default": "",
+            "type": "string"
+          },
+          "outcome": {
+            "default": "success",
+            "type": "string"
+          },
+          "plan_json": {
+            "type": "string"
+          },
+          "project": {
+            "default": "",
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "scope_tags": {
+            "default": "",
+            "type": "string"
+          },
+          "tags": {
+            "default": "",
+            "type": "string"
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "verb": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "plan_json"
+        ],
+        "type": "object"
+      },
+      "qualname": "answer_plan_save"
+    },
+    "answer_plan_search": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "limit": {
+            "default": 5,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer"
+          },
+          "project": {
+            "default": "",
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "qualname": "answer_plan_search"
+    },
     "brief": {
       "is_async": false,
       "module": "nexus.mcp.core",

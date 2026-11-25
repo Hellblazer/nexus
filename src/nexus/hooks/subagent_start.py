@@ -295,7 +295,7 @@ _NX_T3 = (
     "T3: search (where, cluster_by, topic), query (catalog-aware; follow_links, "
     "depth, subtree),\n"
     "    store_list, store_get, store_put, collection_list\n"
-    "Plans (T2): plan_search, plan_save\n"
+    "Answer plans (T2, retrieval only; implementation plans go in beads): answer_plan_search, answer_plan_save\n"
     'Hint: where="section_type!=references" filters noise.\n\n'
     "WRITE-BACK when your work produced findings: interim findings to "
     "T1 (scratch put, your brief's tags); the record your brief or agent definition requires to T2; only "

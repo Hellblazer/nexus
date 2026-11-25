@@ -104,8 +104,8 @@ _PRE_INVERSION_DESTINATIONS = frozenset(
         "/conexus:serena-code-nav",
         "/conexus:substantive-critique",
         "/conexus:writing-nx-skills",
-        "mcp__plugin_conexus_nexus__plan_save",
-        "mcp__plugin_conexus_nexus__plan_search",
+        "mcp__plugin_conexus_nexus__answer_plan_save",
+        "mcp__plugin_conexus_nexus__answer_plan_search",
         "mcp__plugin_conexus_sequential",
     }
 )

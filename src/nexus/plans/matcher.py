@@ -322,7 +322,7 @@ def _unmet_typed_binding(
 
     ``available is None`` means the caller did not declare what it can
     supply, so no filtering happens — this keeps every pre-nexus-0yrjr
-    caller (and ``plan_search``) behaving exactly as before.
+    caller (and ``answer_plan_search``) behaving exactly as before.
     """
     if available is None:
         return None
@@ -369,7 +369,7 @@ def _log_reserved_drops(drops: list[tuple[int, tuple[str, ...]]]) -> None:
         remedy=(
             "the plan declares source, owner or project, which nx_answer "
             "reserves for the caller's evidence request; edit the plan to "
-            "drop the declaration, or retire it with nx plan disable"
+            "drop the declaration, or retire it with nx answer-plan disable"
         ),
     )
 
@@ -398,7 +398,7 @@ def _log_embedded_ref_drops(drops: list[tuple[int, str, str]]) -> None:
     operator step missing an author-supplied argument (``ref`` ``operator_arg``).
 
     INFO and drained exactly like :func:`_log_reserved_drops`; the row is neither rewritten nor
-    deleted, and ``nx plan hygiene`` reports it.
+    deleted, and ``nx answer-plan hygiene`` reports it.
     """
     if not drops:
         return
@@ -409,7 +409,7 @@ def _log_embedded_ref_drops(drops: list[tuple[int, str, str]]) -> None:
         dropped=len(snapshot),
         detail=[{"plan_id": pid, "ref": ref, "reason": why} for pid, ref, why in snapshot],
         remedy=(
-            "the plan can only fail at run time; nx plan hygiene --apply retires it, or "
+            "the plan can only fail at run time; nx answer-plan hygiene --apply retires it, or "
             "edit it so each arg is one $stepN.<field> reference or a list of them, every "
             "verify step has a claim and ids or evidence, and every check step a check_instruction"
         ),
@@ -449,7 +449,7 @@ def _log_t1_drops(
         _log.info(
             "plan_match_always_failing_dropped",
             dropped=always_failing_drops,
-            remedy="nx plan hygiene --apply retires these durably",
+            remedy="nx answer-plan hygiene --apply retires these durably",
         )
 
 
@@ -550,7 +550,7 @@ def _scope_fit(plan_scope_tags: str, normalized_scope_pref: str) -> float | None
     case to disambiguate identity. A caller passing the conventional
     lowercase scope should match plans tagged with the mixed-case form
     found in the wild (nexus-yi7m). Stored values preserve original case
-    so authoring output (``plan_search``) still shows the real name.
+    so authoring output (``answer_plan_search``) still shows the real name.
     """
     if not normalized_scope_pref:
         return 0.0
@@ -887,7 +887,7 @@ def plan_match(
                 # nexus-vtp8h: every recorded run failed — skip rather than
                 # hand the runner a plan that only ever crashes. Attrition is
                 # counted, not over-fetch-compensated (reviewer Medium,
-                # recorded as accepted): `nx plan hygiene` retires these
+                # recorded as accepted): `nx answer-plan hygiene` retires these
                 # durably, so cosine-hit domination by always-failing rows is
                 # a transient pre-hygiene state, and the counter below makes
                 # it observable rather than silently under-delivering n.
