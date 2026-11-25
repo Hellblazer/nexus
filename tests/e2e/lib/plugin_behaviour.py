@@ -452,11 +452,36 @@ def am_flag_parts() -> tuple[str, ...]:
     return (".config", "nexus", "maintainer-profile")
 
 
-def sanitized_path(shim_dir: Path | None) -> str:
+#: Programs the leg hides from every fixture's PATH: the nx family (P0 has no nx, and P2 brings its own through the shim
+#: directory) and ``bd`` (a user's repository has no beads; with ``bd`` on PATH the SessionStart index line would name the
+#: beads topic, which is a data gate that is on, not a leak).
+HIDDEN_PROGRAMS = (*NX_PROGRAMS, "bd")
+
+
+def sanitized_path(shim_dir: Path | None, work: Path) -> str:
+    """PATH without the hidden programs. A directory that holds one is mirrored by symlinks to all its other entries, so
+    ``uv``, ``git`` and the interpreters that live beside ``nx`` or ``bd`` stay reachable."""
     keep: list[str] = []
-    for d in os.environ.get("PATH", "").split(os.pathsep):
-        if d and not any((Path(d) / n).exists() for n in NX_PROGRAMS):
+    for i, d in enumerate(os.environ.get("PATH", "").split(os.pathsep)):
+        if not d:
+            continue
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        if not any(n in names for n in HIDDEN_PROGRAMS):
             keep.append(d)
+            continue
+        mirror = work / "pathmirror" / str(i)
+        mirror.mkdir(parents=True, exist_ok=True)
+        for n in names:
+            if n in HIDDEN_PROGRAMS or (mirror / n).exists():
+                continue
+            try:
+                (mirror / n).symlink_to(Path(d) / n)
+            except OSError:
+                pass
+        keep.append(str(mirror))
     if shim_dir is not None:
         keep.insert(0, str(shim_dir))
     return os.pathsep.join(keep)
@@ -473,7 +498,7 @@ def base_env(work: Path, plugin: Path, fx: Fixture, posture: str, shim_dir: Path
     (iso / "installed_plugins.json").write_text('{"version": 2, "plugins": {}}\n')
     (iso / "known_marketplaces.json").write_text("{}\n")
     env.update({
-        "PATH": sanitized_path(shim_dir if posture == "P2" else None),
+        "PATH": sanitized_path(shim_dir if posture == "P2" else None, work),
         "HOME": str(fx.home),
         "NX_NO_TELEMETRY": "1", "NX_UPGRADE_AUTO": "0", "NX_DISPATCH_COUNTER": "off",
         "NEXUS_CONFIG_DIR": str(iso / "cfg"), "NX_TOOLS_DIR": str(iso / "nx-tools"),
