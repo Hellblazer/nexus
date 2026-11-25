@@ -278,7 +278,7 @@ def test_step_3h_has_exactly_the_three_legs_each_with_its_own_bound() -> None:
         assert steps[:4] == [
             f"cd ~/src/nexus-wt/engine-cut-$TAG-{name}",
             "uv sync -q",
-            "NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m",
+            "NX_BUILD_LEASE_WAIT=28800 NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh --lab-run lab-m",
             "mkdir -p output/gate",
         ], f"Leg {name} must build the stamped jar in its own tag-tree worktree, lease before grant: {steps}"
         assert opts == expected[name], f"Leg {name} harness options differ:\n{opts}\n!=\n{expected[name]}"
