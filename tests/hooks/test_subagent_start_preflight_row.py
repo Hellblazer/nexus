@@ -90,7 +90,7 @@ def _injected(cwd: Path) -> str:
 @pytest.mark.t2_tenant
 def test_a_dispatch_in_another_project_gets_no_preflight_row(tmp_path: Path) -> None:
     ctx = _injected(_repo(tmp_path / "other-project", with_script=False))
-    assert "| Search scope |" in ctx  # the Orchestration table is there
+    assert "| Completion |" in ctx  # the Orchestration table is there (its Search scope row is the maintainer's)
     assert "| Preflight |" not in ctx
     assert "agent-worktree-preflight.sh" not in ctx
 

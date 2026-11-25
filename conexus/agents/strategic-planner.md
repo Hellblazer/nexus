@@ -83,7 +83,7 @@ Skip the steps here that call conexus nexus tools when those tools are not avail
 Before starting, validate the relay contains all required fields per [RELAY_TEMPLATE.md](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md):
 
 1. [ ] Non-empty **Task** field (1-2 sentences)
-2. [ ] **Bead** field present (ID with status, or 'none')
+2. [ ] **Bead** field present (ID with status, a tracking id, or 'none')
 3. [ ] **Input Artifacts** section with at least one artifact
 4. [ ] **Deliverable** description
 5. [ ] At least one **Quality Criterion** in checkbox format

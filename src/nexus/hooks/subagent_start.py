@@ -79,6 +79,18 @@ from nexus.hooks import subagent_work
 
 __all__ = ["run"]
 
+# nexus-sby49 audience gates. Both predicates tighten (they add text), so an import failure binds
+# both to True: a broken helper gives a maintainer the full injection it has today, never a
+# thinner one.
+try:
+    from nexus.hooks._audience import maintainer as _maintainer, nexus_repo as _nexus_repo
+except BaseException:  # noqa: BLE001
+    def _maintainer(payload: object) -> bool:
+        return True
+
+    def _nexus_repo(payload: object) -> bool:
+        return True
+
 # -- Classification regexes (verbatim; see module docstring) -----------------
 
 #: subagent-start.sh:124
@@ -135,7 +147,7 @@ _RELAY = (
     "| Field | Description |\n"
     "|-------|-------------|\n"
     "| Task | 1-2 sentence summary |\n"
-    "| Bead | Bead ID with status, or 'none' |\n"
+    "| Bead | Bead ID with status, a tracking id, or 'none' |\n"
     "| Input Artifacts | nx store, nx memory, nx scratch, files |\n"
     "| Deliverable | What the agent should produce |\n"
     "| Quality Criteria | Checkbox list |\n\n"
@@ -143,21 +155,46 @@ _RELAY = (
     "blocks for the caller to use.\n"
 )
 
-_ORCH = (
+#: One constant per row of the Orchestration table (nexus-sby49.3): each row has its own audience in
+#: ``conexus/hooks/audience.yaml``. Every reader gets the head, Completion and Inbox; the Git row and
+#: the Search scope row are SAM-WIDE (``maintainer()``).
+_ORCH_HEAD = (
     "\n## Orchestration (Required)\n\n"
     "| Directive | Rule |\n"
     "|-----------|------|\n"
+)
+
+_ORCH_COMPLETION = (
     "| Completion | Background: SubagentHandback (or SendMessage) full result to main "
     "before idling: success/failure/blocked + live task ids. Foreground: final message "
     "IS the hand-back. |\n"
+)
+
+_ORCH_INBOX = (
     "| Inbox | Re-check inbox right before composing any hand-back; newest directive "
     "wins |\n"
+)
+
+_ORCH_GIT = (
     "| Git | Shared tree: NEVER git add/commit (hook-ENFORCED; linked worktrees "
     "exempt). Hand back diffs+paths; orchestrator commits pathspec-limited |\n"
+)
+
+_ORCH_SEARCH_SCOPE = (
     "| Search scope | Search only under the roots your brief names, or your working "
     "directory; never a whole-disk or whole-home search (`find /`, `find ~`, `grep -r /`, "
     "`mdfind`). A file you cannot find: hand back naming it (nexus-egv6q) |\n"
 )
+
+
+def _orchestration(payload: dict) -> str:
+    """The Orchestration table for this dispatch: the head, Completion and Inbox for everyone, and
+    the Git and Search scope rows when ``maintainer()`` holds. The maintainer's text is the table
+    this module carried before nexus-sby49, byte for byte."""
+    rows = [_ORCH_HEAD, _ORCH_COMPLETION, _ORCH_INBOX]
+    if _maintainer(payload):
+        rows += [_ORCH_GIT, _ORCH_SEARCH_SCOPE]
+    return "".join(rows)
 
 _WORKTREE_PREFLIGHT = (
     "| Preflight | If dispatched with isolation:worktree: run "
@@ -231,7 +268,7 @@ _NX_T1 = (
     '(action="get", entry_id=...). If your brief says you are an independent '
     "reviewer, read nothing else in T1.\n"
     "- Interim findings and working notes go to T1: scratch put, with the tags your "
-    'brief names (for example tags="nexus-abc,review-r1") and agent="<your role>".\n'
+    'brief names (for example tags="my-task,review-r1") and agent="<your role>".\n'
     "- T2 memory_put only for a record your brief or your agent definition requires "
     "(gate records stay mandatory); never overwrite a T2 record it did not give you. "
     "T3 store_put only for validated, reusable knowledge.\n"
@@ -282,7 +319,7 @@ _NX_AUTOLINK = (
     "  3. store_put -- auto-creates catalog links from scratch context\n\n"
     "If link-context already in scratch (sibling agent did 1+2), skip to step 3.\n\n"
     'AGENT TAG: pass agent="<your-role>" to memory_put so nx tier-status slices '
-    "writes by agent (nexus-9clx).\n"
+    "writes by agent.\n"
 )
 
 _PHASE_GATE = (
@@ -292,8 +329,7 @@ _PHASE_GATE = (
     "the RDR, and for each write `Item N = <closing bead id>` or `Item N = none` "
     "with a one-line reason. Do not close while an item has neither. Nothing "
     "enforces this; skipping it is the silent-scope-reduction failure mode: "
-    "RDR-112 Phase 1 (nexus-52lb) lost days when the T3 daemon drop surfaced "
-    "three phases later.\n"
+    "a dropped item surfaces phases later.\n"
 )
 
 #: nexus-yjg4v: the five questions behind the review fix rounds of
@@ -302,31 +338,61 @@ _PHASE_GATE = (
 #: debug-p2c-bench-empty-collections-cache). Each brief stated WHAT to change
 #: and left one of these open; a reviewer then asked it. The development
 #: skill's Pre-Dispatch section carries the same list for the brief's author.
-_BRIEF_CHECK = (
+#:
+#: nexus-sby49.3 (D10): one constant per question, each with its own audience in
+#: ``conexus/hooks/audience.yaml``. The head and questions 1, 2, 4 and 5 are SAM-WIDE (``maintainer()``)
+#: and go only to an implementer type; question 3 ("local AND cloud") is NEXUS-REPO, nexus's own
+#: deployment axis. The questions are numbered when the block is assembled, so a maintainer outside
+#: nexus gets 1 to 4, and in nexus the text is the five-question block this module carried before.
+_BRIEF_CHECK_HEAD = (
     "\n## Brief check (if you change code)\n\n"
     "Before your first edit, find your brief's answer to each question. Where "
     "it has none or says UNKNOWN, resolve it first (read the code, measure, or "
     "ask the dispatcher) and put the answers at the top of your hand-back. If "
     "you cannot resolve one, stop and report it; do not guess.\n"
-    "1. Consumers: every caller and consumer of what you change, by name, and "
+)
+_BRIEF_Q_CONSUMERS = (
+    "Consumers: every caller and consumer of what you change, by name, and "
     "which of them filter, re-rank or page AFTER it.\n"
-    "2. Final point: where the output's real final order or display is decided "
+)
+_BRIEF_Q_FINAL_POINT = (
+    "Final point: where the output's real final order or display is decided "
     "(after boosts, caps, paging), and that your change acts there.\n"
-    "3. Modes: behaviour in local AND cloud mode; a mode nobody measured is "
+)
+_BRIEF_Q_MODES = (
+    "Modes: behaviour in local AND cloud mode; a mode nobody measured is "
     "measured first or left unchanged.\n"
-    "4. Bounds: which pool, permit, memory or thread limit the change draws on, "
+)
+_BRIEF_Q_BOUNDS = (
+    "Bounds: which pool, permit, memory or thread limit the change draws on, "
     "and its size against that limit on small and large boxes.\n"
-    "5. State: every cache or shared state you touch, who invalidates it, the "
+)
+_BRIEF_Q_STATE = (
+    "State: every cache or shared state you touch, who invalidates it, the "
     "invalidate-vs-in-flight-fill race, the first-write and empty cases, and "
     "the test reset hooks.\n"
 )
+
+
+def _brief_check(payload: dict) -> str:
+    """The brief check for an implementer dispatch, or ``""`` for anyone outside ``maintainer()``.
+
+    A maintainer in a nexus checkout gets all five questions; a maintainer elsewhere gets the four that
+    are not about nexus's local/cloud axis, renumbered."""
+    if not _maintainer(payload):
+        return ""
+    questions = [_BRIEF_Q_CONSUMERS, _BRIEF_Q_FINAL_POINT]
+    if _nexus_repo(payload):
+        questions.append(_BRIEF_Q_MODES)
+    questions += [_BRIEF_Q_BOUNDS, _BRIEF_Q_STATE]
+    return _BRIEF_CHECK_HEAD + "".join(f"{n}. {q}" for n, q in enumerate(questions, 1))
 
 #: GitHub #1656 (2026-11-13): the "Sequential Thinking" section is no longer injected. With it in the hook's
 #: output, subagents were stopped by the API's safety classifier ([reasoning_extraction]); on the reporter's machine
 #: the same prompt went 0 of 11 blocked with it removed (tool absent), against 4 of 8 with it present.
 
 _OPERATORS = (
-    "\n## Analytical operators (RDR-080)\n\n"
+    "\n## Analytical operators\n\n"
     "summarize, extract, rank, compare and generate are plan steps inside "
     "nx_answer,\n"
     "not MCP tools; each wraps claude -p (300s default, ~11s minimum per "
@@ -624,7 +690,7 @@ def run(payload: dict | None) -> HookResult:
     parts.append(_linked_rdrs_section(task_text, env))
 
     parts.append(_RELAY)
-    parts.append(_ORCH)
+    parts.append(_orchestration(data))
     parts.append(_worktree_preflight_row(repo_root, str(data.get("cwd") or ""))
                  or _worktree_preflight_row("", _process_cwd()))
 
@@ -641,7 +707,7 @@ def run(payload: dict | None) -> HookResult:
         parts.append(_knowledge_map_section(repo_root))
 
     if _IMPLEMENTER_TYPE_RE.search(agent_type):
-        parts.append(_BRIEF_CHECK)
+        parts.append(_brief_check(data))
 
     if not skip_operators:
         parts.append(_OPERATORS)

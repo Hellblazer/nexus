@@ -2959,6 +2959,49 @@ def _cli_not_started_by_claude_code(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(scope="session")
+def _unflagged_account_home(tmp_path_factory):
+    """An account home with no maintainer flag (nexus-sby49.3)."""
+    return tmp_path_factory.mktemp("acct-home-unflagged")
+
+
+@pytest.fixture(autouse=True)
+def _src_audience_is_a_user_by_default(monkeypatch, _unflagged_account_home):
+    """The src copy of the audience helper (``nexus.hooks._audience``) answers from the OS account's home, and a
+    maintainer's laptop has the flag there, so a hook test that did not pin it passed on the laptop and failed in CI
+    (or the other way round). Every test starts as a USER on an account with no flag; a test of nexus's own
+    behaviour opts in with ``src_maintainer_flag`` or a checkout from ``nexus_marked_repo``. A test that runs a hook
+    as a subprocess cannot use this seam (it is in-process only): it passes the home through the driver prelude in
+    ``tests/hooks/audience_harness.py``. The D8 fixture convention: a bare ``git init`` is a user's repo."""
+    from nexus.hooks import _audience  # noqa: PLC0415 — the module the src hooks import
+
+    monkeypatch.setattr(_audience, "_ACCOUNT_HOME_OVERRIDE", str(_unflagged_account_home))
+
+
+@pytest.fixture
+def src_maintainer_flag(monkeypatch, tmp_path_factory):
+    """The src helper sees an account that carries the maintainer flag."""
+    from nexus.hooks import _audience  # noqa: PLC0415
+
+    home = tmp_path_factory.mktemp("acct-home-flagged")
+    flag = home.joinpath(*_audience.FLAG_PARTS)
+    flag.parent.mkdir(parents=True)
+    flag.write_text("")
+    monkeypatch.setattr(_audience, "_ACCOUNT_HOME_OVERRIDE", str(home))
+    return home
+
+
+@pytest.fixture
+def nexus_marked_repo(tmp_path):
+    """A directory shaped like a nexus checkout: a ``.git`` and the tracked Phase 2 marker. Pass it as the payload's ``cwd``."""
+    repo = tmp_path / "nexus-checkout"
+    (repo / ".git").mkdir(parents=True)
+    marker = repo / ".nexus" / "dev-process.json"
+    marker.parent.mkdir()
+    marker.write_text("{}")
+    return repo
+
+
 @pytest.fixture(autouse=True)
 def _restore_cwd():
     """Put the working directory back after every test. Production code moves

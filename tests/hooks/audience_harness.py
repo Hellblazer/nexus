@@ -40,6 +40,24 @@ def flagged_home(home: "os.PathLike[str] | str") -> str:
     return os.fspath(home)
 
 
+#: The src hooks (``nexus.hooks._audience``) run in ``nx-hook`` or the MCP server, never through ``runpy``, so a test
+#: that runs one in a CHILD PROCESS cannot reach the in-process seam. Its driver script starts with this prelude, and the
+#: test passes the home in ``NX_TEST_ACCOUNT_HOME`` (read here, in test code; the helper itself never reads env).
+SRC_SEAM_ENV = "NX_TEST_ACCOUNT_HOME"
+SRC_SEAM_PRELUDE = (
+    "import os as _seam_os\n"
+    f"_seam_home = _seam_os.environ.get({SRC_SEAM_ENV!r})\n"
+    "if _seam_home:\n"
+    "    from nexus.hooks import _audience as _seam_audience\n"
+    "    _seam_audience._ACCOUNT_HOME_OVERRIDE = _seam_home\n"
+)
+
+
+def src_seam_env(home: "os.PathLike[str] | str") -> dict[str, str]:
+    """The env entry that points a prelude-carrying child's src helper at *home*."""
+    return {SRC_SEAM_ENV: os.fspath(home)}
+
+
 SCRIPTS = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir, "conexus", "hooks", "scripts",
 )

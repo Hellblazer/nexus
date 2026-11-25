@@ -48,5 +48,16 @@ it is until moved back deliberately.
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/skills/rdr-close/SKILL.md`: one clause: the Step 6 target is found by its attributes and minted on first write, not rendered, nexus-p2m1x.30.
+- `conexus/agents/architect-planner.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/agents/code-review-expert.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/agents/codebase-deep-analyzer.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/agents/debugger.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/agents/deep-analyst.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/agents/deep-research-synthesizer.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/agents/developer.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/agents/strategic-planner.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/agents/substantive-critic.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/agents/test-validator.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/resources/agent-shared/RELAY_TEMPLATE.md`: the Bead field also takes a tracking id (D10), nexus-sby49.3.
 
 ## Deferred to the next client release
