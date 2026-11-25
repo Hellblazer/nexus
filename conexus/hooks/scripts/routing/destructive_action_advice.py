@@ -820,6 +820,9 @@ class Row(NamedTuple):
     advice: str
     hints: tuple[str, ...] | None = None  # cheap gate for Bash: one must occur in the command
     mode: str | None = None  # None = :data:`MODE`
+    #: Who the row fires for (nexus-sby49.3): EVERY-USER, NEXUS-REPO or SAM-WIDE, in ``conexus/hooks/audience.yaml``'s
+    #: vocabulary. Every row advises for everyone today (U8a); the planned per-row deny flip (U8b, D6) is the maintainer's.
+    audience: str = "EVERY-USER"
 
 
 ROWS: tuple[Row, ...] = (

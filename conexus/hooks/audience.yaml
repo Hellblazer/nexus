@@ -1,0 +1,872 @@
+# The audience manifest (nexus-sby49.3, plan section 5 item 1).
+#
+# Who each hook, rule and injected text is for. tests/test_plugin_audience_lint.py fails on a registration with no entry,
+# an unknown value, a constant that does not exist, a gated entry in a module that never calls its predicate, a predicate
+# called outside a wrapped body, and an audience import whose fallback widens a permission. The behaviour leg
+# (tests/e2e/lib/plugin_behaviour.py) drives the real argv and checks the output against these entries.
+#
+#   audience  EVERY-USER  the product; fires always (a data gate only on the user's own content)
+#             NEXUS-REPO  fires when the checkout carries the tracked nexus marker, whoever runs it
+#             SAM-WIDE    fires when the account flag exists or the checkout carries the marker
+#             REMOVE      never
+#   gate      none | maintainer | nexus_repo | account_flag | data
+#   live      false = the rule's end state is not wired yet (a Phase 3 row); the leg's allowlist is exactly these rows
+#   phase     when the item changes: - (never), 1, 2, 3, after-2, 4
+#   decision  the owner decision (D1..D13) the entry rests on
+#
+# A registration is keyed on event plus argv: 23 registrations, 22 distinct argv (auto-approve is registered for PreToolUse
+# and PermissionRequest with one argv). `modules` is the table of every hook module that has text or a predicate; each
+# module-level string constant of 40 characters or more is declared injected (a constant entry) or not_injected (a reason).
+version: 1
+audiences:
+- EVERY-USER
+- NEXUS-REPO
+- SAM-WIDE
+- REMOVE
+phase_shipped: 2
+decisions_answered:
+- D1
+- D2
+- D3
+- D4
+- D5
+- D6
+- D7
+- D8
+- D9
+- D10
+- D11
+- D12
+- D13
+registrations:
+- key: SessionStart hooks/scripts/nx_setup_notice.py
+  event: SessionStart
+  matcher: startup|resume|clear|compact|fork
+  argv:
+  - hooks/scripts/nx_setup_notice.py
+  modules:
+  - conexus/hooks/scripts/nx_setup_notice.py
+  audience: EVERY-USER
+  gate: data
+  evidence: 'G3: the setup notice, existing data gates (analysis section 6)'
+  target_state: as is
+  phase: '-'
+- key: SessionStart launch/nx_launch.py nx-hook upgrade-auto
+  event: SessionStart
+  matcher: startup|resume|clear|compact|fork
+  argv:
+  - launch/nx_launch.py
+  - nx-hook
+  - upgrade-auto
+  modules:
+  - conexus/launch/nx_launch.py
+  - src/nexus/hooks/upgrade_auto.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U3: RDR-076 (nx upgrade --auto at session start)'
+  target_state: as is
+  phase: '-'
+  decision: D4
+- key: SessionStart launch/nx_launch.py nx-hook preflight
+  event: SessionStart
+  matcher: startup|resume|clear|compact|fork
+  argv:
+  - launch/nx_launch.py
+  - nx-hook
+  - preflight
+  modules:
+  - conexus/launch/nx_launch.py
+  - src/nexus/hooks/preflight_verb.py
+  audience: EVERY-USER
+  gate: data
+  evidence: 'G1: runs the repo''s own preflight procedure when it has one; sound as it stands (ledger G1)'
+  target_state: as is
+  phase: '-'
+- key: SessionStart launch/nx_launch.py nx-hook self-gc
+  event: SessionStart
+  matcher: startup|resume|clear|compact|fork
+  argv:
+  - launch/nx_launch.py
+  - nx-hook
+  - self-gc
+  modules:
+  - conexus/launch/nx_launch.py
+  - src/nexus/hooks/self_gc.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'product: reaps nx''s own stale tool generations'
+  target_state: as is
+  phase: '-'
+- key: SessionStart launch/nx_launch.py nx-hook session-start
+  event: SessionStart
+  matcher: startup|resume|clear|compact|fork
+  argv:
+  - launch/nx_launch.py
+  - nx-hook
+  - session-start
+  modules:
+  - conexus/launch/nx_launch.py
+  - src/nexus/hooks/session_start_verb.py
+  - src/nexus/session_start_guidance.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'product: session id, identity binding, the routing guidance, the mailbox arm (ledger G2, G5)'
+  target_state: as is
+  phase: '-'
+- key: SessionStart launch/nx_launch.py nx-hook session-context
+  event: SessionStart
+  matcher: startup|resume|clear|compact|fork
+  argv:
+  - launch/nx_launch.py
+  - nx-hook
+  - session-context
+  modules:
+  - conexus/launch/nx_launch.py
+  - src/nexus/hooks/session_context.py
+  - src/nexus/hooks/board_due.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I1a, I1b, I1c, I2 and the tripwire: each text has its own entry under constants (nexus-sby49.3)'
+  target_state: as is
+  phase: '-'
+- key: SessionStart launch/nx_launch.py nx-hook rdr
+  event: SessionStart
+  matcher: startup|resume|clear|compact|fork
+  argv:
+  - launch/nx_launch.py
+  - nx-hook
+  - rdr
+  modules:
+  - conexus/launch/nx_launch.py
+  - src/nexus/hooks/rdr_verb.py
+  audience: EVERY-USER
+  gate: data
+  evidence: 'G5: the RDR counts and pointers, only where the repo has an RDR directory'
+  target_state: as is
+  phase: '-'
+- key: SessionStart hooks/scripts/version_lockstep_hook.py
+  event: SessionStart
+  matcher: startup
+  argv:
+  - hooks/scripts/version_lockstep_hook.py
+  modules:
+  - conexus/hooks/scripts/version_lockstep_hook.py
+  - conexus/hooks/scripts/version_lockstep_action.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'G4: version lockstep (analysis section 6)'
+  target_state: as is
+  phase: '-'
+- key: SessionStart hooks/scripts/nx_hook_shim.py mcp-connect-wait
+  event: SessionStart
+  matcher: startup
+  argv:
+  - hooks/scripts/nx_hook_shim.py
+  - mcp-connect-wait
+  modules:
+  - conexus/hooks/scripts/nx_hook_shim.py
+  - src/nexus/hooks/mcp_connect_wait.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U9: RDR-215 / nexus-veh77, the connect wait'
+  target_state: as is
+  phase: '-'
+  decision: D5
+- key: SessionStart hooks/scripts/compact_checkpoint.py inject
+  event: SessionStart
+  matcher: compact
+  argv:
+  - hooks/scripts/compact_checkpoint.py
+  - inject
+  modules:
+  - conexus/hooks/scripts/compact_checkpoint.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'S2-8: the checkpoint is product (nexus-3lqxv); the text naming the board and bd is S2-2 under constants'
+  target_state: as is
+  phase: '-'
+- key: SessionEnd launch/nx_launch.py nx-session-end-launcher
+  event: SessionEnd
+  matcher: ''
+  argv:
+  - launch/nx_launch.py
+  - nx-session-end-launcher
+  modules:
+  - conexus/launch/nx_launch.py
+  - src/nexus/_session_end_launcher.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'product: the session-end flush'
+  target_state: as is
+  phase: '-'
+- key: SessionEnd hooks/scripts/compact_checkpoint.py end
+  event: SessionEnd
+  matcher: clear
+  argv:
+  - hooks/scripts/compact_checkpoint.py
+  - end
+  modules:
+  - conexus/hooks/scripts/compact_checkpoint.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'S2-8: the checkpoint is product (nexus-3lqxv)'
+  target_state: as is
+  phase: '-'
+- key: SubagentStart mcp_tool plugin:conexus:nexus hook_subagent_start
+  event: SubagentStart
+  matcher: ''
+  argv:
+  - mcp_tool
+  - plugin:conexus:nexus
+  - hook_subagent_start
+  modules:
+  - src/nexus/hooks/subagent_start.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: every dispatch gets the T1 contract, the relay and the tiers; the maintainer-only rows are constants below'
+  target_state: as is
+  phase: '-'
+- key: SubagentStop hooks/scripts/nx_hook_shim.py subagent-stop-t1-nudge
+  event: SubagentStop
+  matcher: .+
+  argv:
+  - hooks/scripts/nx_hook_shim.py
+  - subagent-stop-t1-nudge
+  modules:
+  - conexus/hooks/scripts/nx_hook_shim.py
+  - src/nexus/hooks/subagent_stop_t1_nudge.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U5a: T1 is product (nexus-mtheb); U5b and the dispatch record are rules below'
+  target_state: as is
+  phase: '-'
+  decision: D10
+- key: PreToolUse hooks/scripts/routing/subagent_git_write_requires_orchestrator.py
+  event: PreToolUse
+  matcher: Bash
+  argv:
+  - hooks/scripts/routing/subagent_git_write_requires_orchestrator.py
+  modules:
+  - conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U1b: the user seatbelt (D1''s list) runs for everyone; the full guard U1a is a rule below'
+  target_state: as is
+  phase: '-'
+  decision: D1
+- key: PreToolUse hooks/scripts/routing/credential_print_guard.py
+  event: PreToolUse
+  matcher: Bash
+  argv:
+  - hooks/scripts/routing/credential_print_guard.py
+  modules:
+  - conexus/hooks/scripts/routing/credential_print_guard.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U7a: the credential deny (rdr-219:522-526); U7b the redirect text is a constant below'
+  target_state: as is
+  phase: '-'
+- key: PreToolUse hooks/scripts/routing/destructive_action_advice.py
+  event: PreToolUse
+  matcher: Bash|Edit|Write|MultiEdit
+  argv:
+  - hooks/scripts/routing/destructive_action_advice.py
+  modules:
+  - conexus/hooks/scripts/routing/destructive_action_advice.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U8a: the advisory rows run in advise mode for everyone; their text is neutral in Phase 3'
+  target_state: advise for everyone, neutral text
+  phase: '3'
+  live: false
+- key: PreToolUse hooks/scripts/nx_hook_shim.py auto-approve
+  event: PreToolUse
+  matcher: mcp__plugin_conexus_.*
+  argv:
+  - hooks/scripts/nx_hook_shim.py
+  - auto-approve
+  modules:
+  - conexus/hooks/scripts/nx_hook_shim.py
+  - src/nexus/hooks/auto_approve.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U2a: documented feature (README:56, docs/mcp-servers.md:303); U2b is a rule below'
+  target_state: as is
+  phase: '-'
+- key: PermissionRequest hooks/scripts/nx_hook_shim.py auto-approve
+  event: PermissionRequest
+  matcher: mcp__plugin_conexus_.*
+  argv:
+  - hooks/scripts/nx_hook_shim.py
+  - auto-approve
+  modules:
+  - conexus/hooks/scripts/nx_hook_shim.py
+  - src/nexus/hooks/auto_approve.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U2a: documented feature (README:56, docs/mcp-servers.md:303); U2b is a rule below'
+  target_state: as is
+  phase: '-'
+- key: UserPromptSubmit hooks/scripts/mailbox_drain.py
+  event: UserPromptSubmit
+  matcher: ''
+  argv:
+  - hooks/scripts/mailbox_drain.py
+  modules:
+  - conexus/hooks/scripts/mailbox_drain.py
+  audience: EVERY-USER
+  gate: data
+  evidence: 'G2: the mailbox drain, existing data gates'
+  target_state: as is
+  phase: '-'
+- key: PreCompact hooks/scripts/compact_checkpoint.py pre
+  event: PreCompact
+  matcher: manual|auto
+  argv:
+  - hooks/scripts/compact_checkpoint.py
+  - pre
+  modules:
+  - conexus/hooks/scripts/compact_checkpoint.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'S2-8: the checkpoint is product (nexus-3lqxv)'
+  target_state: as is
+  phase: '-'
+- key: PostCompact hooks/scripts/compact_checkpoint.py post
+  event: PostCompact
+  matcher: manual|auto
+  argv:
+  - hooks/scripts/compact_checkpoint.py
+  - post
+  modules:
+  - conexus/hooks/scripts/compact_checkpoint.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'S2-8: the checkpoint is product (nexus-3lqxv)'
+  target_state: as is
+  phase: '-'
+- key: Stop hooks/scripts/stop_wake_guard.py
+  event: Stop
+  matcher: ''
+  argv:
+  - hooks/scripts/stop_wake_guard.py
+  modules:
+  - conexus/hooks/scripts/stop_wake_guard.py
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U6a: the promise and timed classes, one extra turn at most (stop_hook_active); D9: every user, neutral text'
+  target_state: neutral text for users; the CI text is a rule below
+  phase: '3'
+  live: false
+  decision: D9
+modules:
+  conexus/hooks/scripts/nx_setup_notice.py:
+    wrapper: none
+    predicates: []
+  conexus/hooks/scripts/nx_hook_shim.py:
+    wrapper: none
+    predicates: []
+  src/nexus/hooks/upgrade_auto.py:
+    wrapper: none
+    predicates: []
+  src/nexus/hooks/preflight_verb.py:
+    wrapper: none
+    predicates: []
+  src/nexus/hooks/self_gc.py:
+    wrapper: none
+    predicates: []
+  src/nexus/hooks/session_start_verb.py:
+    wrapper: none
+    predicates: []
+  src/nexus/hooks/mcp_connect_wait.py:
+    wrapper: none
+    predicates: []
+  src/nexus/hooks/auto_approve.py:
+    wrapper: none
+    predicates: []
+  conexus/hooks/scripts/routing/credential_print_guard.py:
+    wrapper: none
+    predicates: []
+  conexus/hooks/scripts/routing/destructive_action_advice.py:
+    wrapper: none
+    predicates: []
+  src/nexus/session_start_guidance.py:
+    wrapper: none
+    predicates: []
+  src/nexus/hooks/board_due.py:
+    wrapper: none
+    predicates: []
+  src/nexus/hooks/identity_bind.py:
+    wrapper: none
+    predicates: []
+  src/nexus/hooks/rdr_verb.py:
+    wrapper: none
+    predicates: []
+  conexus/hooks/scripts/version_lockstep_hook.py:
+    wrapper: none
+    predicates: []
+  conexus/hooks/scripts/version_lockstep_action.py:
+    wrapper: none
+    predicates: []
+  conexus/hooks/scripts/compact_checkpoint.py:
+    wrapper: none
+    predicates: []
+  conexus/hooks/scripts/mailbox_drain.py:
+    wrapper: none
+    predicates: []
+    not_injected:
+      _REASON_NO_RECORD: a diagnostic reason label, never injected
+      _UUID: a regular-expression fragment
+  src/nexus/hooks/mailbox_drain.py:
+    wrapper: none
+    predicates: []
+  conexus/hooks/scripts/stop_wake_guard.py:
+    wrapper: none
+    predicates: []
+    not_injected:
+      _ROLE: a regular-expression fragment the promise classifier compiles; never injected
+      _FUNCTION_WORDS: a regular-expression fragment the promise classifier compiles; never injected
+      _NOUN_BACKSTOP: a regular-expression fragment the promise classifier compiles; never injected
+      _PRINCIPAL_NAME: a regular-expression fragment the promise classifier compiles; never injected
+      _NOT_A_SUBJECT: a regular-expression fragment the promise classifier compiles; never injected
+      _STRONG_SRC: a regular-expression fragment the promise classifier compiles; never injected
+      _WEAK_SRC: a regular-expression fragment the promise classifier compiles; never injected
+      _AUX: a regular-expression fragment the promise classifier compiles; never injected
+      _TURN_VERBS: a regular-expression fragment the promise classifier compiles; never injected
+      _TURN_PROGRESSIVE: a regular-expression fragment the promise classifier compiles; never injected
+      _RUN_NOUN: a regular-expression fragment the promise classifier compiles; never injected
+      _RUN_STATE: a regular-expression fragment the promise classifier compiles; never injected
+      _PROMISE_VERBS: a regular-expression fragment the promise classifier compiles; never injected
+      _TIME: a regular-expression fragment the promise classifier compiles; never injected
+  conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py:
+    wrapper: run_hook
+    predicates:
+    - maintainer
+    - note_hook_error
+    - note_marker_only
+    - remote_test_hosts
+    not_injected:
+      RULE_NAME: a rule identifier or a regular-expression fragment the scanner compiles; never injected
+      _VERB_ALT_HEAD: a rule identifier or a regular-expression fragment the scanner compiles; never injected
+      _VERB_ALT_TAIL: a rule identifier or a regular-expression fragment the scanner compiles; never injected
+      _HOOK_NAMES: a rule identifier or a regular-expression fragment the scanner compiles; never injected
+      _DASHED_LEAD_WORDS: a rule identifier or a regular-expression fragment the scanner compiles; never injected
+      _MASK_DELIM: a rule identifier or a regular-expression fragment the scanner compiles; never injected
+  conexus/hooks/scripts/routing/_lib.py:
+    wrapper: local_try
+    predicates:
+    - maintainer
+  conexus/hooks/scripts/routing/_user_git_seatbelt.py:
+    wrapper: none
+    predicates: []
+  conexus/hooks/scripts/_audience.py:
+    wrapper: none
+    predicates: []
+    not_injected:
+      TRIPWIRE_LINE: the line written once per session to hook.log, never model context; the SessionStart line is session_context._TRIPWIRE_LINE
+  src/nexus/hooks/_audience.py:
+    wrapper: none
+    predicates: []
+    not_injected:
+      TRIPWIRE_LINE: a byte copy of the plugin helper; the log line is never model context
+  src/nexus/hooks/subagent_start.py:
+    wrapper: mcp
+    predicates:
+    - maintainer
+    - nexus_repo
+  src/nexus/hooks/session_context.py:
+    wrapper: entry
+    predicates:
+    - account_flag
+    - maintainer
+    - nexus_repo
+  src/nexus/hooks/subagent_stop_t1_nudge.py:
+    wrapper: never_fail
+    predicates:
+    - maintainer
+constants:
+- id: src/nexus/hooks/subagent_start.py:_RELAY
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the Bead field keeps its name and takes a tracking id (D10)'
+  target_state: as is
+  phase: '2'
+  decision: D10
+- id: src/nexus/hooks/subagent_start.py:_ORCH_HEAD
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the Completion and Inbox rows are product'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/subagent_start.py:_ORCH_COMPLETION
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the Completion and Inbox rows are product'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/subagent_start.py:_ORCH_INBOX
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the Completion and Inbox rows are product'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/subagent_start.py:_ORCH_GIT
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: 'U4: the prompt half of the maintainer''s git guard (RDR-184); every incident was a Sam session'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/subagent_start.py:_ORCH_SEARCH_SCOPE
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: 'Search-scope row: nexus-egv6q, a bead two peers reported; users keep the whole_disk_scan advisory (D10)'
+  target_state: as is
+  phase: '2'
+  decision: D10
+- id: src/nexus/hooks/subagent_start.py:_WORKTREE_PREFLIGHT
+  audience: NEXUS-REPO
+  gate: data
+  evidence: 'G1: the row goes only to a project that carries the preflight script (nexus-z7ddd)'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/subagent_start.py:_NX_T1
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the T1 contract, the storage tiers and the operators are product; no bead or RDR id in the text'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/subagent_start.py:_NX_TIERS
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the T1 contract, the storage tiers and the operators are product; no bead or RDR id in the text'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/subagent_start.py:_NX_TOOLS
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the T1 contract, the storage tiers and the operators are product; no bead or RDR id in the text'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/subagent_start.py:_NX_T3
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the T1 contract, the storage tiers and the operators are product; no bead or RDR id in the text'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/subagent_start.py:_NX_ANSWER
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the T1 contract, the storage tiers and the operators are product; no bead or RDR id in the text'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/subagent_start.py:_NX_AUTOLINK
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the T1 contract, the storage tiers and the operators are product; no bead or RDR id in the text'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/subagent_start.py:_OPERATORS
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the T1 contract, the storage tiers and the operators are product; no bead or RDR id in the text'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/subagent_start.py:_PHASE_GATE
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the phase-review-gate pointer, shown only when the task text asks for a phase close; the incident history is gone'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/subagent_start.py:_CATALOG_TOOLS
+  audience: EVERY-USER
+  gate: data
+  evidence: 'I3: shown only where a catalog exists for the task'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/subagent_start.py:_CATALOG_LINKING
+  audience: EVERY-USER
+  gate: data
+  evidence: 'I3: shown only where a catalog exists for the task'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/subagent_start.py:_BRIEF_CHECK_HEAD
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: 'I3b: Sam via nexus_ffa 2026-10-08, nexus-yjg4v (implementer types only; D10)'
+  target_state: as is
+  phase: '2'
+  decision: D10
+- id: src/nexus/hooks/subagent_start.py:_BRIEF_Q_CONSUMERS
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: 'I3b: Sam via nexus_ffa 2026-10-08, nexus-yjg4v (implementer types only; D10)'
+  target_state: as is
+  phase: '2'
+  decision: D10
+- id: src/nexus/hooks/subagent_start.py:_BRIEF_Q_FINAL_POINT
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: 'I3b: Sam via nexus_ffa 2026-10-08, nexus-yjg4v (implementer types only; D10)'
+  target_state: as is
+  phase: '2'
+  decision: D10
+- id: src/nexus/hooks/subagent_start.py:_BRIEF_Q_BOUNDS
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: 'I3b: Sam via nexus_ffa 2026-10-08, nexus-yjg4v (implementer types only; D10)'
+  target_state: as is
+  phase: '2'
+  decision: D10
+- id: src/nexus/hooks/subagent_start.py:_BRIEF_Q_STATE
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: 'I3b: Sam via nexus_ffa 2026-10-08, nexus-yjg4v (implementer types only; D10)'
+  target_state: as is
+  phase: '2'
+  decision: D10
+- id: src/nexus/hooks/subagent_start.py:_BRIEF_Q_MODES
+  audience: NEXUS-REPO
+  gate: nexus_repo
+  evidence: 'I3b: question 3, ''local AND cloud'', is nexus''s own deployment axis (D10)'
+  target_state: as is
+  phase: '2'
+  decision: D10
+- id: src/nexus/hooks/session_context.py:_T1_HEADING
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I1a: the T1 heading is product'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/session_context.py:_T1_DISPATCH_PROTOCOL
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: 'I1b: nexus-mtheb, Sam''s own dispatch protocol (D10)'
+  target_state: as is
+  phase: '2'
+  decision: D10
+- id: src/nexus/hooks/session_context.py:_T1_LIFETIME
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I1a/I1c: what T1 survives; the retired share_t1 parenthetical is gone'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/session_context.py:BRIEF_INDEX_LINE
+  audience: EVERY-USER
+  gate: data
+  evidence: 'I2: the whole index line; brief_index_line() names beads and rdr only where the project has them'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/session_context.py:_INDEX_HEAD
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I2: the always-on part of the index line'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/session_context.py:_INDEX_CORE
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I2: the always-on part of the index line'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/session_context.py:_INDEX_ME
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I2: the always-on part of the index line'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/session_context.py:_INDEX_BEADS
+  audience: EVERY-USER
+  gate: data
+  evidence: 'I2: named only where the project has .beads/ or bd is on PATH'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/session_context.py:_INDEX_RDR
+  audience: EVERY-USER
+  gate: data
+  evidence: 'I2: named only where the project has an RDR directory'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/session_context.py:_TRIPWIRE_LINE
+  audience: NEXUS-REPO
+  gate: nexus_repo
+  evidence: 'Phase 1 tripwire promoted to a SessionStart line: the marker is the only reason this session is a maintainer''s'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/hooks/subagent_stop_t1_nudge.py:NUDGE
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U5a: T1 is product (nexus-mtheb); the text no longer names a bead id'
+  target_state: as is
+  phase: '2'
+- id: src/nexus/session_start_guidance.py:GUIDANCE_IMPERATIVE
+  audience: EVERY-USER
+  gate: none
+  evidence: 'product: the routing imperative every session reads'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/board_due.py:HEADING
+  audience: EVERY-USER
+  gate: data
+  evidence: 'product: printed only when a board entry of this session has a due thread'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/identity_bind.py:_PENDING_NOTICE
+  audience: EVERY-USER
+  gate: none
+  evidence: 'RDR-253: identity binding is product'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/mailbox_drain.py:_PEER_FRAME
+  audience: EVERY-USER
+  gate: data
+  evidence: 'G2: the mailbox frame, only where a message arrived'
+  target_state: as is
+  phase: '-'
+- id: conexus/hooks/scripts/mailbox_drain.py:_PEER_FRAME
+  audience: EVERY-USER
+  gate: data
+  evidence: 'G2: the mailbox frame, only where a message arrived'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/mailbox_drain.py:_SENDER_LEGEND
+  audience: EVERY-USER
+  gate: data
+  evidence: 'G2: the mailbox frame, only where a message arrived'
+  target_state: as is
+  phase: '-'
+- id: conexus/hooks/scripts/mailbox_drain.py:_SENDER_LEGEND
+  audience: EVERY-USER
+  gate: data
+  evidence: 'G2: the mailbox frame, only where a message arrived'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/rdr_verb.py:_T2_LATE_NOTE
+  audience: EVERY-USER
+  gate: data
+  evidence: 'G5: only where the repo has an RDR directory'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/rdr_verb.py:_FIX_CHECK_CUT_SHORT_NOTE
+  audience: EVERY-USER
+  gate: data
+  evidence: 'G5: only where the repo has an RDR directory'
+  target_state: as is
+  phase: '-'
+- id: src/nexus/hooks/upgrade_auto.py:SKEW_GUIDANCE
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U3: the plugin/CLI skew note'
+  target_state: as is
+  phase: '-'
+- id: conexus/hooks/scripts/version_lockstep_action.py:_REF_DRIFT_REMEDY
+  audience: EVERY-USER
+  gate: none
+  evidence: 'G4: version lockstep remedy'
+  target_state: as is
+  phase: '-'
+- id: conexus/hooks/scripts/version_lockstep_action.py:_FAILURES_REMEDY
+  audience: EVERY-USER
+  gate: none
+  evidence: 'G4: version lockstep remedy'
+  target_state: as is
+  phase: '-'
+- id: conexus/hooks/scripts/compact_checkpoint.py:_STUB_BODY
+  audience: EVERY-USER
+  gate: none
+  evidence: 'S2-8: the no-checkpoint stub'
+  target_state: as is
+  phase: '-'
+- id: conexus/hooks/scripts/compact_checkpoint.py:_RESUME_DIRECTIVE
+  audience: EVERY-USER
+  gate: data
+  evidence: 'S2-2: names the board and bd; Phase 3 gates the board and beads words on what the project has'
+  target_state: the board and bd words only where a board entry or .beads/ exists
+  phase: '3'
+  live: false
+- id: conexus/hooks/scripts/compact_checkpoint.py:_CRON_NOTE
+  audience: EVERY-USER
+  gate: none
+  evidence: 'S2-8: the cron note after a compaction'
+  target_state: as is
+  phase: '-'
+- id: conexus/hooks/scripts/routing/credential_print_guard.py:_REDIRECT
+  audience: NEXUS-REPO
+  gate: nexus_repo
+  evidence: 'U7b: the redirect names the Hellblazer/nexus wrapper; users get ''ask your operator for an equivalent'''
+  target_state: the wrapper URL only with the marker
+  phase: '3'
+  live: false
+rules:
+- id: U1a
+  module: conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: RDR-184 scopes itself to nexus multi-agent development; every incident (20cd906e, hm0y4, 3c92m, dsr6a, k66o5) was a Sam session
+  target_state: as is
+  phase: '1'
+  decision: D1
+- id: U1b
+  module: conexus/hooks/scripts/routing/_user_git_seatbelt.py
+  audience: EVERY-USER
+  gate: none
+  evidence: Discards and history destruction are accidents any user can have; D1's list
+  target_state: as is
+  phase: '1'
+  decision: D1
+- id: U5b
+  module: src/nexus/hooks/subagent_stop_t1_nudge.py
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: 'nexus-mtheb: the nudge for Claude Code''s built-in agents, measured on Sam''s nine sessions (D10)'
+  target_state: as is
+  phase: '2'
+  decision: D10
+- id: dispatch-record
+  module: src/nexus/hooks/subagent_stop_t1_nudge.py
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: 'Telemetry: agent_dispatch_record sends the agent type and put count to the user''s engine for nexus''s census work'
+  target_state: as is
+  phase: '2'
+- id: routing-telemetry
+  module: conexus/hooks/scripts/routing/_lib.py
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: 'Telemetry: log_routing_event sends the user''s command fragment to their engine for nexus''s census work'
+  target_state: as is
+  phase: '2'
+- id: U2b
+  module: src/nexus/hooks/auto_approve.py
+  audience: SAM-WIDE
+  gate: account_flag
+  evidence: 'Recorded decision 240731431b, ff9d61f5ee that never weighed other users: users are prompted for memory_delete, plan_delete, memory_consolidate,
+    nx_tidy, tuple_in and mailbox_send; the flag keeps the full list'
+  target_state: a prompt for users on the destructive and other-party tools
+  phase: '3'
+  live: false
+  decision: D2
+- id: U6b
+  module: conexus/hooks/scripts/stop_wake_guard.py
+  audience: NEXUS-REPO
+  gate: nexus_repo
+  evidence: The CI text (nx ci wait, develop/main, the CI board) is fed by nexus CI (stop_wake_guard.py:780-787)
+  target_state: the CI text only with the marker
+  phase: '3'
+  live: false
+- id: U6c
+  module: conexus/hooks/scripts/stop_wake_guard.py
+  audience: REMOVE
+  gate: none
+  evidence: Creating ~/.config/nexus/logs/hook.log in a user's home (_log at :806-815)
+  target_state: log only when the directory exists
+  phase: '3'
+  live: false
+- id: U8b
+  module: conexus/hooks/scripts/routing/destructive_action_advice.py
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: Sam's planned deny flip, recorded only in b5998a9644's subject; never for users, per row for Sam from routing_events (D6)
+  target_state: per-row Row.mode for the maintainer
+  phase: after-2
+  live: false
+  decision: D6

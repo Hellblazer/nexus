@@ -20,6 +20,11 @@
 #   fail_closed:      bool; default false. true means hook crashes deny
 #                     the call rather than allow it. Reserve for safety-
 #                     critical invariants (no rule uses it today).
+#   audience:         who the hook fires for (nexus-sby49.3): EVERY-USER |
+#                     NEXUS-REPO | SAM-WIDE. The registration's audience as
+#                     conexus/hooks/audience.yaml declares it; a rule inside
+#                     the hook that only the maintainer has (the git guard's
+#                     full form) is its own entry there.
 #
 # Example shape (commented; not yet active):
 #
@@ -58,6 +63,7 @@ rules:
     # The full rule is the maintainer's; other audiences get the short
     # seatbelt in _user_git_seatbelt.py (nexus-sby49).
     fail_closed: false
+    audience: EVERY-USER
   credential_print_guard:
     hook_script: credential_print_guard.py
     matcher: Bash
@@ -77,6 +83,7 @@ rules:
     # all-or-nothing run_hook(fail_closed=...) wrapper stays False here,
     # exactly like subagent_git_write_requires_orchestrator's split above.
     fail_closed: false
+    audience: EVERY-USER
   destructive_action_advice:
     hook_script: destructive_action_advice.py
     matcher: Bash|Edit|Write|MultiEdit
@@ -97,3 +104,4 @@ rules:
     escape_token: "# routing-allow: (deny mode only; advise mode has nothing to escape)"
     # Advice only: a crash must never block or even slow a call.
     fail_closed: false
+    audience: EVERY-USER
