@@ -75,49 +75,25 @@ _HOOK_NAMES = INDEX_HOOK_NAMES
 _STANZA = """\
 {begin}
 REPO_TOP="$(git rev-parse --show-toplevel)"
-# LINKED-WORKTREE GUARD (nexus-ws67k, 2026-08-23). A worktree is a transient
-# VIEW of a repository, not a thing worth indexing:
-#   * it is ephemeral by design -- created for a branch, deleted when done, so
-#     any index of it describes a path that will not exist tomorrow;
-#   * N worktrees of one repo hold byte-identical content, so each one is a
-#     full re-index of a tree already indexed;
-#   * the pgrep guard below compares RESOLVED PATHS, so it cannot see a sibling
-#     worktree indexing the same repo -- three views run three concurrent full
-#     indexes, each believing it is alone;
-#   * hooks live in the COMMON git dir, so installing once in the primary arms
-#     every worktree automatically. Nobody opts in.
-# Measured 2026-08-23 over ~/.config/nexus/index.log: 433 runs in 14 days, 9 of
-# them worktree-targeted in a single day, each re-embedding hundreds of files of
-# a ~2151-file tree, several projected at 64-131 minutes, all detached so the
-# cost never lands on the committing session's clock.
-# --git-dir equals --git-common-dir in a primary checkout and differs in a
+# LINKED-WORKTREE GUARD. A linked worktree is a transient view of a repository,
+# not something worth indexing: it is created for a branch and deleted when the
+# branch is done, so an index of it describes a path that will not exist
+# tomorrow; several worktrees of one repo hold identical content, so each would
+# re-index a tree already indexed; and hooks live in the common directory, so
+# installing once in the main working tree arms every worktree with no opt-in.
+# --git-dir equals --git-common-dir in the main working tree and differs in a
 # linked worktree; both are normalised to absolute physical paths first because
-# git returns a bare ".git" for the primary and an absolute path for a worktree.
-# INTERIM, AND DELIBERATELY NARROWER THAN THE FIX. It suppresses indexing of
-# feature-branch views, which is the safer default while the catalog carries NO
-# branch dimension at all (head_hash is per-OWNER, so whichever branch indexes
-# last overwrites the one shared corpus; on 2026-08-23 that corpus briefly
-# carried a head_hash for a commit that had been rebased away and existed in no
-# branch).
-# The durable model, Sam 2026-08-23, is its own RDR and this guard is NOT it:
-#   * index BRANCHES, not checkouts -- a branch is the durable unit, a checkout
-#     path is a transient view of one;
-#   * OPT IN to what is indexed -- nexus has two stable branches (main,
-#     develop); everything else should be silent by default rather than indexed
-#     by default;
-#   * a directory changing is NOT a complete reindex -- measured over the last
-#     12 develop commits, each touched 1-5 files while the indexer re-processed
-#     182-441 per run, roughly 100x amplification. Git already knows the exact
-#     changed set; the staleness scan walks the whole tree and ignores it.
-# Do not extend this guard toward that design in place. It is a stopgap.
+# git returns a bare ".git" for the main working tree and an absolute path for a
+# worktree. The guard is deliberately narrow: it suppresses indexing of worktree
+# views and nothing else.
 _NX_GIT_DIR="$(cd "$(git rev-parse --git-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
 _NX_GIT_COMMON="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
 if [ -n "$_NX_GIT_DIR" ] && [ -n "$_NX_GIT_COMMON" ] && [ "$_NX_GIT_DIR" != "$_NX_GIT_COMMON" ]; then
-  echo "=== nx index post-commit SKIPPED (linked worktree, nexus-ws67k) $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
+  echo "=== nx index post-commit SKIPPED (linked worktree) $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
     >> "$HOME/.config/nexus/index.log"
   exit 0
 fi
-# pgrep guard (nexus-mkj6u 2026-05-23): skip if an indexer for THIS
+# pgrep guard: skip if an indexer for THIS
 # repo is already running. Belt-and-suspenders with --on-locked=skip,
 # which races on lock acquisition under burst-commit workloads. The
 # race fires when 2+ commits happen before the first indexer finishes
@@ -128,7 +104,7 @@ fi
 if pgrep -f "nx index repo $REPO_TOP" > /dev/null 2>&1; then
   exit 0
 fi
-# nexus-q3xrx: one stamped header per hook run — crash tracebacks (Python
+# One stamped header per hook run — crash tracebacks (Python
 # default excepthook -> stderr -> this redirect) land RAW and undatable
 # without it; the header bounds every entry to a dated run window.
 # The dispatch below is DETACHED, so this redirect is the only sink its
@@ -143,7 +119,7 @@ if [ -f "$NX_INDEX_LOG" ] && [ "$(wc -c < "$NX_INDEX_LOG" 2>/dev/null || echo 0)
 fi
 echo "=== nx index post-commit $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
   >> "$NX_INDEX_LOG"
-# nexus-2k66t.4.2: a background run never starts a 374 MB PDF-stack download.
+# A background run never starts a 374 MB PDF-stack download.
 # With the stack missing it indexes code and prose, logs each PDF it left, and
 # exits 69; `nx doctor` counts them and names the command.
 NX_PDF_STACK=refuse nx index repo "$REPO_TOP" --since-head --on-locked=skip \\
@@ -435,7 +411,7 @@ def hooks_install(path: Path, pre_push: bool) -> None:
         if name == PRE_PUSH_HOOK and action in ("created", "appended") and (note := _tracked_note(repo, hooks_dir / name)):
             click.echo(f"  ! {note}")
 
-    click.echo("Done. The pre-push hook checks the CI hold before a push to develop or main." if pre_push
+    click.echo("Done. The pre-push hook checks the CI hold before a push to a branch the CI board tracks." if pre_push
                else "Done. Indexing will run in the background after each commit.")
 
 
@@ -466,7 +442,7 @@ def hooks_uninstall(path: Path, pre_push: bool) -> None:
 @hooks.command("update")
 @click.argument("path", type=click.Path(file_okay=False, path_type=Path), default=".")
 def hooks_update(path: Path) -> None:
-    """Refresh nexus git hooks to the current stanza (nexus-mkj6u shakeout).
+    """Refresh nexus git hooks to the current stanza.
 
     Equivalent to ``nx hooks uninstall`` then ``nx hooks install``, in one step.
     Use this when ``nx doctor`` reports stanza drift — typically after a

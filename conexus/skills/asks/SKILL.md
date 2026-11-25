@@ -1,6 +1,6 @@
 ---
 name: asks
-description: Use when the user asks to go through, work through or answer the asks waiting on them, or to relay answers to the sessions that raised them (RDR-245 structured asks on the threads board)
+description: Use when the user asks to go through, work through or answer the asks waiting on them, or to relay answers to the sessions that raised them (structured asks on the threads board)
 effort: medium
 ---
 

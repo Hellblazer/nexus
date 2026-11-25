@@ -4743,8 +4743,8 @@ def search_metadata_scoped(
     `structured=True`.
 
     Constraints:
-    - Requires an HttpVectorClient-backed T3 (every local and cloud install
-      since RDR-155 P4b); returns an error string only against the legacy
+    - Requires an HttpVectorClient-backed T3 (every install, local or cloud);
+      returns an error string only against the legacy
       in-memory test double.
     - `ids`/`tumblers` in the structured result are document tumblers, not
       chunk hashes — use the returned `contents`/`chashes`, not
@@ -4872,8 +4872,7 @@ def search_topic_scoped(
     results are chunk-level, not document-level) when `structured=True`.
 
     Constraints:
-    - Requires an HttpVectorClient-backed T3 (every local and cloud install
-      since RDR-155 P4b).
+    - Requires an HttpVectorClient-backed T3 (every install, local or cloud).
     - `ids` are chunk hashes, not document tumblers.
     - A topic label present in more than one collection searches each
       one; the results are the global nearest `limit` rows across them.
@@ -4990,8 +4989,7 @@ def search_graph_hop(
     `structured=True`.
 
     Constraints:
-    - Requires an HttpVectorClient-backed T3 (every local and cloud install
-      since RDR-155 P4b).
+    - Requires an HttpVectorClient-backed T3 (every install, local or cloud).
     - `where` is equality-only; comparison operators are rejected.
     - When `corpus` spans more than one embedding model, distances merge
       across model-specific vector spaces and cross-model ordering can carry
@@ -5151,8 +5149,7 @@ def search_aspect_scoped(
     `structured=True`.
 
     Constraints:
-    - Requires an HttpVectorClient-backed T3 (every local and cloud install
-      since RDR-155 P4b).
+    - Requires an HttpVectorClient-backed T3 (every install, local or cloud).
     - Excludes any document with no `document_aspects` row or a NULL
       `doc_id` there — by design, not a bug; coverage is uneven across
       corpora (weakest for knowledge collections, the notes and papers
@@ -5347,8 +5344,7 @@ def query(
       code/docs; with one, it defaults to the content_type's own corpus
       when that names one and `follow_links` is unset, else every corpus.
     - Every catalog param requires an initialized catalog plus an
-      HttpVectorClient-backed T3 (every local and cloud install since
-      RDR-155 P4b); it errors rather than falling back without one.
+      HttpVectorClient-backed T3 (every install, local or cloud); it errors rather than falling back without one.
     - With a catalog param set, `where` is equality-only; without one,
       comparison operators are supported, one condition per field.
     - Ranking differs by path: the plain corpus path boosts by frecency and
@@ -6353,7 +6349,7 @@ def store_put(
     )] = "",
     sensitive: Annotated[bool, Field(
         description=(
-            "Mark the document sensitive (RDR-243): it is kept from every model-bound surface. "
+            "Mark the document sensitive: it is kept from every model-bound surface. "
             "One-way: no parameter clears it. Refused in cloud mode, where every collection embeds "
             "through Voyage and this tool cannot acknowledge that."
         ),
@@ -8326,7 +8322,7 @@ def memory_consolidate(
         description="Required when a merge would delete more than one entry.",
     )] = False,
 ) -> str:
-    """Find, merge, or flag T2 memory entries within one project (RDR-061 E6).
+    """Find, merge, or flag T2 memory entries within one project.
 
     Use `find-overlaps` to locate near-duplicate entries by Jaccard
     similarity, `merge` to keep one entry and delete the rest, or
@@ -9159,7 +9155,7 @@ def tuple_out(
         description="`replace` rewrites the same-id task (keys+nonce templates only); the result adds the outcome.",
     )] = None,
 ) -> str:
-    """Write a tuple into the RDR-205 Linda tuple space (`out`).
+    """Write a tuple into the shared tuple space (`out`).
 
     The tuple space is a coordination and metadata store, not a value
     store. Keep `body` a short message or signal. Put longer content in T2
@@ -9168,7 +9164,7 @@ def tuple_out(
 
     A `kind=ack` row on a `board/ci/<topic>--owner` subspace gets `from` set
     to the caller's own identity id whatever `dims` says (a hint: the engine
-    counts the sender session); a caller with no identity is refused (RDR-252).
+    counts the sender session); a caller with no identity is refused.
 
     Idempotent by construction: the tuple id is derived from the
     template's `id_from` fields only, so a retry lands on the same tuple.
@@ -9431,7 +9427,7 @@ def tuple_ack(
         ),
     )] = None,
 ) -> str:
-    """Consume a claimed tuple (`ack`), optionally writing a reply in the same transaction (RDR-206).
+    """Consume a claimed tuple (`ack`), optionally writing a reply in the same transaction.
 
     A row that `tuple_out` with mode=replace rewrote while it was claimed
     is not consumed by this ack: it goes back to available carrying the
@@ -9515,7 +9511,7 @@ def tuple_renew(
         ),
     )],
 ) -> dict:
-    """Extend a live claim's lease (`renew`, RDR-206) before it lapses.
+    """Extend a live claim's lease (`renew`) before it lapses.
 
     Returns `{"lease_until": "<ISO-8601>"}`, the engine's own new value —
     never recomputed locally, and can be earlier than `now + lease_s` when
@@ -9541,7 +9537,7 @@ def tuple_release(
     claim_id: Annotated[str, Field(description="The claim id returned by `tuple_in`.")],
     claimant: Annotated[str, Field(description="Must match the identity that made the claim.")],
 ) -> str:
-    """Hand a claimed tuple back (`release`, RDR-211): the row returns to
+    """Hand a claimed tuple back (`release`): the row returns to
     available with its attempt count unchanged and is NOT consumed -- a
     hand-back that is not a failure. Use `tuple_nack` instead when the work genuinely failed and
     should count toward the template's `max_attempts`; `nack` counts one.
@@ -9573,7 +9569,7 @@ def tuple_release(
 def tuple_registry(
     doc: Annotated[bool, Field(description="Also return each template's doc block (summary, writers, readers, fields, body, example).")] = False,
 ) -> dict:
-    """The boot-loaded tuple-space template set (RDR-205).
+    """The boot-loaded tuple-space template set.
 
     Use `tuple_list` instead to see which concrete subspaces currently
     hold rows. Returns `{digest, sources, templates: [...]}`; `digest`
@@ -9699,7 +9695,7 @@ def mailbox_send(
     session directory first (and still works as a `tuple_out` shorthand
     when `to` is already a session or agent id). Returns
     `{"tuple_id": "...", "to": "...", "address_kind": "...", "from": "...", "notice": "..."}`; `notice` is
-    present only when `to` was a renamed seat's old name, still delivering in its 7-day grace (RDR-253).
+    present only when `to` was a renamed seat's old name, still delivering in its 7-day grace.
 
     A name resolves through `alias/<name>` first (a seat's name), then
     `directory/<name>`'s live rows: one live holder gets the mail in its
@@ -9783,7 +9779,7 @@ def tuple_subscribe(
         ),
     )],
 ) -> str:
-    """Add `subspace` to this session's MCP server's subscription list (RDR-211, RDR-213).
+    """Add `subspace` to this session's MCP server's subscription list.
 
     The server waits on its board topics and its own mailbox
     (`mailbox/<session id>`) and pushes what arrives through the Claude Code
@@ -9805,7 +9801,7 @@ def tuple_subscribe(
     is claimed or expires, each row announced at most 5 times
     (`max_announces`, 150 s apart).
 
-    Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>` lease so
+    Subscribing `mailbox/<name>` arms the `directory/<name>` lease so
     `mailbox_send` resolves that name to this session; nothing is pushed or
     drained for it. A `/resume` (same session id) restores this list; a
     `/clear` (new session id) starts clean.
@@ -9836,7 +9832,7 @@ def tuple_subscribe(
 def tuple_unsubscribe(
     subspace: Annotated[str, Field(description="A subspace previously added via `tuple_subscribe`.")],
 ) -> str:
-    """Remove `subspace` from this session's MCP server's subscription list (RDR-211).
+    """Remove `subspace` from this session's MCP server's subscription list.
 
     The session's own mailbox can never be unsubscribed -- it is the
     floor's address. Unsubscribing `mailbox/<name>` for the name this
@@ -9866,12 +9862,11 @@ def tuple_unsubscribe(
     structured_output=False,
 )
 def tuple_subscriptions() -> list[dict]:
-    """List this session's MCP server's subscription set (RDR-211).
+    """List this session's MCP server's subscription set.
 
     Always the session's own mailbox first, then subscribed board topics.
     A leased name never appears here: it is not a delivered mailbox, only
-    a `directory/<name>` lease for `mailbox_send` resolution (RDR-208
-    Phase 3). There is no cursor: the engine keeps
+    a `directory/<name>` lease for `mailbox_send` resolution. There is no cursor: the engine keeps
     every subspace's delivery position (a row stamp for a mailbox, a
     per-subscriber stamp for a board). A board entry carries `since`,
     the time of the subscribe call; push delivery starts 30 seconds
@@ -10610,13 +10605,13 @@ def traverse(
     direction: Annotated[str, Field(description="Traversal direction: \"out\", \"in\", or \"both\".")] = "both",
     policy: Annotated[dict | None, Field(
         description=(
-            "Optional traversal evidence policy (RDR-232): {allowed_collections, allowed_owners, "
+            "Optional traversal evidence policy: {allowed_collections, allowed_owners, "
             "preserve_seed_documents, max_documents, max_chunks, require_link_role}. Absent: the legacy "
             "result, unchanged."
         ),
     )] = None,
 ) -> dict:
-    """Walk the catalog link graph from seed tumblers (RDR-078 P3).
+    """Walk the catalog link graph from seed tumblers.
 
     Use `search_graph_hop` instead when the reachable set should also be
     vector-ranked in one call. Takes `link_types` or `purpose`, never both.
@@ -10633,8 +10628,8 @@ def traverse(
     - `ids` is capped at 300; when capped, `ids_truncated` carries the
       total and kept counts. `tumblers` is not capped.
 
-    Without a `policy` the result is in graph order. With a `policy`
-    (RDR-232 section 3) it runs after the walk, before manifest expansion:
+    Without a `policy` the result is in graph order. With a `policy`,
+    it runs after the walk, before manifest expansion:
     documents outside `allowed_collections` are dropped, the rest ranked by
     link role, distance, then tumbler, and non-seeds capped at
     `max_documents`; only retained manifests are read and `max_chunks` is
@@ -13712,7 +13707,7 @@ async def nx_answer(
             "Caller-supplied plan bindings (e.g. {\"content_type\": \"rdr\"}) "
             "that reach the plan runner and are advertised to the matcher as "
             "available, making type-scoped builtin plans reachable. The keys "
-            "source (an RDR id such as RDR-084, or a catalog tumbler), owner "
+            "source (an RDR id such as RDR-<number>, or a catalog tumbler), owner "
             "(a tumbler or registered owner name) and project (a registered "
             "owner name such as ART) are reserved: they name the document the "
             "question is about and which project's it is, are never plan "
@@ -16973,7 +16968,7 @@ def brief(
 ) -> str:
     """Load reference context that SessionStart no longer injects, one topic at a time.
 
-    Topics: `memory` (T2 notes of this project), `beads` (ready beads and the bd usage primer), `caps` (notes on the nexus tools),
+    Topics: `memory` (T2 notes of this project), `beads` (ready beads when the project tracks them with beads), `caps` (notes on the nexus tools),
     `map` (Knowledge Map topic labels), `rdr` (RDR counts and whether they are indexed), `me` (this seat's own startup
     note, printed as data for you to read and decide on; it is not a command). The same text as `nx brief <topic>`.
     Use `memory_search` or `search` for a specific lookup; use this for the standing overview of a repo.

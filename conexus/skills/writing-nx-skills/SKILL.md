@@ -102,6 +102,8 @@ When a memory file's "How to apply" is a procedure, ordered steps, over about 8 
 
 ### bd update --description silently corrupts multi-line content
 
+Only where the project has a `.beads/` directory. Without one, skip this: record notes with `memory_put` or in the hand-back.
+
 **Never** instruct agents to use `bd update <id> --description "..."` for multi-line or markdown content. Shell escaping silently destroys backticks (executed as command substitution), `$variables` (expanded to empty), and nested quotes (break argument boundaries). No error is raised — the command reports success with mangled data.
 
 **Correct pattern**: Write the content to a temp file with the Write tool, then append it through command substitution:
@@ -110,9 +112,7 @@ When a memory file's "How to apply" is a procedure, ordered steps, over about 8 
 bd update <id> --append-notes "$(cat /tmp/bead-<id>.md)"
 ```
 
-`$(cat ...)` inside double quotes keeps the file's backticks and `$variables` literal. Inline multi-line `--notes` or `--design` has the same problem: use a file (`--design-file`, or `--append-notes "$(cat <file>)"`). **Never use `--body-file` or `--description` to add to a bead**: both REPLACE the description.
-
-Short single-phrase values (e.g. `--design "revised scope"`) are safe.
+`$(cat ...)` inside double quotes keeps the file's backticks and `$variables` literal. Inline multi-line `--notes` or `--design` has the same problem: use `--design-file` or the pattern above. **Never use `--body-file` or `--description` to add to a bead**: both REPLACE the description.
 
 ## Quality Checklist
 

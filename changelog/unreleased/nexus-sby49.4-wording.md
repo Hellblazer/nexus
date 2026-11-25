@@ -1,0 +1,3 @@
+### Changed
+
+- **Wording a user reads no longer names nexus's internal ids, its maintainer or its branches.** The MCP tool descriptions (search, tuple, traverse, store_put, brief and the rest) drop their RDR ids and the Linda label; `nx ask`, `nx ci`, `nx group` and `nx hooks` help says "the user" where it named a person and "the branches the board tracks" where it named two; the hook stanza `nx hooks install` writes into a repository drops its bead ids, dates and design history (installed hooks refresh with `nx hooks update`); the log line a skipped linked worktree writes no longer carries a bead id. The nexus skill's note table, the asks and plan-audit descriptions and the writing-nx-skills `bd update` pitfall (now conditional on `.beads/`) follow. (nexus-sby49.4)

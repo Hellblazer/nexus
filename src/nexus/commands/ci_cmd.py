@@ -33,7 +33,7 @@ def _store():
 
 @click.group(name="ci")
 def ci_group() -> None:
-    """CI results: develop and main from the CI board, any other branch from GitHub's check-runs."""
+    """CI results for a branch: from the CI board where the branch has a topic, otherwise from GitHub's check-runs."""
 
 
 @ci_group.command(name="wait")
@@ -53,7 +53,7 @@ def ci_group() -> None:
               help="Repository part of the board topic [default: the repository name of the origin remote; "
                    "the wait refuses when there is none].")
 @click.option("--branch", default=None,
-              help="Branch part of the board topic. Only develop and main have one; any other branch "
+              help="Branch part of the board topic. Only the branches the board tracks have one; any other branch "
                    "(a release or feature branch) is waited on through GitHub's check-runs, not the board. "
                    "[default: develop when refs/remotes/origin/develop exists, else the branch "
                    "refs/remotes/origin/HEAD points at; the wait refuses when there is neither.]")
@@ -91,7 +91,7 @@ def ci_wait_cmd(
     board read, or the board unreachable until the deadline).
     Click's own usage errors (a missing SHA, --timeout out of range) exit 2.
 
-    GitHub-only mode: the board has topics for develop and main only. For any
+    GitHub-only mode: the board has topics for the branches it tracks only. For any
     other --branch (a release or feature branch), or when the engine refuses
     the topic as unknown, the board is skipped and the wait reads SHA's
     check-runs from GitHub (all events, so a pull_request's CI counts), never
@@ -331,7 +331,7 @@ def _board_of_origin(store: Any, repo: str) -> str:
               help=f"With --not-mine, a line saying why or who has it (at most {_NOTE_MAX} characters, no control "
                    "characters). Shown by `nx group ack-times`.")
 def ci_ack_cmd(sha: str, base: str | None, topic: str | None, not_mine: bool, note: str | None) -> None:
-    """Acknowledge a red develop: post the owner's ack for SHA, signed with this session's identity id.
+    """Acknowledge an open red on a CI board: post the owner's ack for SHA, signed with this session's identity id.
 
     With --not-mine the row is a `disclaim` instead: "this red is not mine". The engine (0.1.201 and later; an older one
     only records the row) hands the red on at once when its current owner disclaims, without waiting for the
@@ -454,7 +454,7 @@ def _base_options(fn: Any) -> Any:
 @click.option("--red-fix", default=None, help="Push past the hold, on the record: the reason. An override is printed as one "
               "PUSH_RED_FIX_APPLIED line, a flag nothing needed as PUSH_RED_FIX_UNNEEDED.")
 def ci_check_hold_cmd(base: str | None, remote: str, branch: str | None, tips: tuple[str, ...], red_fix: str | None) -> None:
-    """Whether this session may push now (RDR-252, the push script's hold-your-pushes check).
+    """Whether this session may push now (the push script's hold-your-pushes check).
 
     While a red is open on board/ci/<BASE>--owner, only its owner and the pusher of one of its suspects may push (a suspect's
     pusher is the identity its push record's sender-session stamp maps to; `from` is never read). Anyone else is refused:
@@ -554,14 +554,14 @@ def _parse_proofs(values: tuple[str, ...]) -> dict[str, dict[str, Any]]:
 @click.option("--from-sha", required=True, help="The branch tip the push replaced (the record's `base`); may be empty.")
 @click.option("--to-sha", required=True, help="The tip the push landed.")
 @click.option("--count", type=click.IntRange(min=0), default=None, help="How many commits the push carried (the record's `n`).")
-@click.option("--red-fix", default=None, help="The reason a push overrode the develop-red hold: written into the record body as red_fix.")
+@click.option("--red-fix", default=None, help="The reason a push overrode the open-red hold: written into the record body as red_fix.")
 @click.option("--skip", "skips", multiple=True, callback=lambda _ctx, _param, values: _parse_skips(values),
               help="CHECK=REASON (repeatable): a push-time check the push overrode, written into the record body under skips.")
 @click.option("--proof-info", "proofs", multiple=True, callback=lambda _ctx, _param, values: _parse_proofs(values),
               help="LEG=TREE12,STARTED,SECONDS,HOST (repeatable): a heavy-leg proof the push relied on, written under proofs.")
 def ci_record_push_cmd(base: str | None, remote: str, branch: str | None, from_sha: str, to_sha: str, count: int | None,
                        red_fix: str | None, skips: dict[str, str], proofs: dict[str, dict[str, Any]]) -> None:
-    """Write the push record of a push that landed (RDR-252): one tuple on board/ci/<BASE>--push.
+    """Write the push record of a push that landed: one tuple on board/ci/<BASE>--push.
 
     The record's dims are from=<your identity id, or unknown>, kind=push, sha=<TO_SHA>; its body {base: FROM_SHA, n, proofs, skips, red_fix} (each only when given).
     The owner stamper links base to tip to order the branch's tips and maps the record's sender-session stamp to the pusher.
