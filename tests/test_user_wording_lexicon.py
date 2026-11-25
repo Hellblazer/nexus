@@ -100,13 +100,6 @@ def test_a_planted_id_fails_the_tool_scan() -> None:
 
 _FILES = ("ask.py", "ci_cmd.py", "group_cmd.py", "hooks.py")
 
-#: Top-level command groups the walk skips, each with the reason. A group named here that is no longer registered fails
-#: ``test_every_excluded_group_still_exists``: delete the entry.
-_EXCLUDED_GROUPS: dict[str, str] = {
-    "plan": "group C (nexus-sby49.4) renames it to `nx answer-plan` and owns that text; drop this entry at the merge",
-}
-
-
 def _help_texts(cmd: click.Command, path: str):
     yield path, cmd.help or ""
     yield path, cmd.short_help or ""
@@ -119,8 +112,9 @@ def _help_texts(cmd: click.Command, path: str):
             yield from _help_texts(sub, f"{path} {name}")
 
 
-def _cli_hits(root: click.Group, excluded=_EXCLUDED_GROUPS) -> tuple[int, list[str]]:
+def _cli_hits(root: click.Group, excluded: dict[str, str] | None = None) -> tuple[int, list[str]]:
     """Walk every command of *root* (hidden ones included): help, short help, epilog, every option's help and spelling."""
+    excluded = excluded or {}
     examined = 0
     found: list[str] = []
     own = [("nx", root.help or ""), ("nx", root.epilog or "")] + [(f"nx {p.name}", getattr(p, "help", None) or "") for p in root.params]
@@ -144,11 +138,14 @@ def test_no_nx_command_help_names_a_person_branch_or_id() -> None:
     assert not found, "\n".join(found)
 
 
-def test_every_excluded_group_still_exists() -> None:
+def test_the_cli_walk_reads_answer_plan_and_its_hidden_nx_plan_alias() -> None:
+    """Group C renamed ``nx plan`` to ``nx answer-plan`` and kept the old group as a hidden alias; both are walked, none excluded."""
     from nexus.cli import main  # noqa: PLC0415
 
-    gone = sorted(set(_EXCLUDED_GROUPS) - set(main.commands))
-    assert not gone, f"drop these from _EXCLUDED_GROUPS: {gone}"
+    assert "answer-plan" in main.commands and "plan" in main.commands
+    assert main.commands["plan"].hidden, "nx plan is a hidden deprecated alias"
+    seen = {where.split()[1] for where, _ in (t for name in ("answer-plan", "plan") for t in _help_texts(main.commands[name], f"nx {name}"))}
+    assert seen == {"answer-plan", "plan"}
 
 
 def test_a_planted_name_fails_the_cli_walk() -> None:
@@ -264,15 +261,6 @@ def test_a_planted_id_fails_the_description_scan(tmp_path: Path) -> None:
 #: and the mode phrase of the brief check. The skill files are scanned for ids, people and hosts, not for these.
 _SKILL_EXEMPT_TERMS = frozenset({"bd", "orchestrator", "local and cloud"})
 
-#: (file relative to conexus/skills, line prefix) -> reason. Lines group C (nexus-sby49.4) owns; drop each at the merge. An
-#: entry that matches no line fails ``test_every_group_c_exemption_still_matches``.
-_GROUP_C_LINES: dict[tuple[str, str], str] = {
-    (f"{skill}/SKILL.md", "**Tier-aware discipline**"): "group C reworks line 7 of the seven skills that copy tier-discipline.md"
-    for skill in ("analyze", "deep-analysis", "design-to-code-trace", "document", "knowledge-tidying", "research-synthesis",
-                  "why-was-this-written")
-}
-_GROUP_C_LINES[("nexus/reference.md", "Use plan_save tool:")] = "group C renames the plan tools and owns this example"
-
 #: Literals a user types or reads that the lexicon would flag: the `nx doctor` row label and a `--kind` value. Removed
 #: from a line before the scan; renaming either is a product change, not wording.
 _PRODUCT_LITERALS = ("RDR-229 completion", "--kind labrun")
@@ -282,7 +270,7 @@ def _skill_files() -> list[Path]:
     return sorted(p for p in (PLUGIN / "skills").rglob("*") if p.is_file())
 
 
-def _skill_hits(files: list[Path], root: Path, owned_by_c=_GROUP_C_LINES) -> tuple[int, list[str]]:
+def _skill_hits(files: list[Path], root: Path, owned: dict[tuple[str, str], str] | None = None) -> tuple[int, list[str]]:
     """Every line of every file under the skills directory (SKILL.md, reference.md and the rest) that a session can load."""
     lines = 0
     found: list[str] = []
@@ -290,7 +278,7 @@ def _skill_hits(files: list[Path], root: Path, owned_by_c=_GROUP_C_LINES) -> tup
         rel = f.relative_to(root).as_posix()
         for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             lines += 1
-            if any(rel == r and line.startswith(prefix) for (r, prefix) in owned_by_c):
+            if any(rel == r and line.startswith(prefix) for (r, prefix) in (owned or {})):
                 continue
             for literal in _PRODUCT_LITERALS:
                 line = line.replace(literal, "")
@@ -305,23 +293,15 @@ def test_no_skill_file_names_an_internal_id_or_person() -> None:
     assert not found, "skill text loads into a user's session and names:\n" + "\n".join(found)
 
 
-def test_every_group_c_exemption_still_matches() -> None:
-    dead = [
-        (rel, prefix) for (rel, prefix) in _GROUP_C_LINES
-        if not any(line.startswith(prefix) for line in (PLUGIN / "skills" / rel).read_text(encoding="utf-8").splitlines())
-    ]
-    assert not dead, f"drop these from _GROUP_C_LINES: {dead}"
-
-
 def test_a_planted_id_fails_the_skill_scan(tmp_path: Path) -> None:
     (tmp_path / "x").mkdir()
     (tmp_path / "x" / "reference.md").write_text(
         "fine\nwalks the graph (RDR-078 P3)\nask Sam\nrun bd ready for the orchestrator\nsee nexus-umm29\n", encoding="utf-8")
-    lines, found = _skill_hits([tmp_path / "x" / "reference.md"], tmp_path, owned_by_c={})
+    lines, found = _skill_hits([tmp_path / "x" / "reference.md"], tmp_path, owned=None)
     assert lines == 5
     assert [f.split(": ")[1] for f in found] == ["RDR-078", "Sam", "nexus-umm29"]
     owned = {("x/reference.md", "walks the graph"): "test"}
-    assert [f.split(": ")[1] for f in _skill_hits([tmp_path / "x" / "reference.md"], tmp_path, owned_by_c=owned)[1]] == ["Sam", "nexus-umm29"]
+    assert [f.split(": ")[1] for f in _skill_hits([tmp_path / "x" / "reference.md"], tmp_path, owned=owned)[1]] == ["Sam", "nexus-umm29"]
 
 
 def test_the_nexus_skill_names_no_person_or_id() -> None:

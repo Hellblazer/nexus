@@ -4,7 +4,7 @@ description: Use when the design intent behind a failing code path must be reduc
 effort: medium
 ---
 
-**Tier-aware discipline** — before starting, check T3 (`search`), T2 (`memory_search`), and T1 (`scratch` search) widest to narrowest so you don't duplicate work already done; check `answer_plan_search` for a saved retrieval plan (never an implementation plan) before a multi-source search. Before returning, write findings back at the tier matching their audience (`scratch` for siblings this session, `memory_put` for this project, `store_put` for permanent cross-project knowledge). Full checklist: [${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md](../../resources/tier-discipline.md) (shared across every skill that prescribes it — nexus-cnzei.6).
+**Tier-aware discipline** — before starting, check T3 (`search`), T2 (`memory_search`), and T1 (`scratch` search) widest to narrowest so you don't duplicate work already done; check `answer_plan_search` for a saved retrieval plan (never an implementation plan) before a multi-source search. Before returning, write findings back at the tier matching their audience (`scratch` for siblings this session, `memory_put` for this project, `store_put` for permanent cross-project knowledge). Full checklist: [${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md](../../resources/tier-discipline.md) (shared across every skill that prescribes it).
 
 # why-was-this-written
 

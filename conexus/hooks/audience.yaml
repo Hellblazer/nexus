@@ -869,8 +869,8 @@ rules:
   module: nexus.hooks.auto_approve
   audience: SAM-WIDE
   gate: account_flag
-  evidence: 'Recorded decision 240731431b, ff9d61f5ee that never weighed other users: users are prompted for memory_delete, plan_delete, memory_consolidate,
-    nx_tidy, tuple_in and mailbox_send; the flag keeps the full list'
+  evidence: 'Recorded decision 240731431b, ff9d61f5ee that never weighed other users: users are prompted for memory_delete, answer_plan_delete (and its old name plan_delete),
+    memory_consolidate, nx_tidy, tuple_in and mailbox_send; the flag keeps the full list'
   target_state: a prompt for users on the destructive and other-party tools
   phase: '3'
   decision: D2

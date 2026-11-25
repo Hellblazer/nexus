@@ -394,7 +394,7 @@ Save a retrieval plan to the T2 answer-plan library.
 | `tags` | str | `""` | Comma-separated tags |
 
 ```
-Use answer_plan_save tool: query="What does RDR-232 say about plan eligibility?", plan_json='{"steps": [{"tool": "search", "args": {"query": "$intent"}}, {"tool": "summarize", "args": {"inputs": "$step1.ids"}}]}', verb="query", answer_kind="synthesis", project="nexus"
+Use answer_plan_save tool: query="How does plan eligibility work?", plan_json='{"steps": [{"tool": "search", "args": {"query": "$intent"}}, {"tool": "summarize", "args": {"inputs": "$step1.ids"}}]}', verb="query", answer_kind="synthesis", project="nexus"
 ```
 
 ### answer_plan_search

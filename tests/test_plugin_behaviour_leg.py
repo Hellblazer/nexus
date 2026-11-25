@@ -357,15 +357,16 @@ def _scenarios_for(reg: dict, name: str) -> dict[str, dict]:
     return {sc["name"]: sc for sc in leg._scenarios(reg, fx)}
 
 
-def test_the_leg_expects_the_prompt_for_the_six_tools_for_everyone_but_the_flagged_account() -> None:
-    """U2b: the six are silent for a user and for the marked checkout (the marker never loosens), allowed for the flag."""
+def test_the_leg_expects_the_prompt_for_the_seven_tools_for_everyone_but_the_flagged_account() -> None:
+    """U2b: the seven are silent for a user and for the marked checkout (the marker never loosens), allowed for the flag."""
     reg = _reg("PreToolUse", "auto-approve")
     for name in ("plain", "plain-dirty", "plain-beads", "marked", "flagged"):
         sc = _scenarios_for(reg, name)
         assert sc["search"]["expect"] == "allow"
         for tool in leg.PROMPTED_FOR_USERS:
             assert sc[tool]["expect"] == ("allow" if name == "flagged" else "none"), (name, tool)
-    assert len(leg.PROMPTED_FOR_USERS) == 6
+    assert len(leg.PROMPTED_FOR_USERS) == 7
+    assert "answer_plan_delete" in leg.PROMPTED_FOR_USERS and "plan_delete" in leg.PROMPTED_FOR_USERS
 
 
 def test_the_leg_expects_neutral_stop_text_for_users_and_the_ci_text_only_in_the_marked_checkout() -> None:

@@ -162,7 +162,9 @@ CREDENTIAL_ROWS = [("cat /proc/1234/environ", "deny"), ("ls -la", "pass")]
 #: as the maintainer's (U8a), and no fixture's output is a deny (U8b: the flip is not made, and never reaches a user).
 ADVICE_ROWS = [("pkill -f pytest", "advice"), ("find / -name x.py", "advice"), ("ls -la", "none")]
 #: U2b: the tools a user is prompted for (the hook is silent, so Claude Code's own prompt decides); the maintainer's account allows.
-PROMPTED_FOR_USERS = ("memory_delete", "plan_delete", "memory_consolidate", "nx_tidy", "tuple_in", "mailbox_send")
+PROMPTED_FOR_USERS = (
+    "memory_delete", "answer_plan_delete", "plan_delete", "memory_consolidate", "nx_tidy", "tuple_in", "mailbox_send",
+)
 #: U6b: the stop guard's CI wording, which only a nexus checkout reads.
 CI_TEXT = ("nx ci wait", "CI board", "develop and main")
 
@@ -709,7 +711,7 @@ def _scenarios(reg: dict, fx: Fixture) -> list[dict]:
     if event == "PreToolUse" and tail[-1].endswith("destructive_action_advice.py"):
         return [{"name": cmd, "payload": _bash(fx, cmd), "expect": what} for cmd, what in ADVICE_ROWS]
     if event in ("PreToolUse", "PermissionRequest") and tail[-1] == "auto-approve":
-        # U2b: the six tools are the account flag's alone (the marker does not loosen); every other allowed tool is everyone's
+        # U2b: the seven tools are the account flag's alone (the marker does not loosen); every other allowed tool is everyone's
         out = [{"name": "search", "expect": "allow", "payload": _common(
             fx, event, tool_name="mcp__plugin_conexus_nexus__search", tool_input={"query": "x", "project": "p", "title": "t"})}]
         for tool in PROMPTED_FOR_USERS:

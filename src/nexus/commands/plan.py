@@ -179,8 +179,7 @@ def hygiene_cmd(apply_: bool) -> None:
     `nx answer-plan enable` — never deletes).
 
     Routes through HttpPlanLibrary, so it cleans the live engine-served
-    library (nexus-vtp8h). (Its one-time local-SQLite repair sibling
-    died with the SQLite store — nexus-i711w sub-stage A3.)
+    library.
     """
     library = _open_plan_library()
     if library is None:
@@ -236,7 +235,7 @@ def hygiene_cmd(apply_: bool) -> None:
     "--include-disabled",
     is_flag=True,
     default=False,
-    help="Include soft-disabled rows (nexus-mrzp). Default: skip.",
+    help="Include soft-disabled rows. Default: skip.",
 )
 def list_cmd(
     scope: str, origin: str, name_pat: str, limit: int, as_json: bool,
@@ -439,7 +438,7 @@ def delete_cmd(plan_id: int, yes: bool) -> None:
     "so the operator can later see why the plan was retired.",
 )
 def disable_cmd(plan_id: int, reason: str) -> None:
-    """Soft-disable the plan with *plan_id* (nexus-mrzp).
+    """Soft-disable the plan with *plan_id*.
 
     \b
     Soft-disable takes a plan out of rotation without deleting the row,
@@ -474,7 +473,7 @@ def disable_cmd(plan_id: int, reason: str) -> None:
 @answer_plan.command("enable")
 @click.argument("plan_id", type=int)
 def enable_cmd(plan_id: int) -> None:
-    """Re-enable a previously soft-disabled plan (nexus-mrzp).
+    """Re-enable a previously soft-disabled plan.
 
     Clears the ``disabled_at`` column. The ``disable-reason:`` tag, if
     present, is preserved as a historical record.
@@ -603,7 +602,7 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
     "--insert-only",
     is_flag=True,
     help="Skip the update leg — insert missing templates and leave "
-    "drifted rows alone. The pre-nexus-f1mbo behaviour; there is rarely "
+    "drifted rows alone. The behaviour before reconcile became the default; there is rarely "
     "a reason to want it.",
 )
 def reseed_cmd(force: bool, insert_only: bool) -> None:
@@ -616,7 +615,7 @@ def reseed_cmd(force: bool, insert_only: bool) -> None:
     install could only be made correct by a user who already knew the
     library was wrong — every install that did not run it silently kept
     an April 2026 snapshot with two templates missing and nine rows
-    drifted (nexus-f1mbo). A flag guarding the CORRECT behaviour is
+    drifted. A flag guarding the CORRECT behaviour is
     friction, not safety.
 
     \b

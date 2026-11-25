@@ -63,7 +63,7 @@ def _maintainer_account(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
 
 #: U2b (D2): the destructive or other-party tools a user is prompted for; the account flag keeps the full list.
 _PROMPTED_FOR_USERS = (
-    "memory_delete", "plan_delete", "memory_consolidate", "nx_tidy", "tuple_in", "mailbox_send",
+    "memory_delete", "answer_plan_delete", "plan_delete", "memory_consolidate", "nx_tidy", "tuple_in", "mailbox_send",
 )
 
 
@@ -215,7 +215,7 @@ class TestUsersArePromptedForDestructiveAndOtherPartyTools:
 
     @pytest.mark.parametrize("event", [None, "PreToolUse", "PermissionRequest"])
     @pytest.mark.parametrize("tool", _PROMPTED_FOR_USERS)
-    def test_a_user_gets_no_allow_for_the_six_tools(self, monkeypatch, tmp_path: Path, tool: str, event: str | None) -> None:
+    def test_a_user_gets_no_allow_for_the_seven_tools(self, monkeypatch, tmp_path: Path, tool: str, event: str | None) -> None:
         _account(monkeypatch, tmp_path / "user-home", flagged=False)
         assert _run_nx_hook(f"mcp__plugin_conexus_nexus__{tool}", hook_event_name=event) == ""
 
@@ -230,7 +230,7 @@ class TestUsersArePromptedForDestructiveAndOtherPartyTools:
 
         _account(monkeypatch, tmp_path / "user-home", flagged=False)
         prompted = {f"mcp__plugin_conexus_nexus__{t}" for t in _PROMPTED_FOR_USERS}
-        assert prompted <= auto_approve._ALLOWED_TOOLS, "non-vacuity: the six names are in the full list"
+        assert prompted <= auto_approve._ALLOWED_TOOLS, "non-vacuity: the seven names are in the full list"
         kept = sorted((auto_approve._ALLOWED_TOOLS | auto_approve._ALLOWED_HOOK_TOOLS) - prompted)
         assert len(kept) > 40
         denied = [t for t in kept if _parse_decision(_run_nx_hook(t)) != "allow"]
