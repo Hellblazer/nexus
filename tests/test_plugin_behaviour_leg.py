@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from tests import _audience_manifest as am
+from tests._tmp_root import child_env_with_tmpdir
 
 ROOT = Path(__file__).resolve().parent.parent
 LEG = ROOT / "tests" / "e2e" / "lib" / "plugin_behaviour.py"
@@ -421,7 +422,8 @@ def test_a_private_config_probe_reports_what_a_hook_leaves_in_it(tmp_path) -> No
     probe = leg.Probe("p", "k", "plain", "P2", "script",
                       [sys.executable, "-c", "import os; os.makedirs(os.path.join(os.environ['NEXUS_CONFIG_DIR'], 'logs'))"],
                       {}, None, private_cfg=True)
-    out = leg.run_probe(probe, {"TMPDIR": str(tmp_path)}, tmp_path, 30)
+    env = child_env_with_tmpdir({}, tmp_path)
+    out = leg.run_probe(probe, env, tmp_path, 30)
     assert out.leaked == ("logs",)
     clean = leg.Probe("p", "k", "plain", "P2", "script", [sys.executable, "-c", "pass"], {}, None, private_cfg=True)
-    assert leg.run_probe(clean, {"TMPDIR": str(tmp_path)}, tmp_path, 30).leaked == ()
+    assert leg.run_probe(clean, env, tmp_path, 30).leaked == ()

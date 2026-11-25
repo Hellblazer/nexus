@@ -97,5 +97,16 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/tumbler-footnotes/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 - `conexus/skills/upgrade/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 - `conexus/skills/why-was-this-written/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/hooks/scripts/compact_checkpoint.py`: the compaction text names the threads board and `bd` only where the project has them, nexus-sby49.4.
+- `conexus/hooks/scripts/routing/credential_print_guard.py`: a user's deny and redirect text names no maintainer tool or host, nexus-sby49.4.
+- `conexus/hooks/scripts/stop_wake_guard.py`: the stop guard's CI wording is read only in a nexus checkout; a user gets neutral text, nexus-sby49.4.
+- `conexus/hooks/scripts/version_lockstep_action.py`: the version-lockstep action's text is neutral outside a nexus checkout, nexus-sby49.4.
+- `conexus/resources/agent-shared/ERROR_HANDLING.md`: the plan-library tool is `answer_plan_search`, nexus-sby49.4.
+- `conexus/resources/tier-discipline.md`: the plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan, nexus-sby49.4.
+- `conexus/skills/analyze/SKILL.md`: the Tier-aware discipline line names `answer_plan_search` and a retrieval plan, never an implementation plan, nexus-sby49.4.
+- `conexus/skills/deep-analysis/SKILL.md`: the Tier-aware discipline line names `answer_plan_search` and a retrieval plan, never an implementation plan, nexus-sby49.4.
+- `conexus/skills/design-to-code-trace/SKILL.md`: the Tier-aware discipline line names `answer_plan_search` and a retrieval plan, never an implementation plan, nexus-sby49.4.
+- `conexus/skills/document/SKILL.md`: the Tier-aware discipline line names `answer_plan_search` and a retrieval plan, never an implementation plan, nexus-sby49.4.
+- `conexus/skills/knowledge-tidying/SKILL.md`: the Tier-aware discipline line names `answer_plan_search` and a retrieval plan, never an implementation plan, nexus-sby49.4.
 
 ## Deferred to the next client release

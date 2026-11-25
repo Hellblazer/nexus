@@ -292,7 +292,10 @@ def _board_known(checkpoint: str | None, payload: dict) -> bool:
         heading = re.search(rf"(?m)^## Threads board entry \({_BOARD_PROJECT}/[^)\n]*\)\n+(.*)$", checkpoint)
         if heading is not None and not heading.group(1).startswith("[no board entry"):
             return True
-    return bool(_maintainer(payload))
+    try:
+        return bool(_maintainer(payload))
+    except Exception:  # noqa: BLE001 -- a failing predicate gives the full text, like a failed import
+        return True
 
 
 _ARCHIVE_STAMP = "%Y%m%dT%H%M%SZ"
