@@ -38,8 +38,10 @@ rules:
     matcher: Bash
     mode: block
     rationale: >-
-      subagents never write the index/history OR destroy the working tree in
-      the shared tree — hand-back is diffs+paths and the orchestrator commits
+      for the nexus MAINTAINER (the account flag file, or a checkout carrying
+      the nexus marker; anyone else gets only a short deny list, see
+      _user_git_seatbelt.py), subagents never write the index/history OR
+      destroy the working tree in the shared tree — hand-back is diffs+paths and the orchestrator commits
       pathspec-limited (RDR-184 Gap-4, nexus-s88vq; verb set widened by
       nexus-ays2l from {commit,add} to also cover checkout/restore/stash/
       clean/reset/rm; nexus-3c92m round 4 replaced structural parsing with a

@@ -341,7 +341,8 @@ def test_a_symlinked_cwd_is_resolved_first(home, tmp_path):
 
 
 @pytest.mark.parametrize("cwd", ["${cwd}", "$CLAUDE_PROJECT_DIR/x", "relative/path", "", "\x00bad"])
-def test_an_unusable_cwd_counts_as_no_path(home, cwd):
+def test_an_unusable_cwd_counts_as_no_path(home, cwd, monkeypatch):
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     assert _audience.nexus_repo({"cwd": cwd}) is False
     assert _audience.maintainer({"cwd": cwd}) is False
 
@@ -414,7 +415,7 @@ def test_the_tripwire_sanitises_the_session_id(home, tmp_path):
     (home / ".config" / "nexus" / "logs").mkdir(parents=True)
     _audience.note_marker_only({"cwd": str(repo), "session_id": "../../evil"})
     sentinels = home / ".config" / "nexus" / "logs" / "audience-tripwire"
-    assert [p.name for p in sentinels.iterdir()] == ["evilevil"] or len(list(sentinels.iterdir())) == 1
+    assert [p.name for p in sentinels.iterdir()] == ["evil"]
     assert not (home / ".config" / "evil").exists()
 
 
@@ -503,3 +504,33 @@ def test_a_project_env_naming_a_host_does_not_exempt_it(tmp_path, env_hosts):
     _hosts_file(acct, "ci-box\n")
     assert _ssh_verdict("devbox", repo, acct, env_hosts).get("permissionDecision") == "deny"
     assert _ssh_verdict("ci-box", repo, acct, env_hosts).get("permissionDecision") != "deny"
+
+
+# ---------------------------------------------------------------------------
+# A user-mode seatbelt that raises is noted once per session, then the call passes
+# ---------------------------------------------------------------------------
+
+
+def test_a_seatbelt_exception_passes_the_call_and_is_logged_once_per_session(tmp_path):
+    copy = _plugin_copy(tmp_path, (SCRIPTS / "_audience.py").read_text())
+    (copy / "routing" / "_user_git_seatbelt.py").write_text(
+        "def decide(command, cwd):\n    raise RuntimeError('boom')\n\n\ndef deny_text(hit):\n    return ''\n"
+    )
+    repo = _repo(tmp_path / "userrepo")  # no marker, no flag: user mode
+    acct = tmp_path / "acct"
+    (acct / ".config" / "nexus" / "logs").mkdir(parents=True)
+    payload = json.dumps({
+        "tool_name": "Bash", "tool_input": {"command": "git push --force"}, "cwd": str(repo),
+        "agent_id": "aworker-x-1", "agent_type": "general-purpose", "session_id": "s-err",
+    })
+    env = {**os.environ, "NX_HOOK_PYTHON": sys.executable,
+           "NX_ROUTING_LOG_PATH": str(tmp_path / "route.jsonl"), "NX_DROPPED_WRITES_LOG_PATH": str(tmp_path / "dropped.jsonl")}
+    for _ in range(2):
+        proc = subprocess.run(
+            [sys.executable, str(HARNESS), str(acct), str(copy / "routing" / GUARD.name)],
+            input=payload, capture_output=True, text=True, timeout=30, env=env,
+        )
+        assert proc.returncode == 0 and proc.stdout == "", (proc.stdout, proc.stderr)
+    log = _hook_log(acct)
+    assert log.count("user-mode seatbelt raised RuntimeError") == 1, log
+    assert not (tmp_path / "route.jsonl").exists(), "an error note must not post telemetry"

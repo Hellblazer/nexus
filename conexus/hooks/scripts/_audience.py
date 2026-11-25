@@ -158,17 +158,14 @@ def maintainer(payload: object) -> bool:
         return True
 
 
-def note_marker_only(payload: object) -> None:
-    """Tripwire: say once per session that only the marker made this a maintainer.
+def _note_once(kind: str, payload: object, line: str) -> None:
+    """Append *line* to ``<account home>/.config/nexus/logs/hook.log``, once per (kind, session).
 
-    Writes ``TRIPWIRE_LINE`` to ``<account home>/.config/nexus/logs/hook.log``
-    only when that directory already exists, and at most once per session: an
-    empty sentinel ``logs/audience-tripwire/<session_id>`` is created with
-    ``O_EXCL``, and a second hit finds it and writes nothing. Never raises.
+    Writes only when that logs directory already exists, and at most once per session:
+    an empty sentinel ``logs/audience-<kind>/<session_id>`` is created with ``O_EXCL``,
+    and a second call finds it and writes nothing. Never raises.
     """
     try:
-        if account_flag() or not nexus_repo(payload):
-            return
         home = account_home()
         if not home:
             return
@@ -177,7 +174,7 @@ def note_marker_only(payload: object) -> None:
             return
         sid = str(payload.get("session_id") or "") if isinstance(payload, dict) else ""
         sid = "".join(c for c in sid if c.isalnum() or c in "-_")[:80] or "unknown"
-        sentinels = os.path.join(logs, "audience-tripwire")
+        sentinels = os.path.join(logs, f"audience-{kind}")
         os.makedirs(sentinels, exist_ok=True)
         try:
             os.close(os.open(os.path.join(sentinels, sid), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
@@ -185,9 +182,24 @@ def note_marker_only(payload: object) -> None:
             return
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
         with open(os.path.join(logs, "hook.log"), "a", encoding="utf-8") as handle:
-            handle.write(f"{stamp}+00:00 WARNING audience: {TRIPWIRE_LINE}\n")
-    except BaseException:  # noqa: BLE001 -- a tripwire must never fail the hook
+            handle.write(f"{stamp}+00:00 WARNING audience: {line}\n")
+    except BaseException:  # noqa: BLE001 -- a note must never fail the hook
         pass
+
+
+def note_marker_only(payload: object) -> None:
+    """Tripwire: say once per session that only the marker made this a maintainer."""
+    try:
+        if account_flag() or not nexus_repo(payload):
+            return
+    except BaseException:  # noqa: BLE001
+        return
+    _note_once("tripwire", payload, TRIPWIRE_LINE)
+
+
+def note_hook_error(payload: object, what: str) -> None:
+    """Say once per session that a hook's user-mode path raised (the hook then passes the call)."""
+    _note_once("hook-error", payload, f"hook error, call passed: {what}"[:300])
 
 
 def remote_test_hosts() -> "frozenset[str]":
