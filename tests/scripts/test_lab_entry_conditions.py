@@ -27,7 +27,6 @@ release, engine-release, nightly and Windows workflows are gates of their own, r
 """
 from __future__ import annotations
 
-import fnmatch
 import glob
 import re
 import subprocess
@@ -201,17 +200,21 @@ def test_a_lab_command_that_mirrors_a_ci_line_carries_it_whole() -> None:
 
 
 def test_ci_flags_are_in_both_the_ci_step_and_the_lab_command() -> None:
-    """`ci_flags`: the Maven selectors (-Dgroups, -Dtest.excluded.groups, -Dnexus.ddl.suite) the lab command must
-    pass exactly as CI does. A flag CI drops or changes fails here; so does a lab command that omits one."""
+    """`ci_flags` (whole tokens) and `ci_args` (substrings of the normalised text): the Maven selectors and the CA-3
+    pytest arguments the lab command must pass exactly as CI does. A flag CI drops or changes fails here; so does a
+    lab command that omits one."""
     reg = _registry()
-    flagged = [e for _k, e in _entries(reg) if e.get("ci_flags")]
-    assert len(flagged) >= 2, "non-vacuity: both Maven prerequisites pin their CI flags"
+    flagged = [e for _k, e in _entries(reg) if e.get("ci_flags") or e.get("ci_args")]
+    assert len(flagged) >= 3, "non-vacuity: both Maven prerequisites and the CA-3 live test pin their CI arguments"
     for e in flagged:
         (run,) = _step_run(e["workflow"], e["job"], e["step"])
-        lab = " ".join(e["command"])
-        for flag in e["ci_flags"]:
+        lab = _norm(" ".join(e["command"]))
+        for flag in e.get("ci_flags", []):
             assert flag in run.split(), f"{e['id']}: CI's '{e['step']}' no longer passes {flag}"
             assert flag in lab.split(), f"{e['id']}: the lab command does not pass {flag}"
+        for arg in e.get("ci_args", []):
+            assert arg in run, f"{e['id']}: CI's '{e['step']}' no longer passes {arg!r}"
+            assert arg in lab, f"{e['id']}: the lab command does not pass {arg!r}"
 
 
 def test_ci_env_pins_match_the_ci_job_env_and_the_lab_command() -> None:
@@ -388,6 +391,37 @@ def test_lab_commands_name_things_that_exist() -> None:
             segment = re.split(r"\s(?:&&|\|\||;|\||--)\s|\sscripts/", segment, maxsplit=1)[0]
             for flag in re.findall(r"(?<=\s)(--[a-z][\w-]*)", segment):
                 assert flag in text, f"{where}: {script} has no {flag} option"
+
+
+def test_every_pytest_lab_line_either_skips_the_engine_substrate_or_builds_the_gate_jar() -> None:
+    """Without NX_TEST_T2_SUBSTRATE=none and with no gate jar, conftest's preflight exits 75 (or boots an engine
+    for nothing). CI sets `none` on the jobs that need no engine (ca3-pgvector-bundle's job env among them)."""
+    reg = _registry()
+    seen = 0
+    for _kind, e in _entries(reg):
+        for i, cmd in enumerate(e["command"]):
+            if not re.search(r"\buv run pytest\b", cmd):
+                continue
+            seen += 1
+            built = any("build-gate-jar.sh" in prev for prev in e["command"][:i]) or "build-gate-jar.sh" in cmd
+            assert "NX_TEST_T2_SUBSTRATE=none" in cmd or built, (
+                f"{e['id']}: '{cmd}' neither sets NX_TEST_T2_SUBSTRATE=none nor follows scripts/build-gate-jar.sh"
+            )
+    assert seen >= 3, "non-vacuity: too few pytest lab lines found"
+
+
+def test_glob_regex_follows_the_paths_filter_semantics() -> None:
+    """The path-gate claims are only as good as the matcher: `*` stays within one path segment, `**` crosses them."""
+    star = _glob_regex("service/*.xml")
+    assert star.match("service/pom.xml")
+    assert not star.match("service/src/pom.xml"), "`*` must not cross `/`"
+    assert not star.match("service/pom.xml.bak")
+    deep = _glob_regex("service/src/main/resources/db/changelog/**")
+    assert deep.match("service/src/main/resources/db/changelog/db.changelog-master.xml")
+    assert deep.match("service/src/main/resources/db/changelog/rdr229/x/vectors-081.xml"), "`**` must match nested levels"
+    assert not deep.match("service/src/main/resources/db/other/vectors-081.xml")
+    assert _glob_regex("**/pom.xml").match("pom.xml") and _glob_regex("**/pom.xml").match("a/b/pom.xml")
+    assert not _glob_regex("*.toml").match("scripts/lab-entry-conditions.toml")
 
 
 def test_a_script_a_command_runs_directly_is_executable() -> None:

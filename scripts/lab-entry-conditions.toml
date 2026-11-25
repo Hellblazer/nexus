@@ -215,6 +215,8 @@ job = "ca3-pgvector-bundle"
 step = "Run CA-3 live test (asserts it actually ran, not skipped)"
 run_contains = "scripts/assert_ca3_ran.py ca3.xml"
 script = "scripts/assert_ca3_ran.py"
+ci_env = { NX_TEST_T2_SUBSTRATE = "none" }
+ci_args = ["tests/db/test_pg_provision_ca3_bundle.py", "-o addopts=", "-m integration", "-rs", "--junit-xml=ca3.xml"]
 after = ["ca3-bundle-build"]
 twin = "conditional"
 host = "chas-test or qwent-test (needs docker)"
@@ -225,7 +227,7 @@ gap = "Transcribed from CI's steps and not yet run on a lab host: the first live
 note = "ca3_core includes the Liquibase changelog tree, so every changeset lane triggers this job on the develop push."
 command = [
   "uv sync -q --group dev",
-  'lab-run -c lab-m -- env NEXUS_CA3_BUNDLE="$PWD/bundle" python3 scripts/watched_pytest.py --stall 180 --status ca3-live-status.json -- uv run pytest tests/db/test_pg_provision_ca3_bundle.py -o addopts= -m integration -rs --junit-xml=ca3.xml',
+  'lab-run -c lab-m -- env NEXUS_CA3_BUNDLE="$PWD/bundle" NX_TEST_T2_SUBSTRATE=none python3 scripts/watched_pytest.py --stall 180 --status ca3-live-status.json -- uv run pytest tests/db/test_pg_provision_ca3_bundle.py -o addopts= -m integration -rs --junit-xml=ca3.xml',
   "uv run python scripts/assert_ca3_ran.py ca3.xml",
 ]
 also_covers = ["tests/db/test_pg_provision_ca3_bundle.py"]
