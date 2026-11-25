@@ -271,13 +271,14 @@ table reference the `collection_id`. The engine reads which model
 embeds a collection, and whether it is live or quarantined, from its row
 (RDR-229).
 
-The collection's name is a label, unique among a tenant's live collections.
+The collection's name is a label, unique among a tenant's collections that are not superseded.
 A new knowledge subject gets a minted label, `c` followed by its id (`c4812`).
 `nx index repo` does not mint: the `code`, `docs` and `rdr` collections it
-creates are labelled in the four-segment shape below. Any collection can be
-renamed to a label that passes the label rule ([Choosing and Naming
-Collections](collections.md), Rule 3). Existing labels stay as they are, in
-one of two older shapes:
+creates are labelled in the four-segment shape below. A rename takes
+its content type and owner from the new name and has its own guards
+([Choosing and Naming Collections](collections.md), Rule 3). Existing labels
+stay as they are, typically in one of two older shapes (a `quarantine-`
+collection and a renamed one carry other labels):
 
 - the four-segment RDR-103 shape, `<content_type>__<owner_id>__<embedding_model>__v<n>`, for example `knowledge__distributed-systems__voyage-context-3__v1`;
 - the pre-RDR-103 two-segment shape, `<content_type>__<repo>-<hash>`, for example `code__myrepo-a1b2c3`.
