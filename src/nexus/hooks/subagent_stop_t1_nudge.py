@@ -42,6 +42,11 @@ return carries) does not count; a put with no result yet does, because
 absence of a result is not positive evidence of failure. Text an agent merely
 read, inside a ``tool_result``, never counts.
 
+**Audience (nexus-sby49.3).** A conexus plugin agent (``conexus:<name>``) is nudged for every user (U5a); any
+other agent (Claude Code's built-ins, another plugin's, a project's own) only under ``maintainer()`` (U5b, D10,
+nexus-mtheb). The dispatch record (:func:`record_dispatch`) is the maintainer's too: it sends the agent type and
+put count to the user's engine for nexus's own census.
+
 Stdlib only at module scope: this runs on every real subagent stop, and
 ``src/nexus/hooks`` pays its import cost on every call.
 """
@@ -56,14 +61,31 @@ from nexus._hook_runtime._io import HookResult, additional_context, never_fail
 
 __all__ = ["NUDGE", "record_dispatch", "run", "t1_put_count"]
 
+# nexus-sby49.3 audience gate. ``maintainer`` tightens (it adds a nudge and a telemetry row), so an import
+# failure binds it to True: a broken helper gives the maintainer's behaviour, never a thinner one.
+try:
+    from nexus.hooks._audience import maintainer as _maintainer
+except BaseException:  # noqa: BLE001
+    def _maintainer(payload: object) -> bool:
+        return True
+
 #: What the agent reads. The agent's final message is what its caller
 #: receives, so the nudge asks for the full report again, not the id alone
 #: (review r1 of fd1ca12a5).
 NUDGE = (
     "You wrote nothing to T1. Put your findings in T1 "
-    "(mcp__plugin_conexus_nexus__scratch action=put, tagged with your bead id and write-back), "
+    "(mcp__plugin_conexus_nexus__scratch action=put, tagged with the tags your brief names), "
     "then repeat your complete final report unchanged, ending with the T1 id."
 )
+
+#: The plugin that owns the T1 contract (nexus-sby49.3, U5a). Its agents arrive as ``conexus:<name>``.
+_PLUGIN_PREFIX = "conexus:"
+
+
+def _is_conexus_agent(agent_type: str) -> bool:
+    """U5a: a conexus plugin agent, whose own definition carries the T1 write-back rule. Anything else (a Claude
+    Code built-in such as ``general-purpose`` or ``Explore``, another plugin's agent, a project's own) is U5b."""
+    return agent_type.startswith(_PLUGIN_PREFIX)
 
 #: Agent types (the part after any ``plugin:`` prefix) that have no T1 tool
 #: or whose return is parsed as a fixed format: a nudge only wastes their turn
@@ -195,13 +217,20 @@ def _decide(payload: dict | None) -> HookResult:
     agent_type = _field(data, "agent_type")
     if not agent_type or agent_type.rsplit(":", 1)[-1] in NO_T1_AGENTS:
         return HookResult()
+    # U5a: a conexus agent is nudged for every user. U5b: any other agent (Claude Code's built-ins, another plugin's,
+    # a project's own) only for ``maintainer()`` (D10, nexus-mtheb: measured on Sam's nine sessions). So is the
+    # dispatch record, which sends the agent type and its put count to the user's engine for nexus's own census.
+    maintains = _maintainer(data)
+    if not maintains and not _is_conexus_agent(agent_type):
+        return HookResult()
     puts = t1_put_count(_field(data, "agent_transcript_path"))
     if puts is None:
         return HookResult()
-    try:
-        record_dispatch(_field(data, "session_id"), _field(data, "agent_id"), agent_type, puts)
-    except Exception:  # noqa: BLE001 — a counter must never cost the nudge or the stop
-        pass
+    if maintains:
+        try:
+            record_dispatch(_field(data, "session_id"), _field(data, "agent_id"), agent_type, puts)
+        except Exception:  # noqa: BLE001 — a counter must never cost the nudge or the stop
+            pass
     if puts > 0 or bool(data.get("stop_hook_active")):
         return HookResult()
     return HookResult(stdout=additional_context("SubagentStop", NUDGE))

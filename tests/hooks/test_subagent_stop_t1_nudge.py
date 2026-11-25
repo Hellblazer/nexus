@@ -30,7 +30,7 @@ VERB = "subagent-stop-t1-nudge"
 SCRATCH = "mcp__plugin_conexus_nexus__scratch"
 NUDGE_SENTENCE = (
     "You wrote nothing to T1. Put your findings in T1 "
-    "(mcp__plugin_conexus_nexus__scratch action=put, tagged with your bead id and write-back), "
+    "(mcp__plugin_conexus_nexus__scratch action=put, tagged with the tags your brief names), "
     "then repeat your complete final report unchanged, ending with the T1 id."
 )
 
@@ -83,7 +83,7 @@ def _payload(transcript: Path | str, **over: object) -> dict:
         "session_id": "s1",
         "hook_event_name": "SubagentStop",
         "agent_id": "a1",
-        "agent_type": "developer",
+        "agent_type": "conexus:developer",
         "agent_transcript_path": str(transcript),
         "stop_hook_active": False,
     }
@@ -181,11 +181,43 @@ def test_an_agent_with_no_t1_tool_or_a_parsed_return_is_never_nudged(
     assert result.stdout is None
 
 
-@pytest.mark.parametrize("agent_type", ["conexus:developer", "worktree-developer", "Explore"])
+@pytest.mark.parametrize("agent_type", ["conexus:developer", "conexus:code-review-expert"])
 def test_an_agent_with_the_t1_tool_is_still_nudged(tmp_path: Path, agent_type: str) -> None:
-    """Non-vacuity for the skip list: it names types, it does not silence all."""
+    """Non-vacuity for the skip list: it names types, it does not silence all. U5a: a conexus plugin agent is nudged
+    for every user, on an account with no flag and outside nexus (the autouse fixture's default)."""
     result = nudge.run(_payload(_no_put_transcript(tmp_path), agent_type=agent_type))
     assert result.stdout is not None
+
+
+_BUILT_INS = ["general-purpose", "Explore", "Plan", "claude", "worktree-developer", "developer", "other-plugin:helper"]
+
+
+@pytest.mark.parametrize("agent_type", _BUILT_INS)
+def test_a_user_is_not_nudged_for_a_built_in_or_another_plugins_agent(tmp_path: Path, agent_type: str) -> None:
+    """U5b (D10, nexus-mtheb): the nudge for Claude Code's built-in agents is Sam's own measured rule. A user's
+    ``general-purpose`` stop is silent, and so is a project's own ``developer``."""
+    assert nudge.run(_payload(_no_put_transcript(tmp_path), agent_type=agent_type)).stdout is None
+
+
+@pytest.mark.parametrize("agent_type", _BUILT_INS)
+def test_the_account_flag_gets_the_nudge_for_every_agent_type(
+    tmp_path: Path, agent_type: str, src_maintainer_flag: Path
+) -> None:
+    result = nudge.run(_payload(_no_put_transcript(tmp_path), agent_type=agent_type))
+    assert result.stdout is not None
+    assert json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"] == NUDGE_SENTENCE
+
+
+def test_a_marked_nexus_checkout_gets_the_nudge_for_a_built_in(tmp_path: Path, nexus_marked_repo: Path) -> None:
+    payload = _payload(_no_put_transcript(tmp_path), agent_type="general-purpose", cwd=str(nexus_marked_repo))
+    assert nudge.run(payload).stdout is not None
+
+
+def test_the_nudge_names_no_bead_and_nothing_internal() -> None:
+    import re
+
+    assert "bead" not in nudge.NUDGE.lower()
+    assert re.search(r"\bnexus-[a-z0-9]{4,}\b|RDR-\d+|\bSam\b|\bHal\b", nudge.NUDGE) is None
 
 
 @pytest.mark.parametrize(
@@ -338,17 +370,58 @@ def test_a_non_object_payload_fails_open() -> None:
 
 
 def test_the_counter_seam_is_called_once_with_the_put_count(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, src_maintainer_flag: Path
 ) -> None:
     calls: list[tuple] = []
     monkeypatch.setattr(nudge, "record_dispatch", lambda *a: calls.append(a))
     nudge.run(_payload(_no_put_transcript(tmp_path)))
     nudge.run(_payload(_put_transcript(tmp_path)))
-    assert calls == [("s1", "a1", "developer", 0), ("s1", "a1", "developer", 1)]
+    assert calls == [("s1", "a1", "conexus:developer", 0), ("s1", "a1", "conexus:developer", 1)]
+
+
+def test_a_user_sends_no_dispatch_record_even_for_a_conexus_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``agent_dispatch_record`` sends the agent type and its put count to the user's engine, for nexus's own census
+    (nexus-sby49.3): SAM-WIDE. The user is still nudged (U5a)."""
+    calls: list[tuple] = []
+    monkeypatch.setattr(nudge, "record_dispatch", lambda *a: calls.append(a))
+    result = nudge.run(_payload(_no_put_transcript(tmp_path)))
+    assert result.stdout is not None
+    assert calls == []
+
+
+def test_a_marked_nexus_checkout_records_the_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nexus_marked_repo: Path
+) -> None:
+    calls: list[tuple] = []
+    monkeypatch.setattr(nudge, "record_dispatch", lambda *a: calls.append(a))
+    nudge.run(_payload(_no_put_transcript(tmp_path), cwd=str(nexus_marked_repo)))
+    assert calls == [("s1", "a1", "conexus:developer", 0)]
+
+
+def test_a_helper_that_cannot_import_restores_the_maintainers_behaviour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The module-level fallback is True: a broken ``_audience`` nudges a built-in and records, as before."""
+    import importlib
+    import sys
+
+    real = sys.modules.pop("nexus.hooks._audience")
+    monkeypatch.setitem(sys.modules, "nexus.hooks._audience", None)
+    try:
+        reloaded = importlib.reload(nudge)
+        calls: list[tuple] = []
+        monkeypatch.setattr(reloaded, "record_dispatch", lambda *a: calls.append(a))
+        result = reloaded.run(_payload(_no_put_transcript(tmp_path), agent_type="general-purpose"))
+        assert result.stdout is not None and len(calls) == 1
+    finally:
+        sys.modules["nexus.hooks._audience"] = real
+        importlib.reload(nudge)
 
 
 def test_a_failing_counter_never_costs_the_nudge(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, src_maintainer_flag: Path
 ) -> None:
     def boom(*_a: object) -> None:
         raise RuntimeError("engine down")
