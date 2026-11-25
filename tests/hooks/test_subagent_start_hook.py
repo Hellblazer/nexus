@@ -39,7 +39,7 @@ atexit.register(shutil.rmtree, _UNFLAGGED_HOME, ignore_errors=True)
 def _flagged_home(tmp_path: Path) -> str:
     flag = tmp_path / "acct-flagged" / ".config" / "nexus" / "maintainer-profile"
     flag.parent.mkdir(parents=True)
-    flag.write_text("")
+    flag.write_text("", encoding="utf-8")
     return str(tmp_path / "acct-flagged")
 
 STDIN_PAYLOAD = json.dumps({

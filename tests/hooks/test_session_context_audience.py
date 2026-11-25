@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from nexus.hooks import board_due, identity_notes, session_context
+from tests._audience_fixtures import broken_audience_import
 
 
 @pytest.fixture()
@@ -160,14 +161,8 @@ def test_the_tripwire_line_carries_no_internal_name() -> None:
 # --- T8: a broken helper never thins the maintainer's output ---------------------------------------
 
 
-def test_a_helper_that_cannot_import_gives_the_maintainer_block_to_everyone(monkeypatch, tmp_path: Path) -> None:
-    real = sys.modules.pop("nexus.hooks._audience")
-    monkeypatch.setitem(sys.modules, "nexus.hooks._audience", None)
-    try:
-        reloaded = importlib.reload(session_context)
+def test_a_helper_that_cannot_import_gives_the_maintainer_block_to_everyone(tmp_path: Path) -> None:
+    with broken_audience_import(session_context) as reloaded:
         assert reloaded._maintainer({"cwd": str(tmp_path)}) is True
         assert reloaded._t1_top_lines({"cwd": str(tmp_path)}) == reloaded._T1_TOP_LINES
         assert reloaded._account_flag() is False  # a loosening predicate answers False
-    finally:
-        sys.modules["nexus.hooks._audience"] = real
-        importlib.reload(session_context)

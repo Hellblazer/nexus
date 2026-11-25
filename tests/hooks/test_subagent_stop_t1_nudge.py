@@ -404,20 +404,13 @@ def test_a_helper_that_cannot_import_restores_the_maintainers_behaviour(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The module-level fallback is True: a broken ``_audience`` nudges a built-in and records, as before."""
-    import importlib
-    import sys
+    from tests._audience_fixtures import broken_audience_import  # noqa: PLC0415
 
-    real = sys.modules.pop("nexus.hooks._audience")
-    monkeypatch.setitem(sys.modules, "nexus.hooks._audience", None)
-    try:
-        reloaded = importlib.reload(nudge)
+    with broken_audience_import(nudge) as reloaded:
         calls: list[tuple] = []
         monkeypatch.setattr(reloaded, "record_dispatch", lambda *a: calls.append(a))
         result = reloaded.run(_payload(_no_put_transcript(tmp_path), agent_type="general-purpose"))
         assert result.stdout is not None and len(calls) == 1
-    finally:
-        sys.modules["nexus.hooks._audience"] = real
-        importlib.reload(nudge)
 
 
 def test_a_failing_counter_never_costs_the_nudge(

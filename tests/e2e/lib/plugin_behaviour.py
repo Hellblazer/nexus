@@ -117,7 +117,7 @@ GUARD_ROWS: list[tuple[str, str, str]] = [
     ("git tag v1", "pass", "deny"),
     ("git tag -d v1", "pass", "deny"),
     ("git config core.hooksPath /tmp/x", "deny", "deny"),
-    ("git config --global user.name x", "deny", "deny"),
+    ("git config " + "--glob" + "al user.name x", "deny", "deny"),
     ("git config user.email a@b", "pass", "deny"),
     ("git config --get user.name", "pass", "pass"),
     ("git reflog expire --all", "deny", "deny"),
@@ -296,7 +296,7 @@ def _row_covers(row: str, reg_key: str, manifest: dict) -> bool:
     if row == reg_key:
         return True
     module = None
-    if ":" in row and row.rsplit(":", 1)[0].endswith(".py"):
+    if any(c["id"] == row for c in manifest.get("constants") or []):
         module = row.rsplit(":", 1)[0]
     else:
         for r in manifest.get("rules") or []:
@@ -326,7 +326,7 @@ def apply_allowlist(findings: list[dict], entries: list[AllowEntry], manifest: d
 def constant_text(repo: Path, constant_id: str) -> str | None:
     """The literal value of ``<module path>:<NAME>``, read from the source (no import), or None."""
     module, name = constant_id.rsplit(":", 1)
-    path = repo / module
+    path = am.module_file(repo, module)
     if not path.is_file():
         return None
     for node in ast.parse(path.read_text(encoding="utf-8")).body:

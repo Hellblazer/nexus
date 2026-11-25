@@ -205,15 +205,24 @@ def test_the_session_start_context_states_survival_and_the_claude_p_caveat(monke
     assert "flagged entries land in T2 at session end and on a move to a new id" in out
     assert "survives resume" not in out
     assert "A `claude -p` child always has its own T1" in out
-    assert "`share_t1=True` is retired and raises" in out and "unless started with" not in out
+    assert "share_t1" not in out and "unless started with" not in out  # I1c: the retired-flag note is gone for everyone
 
 
-def test_the_session_start_context_leads_with_the_t1_contract(monkeypatch) -> None:
+def test_the_session_start_context_leads_with_the_t1_contract(monkeypatch, src_maintainer_flag) -> None:
+    """The maintainer's start: the heading, then the dispatch protocol sentence (I1b, D10), then what T1 survives."""
     monkeypatch.setattr(session_context, "which", lambda _c: False)
     monkeypatch.setattr(session_context, "run_command", lambda *_a, **_k: None)
     out = session_context.run(None).stdout or ""
     assert out.startswith("## T1: the working layer this session shares with its subagents")
     assert "name its id in each brief" in out
+
+
+def test_a_users_session_start_leads_with_the_t1_contract_and_has_no_dispatch_protocol(monkeypatch) -> None:
+    monkeypatch.setattr(session_context, "which", lambda _c: False)
+    monkeypatch.setattr(session_context, "run_command", lambda *_a, **_k: None)
+    out = session_context.run(None).stdout or ""
+    assert out.startswith("## T1: the working layer this session shares with its subagents")
+    assert "name its id in each brief" not in out and "Before a dispatch" not in out
 
 
 @pytest.mark.parametrize("char", ["\u00e9", "\u4e2d", "\U0001f600"], ids=["2-byte", "3-byte", "4-byte"])

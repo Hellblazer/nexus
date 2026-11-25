@@ -370,11 +370,25 @@ def _mcp_modules(repo: Path) -> set[str]:
     return {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module and n.module.startswith("nexus.hooks.")}
 
 
-def _dotted(repo: Path, path: str) -> str | None:
-    p = Path(path)
-    if p.parts[:2] == ("src", "nexus"):
-        return ".".join(p.with_suffix("").parts[1:])
-    return None
+def module_file(repo: Path, key: str) -> Path:
+    """The file a manifest module key names. The manifest ships inside the plugin, where a repository path is a reference a
+    user's install cannot follow, so a key is a plugin-relative path (``hooks/scripts/x.py``) or, for the wheel's hooks, a
+    dotted module name (``nexus.hooks.x``)."""
+    if key.startswith("nexus."):
+        return (repo / "src").joinpath(*key.split(".")).with_suffix(".py")
+    return repo / "conexus" / key
+
+
+def module_key(repo: Path, path: Path) -> str:
+    """The inverse of :func:`module_file`."""
+    rel = path.relative_to(repo)
+    if rel.parts[0] == "src":
+        return ".".join(rel.with_suffix("").parts[1:])
+    return "/".join(rel.parts[1:])
+
+
+def _dotted(repo: Path, key: str) -> str | None:
+    return key if key.startswith("nexus.") else None
 
 
 def problems(manifest: dict, hooks_json: dict, repo: Path, *, plugin_root: Path | None = None) -> list[str]:
@@ -403,7 +417,7 @@ def problems(manifest: dict, hooks_json: dict, repo: Path, *, plugin_root: Path 
             out.append(f"registration {r['key']!r}: event, matcher or argv differ from hooks.json")
         out += _entry_problems(f"registration {r['key']!r}", d)
         for m in d.get("modules") or []:
-            if not (repo / m).is_file():
+            if not module_file(repo, m).is_file():
                 out.append(f"registration {r['key']!r}: module {m} does not exist")
         if not d.get("modules"):
             out.append(f"registration {r['key']!r}: names no implementing module")
@@ -437,7 +451,7 @@ def problems(manifest: dict, hooks_json: dict, repo: Path, *, plugin_root: Path 
     mcp_modules = _mcp_modules(repo)
     audited: dict[str, ast.Module] = {}
     for path, spec in modules.items():
-        f = repo / path
+        f = module_file(repo, path)
         if not f.is_file():
             out.append(f"modules: {path} does not exist")
             continue
@@ -479,7 +493,7 @@ def problems(manifest: dict, hooks_json: dict, repo: Path, *, plugin_root: Path 
                     out.append(f"{entry_id}: audience {e['audience']} is live but {path} never calls {want}()")
     # -- every module that has text or a predicate is classified
     for f in hook_module_files(repo):
-        rel = f.relative_to(repo).as_posix()
+        rel = module_key(repo, f)
         if rel in modules:
             continue
         tree = ast.parse(f.read_text(encoding="utf-8"))

@@ -10,7 +10,7 @@
 # until  the condition that ends the entry. An entry past it fails the leg, and so does an entry that matched nothing.
 #
 # This file is the Phase 3 worklist. Phase 3 ships when it has no entries (plan section 7, Phase 3 ship-when).
-conexus/hooks/scripts/routing/credential_print_guard.py:_REDIRECT	Hellblazer/nexus	until: phase-3	U7b: the redirect names the Hellblazer/nexus credentials wrapper; users get "ask your operator for an equivalent"
-conexus/hooks/scripts/routing/credential_print_guard.py:_REDIRECT	RDR-219	until: phase-3	U7b: the redirect cites RDR-219
+hooks/scripts/routing/credential_print_guard.py:_REDIRECT	Hellblazer/nexus	until: phase-3	U7b: the redirect names the Hellblazer/nexus credentials wrapper; users get "ask your operator for an equivalent"
+hooks/scripts/routing/credential_print_guard.py:_REDIRECT	RDR-219	until: phase-3	U7b: the redirect cites RDR-219
 PreToolUse hooks/scripts/routing/destructive_action_advice.py	lab-remote	until: phase-3	U8a: the pkill advice names a lab-remote run; the text is neutral in Phase 3
 S2-2	bd	until: phase-3	S2-2: the compaction text names `bd list --status=in_progress`; Phase 3 gates the board and bd words on what the project has

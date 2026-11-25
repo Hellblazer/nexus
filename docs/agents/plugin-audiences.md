@@ -1,6 +1,6 @@
 # Plugin audiences: who a hook, a rule or a line of injected text is for
 
-The conexus plugin ships to every Claude Code user, and it also carries the rules nexus's own multi-agent development runs on. This page is the model that keeps the two apart. Plan of record: `~/.local/state/nexus/plans/plugin-portability-plan.md` (nexus-sby49; owner rulings D1-D13 in T2 `nexus/sam-ruling-plugin-portability-plan-2026-11-25`).
+The conexus plugin ships to every Claude Code user, and it also carries the rules nexus's own multi-agent development runs on. This page is the model that keeps the two apart. Plan of record: `~/.local/state/nexus/plans/plugin-portability-plan.md` (owner rulings D1-D13 in T2 `nexus/sam-ruling-plugin-portability-plan-2026-11-25`).
 
 ## The audiences
 

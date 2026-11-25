@@ -59,7 +59,7 @@ def test_the_lint_examined_the_whole_plugin(manifest, hooks_json) -> None:
     for path in manifest["modules"]:
         import ast
 
-        census_total += len(am.census(ast.parse((ROOT / path).read_text(encoding="utf-8"))))
+        census_total += len(am.census(ast.parse(am.module_file(ROOT, path).read_text(encoding="utf-8"))))
     declared = {c["id"] for c in manifest["constants"]}
     not_injected = {f"{p}:{n}" for p, m in manifest["modules"].items() for n in (m.get("not_injected") or {})}
     assert census_total >= 70, f"the census saw {census_total} constants: the lint is not looking at the hook modules"
@@ -179,7 +179,7 @@ def test_a_new_string_constant_nobody_classified_fails(manifest, hooks_json) -> 
 def test_a_live_gated_entry_in_a_module_that_never_calls_its_predicate_fails(manifest, hooks_json) -> None:
     def gate_the_setup_notice(m):
         m["rules"].append({
-            "id": "bogus", "module": "conexus/hooks/scripts/nx_setup_notice.py", "audience": "SAM-WIDE", "gate": "maintainer",
+            "id": "bogus", "module": "hooks/scripts/nx_setup_notice.py", "audience": "SAM-WIDE", "gate": "maintainer",
             "evidence": "x", "target_state": "x", "phase": "2",
         })
 
@@ -194,14 +194,14 @@ def test_a_gated_entry_that_is_not_live_may_have_no_call_yet(manifest, hooks_jso
 
 
 def test_a_module_that_declares_the_wrong_predicates_fails(manifest, hooks_json) -> None:
-    m = _mutated(manifest, lambda m: m["modules"]["src/nexus/hooks/subagent_start.py"].__setitem__("predicates", ["maintainer"]))
+    m = _mutated(manifest, lambda m: m["modules"]["nexus.hooks.subagent_start"].__setitem__("predicates", ["maintainer"]))
     assert any("declares predicates" in p for p in _problems(m, hooks_json))
 
 
 def test_a_module_with_text_and_no_entry_fails(manifest, hooks_json) -> None:
-    m = _mutated(manifest, lambda m: m["modules"].pop("src/nexus/hooks/board_due.py"))
+    m = _mutated(manifest, lambda m: m["modules"].pop("nexus.hooks.board_due"))
     found = _problems(m, hooks_json)
-    assert any("board_due.py" in p and "not in the modules table" in p for p in found), found
+    assert any("nexus.hooks.board_due" in p and "not in the modules table" in p for p in found), found
 
 
 # --- T9: the wrapper, the guarded import and the fallback -------------------------------------------------------

@@ -117,7 +117,7 @@ def test_classify_reads_the_hook_envelopes() -> None:
 
 
 def _row(manifest: dict) -> str:
-    return next(r for r in am.allowlist_rows(manifest) if r.startswith("conexus/hooks/scripts/routing/credential_print_guard.py:"))
+    return next(r for r in am.allowlist_rows(manifest) if r.startswith("hooks/scripts/routing/credential_print_guard.py:"))
 
 
 def test_the_checked_in_allowlist_is_well_formed_and_names_only_rows_not_live_yet(manifest) -> None:
@@ -128,7 +128,7 @@ def test_the_checked_in_allowlist_is_well_formed_and_names_only_rows_not_live_ye
 
 
 def test_an_allowlist_entry_for_a_live_row_is_refused(manifest) -> None:
-    entries = leg.parse_allowlist("conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py:RULE_NAME\tSam\tuntil: phase-3\twhy\n")
+    entries = leg.parse_allowlist("hooks/scripts/routing/subagent_git_write_requires_orchestrator.py:RULE_NAME\tSam\tuntil: phase-3\twhy\n")
     assert any("not a row that is not live yet" in p for p in leg.allowlist_problems(entries, manifest))
     entries = leg.parse_allowlist("U1a\tSam\tuntil: phase-3\twhy\n")
     assert any("not a row that is not live yet" in p for p in leg.allowlist_problems(entries, manifest))
@@ -167,7 +167,8 @@ def test_an_allowlisted_finding_is_let_through_and_counted_and_the_rest_fail(man
 
 
 def _synthetic(tmp_path: Path):
-    mod = tmp_path / "m.py"
+    mod = tmp_path / "conexus" / "m.py"
+    mod.parent.mkdir(exist_ok=True)
     mod.write_text('SAM = "the maintainers own row of text"\nREPO = "a row only the nexus checkout gets"\n', encoding="utf-8")
     manifest = {"constants": [
         {"id": "m.py:SAM", "audience": "SAM-WIDE", "gate": "maintainer", "live": True},
@@ -197,7 +198,8 @@ def test_presence_fails_on_a_leak_to_a_user_a_missing_row_and_a_nexus_row_in_a_f
 
 def test_presence_fails_when_a_constants_text_cannot_be_read(tmp_path) -> None:
     manifest = {"constants": [{"id": "m.py:GONE", "audience": "SAM-WIDE", "gate": "maintainer", "live": True}]}
-    (tmp_path / "m.py").write_text("X = 1\n", encoding="utf-8")
+    (tmp_path / "conexus").mkdir(exist_ok=True)
+    (tmp_path / "conexus" / "m.py").write_text("X = 1\n", encoding="utf-8")
     problems, examined = leg.presence_problems(manifest, tmp_path, {})
     assert examined == 0 and "could not be read" in problems[0]
 

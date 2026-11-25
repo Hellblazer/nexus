@@ -104,7 +104,7 @@ def _build(tmp: Path, row: dict) -> tuple[dict | None, Path]:
         flag.mkdir(parents=True)
     elif row["flag"]:
         flag.parent.mkdir(parents=True)
-        flag.write_text("")
+        flag.write_text("", encoding="utf-8")
     for entry in row.get("home_files", []):
         target = home.joinpath(*entry["p"].split("/"))
         target.parent.mkdir(parents=True, exist_ok=True)

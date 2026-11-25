@@ -22,7 +22,7 @@
 #                     critical invariants (no rule uses it today).
 #   audience:         who the hook fires for (nexus-sby49.3): EVERY-USER |
 #                     NEXUS-REPO | SAM-WIDE. The registration's audience as
-#                     conexus/hooks/audience.yaml declares it; a rule inside
+#                     audience.yaml (in the plugin's hooks directory) declares it; a rule inside
 #                     the hook that only the maintainer has (the git guard's
 #                     full form) is its own entry there.
 #

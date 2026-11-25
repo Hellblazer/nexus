@@ -17,6 +17,6 @@ Moved from AGENTS.md on 2026-10-14 (nexus-2ziaz). AGENTS.md is loaded into every
 | Workflows § Cutting a release | [cutting-a-release.md](cutting-a-release.md) | [`.claude/rules/releases-and-engine.md`](../../.claude/rules/releases-and-engine.md) |
 | Worktrees: one session, one worktree | [worktrees.md](worktrees.md) | `AGENTS.md` |
 | Cross-session board (thread fields) | [threads-board.md](threads-board.md) | `AGENTS.md` |
-| Plugin audiences (who a hook, rule or injected text is for; nexus-sby49) | [plugin-audiences.md](plugin-audiences.md) | [`tests/AGENTS.md`](../../tests/AGENTS.md) |
+| Plugin audiences (who a hook, rule or injected text is for) | [plugin-audiences.md](plugin-audiences.md) | [`tests/AGENTS.md`](../../tests/AGENTS.md) |
 
 The `engine-release` skill and every document that cites the engine-service release rules treat [engine-service-release.md](engine-service-release.md) as the authority on wording conflicts.

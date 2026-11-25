@@ -94,21 +94,14 @@ def test_every_row_constant_is_a_whole_table_row() -> None:
 # --- T8: a broken helper never thins the maintainer's text ---------------------------------------
 
 
-def test_a_helper_that_cannot_import_gives_the_maintainer_text_to_everyone(monkeypatch, tmp_path) -> None:
+def test_a_helper_that_cannot_import_gives_the_maintainer_text_to_everyone(tmp_path) -> None:
     """The module-level fallbacks are True: a broken ``_audience`` restores today's injection, never a thinner one."""
-    import importlib
-    import sys
+    from tests._audience_fixtures import broken_audience_import  # noqa: PLC0415
 
-    real = sys.modules.pop("nexus.hooks._audience")
-    monkeypatch.setitem(sys.modules, "nexus.hooks._audience", None)  # an import of it now raises ImportError
-    try:
-        reloaded = importlib.reload(subagent_start)
+    with broken_audience_import(subagent_start) as reloaded:
         assert reloaded._maintainer({"cwd": str(tmp_path)}) is True
         assert reloaded._nexus_repo({"cwd": str(tmp_path)}) is True
         assert reloaded._orchestration({"cwd": str(tmp_path)}) == _OLD_ORCH
-    finally:
-        sys.modules["nexus.hooks._audience"] = real
-        importlib.reload(subagent_start)
 
 
 def test_a_predicate_that_raises_gives_the_maintainer_text(monkeypatch, tmp_path) -> None:

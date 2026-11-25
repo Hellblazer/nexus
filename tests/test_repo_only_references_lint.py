@@ -312,6 +312,9 @@ _ALLOWED: dict[str, list[Site]] = {
     "conexus/hooks/scripts/_audience.py": [
         Site("scripts/agent-worktree-preflight.sh", "scripts/agent-worktree-preflight.sh", "the marker file the audience helper probes with os.path.isfile in the payload's checkout to tell a nexus checkout from a user's repository, never printed"),
     ],
+    "src/nexus/hooks/_audience.py": [
+        Site("scripts/agent-worktree-preflight.sh", "scripts/agent-worktree-preflight.sh", "a byte copy of the plugin helper above: the marker file probed with os.path.isfile in the payload's checkout, never printed"),
+    ],
     "conexus/hooks/scripts/routing/credential_print_guard.py": [
         Site("claude_credentials.py", "blob/main/tests/e2e/lib/claude_credentials.py", "the message links the wrapper in its first sentence; the later mentions are the same file"),
     ],
