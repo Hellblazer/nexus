@@ -16,8 +16,12 @@ from nexus.mcp.core import (  # noqa: F401
     scratch,
     scratch_manage,
     collection_list,
-    plan_save,
-    plan_search,
+    answer_plan_save,
+    answer_plan_search,
+    answer_plan_delete,
+    answer_plan_save,  # deprecated alias, removed one client release after nexus-sby49.4
+    answer_plan_search,  # deprecated alias
+    answer_plan_delete,  # deprecated alias
     procedure_run,
     traverse,
     operator_extract,

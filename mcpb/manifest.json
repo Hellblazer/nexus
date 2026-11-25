@@ -121,12 +121,28 @@
       "description": "List all T3 collections with document counts and embedding models."
     },
     {
+      "name": "answer_plan_save",
+      "description": "Save a retrieval plan to the T2 answer-plan library for reuse by nx_answer."
+    },
+    {
+      "name": "answer_plan_search",
+      "description": "Search the T2 answer-plan library for similar retrieval plans."
+    },
+    {
+      "name": "answer_plan_delete",
+      "description": "Delete one entry from the T2 answer-plan library by id."
+    },
+    {
       "name": "plan_save",
-      "description": "Save a query execution plan to the T2 plan library for reuse."
+      "description": "Deprecated name of answer_plan_save; removed one client release after this one."
     },
     {
       "name": "plan_search",
-      "description": "Search the T2 plan library for similar query plans."
+      "description": "Deprecated name of answer_plan_search; removed one client release after this one."
+    },
+    {
+      "name": "plan_delete",
+      "description": "Deprecated name of answer_plan_delete; removed one client release after this one."
     },
     {
       "name": "traverse",

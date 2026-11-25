@@ -331,7 +331,7 @@ def _build_capabilities_block() -> list[str]:
         "`query` MCP tool: document-level, catalog-aware (`author`, `content_type`, "
         "`subtree`, `follow_links`, `depth`), taxonomy-boosted",
         "`nx_answer` MCP tool: reduce many documents (minutes); `search`/`query`: lookups (seconds)",
-        "`plan_save`/`plan_search` MCP tools: T2, project-scoped plan library",
+        "`answer_plan_save`/`answer_plan_search` MCP tools: T2 library of nx_answer's retrieval plans (implementation plans go in beads)",
         "`scratch` MCP tool: T1, shared with this session's subagents (see the T1 block above)",
         "`search`/`links`/`link` MCP tools (nexus-catalog): metadata-first; "
         "`chash:` spans preferred for link creation",

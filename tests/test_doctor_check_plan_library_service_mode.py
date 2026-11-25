@@ -109,7 +109,7 @@ def test_warning_is_reflected_in_the_verdict_line_not_masked():
 
 def test_below_floor_exits_1_names_reseed_fix():
     """Below the builtin floor is a genuine FAIL — the reseed verb named
-    in the fix hint is the LIVE command (`nx plan reseed`), not the
+    in the fix hint is the LIVE command (`nx answer-plan reseed`), not the
     retired `nx catalog setup`."""
     with patch("nexus.db.t2.http_plan_library.HttpPlanLibrary") as lib:
         lib.return_value.list_plans.return_value = _builtin_rows(1)
@@ -118,7 +118,7 @@ def test_below_floor_exits_1_names_reseed_fix():
     assert exit_code == 1
     assert "FAIL" in printed
     assert "global-tier builtin count 1" in printed
-    assert "nx plan reseed" in printed
+    assert "nx answer-plan reseed" in printed
     assert "nx catalog setup" not in printed
 
 

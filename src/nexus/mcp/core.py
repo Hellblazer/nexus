@@ -2,17 +2,19 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-48 registered tools + 13 demoted (plain functions, no @mcp.tool();
+51 registered tools + 13 demoted (plain functions, no @mcp.tool();
 the ten operator_* functions were demoted at nexus-ivi4s). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
-operators toward no longer exists.
+operators toward no longer exists. Three of the 51 are the deprecated plan_save,
+plan_search and plan_delete aliases of the answer_plan_* tools (nexus-sby49.4).
 """
 from __future__ import annotations
 
 import contextlib
 import contextvars
 import dataclasses
+import functools
 import hashlib
 import json
 import re
@@ -65,6 +67,7 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistr
 from nexus.mcp._sdk_patches import apply_sdk_patches as _apply_sdk_patches
 from nexus.mcp._server_version import server_version as _server_version
 from nexus.mcp._tool_failure import fail as _fail
+from nexus.mcp._tool_failure import is_failure
 from nexus.mcp.answer_chunks import cap_chunks, harvest_chunks  # GH #1667
 from nexus.lua_runtime import library as _procedure_library
 from nexus.lua_runtime.runner import (
@@ -321,7 +324,7 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
 #:
 #: Basis: none of this module's paginated text tools clamp the caller-
 #: supplied ``limit`` (or, for ``store_list(docs=True)``/``memory_search``/
-#: ``plan_search``, some fetch the FULL matching set before any pagination
+#: ``answer_plan_search``, some fetch the FULL matching set before any pagination
 #: at all) — and the audit found the backing pgvector engine does not
 #: either: ``PgVectorRepository#searchWithTokens``'s own javadoc states "No
 #: upper bound is applied to nResults by design: the result-size caps the
@@ -8661,11 +8664,11 @@ def collection_list() -> str:
 # bead-dump that matched at 0.66-0.70 then crashed the runner on an
 # unknown tool).
 @mcp.tool(
-    title="Save Query Plan",
+    title="Save Answer Plan",
     annotations={"readOnlyHint": False, "destructiveHint": False},
     structured_output=False,
 )
-def plan_save(
+def answer_plan_save(
     query: Annotated[str, Field(description="The original natural-language question the plan answers.")],
     plan_json: Annotated[str, Field(
         description=(
@@ -8707,7 +8710,7 @@ def plan_save(
         ),
     )] = "",
 ) -> str:
-    """Save a reusable retrieval query-execution plan to the T2 plan library.
+    """Save an answer plan (a reusable retrieval plan) to the T2 answer-plan library.
 
     Use beads + `memory_put` instead for implementation, pipeline, or
     phased-execution plans — this library is for retrieval plans only,
@@ -8827,7 +8830,7 @@ def plan_save(
                 f"(summarize, generate, extract and the like); this one ends in {_last!r}, which hands back what "
                 "it retrieved. Declare discovery/listing or unknown, or add the step that puts the answer together."
             )
-        # RDR-232 Phase 2 (nexus-jypmj.2.1, nexus-0vh80): plan_save writes the declaration, and only from the
+        # RDR-232 Phase 2 (nexus-jypmj.2.1, nexus-0vh80): answer_plan_save writes the declaration, and only from the
         # caller's argument: provenance `saved`, the saver's own unreviewed claim. Only the seed loader declares
         # curated and only the nx_answer grow site declares grown, so an embedded key (valid, malformed or an
         # unrelated one of the same name) is replaced, never stored or trusted.
@@ -8843,7 +8846,7 @@ def plan_save(
         tags_to_store, _tags_removed = strip_reserved_tags(tags)
         if _tags_removed:
             _log.warning(
-                "plan_save_reserved_tags_removed",
+                "answer_plan_save_reserved_tags_removed",
                 removed=list(_tags_removed), kept=tags_to_store, query=query[:80],
             )
         # nexus-j5geq: route through the T2 daemon (plans.save_plan is in
@@ -8863,7 +8866,7 @@ def plan_save(
             )
         )
         _record_tier_write(
-            tool="plan_save", tier="plan",
+            tool="answer_plan_save", tier="plan",
             project=project, target_title=query[:80],
         )
         saved = f"Saved plan: [{row_id}] {query[:80]}"
@@ -8891,21 +8894,21 @@ def plan_save(
             saved += f" (reserved tags removed: {', '.join(_tags_removed)}; only the grow site and the seed loader set them)"
         return saved
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return _mcp_tool_error("plan_save", e)
+        return _mcp_tool_error("answer_plan_save", e)
 
 
 @mcp.tool(
-    title="Search Plan Library",
+    title="Search Answer Plans",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
-def plan_search(
+def answer_plan_search(
     query: Annotated[str, Field(description="Search query, matched against plan query text and tags.")],
     project: Annotated[str, Field(description="Optional project filter (e.g. \"nexus\").")] = "",
     limit: Annotated[int, Field(description="Maximum results to return.")] = 5,
     offset: Annotated[int, Field(description="Results to skip, for pagination.")] = 0,
 ) -> str:
-    """Search the T2 plan library for similar saved retrieval plans, for a human to browse.
+    """Search the T2 answer-plan library for similar saved retrieval plans, for a human to browse.
 
     Use `nx_answer`'s own plan-match gate instead when you want a plan
     executed automatically rather than reviewed by a person.
@@ -8942,22 +8945,22 @@ def plan_search(
         shown_end = offset + len(results)
         if has_more:
             lines.append(f"\n--- showing {offset + 1}-{shown_end}. may have more: offset={shown_end}")
-        return _cap_text_result("\n\n".join(lines), "plan_search")
+        return _cap_text_result("\n\n".join(lines), "answer_plan_search")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return _mcp_tool_error("plan_search", e)
+        return _mcp_tool_error("answer_plan_search", e)
 
 
 @mcp.tool(
-    title="Delete Query Plan",
+    title="Delete Answer Plan",
     annotations={"readOnlyHint": False, "destructiveHint": True},
     structured_output=False,
 )
-def plan_delete(
-    plan_id: Annotated[int, Field(description="Numeric plan id to delete (from `plan_search` or `nx plan list`).")],
+def answer_plan_delete(
+    plan_id: Annotated[int, Field(description="Numeric plan id to delete (from `answer_plan_search` or `nx answer-plan list`).")],
 ) -> str:
-    """Permanently delete one plan-library entry by id.
+    """Permanently delete one answer-plan library entry by id.
 
-    The counterpart to `plan_save`: removes a throwaway or incorrect entry
+    The counterpart to `answer_plan_save`: removes a throwaway or incorrect entry
     (e.g. a shakeout probe) without direct DB access.
 
     Returns a confirmation naming the deleted plan's query, or an error if
@@ -8975,7 +8978,46 @@ def plan_delete(
         label = row.get("name") or row.get("query") or "(unnamed)"
         return f"Deleted plan id={plan_id}: {label[:80]}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return _mcp_tool_error("plan_delete", e)
+        return _mcp_tool_error("answer_plan_delete", e)
+
+
+# nexus-sby49.4 (Sam, 2026-11-25): the plan-library tools were renamed so an implementation plan cannot be
+# mistaken for what they hold, which is only the retrieval plans `nx_answer` matches. The old names stay for
+# one client release: each runs its answer_plan_* twin and adds a line saying it is deprecated and naming the
+# new tool. They are removed in the release after that one.
+def _deprecated_plan_alias(old: str, target: Callable[..., str]) -> Callable[..., str]:
+    """The old-name twin of `target`: same parameters and result, plus one deprecation line."""
+    note = (
+        f"Deprecated: `{old}` is now `{target.__name__}`. The old name works for one more client "
+        "release and is then removed."
+    )
+
+    @functools.wraps(target)
+    def alias(*args: Any, **kwargs: Any) -> str:
+        result = target(*args, **kwargs)
+        text = f"{result}\n\n{note}"
+        return _fail(text) if is_failure(result) else text
+
+    alias.__name__ = alias.__qualname__ = old
+    alias.__doc__ = f"{note}\n\n{target.__doc__ or ''}"
+    return alias
+
+
+plan_save = mcp.tool(
+    title="Save Answer Plan (deprecated name)",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
+)(_deprecated_plan_alias("plan_save", answer_plan_save))
+plan_search = mcp.tool(
+    title="Search Answer Plans (deprecated name)",
+    annotations={"readOnlyHint": True},
+    structured_output=False,
+)(_deprecated_plan_alias("plan_search", answer_plan_search))
+plan_delete = mcp.tool(
+    title="Delete Answer Plan (deprecated name)",
+    annotations={"readOnlyHint": False, "destructiveHint": True},
+    structured_output=False,
+)(_deprecated_plan_alias("plan_delete", answer_plan_delete))
 
 
 # ── Procedure library (RDR-240 Technical Design 3, bead nexus-qo7ie.31) ──────

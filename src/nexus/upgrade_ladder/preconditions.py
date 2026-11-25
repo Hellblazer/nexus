@@ -418,7 +418,7 @@ def _plan_library_report(
             name="plan-library",
             applicable=True,
             current=False,
-            detail=f"could not reconcile ({exc}); run `nx plan reseed`",
+            detail=f"could not reconcile ({exc}); run `nx answer-plan reseed`",
         )
 
     if not inserted and not updated:

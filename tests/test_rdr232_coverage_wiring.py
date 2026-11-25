@@ -576,7 +576,7 @@ class TestCountersAndPlanHygiene:
         assert (successes, failures) == (3, 0)
         row = self._row(successes, failures)
         assert _is_always_failing(row) is False, "the matcher's always-failing skip does not see partial runs"
-        assert _hygiene_scan(self._library(row)) == [], "and `nx plan hygiene` does not retire it either"
+        assert _hygiene_scan(self._library(row)) == [], "and `nx answer-plan hygiene` does not retire it either"
 
     @pytest.mark.asyncio
     async def test_scenario_2_a_plan_with_three_unavailable_runs_and_no_success_is_skipped_and_flagged(self) -> None:

@@ -155,7 +155,7 @@ the verb; a bad value, or `answer_kind: null`, fails template validation.
 The seed loader folds it into `plan_json` as a versioned, curated
 declaration, so it is not a dimension and does not change plan identity.
 Write it at the template level only: an `answer_kind` inside `plan_json`
-is refused, and `plan_save` removes one from a plan you save, because
+is refused, and `answer_plan_save` removes one from a plan you save, because
 only seeded templates declare a kind and a plan saved without one reads
 as `unknown`. Nothing filters plans by kind yet.
 
@@ -254,17 +254,17 @@ Every scope above `personal` is a git-tracked YAML path:
 
 | Scope | Location | Promotion |
 |-------|----------|-----------|
-| `personal` | T2 only (engine Postgres) | `plan_save` at runtime |
-| `rdr-<slug>` | `docs/rdr/<slug>/plans.yml` (peer to the RDR) | `nx plan reseed` when RDR is `status: accepted` |
-| `project` | `.nexus/plans/*.yml` or `.nexus/plans.yml` | `nx plan reseed` |
-| `repo` | umbrella `.nexus/plans/_repo.yml` | `nx plan reseed` (umbrella detection) |
+| `personal` | T2 only (engine Postgres) | `answer_plan_save` at runtime |
+| `rdr-<slug>` | `docs/rdr/<slug>/plans.yml` (peer to the RDR) | `nx answer-plan reseed` when RDR is `status: accepted` |
+| `project` | `.nexus/plans/*.yml` or `.nexus/plans.yml` | `nx answer-plan reseed` |
+| `repo` | umbrella `.nexus/plans/_repo.yml` | `nx answer-plan reseed` (umbrella detection) |
 | `global` | `conexus/plans/builtin/*.yml` (conexus plugin) | plugin release |
 
 A plan authored at one scope can be *promoted* — copied to a higher
 scope with a new dimension map. Promotion flow (tool surface in
 RDR-079) is out of scope here; forward-reference only.
 
-**Lifecycle ops:** there is no `nx plan promote` or `nx plan audit` CLI
+**Lifecycle ops:** there is no `nx answer-plan promote` or `nx answer-plan audit` CLI
 verb. Plan audit shipped as the MCP tool `nx_plan_audit`; promotion has no
 surface. The `verb:plan-promote, strategy:propose`
 meta-seed (Phase 4d) that once stood in for the audit CLI was retired
@@ -341,8 +341,8 @@ longer string (`"Code: $step3.contents"`), or anywhere inside an object
 (`{"a": "$step3.contents"}`), raises `PlanRunStepRefError` naming the step
 and the arg, before the first step dispatches. Only the plan's own args are
 checked: a `$intent` whose text contains `$step1.ids` is the caller's text and
-passes through. The same check refuses `plan_save` of such a plan, makes the
-plan matcher skip a saved one (logged), and is reported by `nx plan hygiene`
+passes through. The same check refuses `answer_plan_save` of such a plan, makes the
+plan matcher skip a saved one (logged), and is reported by `nx answer-plan hygiene`
 (nexus-jypmj.4).
 
 Unknown `$stepN.<field>` references raise `PlanRunStepRefError` with
@@ -393,7 +393,7 @@ space matches.
 
 ### Inference vs explicit
 
-`plan_save` infers `scope_tags` from the plan JSON by walking retrieval
+`answer_plan_save` infers `scope_tags` from the plan JSON by walking retrieval
 steps and unioning the literal string values of each step's `corpus` and
 `collection` args. `$var` placeholders (e.g. `"corpus": "$corpus"`) are
 skipped, since the real routing is decided by the caller's bindings.
@@ -401,7 +401,7 @@ skipped, since the real routing is decided by the caller's bindings.
 (agnostic).
 
 Pass an explicit `scope_tags="rdr__arcaneum,code__nexus"` kwarg to
-`plan_save` when inference would undershoot, the common case being a
+`answer_plan_save` when inference would undershoot, the common case being a
 plan whose retrieval steps use `$var` placeholders but which you
 nonetheless know targets a specific corpus family. Explicit values
 override inference; they are normalized on the way in.
@@ -476,10 +476,10 @@ the `"all"` wildcard end up agnostic (`scope_tags=""`) in that case.
 - `nx doctor --check-plan-library` (RDR-092 Phase 0c) reports plan
   rows by bucket (authored vs backfilled vs non-dimensional) and
   flags a stale global tier. Run after any plugin install to
-  confirm `nx plan reseed` seeded the 13 builtins (see
+  confirm `nx answer-plan reseed` seeded the 13 builtins (see
   [Plan-Centric Retrieval § The 13 builtin scenario templates](plan-centric-retrieval.md#the-13-builtin-scenario-templates)).
-- `nx plan repair` (RDR-092 Phase 0d) was removed in 7.0.0 with the local plan
-  library; `nx plan` now has `delete`, `disable`, `enable`, `hygiene`, `list`,
+- `nx answer-plan repair` (RDR-092 Phase 0d) was removed in 7.0.0 with the local plan
+  library; `nx answer-plan` now has `delete`, `disable`, `enable`, `hygiene`, `list`,
   `reseed`, `set-scope` and `show`.
 
 ## See also

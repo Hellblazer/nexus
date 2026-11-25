@@ -3422,14 +3422,14 @@ convergence failure never fails init — it defers with a pointer at
 
 **Builtin plan-template seeding (nexus-e1ti4):** immediately after the
 ladder converges, `nx init` also seeds/reconciles the builtin plan-template
-library (the same reconcile `nx plan reseed` runs). Before this, a virgin
+library (the same reconcile `nx answer-plan reseed` runs). Before this, a virgin
 install left the global plan tier at zero rows — only the manual
-`nx plan reseed` populated it — so `nx_answer`'s plan-match gate missed
+`nx answer-plan reseed` populated it — so `nx_answer`'s plan-match gate missed
 100% of the time on a fresh box. Idempotent (dedups on the plan's
 `(project, dimensions)` key) and best-effort: a seeding failure is echoed
 to stderr and logged, never silently swallowed, and never fails an
 otherwise-successful init. `nx doctor --check-plan-library` is the durable
-signal if it ever fails; the fix is `nx plan reseed`.
+signal if it ever fails; the fix is `nx answer-plan reseed`.
 
 **Service autostart (RDR-174 P2.4, decide-first):** in local mode `nx init`
 decides autostart *before* starting any supervisor. Interactive runs prompt
@@ -4082,15 +4082,15 @@ nexus-p0clh replaced it with an unconditional N/A stub that validated
 nothing. nexus-vl8lk PORTED it: the check now reads the live plan library
 via `HttpPlanLibrary.list_plans` (no new engine route) and renders the same
 census against real service data — exit 1 when the global-tier builtin
-count is below the floor (fix: `nx plan reseed`), exit 2 (counts UNKNOWN)
-when the service is unreachable. No `nx plan repair` hint (that command
-group no longer exists; see [`nx plan repair`](#nx-plan-repair-removed)).
+count is below the floor (fix: `nx answer-plan reseed`), exit 2 (counts UNKNOWN)
+when the service is unreachable. No `nx answer-plan repair` hint (that command
+group no longer exists; see [`nx answer-plan repair`](#nx-answer-plan-repair-removed)).
 
 **Disk-vs-live template parity (nexus-f1mbo).** The count floor above can
 only fail against a library that is nearly empty — it cannot fail against
 one that is the wrong shape. Beside the floor, the check now compares every
 template shipped on disk against its stored row and fails with the same
-exit 1 (fix: `nx plan reseed`, which also rewrites a drifted row — see [`nx plan reseed`](#nx-plan-reseed)) on:
+exit 1 (fix: `nx answer-plan reseed`, which also rewrites a drifted row — see [`nx answer-plan reseed`](#nx-answer-plan-reseed)) on:
 
 - **missing** — a shipped template with no library row at all;
 - **drifted** — a library row whose content no longer matches its
@@ -4098,7 +4098,7 @@ exit 1 (fix: `nx plan reseed`, which also rewrites a drifted row — see [`nx pl
 
 An **orphaned** row (a `builtin-template`-tagged row with no template
 shipped on disk) is reported as a WARN, not a failure — remove it with
-`nx plan delete <id>` if intended. When the live listing hits its page cap,
+`nx answer-plan delete <id>` if intended. When the live listing hits its page cap,
 absence is unprovable — the check reports drift (still trustworthy for the
 rows it did see) but notes that missing templates were not checked, rather
 than silently under-reporting.
@@ -4395,19 +4395,21 @@ After the ownerless-write release, restart every long-lived `nx-mcp` server and 
 
 ---
 
-## nx plan
+## nx answer-plan
 
-Plan library maintenance commands (RDR-092 Phase 0d).
+Answer-plan library maintenance commands (RDR-092 Phase 0d): the library holds the retrieval plans `nx_answer` matches, never implementation plans (those go in beads).
+
+`nx plan` is the old name of this group. It still works, prints a deprecation notice on stderr that names `nx answer-plan`, and is removed one client release after this one.
 
 ```
-nx plan list                     # Tabulate plans in the library
-nx plan show ID_OR_NAME          # Full record for one plan
-nx plan delete PLAN_ID           # Delete a plan row (prompts unless -y)
-nx plan disable PLAN_ID          # Soft-disable a plan without deleting it
-nx plan enable PLAN_ID           # Re-enable a previously disabled plan
-nx plan set-scope PLAN_ID TAGS   # Override a plan's scope_tags
-nx plan reseed [--force] [--insert-only]  # Re-run the builtin seed loader
-nx plan hygiene [--apply]        # Flag/disable bead-dumps, embedded step refs, operator steps missing a claim/evidence/check_instruction, null-verb, always-failing plans
+nx answer-plan list                     # Tabulate plans in the library
+nx answer-plan show ID_OR_NAME          # Full record for one plan
+nx answer-plan delete PLAN_ID           # Delete a plan row (prompts unless -y)
+nx answer-plan disable PLAN_ID          # Soft-disable a plan without deleting it
+nx answer-plan enable PLAN_ID           # Re-enable a previously disabled plan
+nx answer-plan set-scope PLAN_ID TAGS   # Override a plan's scope_tags
+nx answer-plan reseed [--force] [--insert-only]  # Re-run the builtin seed loader
+nx answer-plan hygiene [--apply]        # Flag/disable bead-dumps, embedded step refs, operator steps missing a claim/evidence/check_instruction, null-verb, always-failing plans
 ```
 
 Service mode is the only mode: all verbs (`list` / `show` / `delete` /
@@ -4418,15 +4420,15 @@ group that used to require it was deleted along with the local SQLite plan
 library (RDR-158 P4, nexus-i711w sub-stage A3); see below. `reseed`
 reconciles by default (nexus-f1mbo) — see below.
 
-### nx plan hygiene
+### nx answer-plan hygiene
 
 ```
-nx plan hygiene            # report-only scan
-nx plan hygiene --apply    # disable the flagged plans (reversible)
+nx answer-plan hygiene            # report-only scan
+nx answer-plan hygiene --apply    # disable the flagged plans (reversible)
 ```
 
 Scans the plan library for five pollution classes and, with `--apply`,
-DISABLES them (never deletes; reverse with `nx plan enable ID`):
+DISABLES them (never deletes; reverse with `nx answer-plan enable ID`):
 
 - plans whose `plan_json` is not an executable retrieval DAG (unparseable
   JSON, no/empty `steps`, steps without a `tool`) — the bead-dump class that
@@ -4440,16 +4442,16 @@ DISABLES them (never deletes; reverse with `nx plan enable ID`):
 - always-failing plans (zero recorded successes, 3+ failures) — the matcher
   already skips these live; hygiene retires them durably.
 
-Unlike the retired `nx plan repair` group (see below), this verb works in
+Unlike the retired `nx answer-plan repair` group (see below), this verb works in
 service mode: it routes through the storage facade and cleans the live
 engine-served library on migrated installs. Partial apply failures are
 reported per plan; a scan that hits the 10,000-row limit says so rather than
 silently truncating.
 
-### nx plan list
+### nx answer-plan list
 
 ```
-nx plan list [--scope S] [--origin builtin|grown|user] [--name SUBSTR] [-n N | --limit N] [--json] [--include-disabled]
+nx answer-plan list [--scope S] [--origin builtin|grown|user] [--name SUBSTR] [-n N | --limit N] [--json] [--include-disabled]
 ```
 
 Tabulates plans: id, origin, verb, scope, use count, last used, name. Origin is
@@ -4457,12 +4459,12 @@ read from the row's tag tokens and its answer-kind declaration (nexus-7bwe):
 `grown` for the `grown` tag, a grown declaration, or the legacy shape (project
 `personal`, no tags); `builtin` for the `builtin-template` tag; `user` otherwise. `--include-disabled` also shows soft-disabled rows,
 marked `[D]`. `--json` emits the same fields as a JSON array. Default limit 50.
-See § `nx plan show` below for what `use count` actually counts.
+See § `nx answer-plan show` below for what `use count` actually counts.
 
-### nx plan show
+### nx answer-plan show
 
 ```
-nx plan show ID_OR_NAME [--json]
+nx answer-plan show ID_OR_NAME [--json]
 ```
 
 Prints a plan's full record: metadata, run metrics (use / match / success /
@@ -4489,45 +4491,45 @@ end of a run rather than the start, later by the run's duration (up to about
 only while the plan is inside its TTL: a run on an expired plan counts but
 leaves `last_used` alone, so the plan stays expired (nexus-i1eb4).
 
-### nx plan delete
+### nx answer-plan delete
 
 ```
-nx plan delete PLAN_ID [-y]
+nx answer-plan delete PLAN_ID [-y]
 ```
 
 Deletes the plan row. The numeric id is required (not a name) because deletion
 is destructive and a name-substring lookup is fuzzy; find the id with
-`nx plan list` or `nx plan show <name>` first. Prompts for confirmation unless
+`nx answer-plan list` or `nx answer-plan show <name>` first. Prompts for confirmation unless
 `-y`/`--yes`.
 
-### nx plan disable / enable
+### nx answer-plan disable / enable
 
 ```
-nx plan disable PLAN_ID [--reason TEXT]    # Soft-disable a plan without deleting it
-nx plan enable PLAN_ID                     # Re-enable a previously disabled plan
+nx answer-plan disable PLAN_ID [--reason TEXT]    # Soft-disable a plan without deleting it
+nx answer-plan enable PLAN_ID                     # Re-enable a previously disabled plan
 ```
 
 Introduced 4.18.0 (`nexus-mrzp`). `disable` sets `disabled_at` on the plan row so both matcher lanes (T1 cosine via `list_active_plans`, T2 Postgres full-text via `search_plans`) skip it, without losing its row id, telemetry counters, or T1 cache embedding. `--reason` appends a `disable-reason:<text>` tag as a historical record (preserved even after re-enable). `enable` clears `disabled_at`. Useful for triaging a plan whose match-text is misrouting traffic without committing to a delete + re-seed cycle.
 
-### nx plan set-scope
+### nx answer-plan set-scope
 
 ```
-nx plan set-scope PLAN_ID TAGS
-nx plan set-scope PLAN_ID --from-project
+nx answer-plan set-scope PLAN_ID TAGS
+nx answer-plan set-scope PLAN_ID --from-project
 ```
 
 Explicit admin override of a plan's `scope_tags` (comma-separated; can widen or
 narrow scope). The matcher reads scope_tags fresh on every call, so changes take
-effect immediately. Applies the same normalization as `plan_save`: hash suffixes
+effect immediately. Applies the same normalization as `answer_plan_save`: hash suffixes
 and glob tails stripped, scope-agnostic sentinels (`all`) dropped, stored
 sorted-unique. Idempotent. `--from-project` (mutually exclusive with `TAGS`)
 stamps scope_tags from the plan's own `project` column, the same recovery
 source as the automatic #1069 fallback in `save_plan`.
 
-### plan_save (MCP tool; there is no `nx plan save`)
+### answer_plan_save (MCP tool; there is no `nx answer-plan save`)
 
 ```
-plan_save(query, plan_json, verb, answer_kind, project="", outcome="success", tags="", ttl=None, scope_tags="")
+answer_plan_save(query, plan_json, verb, answer_kind, project="", outcome="success", tags="", ttl=None, scope_tags="")
 ```
 
 `answer_kind` is **required** (nexus-0vh80, Sam 2026-11-03): `lookup`, `synthesis`, `discovery/listing`,
@@ -4544,10 +4546,10 @@ and a caller can still mislabel the kind. `project` is the repository's name (no
 it is not the session's project (its directory name or its primary checkout's) and when the kind is `unknown`. The `grown` and `builtin-template` tags are removed from `tags` (nexus-3ihve). A plan
 saved before this change declares nothing and serves no request; save it again with a kind.
 
-### nx plan reseed
+### nx answer-plan reseed
 
 ```
-nx plan reseed [--force] [--insert-only]
+nx answer-plan reseed [--force] [--insert-only]
 ```
 
 Re-runs the four-tier plan-library seed loader. **Reconciles by default**
@@ -4574,15 +4576,15 @@ practice it serves nothing: those rows are filed under the tier's scope name (`p
 saved plan serves only a request from the project it is filed under, whose name is a repository's. A row written
 before that, still saying `curated`, is rewritten by the next reconcile.
 
-### nx plan repair (removed)
+### nx answer-plan repair (removed)
 
 ```
-nx plan repair scope-tags          # Backfill empty scope_tags + rewash legacy 'all' sentinels
-nx plan repair dimensions          # Backfill verb/name/dimensions on NULL-dimension rows
-nx plan repair match-text          # Populate plans.match_text + refresh plans_fts
-nx plan repair retire-legacy       # Delete pre-RDR-078 'operation'-shape rows
-nx plan repair builtin-bindings    # Patch bindings into pre-4.10.1 builtin rows
-nx plan repair all                 # Every pass, in dependency order
+nx answer-plan repair scope-tags          # Backfill empty scope_tags + rewash legacy 'all' sentinels
+nx answer-plan repair dimensions          # Backfill verb/name/dimensions on NULL-dimension rows
+nx answer-plan repair match-text          # Populate plans.match_text + refresh plans_fts
+nx answer-plan repair retire-legacy       # Delete pre-RDR-078 'operation'-shape rows
+nx answer-plan repair builtin-bindings    # Patch bindings into pre-4.10.1 builtin rows
+nx answer-plan repair all                 # Every pass, in dependency order
 ```
 
 These were consumer-side content-repair verbs (RDR-120 §A8) that mutated row
@@ -4595,7 +4597,7 @@ review), tagging confident matches `backfill` and wh-fallback rows
 The whole group was **deleted in 7.0.0** along with the local SQLite plan
 library (RDR-158 P4, nexus-i711w sub-stage A3); the `NX_STORAGE_BACKEND=sqlite`
 escape hatch that could reach the local file is retired too (RDR-158 P3 —
-setting it is now a hard error). `nx plan repair ...` is no longer a
+setting it is now a hard error). `nx answer-plan repair ...` is no longer a
 registered command. The local file, where present, is a frozen pre-migration
 snapshot.
 
@@ -5531,7 +5533,7 @@ someone read `nx doctor`'s warning and ran `nx agents install` by hand
 **Plan-library precondition runs on every invocation, never skipped.**
 Beside package/engine/process/lockstep, `nx upgrade` also converges the
 builtin plan-template library (reconciling it against the templates this
-build ships, the same reconcile `nx plan reseed` runs) as its own
+build ships, the same reconcile `nx answer-plan reseed` runs) as its own
 precondition axis. Unlike the others, this one is never suppressed by
 `--skip-t3` or `--auto` — it is stateless and recurs on every release that
 edits a template, so it is re-derived every time rather than gated behind a
@@ -7082,7 +7084,7 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   fallback), each `{examined, excluded, reasons}`; a reason is `kind_mismatch`,
   `unknown_request_untrusted_plan`, `unknown_request_narrow_plan`,
   `untrusted_unknown_plan`, `undeclared_builtin` (a builtin seeded before
-  nexus-jypmj.2.1 that `nx plan reseed` has not yet given its declaration),
+  nexus-jypmj.2.1 that `nx answer-plan reseed` has not yet given its declaration),
   `untrusted_curated_claim`, `single_source_synthesis` (a request naming one source refusing
   citation-traversal), `unreviewed_route` (a grown plan whose recorded kind is discounted:
   `eligibility.TRUSTED_ROUTES` is empty until a reviewed decision, nexus-jypmj.2.8,
@@ -7102,7 +7104,7 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `saved_retrieval_only` (a saved plan whose last step is not an operator, declared lookup, synthesis,
   comparison, audit or debug; nexus-0vh80), or `judge_error`
   (judging the candidate failed; kept when not enforcing, dropped when enforcing). A **saved** plan
-  (`plan_save`'s `answer_kind`, or a template in a project, RDR or repo tier) serves only a request of its own
+  (`answer_plan_save`'s `answer_kind`, or a template in a project, RDR or repo tier) serves only a request of its own
   declared kind, none of the compatibility cells a curated plan has and never the `unknown` request (reason
   `unknown_request_untrusted_plan`, a mismatched kind `kind_mismatch`); the request's project is the session's
   directory name (the name a grown plan is filed under) or the name of the primary checkout of its git repository, so
@@ -7129,12 +7131,12 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   answer-kind declaration: `library_check` is `checked`, `builtins_checked` is how
   many builtin rows a reseed can fix were examined, `undeclared_builtins` how many
   of them lack the declaration and `undeclared_builtin_names` names up to 8, each as
-  `<name> (id <n>)` (several builtin rows share a name). Run `nx plan reseed`, or upgrade,
+  `<name> (id <n>)` (several builtin rows share a name). Run `nx answer-plan reseed`, or upgrade,
   which reconciles them. If the state outlives a reseed, the reseed's own warnings say
   why: a `seed load error` for a template means the installed conexus rejects it, and
   only an upgraded conexus clears it; a `not reconciled` warning (`description already
-  belongs to library row id=N`) clears when row N is deleted (`nx plan delete N`) and
-  `nx plan reseed` is run again. The once-per-process warning in the log carries the same
+  belongs to library row id=N`) clears when row N is deleted (`nx answer-plan delete N`) and
+  `nx answer-plan reseed` is run again. The once-per-process warning in the log carries the same
   text as its `remedy`. A builtin-tagged orphan that
   no shipped template describes is not counted: the seed loader leaves it in place, so
   a reseed could not fix it. A library with no such row enforces and says

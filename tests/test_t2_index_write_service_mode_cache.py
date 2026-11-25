@@ -839,7 +839,7 @@ def test_token_rotation_without_explicit_reset_resolves_fresh_client(
             plan_json='{"steps": []}',
             verb="query",
         ),
-        op="plan_save",
+        op="answer_plan_save",
     )
 
     _other_tenant, other_token = mint_test_tenant(ensure_engine())

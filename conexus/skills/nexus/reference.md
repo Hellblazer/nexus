@@ -22,7 +22,7 @@ is gone from `uv.lock`); this section described both as current until 7.20.0.
 
 Core tools are prefixed `mcp__plugin_conexus_nexus__`; catalog tools are prefixed `mcp__plugin_conexus_nexus-catalog__`.
 
-The core server registers 46 tools, plus two `hook_*` tools the plugin's hooks call. Not tabled below, each described by its own tool description: scoped search (`search_metadata_scoped`, `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`), `plan_delete`, `procedure_run`, `nx_answer_report`, `brief`, `tuple_*` and `mailbox_send` (see the mailbox skill), `setup`, `setup_status`, `daemon_uninstall`. The analytical operators are plan steps inside `nx_answer`, not tools (see Operators below).
+The core server registers 49 tools, plus two `hook_*` tools the plugin's hooks call. Not tabled below, each described by its own tool description: scoped search (`search_metadata_scoped`, `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`), `answer_plan_delete`, `procedure_run`, `nx_answer_report`, `brief`, `tuple_*` and `mailbox_send` (see the mailbox skill), `setup`, `setup_status`, `daemon_uninstall`. The analytical operators are plan steps inside `nx_answer`, not tools.
 There are 10 catalog tools (nexus-catalog server): `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`.
 
 ### search
@@ -150,7 +150,7 @@ of a plan inside `nx_answer` (or `plan_run`), each a `claude -p` subprocess
 (default timeout 300s); consecutive steps are bundled into one subprocess. A
 plan step names the bare verb, and the plan runner resolves it in-process to
 `operator_<verb>`. To use one, ask `nx_answer` a question its plans cover, or
-save a plan with `plan_save` whose steps name these verbs.
+save a plan with `answer_plan_save` whose steps name these verbs.
 
 | Plan verb | Input | Returns |
 |---|---|---|
@@ -380,9 +380,9 @@ mcp__plugin_conexus_nexus__collection_list()
 
 Returns collection names, document counts, and embedding models for every collection in the T3 database.
 
-### plan_save
+### answer_plan_save
 
-Save a query execution plan to the T2 plan library.
+Save a retrieval plan to the T2 answer-plan library.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -395,12 +395,12 @@ Save a query execution plan to the T2 plan library.
 | `tags` | str | `""` | Comma-separated tags |
 
 ```
-Use plan_save tool: query="What does RDR-232 say about plan eligibility?", plan_json='{"steps": [{"tool": "search", "args": {"query": "$intent"}}, {"tool": "summarize", "args": {"inputs": "$step1.ids"}}]}', verb="query", answer_kind="synthesis", project="nexus"
+Use answer_plan_save tool: query="What does RDR-232 say about plan eligibility?", plan_json='{"steps": [{"tool": "search", "args": {"query": "$intent"}}, {"tool": "summarize", "args": {"inputs": "$step1.ids"}}]}', verb="query", answer_kind="synthesis", project="nexus"
 ```
 
-### plan_search
+### answer_plan_search
 
-Search the T2 plan library for similar query plans.
+Search the T2 answer-plan library for retrieval plans.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -409,7 +409,7 @@ Search the T2 plan library for similar query plans.
 | `limit` | int | `5` | Maximum results |
 
 ```
-Use plan_search tool: query="enumerate documents", project="nexus"
+Use answer_plan_search tool: query="enumerate documents", project="nexus"
 ```
 
 ## Indexing (CLI only)

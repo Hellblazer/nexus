@@ -129,7 +129,7 @@ def _plan_for(op: str) -> tuple[str, str, dict]:
 
 @pytest.mark.asyncio
 async def test_p2c_ab_measurement(request) -> None:
-    from nexus.mcp.core import nx_answer, plan_save
+    from nexus.mcp.core import nx_answer, answer_plan_save
     from nexus.mcp_infra import t2_ctx
     from nexus.operators.dispatch import ambient_usage_sink
 
@@ -156,7 +156,7 @@ async def test_p2c_ab_measurement(request) -> None:
     for op in _OPERATORS:
         question, plan_json, _args = _plan_for(op)
         questions[op] = question
-        save_result = plan_save(
+        save_result = answer_plan_save(
             query=question, plan_json=plan_json, verb="analyze", answer_kind="unknown",
             project="nexus", outcome="success",
             tags="rdr196,p2c,ab-measurement,nexus-nyry9.16",

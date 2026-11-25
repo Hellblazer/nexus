@@ -314,7 +314,7 @@ verify_pg_count_at_least "tier_writes"        "tier_writes"        "${PROD_TELEM
 # misattributed). PG UNIQUE(tenant,project,query) collapses dimension-less duplicate plans
 # that SQLite's partial UNIQUE(project,dimensions) WHERE dimensions IS NOT NULL keeps, so
 # the right baseline is distinct(project,query), NOT raw COUNT(*). at_least (not exact):
-# plans ARE written live (plan_save fires during nx_answer runs), so the prod source can gain
+# plans ARE written live (answer_plan_save fires during nx_answer runs), so the prod source can gain
 # rows between the baseline snapshot and the ETL read — exact would false-FAIL on a live prod
 # (same reason the telemetry/chash checks use at_least). nexus-tzosw.
 verify_pg_count_at_least "plans"              "plans"              "${PROD_PLANS_DISTINCT:-0}"

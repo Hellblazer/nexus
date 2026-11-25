@@ -89,6 +89,10 @@ _ALLOWED_TOOLS: frozenset[str] = frozenset(
         "mcp__plugin_conexus_nexus__scratch",
         "mcp__plugin_conexus_nexus__scratch_manage",
         "mcp__plugin_conexus_nexus__collection_list",
+        "mcp__plugin_conexus_nexus__answer_plan_save",
+        "mcp__plugin_conexus_nexus__answer_plan_search",
+        "mcp__plugin_conexus_nexus__answer_plan_delete",
+        # The old names stay for one client release (nexus-sby49.4); remove these three with the aliases.
         "mcp__plugin_conexus_nexus__plan_save",
         "mcp__plugin_conexus_nexus__plan_search",
         "mcp__plugin_conexus_nexus__plan_delete",

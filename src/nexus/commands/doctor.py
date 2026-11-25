@@ -657,7 +657,7 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
 
 
 #: Minimum global-tier (``project=''``) builtin plan rows expected after
-#: seeding (``nx plan reseed``, formerly ``nx catalog setup``). RDR-078
+#: seeding (``nx answer-plan reseed``, formerly ``nx catalog setup``). RDR-078
 #: shipped 9; RDR-092 Phase 0a brought that to 12; the live count at
 #: nexus-vl8lk was 15; nexus-h33x8.6 a1 added 2 single-query-step
 #: fast-path templates, bringing it to 17 (``conexus/plans/builtin/
@@ -884,7 +884,7 @@ def _run_check_plan_library() -> None:
             f"< expected {_MIN_GLOBAL_BUILTIN_COUNT}",
             err=True,
         )
-        click.echo("    Fix: run `nx plan reseed`.", err=True)
+        click.echo("    Fix: run `nx answer-plan reseed`.", err=True)
         failed = True
 
     # Disk-vs-live parity (nexus-f1mbo). The count floor above cannot fail
@@ -910,19 +910,19 @@ def _run_check_plan_library() -> None:
                 f"library: {_summarise(parity.missing)}",
                 err=True,
             )
-            click.echo("    Fix: run `nx plan reseed`.", err=True)
+            click.echo("    Fix: run `nx answer-plan reseed`.", err=True)
         if parity.drifted:
             click.echo(
                 f"  FAIL: {len(parity.drifted)} library row(s) no longer "
                 f"match their template: {_summarise(parity.drifted)}",
                 err=True,
             )
-            click.echo("    Fix: run `nx plan reseed`.", err=True)
+            click.echo("    Fix: run `nx answer-plan reseed`.", err=True)
         if parity.orphaned:
             click.echo(
                 f"  WARN: {len(parity.orphaned)} builtin row(s) have no "
                 f"template shipped: {_summarise(parity.orphaned)}. Left in "
-                "place — remove with `nx plan delete <id>` if intended.",
+                "place — remove with `nx answer-plan delete <id>` if intended.",
                 err=True,
             )
             warnings += 1

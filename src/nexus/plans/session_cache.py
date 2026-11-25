@@ -19,7 +19,7 @@ no network. Every collection metadata field is primitive; the schema
 is flat and small enough that :mod:`nexus.metadata_schema` is not
 needed here (the collection is T1, not T3).
 
-Per RDR-078 §Phase 1 "Write visibility": a ``plan_save`` inside the
+Per RDR-078 §Phase 1 "Write visibility": a ``answer_plan_save`` inside the
 session calls :meth:`upsert` so the new row is queryable by
 :func:`~nexus.plans.matcher.plan_match` immediately, without waiting
 for the next SessionStart.

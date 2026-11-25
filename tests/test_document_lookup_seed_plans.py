@@ -72,7 +72,7 @@ _TARGET_PLAN_NAMES = {"document-discovery", "corpus-coverage-check"}
 @pytest.fixture()
 def seeded_library(tmp_path: Path):
     """A fresh HttpPlanLibrary seeded from the REAL builtin template
-    directory -- the same directory ``nx plan reseed`` loads in
+    directory -- the same directory ``nx answer-plan reseed`` loads in
     production. Proves the new templates parse, validate, and load
     alongside the other 15+, not in isolation."""
     from nexus.db.t2 import T2Database

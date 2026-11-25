@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``nx plan set-scope`` CLI tests (#1073) — the survivor of this module.
+"""``nx answer-plan set-scope`` CLI tests (#1073) — the survivor of this module.
 
 HISTORY / TOMBSTONE (nexus-i711w Stage 2 sub-stage A3): this file was born
-as the RDR-120 §A8 / nexus-rv7x6 test suite for the ``nx plan repair``
+as the RDR-120 §A8 / nexus-rv7x6 test suite for the ``nx answer-plan repair``
 group (scope-tags / dimensions / match-text / retire-legacy /
 builtin-bindings / all), whose six subcommands re-ran legacy content
 migrations against the LOCAL SQLite plans snapshot. The repair group and
 its helper module ``nexus.plans.repair`` were DELETED with the SQLite
-PlanLibrary ([21098] verb fates: ``nx plan repair`` D) — the live library
+PlanLibrary ([21098] verb fates: ``nx answer-plan repair`` D) — the live library
 is engine-served and content repairs are engine-side operations. Deleted
 with them:
 
@@ -16,12 +16,12 @@ with them:
     / TestRepairAll / TestNoDbFile — CLI surface of the deleted verbs.
   * TestRepairScopeTagsProjectFallback — the #1069 project-column recovery
     INSIDE ``repair_scope_tags``; its interactive counterpart survives as
-    ``nx plan set-scope --from-project`` (tested below).
+    ``nx answer-plan set-scope --from-project`` (tested below).
   * test_set_scope_no_db_exits_cleanly — the "local .db file absent" branch
     no longer exists; the engine-served CLI's failure mode is the
     ``plans service unavailable`` ClickException in ``_open_plan_library``.
 
-``nx plan set-scope`` SURVIVES, routed through ``HttpPlanLibrary`` — these
+``nx answer-plan set-scope`` SURVIVES, routed through ``HttpPlanLibrary`` — these
 tests run against the per-test engine tenant: seeds go through
 ``T2Database(tmp).plans`` and the CLI reads the same tenant via the env the
 autouse ``_pin_t2_substrate`` fixture sets.
@@ -33,7 +33,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from nexus.commands.plan import plan as plan_cmd
+from nexus.commands.plan import answer_plan as plan_cmd
 from nexus.db.t2 import T2Database
 
 
@@ -50,11 +50,11 @@ def plan_db(tmp_path: Path) -> T2Database:
     database.close()
 
 
-# ── #1073: nx plan set-scope command ───────────────────────────────────────
+# ── #1073: nx answer-plan set-scope command ───────────────────────────────────────
 
 
 class TestSetScopeCommand:
-    """Tests for the ``nx plan set-scope <plan_id> <tags>`` command (#1073)."""
+    """Tests for the ``nx answer-plan set-scope <plan_id> <tags>`` command (#1073)."""
 
     @staticmethod
     def _seed_with_plan(db: T2Database, *, project: str = "") -> int:
@@ -74,7 +74,7 @@ class TestSetScopeCommand:
 
     def test_set_scope_is_registered(self) -> None:
         assert "set-scope" in plan_cmd.commands, (
-            "nx plan set-scope command must be registered"
+            "nx answer-plan set-scope command must be registered"
         )
 
     @pytest.mark.t2_tenant

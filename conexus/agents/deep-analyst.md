@@ -60,7 +60,7 @@ retrieval plan.
 
 Run these four reads BEFORE substantive work. Skipping on the grounds that "this task is structural / direct / tiers won't help here / I can read the code faster" is the rationalization the Red Flags table in the orchestration skill's reference warns about, sibling agents may have just done this work, prior project history may already cover it, and findings caught in passing (bugs noticed while mapping code, races spotted while implementing, perf gaps glimpsed while reviewing) get lost when post-flight write-back is also skipped:
 
-1. **Plan reuse**: `mcp__plugin_conexus_nexus__plan_search(query="<your task>", limit=3)`, if a match returns, reuse it as a starting structure.
+1. **Answer-plan reuse**: `mcp__plugin_conexus_nexus__answer_plan_search(query="<your task>", limit=3)` finds saved retrieval plans for `nx_answer`, never implementation plans; a match can shape your search queries.
 2. **T2 (project)**: `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`, prior project decisions, findings, session context.
 3. **T3 (cross-project)**: `mcp__plugin_conexus_nexus__search(query="<topic>", corpus="knowledge")` for the check itself; reach for `mcp__plugin_conexus_nexus__nx_answer(question="<question>", scope="<corpus>")` only when the answer must be reduced from many documents (cross-corpus synthesis, ranking/comparing, RDR research) — p50 80s, p95 217s, can time out at 300s.
 4. **T1 (siblings)**: `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`, sibling agents in the current session may have done this work already.

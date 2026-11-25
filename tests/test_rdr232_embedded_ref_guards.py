@@ -2,8 +2,8 @@
 """nexus-jypmj.4: the embedded-step-reference scan (nexus-jypmj.1.19) at the points before a run.
 
 A ``$stepN.field`` inside a longer string or an object is never substituted, so a plan holding one
-fails at run time. The same raw-arg scan now also runs at ``plan_save``, in the plan matcher (a logged
-exclusion), in ``nx plan hygiene`` and on the planner's output (one re-prompt on a plan miss).
+fails at run time. The same raw-arg scan now also runs at ``answer_plan_save``, in the plan matcher (a logged
+exclusion), in ``nx answer-plan hygiene`` and on the planner's output (one re-prompt on a plan miss).
 
 Tenant-free: the library is a stub, ``_t2_index_write`` is patched, and the planner dispatch is a fake.
 """
@@ -73,11 +73,11 @@ def test_the_scan_passes_a_clean_plan_and_tolerates_what_is_not_a_plan() -> None
         assert find_embedded_step_ref(not_a_plan) is None
 
 
-# ── plan_save ────────────────────────────────────────────────────────────────
+# ── answer_plan_save ────────────────────────────────────────────────────────────────
 
 
 def _save(plan: dict) -> tuple[str, list]:
-    from nexus.mcp.core import plan_save
+    from nexus.mcp.core import answer_plan_save
 
     writes: list = []
 
@@ -89,7 +89,7 @@ def _save(plan: dict) -> tuple[str, list]:
         patch("nexus.mcp.core._t2_index_write", fake_write),
         patch("nexus.mcp.core._record_tier_write"),
     ):
-        return plan_save(query="q", plan_json=json.dumps(plan), verb="research", answer_kind="unknown"), writes
+        return answer_plan_save(query="q", plan_json=json.dumps(plan), verb="research", answer_kind="unknown"), writes
 
 
 def test_plan_save_refuses_an_embedded_ref_and_names_it_and_writes_nothing() -> None:
@@ -194,14 +194,14 @@ def test_a_saved_plan_with_an_embedded_ref_is_excluded_logged_and_kept(
         excluded[0]["detail"][0]["plan_id"] == 1
         and excluded[0]["detail"][0]["ref"] == "$step3.contents"
     )
-    assert "nx plan hygiene" in excluded[0]["remedy"]
+    assert "nx answer-plan hygiene" in excluded[0]["remedy"]
     assert lib.rows[1]["plan_json"] == json.dumps(BAD), (
         "the row is neither rewritten nor deleted"
     )
     assert 1 not in lib.bumped, "an excluded plan is not counted as matched"
 
 
-# ── nx plan hygiene ──────────────────────────────────────────────────────────
+# ── nx answer-plan hygiene ──────────────────────────────────────────────────────────
 
 
 class _HygieneLibrary:

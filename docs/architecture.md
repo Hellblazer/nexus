@@ -1145,7 +1145,7 @@ the guard never needed to consult.
 Because many T2 domain stores (and the catalog client, and T1's
 `HttpScratchStore`) send a READ over POST when the query does not fit a
 GET query string (search/lookup bodies, batch resolves,
-`HttpCatalogClient.traverse`, `operator-query`, `plan_search`,
+`HttpCatalogClient.traverse`, `operator-query`, `answer_plan_search`,
 `HttpScratchStore.search`/`list_entries`/`flagged_entries`/
 `resolve_prefix_candidates` — the last one is the MCP `scratch` tool's
 `get`/`delete` disambiguation fallback on an ambiguous or missing id, a
@@ -1185,7 +1185,7 @@ Phase 2 replaced a single shared connection with per-store connections:
 Phase 2 consequences:
 
 - **Cross-domain reads no longer block on unrelated writes**: a
-  `memory_search` on one thread and a `plan_save` on another run in
+  `memory_search` on one thread and a `answer_plan_save` on another run in
   parallel because the Phase 1 shared Python mutex is gone. Concurrent
   *writes* across domains still serialize at SQLite's single-writer
   WAL lock. The serving `busy_timeout` is 30000 ([RDR-129](rdr/rdr-129-t2-daemon-serving-path-cross-store-contention.md) B1; the
@@ -1442,7 +1442,7 @@ Grouped by verb:
 - **verb=debug**
   - `debug-default`: Dev work from a concrete failure. Catalog per-file lookup as the primary link walk; multi-hop graph traversal is delegated to Serena.
 
-The plan-author / plan-inspect / plan-promote templates and their skills were RETIRED at nexus-77cct. They dispatched a `plan_match` MCP tool that has never existed (the server registers `plan_save`, `plan_search` and `plan_delete` only), so nothing ever invoked them successfully — and they were not inert, since their descriptions absorbed any question containing the word "plan" and outranked the plan a caller actually wanted. What they described is `nx plan list` / `nx plan show` / `nx plan hygiene`, which work. `traverse-then-generate` was retired in the same change: it required caller-supplied catalog tumblers, which no question carries.
+The plan-author / plan-inspect / plan-promote templates and their skills were RETIRED at nexus-77cct. They dispatched a `plan_match` MCP tool that has never existed (the server registers `answer_plan_save`, `answer_plan_search` and `answer_plan_delete` only), so nothing ever invoked them successfully — and they were not inert, since their descriptions absorbed any question containing the word "plan" and outranked the plan a caller actually wanted. What they described is `nx answer-plan list` / `nx answer-plan show` / `nx answer-plan hygiene`, which work. `traverse-then-generate` was retired in the same change: it required caller-supplied catalog tumblers, which no question carries.
 
 Every shipped template must be *offerable* — reachable by some question. A template requiring a typed binding that is neither defaulted nor derivable from a question (`nexus.plans.binding_infer`) fails CI in `tests/test_builtin_plans.py`.
 

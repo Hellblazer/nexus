@@ -1,0 +1,4 @@
+### Changed
+
+- **The plan-library MCP tools are `answer_plan_save`, `answer_plan_search` and `answer_plan_delete`, and the CLI group is `nx answer-plan`.** The library holds only the retrieval plans `nx_answer` matches; the old names read as if they held implementation plans, and two agent else-branches had sent implementation steps to "the plan document". The behaviour of each tool and subcommand is unchanged. (nexus-sby49.4)
+- **The old names work for one more client release and are then removed.** `plan_save`, `plan_search` and `plan_delete` run their new twins and add a line saying they are deprecated and naming the new tool; `nx plan ...` runs the same subcommands as `nx answer-plan ...` and prints the same notice on stderr, so `--json` output stays parseable. Plugin text, agents, skills and the SessionStart and SubagentStart guidance use the new names. (nexus-sby49.4)

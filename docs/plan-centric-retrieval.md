@@ -159,7 +159,7 @@ Every plan in the library pins a **dimensional identity**:
 
 The `(project, dimensions)` pair is UNIQUE — two plans with the same
 dimensions in the same project will collide at seed time.  This is how
-the seed loader stays idempotent: a second run of `nx plan reseed` with
+the seed loader stays idempotent: a second run of `nx answer-plan reseed` with
 unchanged templates produces zero inserts.
 
 ## The 13 builtin scenario templates
@@ -168,7 +168,7 @@ This count (13, one per file in `conexus/plans/builtin/*.yml`) is
 canonical here — other docs should link to this section rather than
 restating the number.
 
-`nx plan reseed` seeds these from `conexus/plans/builtin/*.yml` as
+`nx answer-plan reseed` seeds these from `conexus/plans/builtin/*.yml` as
 `scope:global` plans:
 
 | Template | Verb + strategy | What it does |
@@ -209,8 +209,8 @@ Seven templates have been retired as unofferable or redundant
 commit af1b292bc). Four were plan-lifecycle meta-seeds
 (`plan-author-default`, `plan-inspect-default`, `plan-inspect-dimensions`,
 `plan-promote-propose`): each dispatched a `plan_match` MCP tool that has
-never existed on the server (it registers `plan_save` / `plan_search` /
-`plan_delete` only), so nothing ever invoked them successfully — and they
+never existed on the server (it registers `answer_plan_save` / `answer_plan_search` /
+`answer_plan_delete` only), so nothing ever invoked them successfully — and they
 were not merely inert, since their templates absorbed any question
 containing the word "plan" and outranked the plan a caller actually
 wanted. `traverse-then-generate` required caller-supplied catalog

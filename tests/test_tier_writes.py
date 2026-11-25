@@ -7,7 +7,7 @@ Covers:
 - ``_record_tier_write`` swallows exceptions (telemetry must NEVER
   break the hot path).
 - Wired-in MCP write tools (memory_put, store_put, scratch put,
-  plan_save) emit one row per call.
+  answer_plan_save) emit one row per call.
 """
 from __future__ import annotations
 
@@ -187,12 +187,12 @@ class TestWiring:
     def test_plan_save_records_plan_tier(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """plan_save writes tier='plan' (distinct from T2 because plan
+        """answer_plan_save writes tier='plan' (distinct from T2 because plan
         retrieval / cold-start cost is the metric being tracked)."""
         db_path = self._setup(tmp_path, monkeypatch)
-        from nexus.mcp.core import plan_save
+        from nexus.mcp.core import answer_plan_save
 
-        result = plan_save(
+        result = answer_plan_save(
             query="how does X relate to Y in the catalog",
             plan_json='{"steps":[{"tool":"search","args":{"query":"$intent"}}]}',
             verb="query",
@@ -202,7 +202,7 @@ class TestWiring:
         )
 
         rows = self._tier_writes(db_path)
-        plan_rows = [r for r in rows if r[0] == "plan_save"]
+        plan_rows = [r for r in rows if r[0] == "answer_plan_save"]
         assert len(plan_rows) == 1, result
         assert plan_rows[0][1] == "plan"
         assert plan_rows[0][2] == "nexus"  # project

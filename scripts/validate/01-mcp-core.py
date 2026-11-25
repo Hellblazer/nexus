@@ -8,7 +8,7 @@ Coverage — 26 tools:
   search, query, store_put, store_get, store_list, store_get_many,
   memory_put, memory_get, memory_delete, memory_search, memory_consolidate,
   scratch, scratch_manage, collection_list,
-  plan_save, plan_search,
+  answer_plan_save, answer_plan_search,
   traverse,
   operator_extract, operator_rank, operator_compare, operator_summarize,
   operator_generate,
@@ -97,17 +97,17 @@ def run_suite() -> None:
 
 
 def _seed_catalog_and_plans() -> None:
-    """Run `nx plan reseed` so the sandbox has the seeded plan library."""
+    """Run `nx answer-plan reseed` so the sandbox has the seeded plan library."""
     step("Seed catalog + plans")
     import subprocess
     # nexus-06aei: was `nx catalog setup`, retired since conexus 7.0.0 and
     # raising unconditionally, so this step asserted returncode == 0 on a
-    # command that can only refuse and the suite could not pass. `nx plan
+    # command that can only refuse and the suite could not pass. `nx answer-plan
     # reseed` calls seed_plan_templates() -- the same function catalog
     # setup used for the plan half, and the one `nx init` calls -- so the
     # step does what its name always claimed. Found by
     # tests/test_retired_command_callers_lint.py.
-    with case("nx plan reseed (plan library seeded)"):
+    with case("nx answer-plan reseed (plan library seeded)"):
         r = subprocess.run(
             ["uv", "run", "nx", "plan", "reseed"],
             capture_output=True, text=True, timeout=60,
@@ -244,22 +244,22 @@ def _exercise_collection_list() -> None:
         info(f"  collections: {out.splitlines()[0][:80] if out else '(empty)'}")
 
 
-# ── plan_save / plan_search ──────────────────────────────────────────────────
+# ── answer_plan_save / answer_plan_search ──────────────────────────────────────────────────
 
 def _exercise_plan_save_search() -> None:
-    step("plan_save / plan_search")
-    from nexus.mcp.core import plan_save, plan_search
+    step("answer_plan_save / answer_plan_search")
+    from nexus.mcp.core import answer_plan_save, answer_plan_search
 
-    with case("plan_save"):
-        out = plan_save(
+    with case("answer_plan_save"):
+        out = answer_plan_save(
             query="walk the catalog to find implementations",
             plan_json='{"steps":[{"tool":"traverse","args":{"seeds":["1.1"],"link_types":["implements"]}}]}',
             tags="validate,test",
         )
         assert isinstance(out, str)
 
-    with case("plan_search"):
-        out = plan_search(query="walk catalog", limit=5)
+    with case("answer_plan_search"):
+        out = answer_plan_search(query="walk catalog", limit=5)
         assert isinstance(out, str)
         # Seeded 14 plans + 1 we just saved should surface SOMETHING
         assert "walk" in out.lower() or "catalog" in out.lower() or len(out) > 50, out[:200]

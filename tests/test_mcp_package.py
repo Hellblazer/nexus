@@ -34,6 +34,8 @@ def test_core_registered_tools():
         "search", "query", "store_put", "store_get", "store_list", "store_get_many",
         "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
         "scratch", "scratch_manage", "collection_list",
+        "answer_plan_save", "answer_plan_search", "answer_plan_delete",
+        # nexus-sby49.4: the old names, kept one client release as deprecated aliases.
         "plan_save", "plan_search", "plan_delete",
         # RDR-240 (bead nexus-qo7ie.31): the library procedure runner.
         "procedure_run",
@@ -288,7 +290,7 @@ def test_init_reexports_all():
         "search", "query", "store_put", "store_get", "store_list", "store_get_many",
         "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
         "scratch", "scratch_manage", "collection_list",
-        "plan_save", "plan_search", "procedure_run",
+        "answer_plan_save", "answer_plan_search", "procedure_run",
         "traverse",
         "operator_extract", "operator_rank", "operator_compare",
         "operator_summarize", "operator_generate",

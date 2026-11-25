@@ -5,7 +5,7 @@ O(repo) meta-tests, hence the lint marker. Three doctrines these checks
 protect, each reversed or clarified after guidance had already taught the
 old shape:
 
-- ``memory_put`` AND ``plan_save`` share one ``ttl: int | None = None``
+- ``memory_put`` AND ``answer_plan_save`` share one ``ttl: int | None = None``
   contract (``mcp/core.py``), reversed 2026-09-12 (nexus-473mx): omitting
   ``ttl`` now means permanent, and the engine REJECTS ``ttl<=0`` (0
   included) outright with a 400 — there is no "0 means permanent"
@@ -63,7 +63,7 @@ pytestmark = pytest.mark.lint
 #: stale entry, so an exemption cannot silently outlive the text it excuses.
 ALLOWLIST: dict[tuple[str, str, str], str] = {}
 
-#: memory_put and plan_save share the ttl: int | None contract; store_put's
+#: memory_put and answer_plan_save share the ttl: int | None contract; store_put's
 #: ttl is a genuinely different, string-typed contract ("Nd"/"Nw"/
 #: "permanent") and stays OUT of scope for this check on purpose.
 #:
@@ -80,9 +80,9 @@ ALLOWLIST: dict[tuple[str, str, str], str] = {}
 #: never fire there, silently missing every prefixed call and leaving
 #: only the unprefixed prose mentions matched. Trailing \b stays, to keep
 #: this from matching as a prefix of some unrelated longer identifier.
-_TTL_BEARING_CALL_RE = re.compile(r"(?:memory_put|plan_save)\b")
+_TTL_BEARING_CALL_RE = re.compile(r"(?:memory_put|answer_plan_save)\b")
 _QUERY_CALL_RE = re.compile(r"query\(")
-#: Flags two distinct wrong shapes for memory_put/plan_save's ttl:
+#: Flags two distinct wrong shapes for memory_put/answer_plan_save's ttl:
 #: (a) the retired bare-int literals 0 and 30, any spacing around `=`;
 #: (b) ANY quoted value at all (ttl="30", ttl='permanent', ttl="30d") —
 #: the type itself is wrong, since ttl here is int | None, never a string.
@@ -220,7 +220,7 @@ def _unallowed(files: list[Path], finder, kind: str) -> list[str]:
 def test_memory_put_and_plan_save_never_prescribe_a_bad_ttl(scanned_files: list[Path]) -> None:
     problems = _unallowed(scanned_files, _find_bad_ttl_calls, "bad-ttl")
     assert not problems, (
-        "memory_put(...) and plan_save(...) examples must omit ttl for "
+        "memory_put(...) and answer_plan_save(...) examples must omit ttl for "
         "permanent (nexus-473mx) and must never prescribe ttl=0 (rejected "
         "with a 400 — there is no 0-means-permanent coercion), ttl=30 (the "
         "retired default, not a convention to reproduce), or ANY quoted ttl "

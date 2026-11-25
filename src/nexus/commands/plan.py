@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""``nx plan`` command group.
+"""``nx answer-plan`` command group.
 
 Day-2 operations against the plan library:
 
-  - ``nx plan list``    Tabulate plans with origin / use_count / scope
-  - ``nx plan show``    Full plan_json + dimensions + run history
-  - ``nx plan delete``  Remove a plan row (with confirmation)
-  - ``nx plan reseed``  Re-run the four-tier seed loader
+  - ``nx answer-plan list``    Tabulate plans with origin / use_count / scope
+  - ``nx answer-plan show``    Full plan_json + dimensions + run history
+  - ``nx answer-plan delete``  Remove a plan row (with confirmation)
+  - ``nx answer-plan reseed``  Re-run the four-tier seed loader
 
 The first four (nexus-la28) close the routine-ops gap that bit the
 RDR-098 abstract-themes smoke run: an inline-planner-grown plan
@@ -30,7 +30,7 @@ def _classify_origin(row: dict) -> str:
       session's project) or a grown answer-kind declaration in ``plan_json``; and the legacy grown shape,
       ``project=='personal'`` with no tags.
     - ``builtin``  the ``builtin-template`` tag token (seeded from the shipped templates).
-    - ``user``     anything else (``plan_save`` or an ad-hoc skill).
+    - ``user``     anything else (``answer_plan_save`` or an ad-hoc skill).
 
     Tags are read as comma tokens, as the eligibility gate reads them; a grown token wins over the builtin
     one, as it does there.
@@ -53,15 +53,15 @@ def _classify_origin(row: dict) -> str:
     return "user"
 
 
-@click.group()
-def plan() -> None:
-    """Plan library maintenance commands."""
+@click.group(name="answer-plan")
+def answer_plan() -> None:
+    """Answer-plan library maintenance commands (the retrieval plans nx_answer matches)."""
 
 
-# The `nx plan repair` group (6 subcommands) and its SQLite helper
+# The `nx answer-plan repair` group (6 subcommands) and its SQLite helper
 # `_open_plans_db` were DELETED (nexus-i711w Stage 2 sub-stage A3): every
 # subcommand body took a sqlite3.Connection into the deleted SQLite
-# PlanLibrary's tables ([21098] verb fates: `nx plan repair` D). The live
+# PlanLibrary's tables ([21098] verb fates: `nx answer-plan repair` D). The live
 # library is engine-served; content repairs are engine-side operations.
 
 
@@ -169,14 +169,14 @@ def _hygiene_apply(library, findings: list[dict]) -> int:
     return count
 
 
-@plan.command("hygiene")
+@answer_plan.command("hygiene")
 @click.option("--apply", "apply_", is_flag=True,
               help="Disable the flagged plans (default: report only).")
 def hygiene_cmd(apply_: bool) -> None:
     """Scan the plan library for bead-dumps, embedded step references, operator
     steps missing a claim, evidence or check_instruction, null-verb rows, and
     always-failing plans; --apply DISABLES them (reversible via
-    `nx plan enable` — never deletes).
+    `nx answer-plan enable` — never deletes).
 
     Routes through HttpPlanLibrary, so it cleans the live engine-served
     library (nexus-vtp8h). (Its one-time local-SQLite repair sibling
@@ -195,13 +195,13 @@ def hygiene_cmd(apply_: bool) -> None:
         click.echo(f"  [{f['id']}] {f['query']!r}: {f['reason']}")
     if not apply_:
         click.echo("\nReport only — re-run with --apply to disable them "
-                   "(reversible via `nx plan enable <id>`).")
+                   "(reversible via `nx answer-plan enable <id>`).")
         return
     count = _hygiene_apply(library, findings)
     click.echo(f"Disabled {count} plan(s).")
 
 
-@plan.command("list")
+@answer_plan.command("list")
 @click.option(
     "--scope",
     default="",
@@ -252,9 +252,9 @@ def list_cmd(
       - ``user``     everything else
 
     Examples:
-      nx plan list
-      nx plan list --scope=global --origin=builtin
-      nx plan list --name=hybrid
+      nx answer-plan list
+      nx answer-plan list --scope=global --origin=builtin
+      nx answer-plan list --name=hybrid
     """
     lib = _open_plan_library()
     if lib is None:
@@ -330,7 +330,7 @@ def list_cmd(
         )
 
 
-@plan.command("show")
+@answer_plan.command("show")
 @click.argument("id_or_name")
 @click.option(
     "--json",
@@ -391,7 +391,7 @@ def show_cmd(id_or_name: str, as_json: bool) -> None:
         click.echo(raw)
 
 
-@plan.command("delete")
+@answer_plan.command("delete")
 @click.argument("plan_id", type=int)
 @click.option(
     "-y",
@@ -404,8 +404,8 @@ def delete_cmd(plan_id: int, yes: bool) -> None:
 
     \b
     The numeric id is required (not a name) because deletion is
-    destructive and a name-substring lookup is fuzzy. Use ``nx plan
-    list`` or ``nx plan show <name>`` to find the id first.
+    destructive and a name-substring lookup is fuzzy. Use ``nx answer-plan
+    list`` or ``nx answer-plan show <name>`` to find the id first.
     """
     lib = _open_plan_library()
     if lib is None:
@@ -430,7 +430,7 @@ def delete_cmd(plan_id: int, yes: bool) -> None:
     click.echo(f"Removed {removed} row(s).")
 
 
-@plan.command("disable")
+@answer_plan.command("disable")
 @click.argument("plan_id", type=int)
 @click.option(
     "--reason",
@@ -444,7 +444,7 @@ def disable_cmd(plan_id: int, reason: str) -> None:
     \b
     Soft-disable takes a plan out of rotation without deleting the row,
     preserving run history and supporting A/B tests, regression triage,
-    and rollback. Re-enable with ``nx plan enable <id>``.
+    and rollback. Re-enable with ``nx answer-plan enable <id>``.
 
     \b
     Both matcher lanes (T1 cosine via list_active_plans, T2 full-text via
@@ -471,7 +471,7 @@ def disable_cmd(plan_id: int, reason: str) -> None:
     click.echo(f"Disabled plan id={plan_id} name={label!r}{suffix}.")
 
 
-@plan.command("enable")
+@answer_plan.command("enable")
 @click.argument("plan_id", type=int)
 def enable_cmd(plan_id: int) -> None:
     """Re-enable a previously soft-disabled plan (nexus-mrzp).
@@ -499,7 +499,7 @@ def enable_cmd(plan_id: int) -> None:
     click.echo(f"Enabled plan id={plan_id} name={label!r}.")
 
 
-@plan.command("set-scope")
+@answer_plan.command("set-scope")
 @click.argument("plan_id", type=int)
 @click.argument("tags", required=False, default="")
 @click.option(
@@ -530,9 +530,9 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
     \b
     Examples::
 
-      nx plan set-scope 22 canon-conductor-compose
-      nx plan set-scope 21 --from-project
-      nx plan set-scope 43 rdr__arcaneum,knowledge__delos
+      nx answer-plan set-scope 22 canon-conductor-compose
+      nx answer-plan set-scope 21 --from-project
+      nx answer-plan set-scope 43 rdr__arcaneum,knowledge__delos
     """
     if from_project and tags:
         raise click.UsageError(
@@ -591,7 +591,7 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
     )
 
 
-@plan.command("reseed")
+@answer_plan.command("reseed")
 @click.option(
     "--force",
     "force",
@@ -641,3 +641,27 @@ def reseed_cmd(force: bool, insert_only: bool) -> None:
             "Nothing inserted, and --insert-only cannot see content "
             "drift. Drop the flag to reconcile."
         )
+
+
+class _DeprecatedPlanGroup(click.Group):
+    """``nx plan``, the old name of ``nx answer-plan``: runs the same subcommands and says so.
+
+    Kept for one client release (Sam, 2026-11-25, nexus-sby49.4) and removed in the release after.
+    The notice goes to stderr, so ``--json`` output on stdout stays parseable.
+    """
+
+    def invoke(self, ctx: click.Context):
+        click.echo(
+            "Deprecated: `nx plan` is now `nx answer-plan`. The old name works for one more client "
+            "release and is then removed.",
+            err=True,
+        )
+        return super().invoke(ctx)
+
+
+plan = _DeprecatedPlanGroup(
+    name="plan",
+    commands=answer_plan.commands,
+    help="Deprecated: use `nx answer-plan`, which has the same subcommands.",
+    hidden=True,  # still runs; out of `nx --help` and the reference, whose census reads the commands it lists
+)
