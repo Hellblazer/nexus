@@ -714,3 +714,106 @@ def test_the_accepted_gaps_are_named_in_the_module_docstring():
     doc = sb.__doc__ or ""
     for gap in ("abbreviation", "xargs", "bash -c", "eval", "backslash"):
         assert gap in doc, f"the module docstring does not name the gap: {gap}"
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (nexus-sby49.2): quote state and heredoc bodies in the substitution scan
+# ---------------------------------------------------------------------------
+
+ROUND2_TEXT_DENY = [
+    # N1: an apostrophe inside "..." is not a single quote, so the substitution after it is still blanked.
+    "git commit -m \"it's done\" && git push origin $(git branch --show-current) --force",
+    "echo \"it's\" ; git branch $(date +%s) -D",
+]
+ROUND2_STATE_DENY = [
+    # R2: an unquoted heredoc body with an unbalanced paren must not swallow the command after it.
+    "git commit -m \"$(cat <<EOF\nfix (partly\nEOF\n)\" && git reset --hard",
+    "git commit -m \"$(cat <<EOF\nfix (partly\nEOF\n)\"\ngit reset --hard",
+    "git commit -m \"$(cat <<-EOF\n\tfix (partly\n\tEOF\n)\" && git reset --hard",
+    # a heredoc marker inside a quoted string is a string, so it hides nothing
+    "echo \"<<'X'\"\ngit reset --hard\nX",
+    "echo '<<EOF'\ngit reset --hard\nEOF",
+]
+
+
+@pytest.mark.parametrize("cmd", ROUND2_TEXT_DENY)
+def test_round2_text_forms_deny(cmd, tmp_path):
+    hit = sb.decide(cmd, str(tmp_path))
+    assert hit is not None and hit.kind == "text", f"{cmd!r}: {hit}"
+
+
+@pytest.mark.parametrize("cmd", ROUND2_STATE_DENY)
+def test_round2_state_forms_deny_on_a_dirty_tree_and_pass_on_a_clean_one(cmd, dirty_repo, pristine_repo):
+    hit = sb.decide(cmd, str(dirty_repo))
+    assert hit is not None and hit.kind == "state", f"{cmd!r}: {hit}"
+    assert sb.decide(cmd, str(pristine_repo)) is None, f"{cmd!r} denied a clean tree"
+
+
+#: Each prefix opens, closes or fakes a quote, a comment or a heredoc in a different way. None may change what
+#: the command after it is: a flag after a substitution is still that command's flag.
+QUOTE_PREFIXES = [
+    "",
+    "echo \"it's\"; ",
+    "echo \"it's\" && ",
+    "echo 'it'\"'\"'s'; ",
+    "echo \"a\\\"b'c\"; ",
+    "echo 'a\"b'; ",
+    "echo \"x\" 'y' \"z's\"; ",
+    "echo \"$(echo \"it's\")\"; ",
+    "echo \"$(echo 'a)b')\"; ",
+    "echo $(echo \"(\"); ",
+    "echo hi # don't (quote\n",
+    "echo ${#HOME} \"it's\"; ",
+    "cat <<EOF\nit's (partly\nEOF\n",
+    "cat <<-EOF\n\tit's (partly\n\tEOF\n",
+    "cat <<'EOF'\nit's `x` (\nEOF\n",
+    "cat <<\"EOF\"\nit's `x` (\nEOF\n",
+    "cat <<\\EOF\nit's `x` (\nEOF\n",
+    "git commit -m \"$(cat <<'EOF'\nit's (a `b`\nEOF\n)\" && ",
+    "git commit -m \"$(cat <<EOF\nit's (a\nEOF\n)\" && ",
+]
+SUBSTITUTED_TAILS_DENY = [
+    "git push origin $(git branch --show-current) --force",
+    "git push origin \"$(git branch --show-current)\" --delete",
+    "git push origin `git branch --show-current` -f",
+    "git branch $(date +%s) -D",
+    "git push $(echo origin) +main",
+]
+SUBSTITUTED_TAILS_PASS = [
+    "git push origin $(git branch --show-current)",
+    "git branch $(date +%s)",
+    "git log $(git rev-parse HEAD~3)..HEAD",
+]
+
+
+@pytest.mark.parametrize("prefix", QUOTE_PREFIXES, ids=range(len(QUOTE_PREFIXES)))
+@pytest.mark.parametrize("tail", SUBSTITUTED_TAILS_DENY)
+def test_no_quote_comment_or_heredoc_variant_hides_a_trailing_flag(prefix, tail, tmp_path):
+    cmd = prefix + tail
+    hit = sb.decide(cmd, str(tmp_path))
+    assert hit is not None and hit.kind == "text", f"{cmd!r}: {hit}"
+
+
+@pytest.mark.parametrize("prefix", QUOTE_PREFIXES, ids=range(len(QUOTE_PREFIXES)))
+@pytest.mark.parametrize("tail", SUBSTITUTED_TAILS_PASS)
+def test_the_same_variants_with_no_denied_flag_pass(prefix, tail, tmp_path):
+    cmd = prefix + tail
+    assert sb.decide(cmd, str(tmp_path)) is None, repr(cmd)
+
+
+@pytest.mark.parametrize("prefix", QUOTE_PREFIXES, ids=range(len(QUOTE_PREFIXES)))
+def test_the_same_variants_still_deny_a_state_form_after_them_on_a_dirty_tree(prefix, dirty_repo, pristine_repo):
+    cmd = prefix + "git reset --hard $(git rev-parse HEAD~1)"
+    hit = sb.decide(cmd, str(dirty_repo))
+    assert hit is not None and hit.kind == "state", f"{cmd!r}: {hit}"
+    assert sb.decide(cmd, str(pristine_repo)) is None
+
+
+def test_an_apostrophe_in_a_heredoc_body_or_a_comment_does_not_start_a_quote(tmp_path):
+    assert sb.decide("cat <<EOF\ndon't\nEOF\ngit push $(x) -f", str(tmp_path)) is not None
+    assert sb.decide("# don't\ngit push $(x) -f", str(tmp_path)) is not None
+
+
+def test_a_comment_is_not_code(tmp_path):
+    assert sb.decide("echo hi # git push --force $(git branch -D x)", str(tmp_path)) is None
+    assert sb.decide("echo a#b $(git branch -D x)", str(tmp_path)) is not None
