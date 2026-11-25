@@ -82,6 +82,35 @@ SCRIPTS = os.path.join(
 )
 
 
+def path_without(names: "tuple[str, ...]", mirror_root: "os.PathLike[str] | str") -> str:
+    """``PATH`` with *names* gone. A directory that holds one is mirrored under *mirror_root* by symlinks to every other entry,
+    so the tools beside it (git, an interpreter) stay reachable. For a test that runs a hook which shells out to ``nx`` when
+    ``nx`` is on PATH (SubagentStart lists T1 through it) and must reach no storage."""
+    keep: list[str] = []
+    for i, d in enumerate(os.environ.get("PATH", "").split(os.pathsep)):
+        if not d:
+            continue
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            continue
+        if not any(n in entries for n in names):
+            keep.append(d)
+            continue
+        mirror = os.path.join(os.fspath(mirror_root), str(i))
+        os.makedirs(mirror, exist_ok=True)
+        for n in entries:
+            link = os.path.join(mirror, n)
+            if n in names or os.path.lexists(link):
+                continue
+            try:
+                os.symlink(os.path.join(d, n), link)
+            except OSError:
+                pass
+        keep.append(mirror)
+    return os.pathsep.join(keep)
+
+
 def plugin_scripts_dir(script: str) -> str:
     """The ``hooks/scripts`` directory of the plugin *script* belongs to: the nearest ancestor that holds ``_audience.py``.
 
@@ -107,6 +136,10 @@ def main(argv: list[str]) -> None:
     import _audience  # noqa: PLC0415 -- after the sys.path insert
 
     _audience._ACCOUNT_HOME_OVERRIDE = home
+    # The seam lives in this process. A script's reexec_if_needed() would execv into another interpreter when resolve() names
+    # one that differs (a CI runner's thin venv beside uv's python), and the new process has no seam: the real account's flag
+    # decides. The marker is the script's own "already re-exec'd" switch.
+    os.environ["NX_HOOK_INTERPRETER_REEXEC"] = "1"
     sys.argv = [script, *rest]
     runpy.run_path(script, run_name="__main__")
 

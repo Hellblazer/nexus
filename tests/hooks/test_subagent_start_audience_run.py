@@ -8,15 +8,24 @@ convention in ``tests/AGENTS.md``: a module mark counts every later test, pure o
 """
 from __future__ import annotations
 
+import atexit
 import json
+import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from tests.hooks.audience_harness import src_seam_env
+from tests.hooks.audience_harness import path_without, src_seam_env
 from tests.hooks.test_subagent_start_hook import STDIN_PAYLOAD, _flagged_home, _run_hook
 
-_DEAD_ENGINE = {"NX_SERVICE_URL": "http://127.0.0.1:9", "NX_SERVICE_TOKEN": "unused"}
+# The hook lists T1 by running ``nx scratch list`` whenever ``nx`` is on PATH, and that child reaches storage: under CI's
+# storage-touch guard (a thin venv puts ``nx`` on PATH) every case here ended in a teardown error, "reached storage without
+# a tenant". These cases are about the injected text, so the hook runs with no ``nx`` on PATH and touches nothing.
+_MIRROR = tempfile.mkdtemp(prefix="nx-path-no-nx-")
+atexit.register(shutil.rmtree, _MIRROR, ignore_errors=True)
+_NO_NX = {"PATH": path_without(("nx",), _MIRROR)}
+_DEAD_ENGINE = {"NX_SERVICE_URL": "http://127.0.0.1:9", "NX_SERVICE_TOKEN": "unused", **_NO_NX}
 
 
 def _context(*, payload: dict | None = None, account_home: str | None = None) -> str:
