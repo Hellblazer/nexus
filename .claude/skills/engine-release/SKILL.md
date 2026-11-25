@@ -231,20 +231,22 @@ H=chas           # the laptop remote; its ssh host is $H-test (chas-test, or qwe
 git push -q "$H" "$TAG:refs/heads/engine-cut-$TAG"
 ssh "$H-test" "cd ~/src/nexus && for L in A B C; do git worktree add -q --detach ../nexus-wt/engine-cut-$TAG-\$L $TAG; done"
 # Leg A: the normal upgrade, then a plain reboot
-ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-A && uv sync -q && NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
+ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-A && uv sync -q && NX_BUILD_LEASE_WAIT=28800 NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
   lab-run -c lab-m -- uv run python scripts/upgrade_boot_writes.py --prev-client '"$PREV"' --new-jar-commit '"$TAG"' \
   --ceiling-boot 67108864 --ceiling-reboot 67108864 --json output/gate/A.json'
 # Leg B: from before per-collection indexes, queued aspect rows, graceful restart mid-queue
-ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-B && uv sync -q && NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
+ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-B && uv sync -q && NX_BUILD_LEASE_WAIT=28800 NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
   lab-run -c lab-m -- uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
   --collections 7 --rows 30000 --rot pending_aspect_queue \
   --restart-mid-queue 3 --restart-mode graceful --ceiling-boot 67108864 --json output/gate/B.json'
 # Leg C: as Leg B, with a forced kill of the supervisor and engine (PostgreSQL stays up)
-ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-C && uv sync -q && NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
+ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-C && uv sync -q && NX_BUILD_LEASE_WAIT=28800 NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
   lab-run -c lab-m -- uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
   --collections 7 --rows 30000 --rot pending_aspect_queue \
   --restart-mid-queue 3 --restart-mode kill --ceiling-boot 67108864 --json output/gate/C.json'
 ```
+
+`NX_GATE_JAR_CACHE=off` makes each leg build its own jar: the gate-jar cache keys on build inputs, so it can hand back a jar stamped with another commit whose build inputs match (on 0.1.202 leg A the tag commit differed from the cached one only in `service/src/test`), and the leg's jar-identity check refuses that jar with exit 2.
 
 Start each leg as a background command (`run_in_background`) with its output
 redirected to a file: the ssh session holds until the leg exits, so the session is woken
