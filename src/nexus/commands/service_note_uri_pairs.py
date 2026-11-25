@@ -20,7 +20,7 @@ CHECK_EXIT_PAIRS = 3
 
 @click.command(
     "note-uri-pairs",
-    epilog=link_epilog("If the RDR-231 note-URI backfill halts startup", "migration-runbook.md"),
+    epilog=link_epilog("If the note-URI backfill halts startup", "migration-runbook.md"),
 )
 @click.option("--config-dir", "config_dir_str", default=None, help="Config directory override.")
 @click.option(
@@ -31,7 +31,7 @@ CHECK_EXIT_PAIRS = 3
     help="Exit 3 when any pair exists, 0 when there is none (the listing is printed either way).",
 )
 def note_uri_pairs_cmd(config_dir_str: str | None, check: bool) -> None:
-    """List the notes stored under both the legacy and the nx-note spelling (RDR-231), from the local cluster.
+    """List the notes stored under both the legacy and the nx-note spelling, from the local cluster.
 
     Connects to the nx-managed PostgreSQL cluster as its superuser, so it works while the engine is halted
     and on every platform; the password never reaches a command line or the output. A managed or cloud

@@ -69,7 +69,7 @@ any branch, another worktree or a T2 record and lists them; if it says the holde
 scan is incomplete, check those sources yourself before trusting the number.
 
 Before Step 3, confirm the number is free in T2: `memory_put` upserts by (project,
-title), so writing a held number's record silently replaces it (nexus-3piej). Call
+title), so writing a held number's record silently replaces it. Call
 `mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title="{NNN}")`. Only a
 "not found" answer means free. Any record, and an "Ambiguous title prefix" answer
 (rows such as `{NNN}-research-1` exist), means another RDR holds the number: re-run
@@ -77,7 +77,7 @@ the preamble and take a higher number, then check again.
 
 Never hand-scan with a fixed glob. `[0-9][0-9][0-9]-*.md` requires a filename to
 begin with three digits and matches none of nexus's 217 `rdr-NNN-*.md` files, so
-it falls through to `001` and collides with RDR-001.
+it falls through to `001` and collides with the first RDR.
 
 Preamble unavailable: extract from the real filenames, and start at `001` only if
 that returns nothing.

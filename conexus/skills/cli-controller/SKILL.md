@@ -194,7 +194,7 @@ tmux kill-pane -t "$PANE"
 ```
 
 ### Long-Running Process Monitoring
-<!-- nx-mvnw-allowlist (nexus-c00dw): generic tmux-driving example, not
+<!-- nx-mvnw-allowlist: generic tmux-driving example, not
      scoped to this repo's own service build — `mvn clean install` here
      illustrates the pattern for ANY project this skill might drive, not a
      literal command wired to nexus's service build lease. -->

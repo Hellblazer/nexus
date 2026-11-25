@@ -13,12 +13,12 @@ Agent-friendly operations for the document catalog and link graph. Use these ins
 Given a file path, title, or RDR name, find its catalog tumbler.
 
 ```
-# By file path (relative — post-RDR-060)
+# By file path (relative)
 mcp__plugin_conexus_nexus-catalog__search(query="src/app/scoring.py")
 # → Extract tumbler from first result
 
 # By title or RDR name
-mcp__plugin_conexus_nexus-catalog__search(query="RDR-060")
+mcp__plugin_conexus_nexus-catalog__search(query="<RDR title or number>")
 # → Extract tumbler from first result
 
 # By content type
@@ -73,7 +73,7 @@ mcp__plugin_conexus_nexus-catalog__link(
 
 # By title (resolve first)
 # 1. Search for source: mcp__plugin_conexus_nexus-catalog__search(query="scoring.py") → tumbler "1.1.115"
-# 2. Search for target: mcp__plugin_conexus_nexus-catalog__search(query="RDR-060") → tumbler "1.1.440"
+# 2. Search for target: mcp__plugin_conexus_nexus-catalog__search(query="<RDR title or number>") → tumbler "1.1.440"
 # 3. Link: mcp__plugin_conexus_nexus-catalog__link(from_tumbler="1.1.115", to_tumbler="1.1.440", ...)
 ```
 
@@ -84,7 +84,7 @@ mcp__plugin_conexus_nexus-catalog__link(
 | `cites` | Document references another | Paper citing another paper or RDR |
 | `relates` | General relationship | Two related docs without directional meaning |
 | `supersedes` | Replaces an older version | New RDR superseding old one |
-| `formalizes` | Higher abstraction → raw source | Extracted entities / triples pointing back to an L0 text chunk (RDR-057) |
+| `formalizes` | Higher abstraction → raw source | Extracted entities / triples pointing back to an L0 text chunk |
 
 Do NOT use `implements-heuristic`: it is a legacy type from an automated pass that no longer runs, and graph traversal excludes it by default.
 
@@ -94,7 +94,7 @@ Before storing findings via `store_put`, seed T1 scratch so the auto-linker crea
 
 ```
 # 1. Resolve the target document
-mcp__plugin_conexus_nexus-catalog__search(query="RDR-060", limit=1)
+mcp__plugin_conexus_nexus-catalog__search(query="<RDR title or number>", limit=1)
 # → tumbler "1.1.440"
 
 # 2. Seed link-context in T1 scratch

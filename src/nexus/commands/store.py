@@ -588,7 +588,7 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
     """Retrieve a T3 knowledge entry by its document ID.
 
     DOC_ID is the 64-char content-hash ID shown by 'nx store list'
-    (the full sha256(chunk_text) hexdigest — RDR-180; pre-RDR-180
+    (the full sha256(chunk_text) hexdigest; earlier
     stores used the [:32] prefix form).
 
     \b
@@ -752,11 +752,11 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
     Use --id for a single known entry, --title to delete all chunks of a document.
     To remove an entire collection use: nx collection delete <name>
 
-    Note (RDR-108 D1 / RDR-180): T3 chunk natural IDs are content-derived
+    Note: T3 chunk natural IDs are content-derived
     (the full sha256(text) hexdigest), so two documents with identical
     content share one T3 row. --title removes the named document and keeps
-    any chunk another document still holds, naming that document
-    (nexus-sis0m.5). --id names a chunk; one that two documents share is
+    any chunk another document still holds, naming that document.
+   --id names a chunk; one that two documents share is
     kept for both.
     """
     if not doc_id and not title:
@@ -938,7 +938,7 @@ def _delete_by_title(
 def expire_cmd() -> None:
     """Remove T3 knowledge__ entries whose TTL has expired.
 
-    Each note is judged by its own TTL and its own put time, kept in its catalog entry (nexus-6pfgb.15),
+    Each note is judged by its own TTL and its own put time, kept in its catalog entry,
     not by the chunk row it shares with any note of identical text. A lapsed note is retired; its chunk
     is deleted only when no other live note holds it.
     """

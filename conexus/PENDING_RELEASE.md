@@ -70,5 +70,32 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/routing/registry.yaml`: each rule carries its `audience`, nexus-sby49.3.
 - `conexus/skills/writing-nx-skills/promotion.md`: the target table gains an Audience column, a hook target is live only with its audience.yaml entry and a behaviour-leg case, and the loss check lists over-reach, nexus-sby49.3.
 - `conexus/hooks/scripts/routing/destructive_action_advice.py`: the advice `Row` gains an `audience` field (every row EVERY-USER), nexus-sby49.3.
+- `conexus/skills/asks/SKILL.md`: the description no longer cites an RDR id, nexus-sby49.4.
+- `conexus/commands/plan-audit.md`: the description no longer cites an RDR id, nexus-sby49.4.
+- `conexus/skills/nexus/SKILL.md`: the note table says "the user's own standing rules" where it named a person, and two lines lose an RDR id and a bead id, nexus-sby49.4.
+- `conexus/skills/writing-nx-skills/SKILL.md`: the `bd update` pitfall applies only where `.beads/` exists and says what to do without it, nexus-sby49.4.
+- `conexus/skills/architecture/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/catalog/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/cli-controller/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/composition-probe/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/decision-drift-review/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/mailbox/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/nexus/reference.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/orchestration/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/orchestration/reference.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/peer-messaging/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/phase-review-gate/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/plan-first/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/plan-validation/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/rdr-accept-checklist/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/rdr-audit-checklist/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/rdr-create/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/rdr-gate-checklist/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/research-synthesis/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/strategic-planning/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/substantive-critique/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/tumbler-footnotes/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/upgrade/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/why-was-this-written/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 
 ## Deferred to the next client release

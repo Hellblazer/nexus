@@ -227,10 +227,10 @@ def _maybe_emit_silent_zero_note(
 @click.option("--no-threshold", "no_threshold", is_flag=True, default=False,
               help="Disable distance-threshold filtering entirely — show every "
                    "candidate returned by the vector search. Mutually exclusive "
-                   "with --threshold. (RDR-087 Phase 1 workaround for silent "
+                   "with --threshold. (workaround for silent "
                    "threshold-drop on dense-prose collections.)")
 @click.option("--quiet", "quiet", is_flag=True, default=False,
-              help="Suppress the RDR-087 silent-zero stderr note (shown when a "
+              help="Suppress the silent-zero stderr note (shown when a "
                    "query returns zero results because every candidate was "
                    "dropped by the distance threshold).")
 def search_cmd(

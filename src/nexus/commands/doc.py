@@ -55,7 +55,7 @@ from nexus.doc.resolvers_corpus import AnchorResolver
 
 @click.group("doc")
 def doc() -> None:
-    """Doc-build token rendering (RDR-082)."""
+    """Doc-build token rendering."""
 
 
 def _default_registry(
@@ -99,7 +99,7 @@ def _default_registry(
 )
 @click.option(
     "--expand-citations", is_flag=True,
-    help="RDR-086 Phase 4.3: append a footnote block resolving every "
+    help="append a footnote block resolving every "
          "chash: citation to its chunk text.",
 )
 @click.option(
@@ -470,7 +470,7 @@ def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
 @click.option(
     "--fail-ungrounded", is_flag=True, default=False,
     help="Exit non-zero when any chash: citation fails to resolve via "
-         "Catalog.resolve_chash (RDR-086 Phase 4.1).",
+         "Catalog.resolve_chash.",
 )
 @click.option(
     "--format", "output_format", type=click.Choice(["table", "json"]),
@@ -488,7 +488,7 @@ def check_grounding_cmd(
     bracketed citations are not machine-verifiable — the ratio tells you
     how much of this doc's grounding is upgradeable.
 
-    With ``--fail-ungrounded`` (RDR-086 Phase 4.1), every ``chash:`` span
+    With ``--fail-ungrounded``, every ``chash:`` span
     is resolved via ``Catalog.resolve_chash``; any miss triggers a
     non-zero exit plus a file:line error report.
     """
@@ -611,7 +611,7 @@ def check_extensions_cmd(
 
     For each ``chash:`` citation in the input docs, resolve the chash
     through the T2 ``chash_index`` to the T3-scoped ``doc_id``
-    (RDR-086 Phase 4.2 caller-side fix), then delegate to
+    (caller-side fix), then delegate to
     ``CatalogTaxonomy.chunk_grounded_in`` with the resolved doc_id.
     The taxonomy signature and semantics are unchanged — the fix is
     in the caller, so every other consumer of ``chunk_grounded_in``

@@ -657,14 +657,14 @@ def _run_reactivate(cat: "CatalogReader", owner_prefix: str, *, will_act: bool, 
     "--census", "do_census", is_flag=True,
     help=(
         "Classify repo-owner root paths as healthy / path_vanished / "
-        "path_exists_empty / not_a_repository / unreadable (nexus-7kl32), with corroborating "
+        "path_exists_empty / not_a_repository / unreadable, with corroborating "
         "doc/chunk-count evidence for the deactivate-eligible population."
     ),
 )
 @click.option(
     "--include-deactivated", is_flag=True, default=False,
     help=(
-        "Also show owners that were deactivated (nexus-cw262): visibility "
+        "Also show owners that were deactivated: visibility "
         "affordance so a past --execute deactivate stays auditable rather "
         "than silently permanent. Works with both --census and the plain "
         "listing."
@@ -675,10 +675,10 @@ def _run_reactivate(cat: "CatalogReader", owner_prefix: str, *, will_act: bool, 
     type=click.Choice(_MUTATION_ACTIONS),
     default=None,
     help=(
-        "Mutation arm (nexus-cw262). 'deactivate' requires --census (acts on "
+        "Mutation arm. 'deactivate' requires --census (acts on "
         "path_vanished and not_a_repository owners with 0 live documents). 'reactivate' requires "
         "--owner <tumbler_prefix> (the undo affordance for a deactivate "
-        "misfire, or any manual reversal). 'move' (RDR-254) keeps a document's or an owner's identity when "
+        "misfire, or any manual reversal). 'move' keeps a document's or an owner's identity when "
         "its path moves: --document <tumbler> --new-path <file>, or --owner <prefix> --new-root <dir>."
     ),
 )
@@ -706,7 +706,7 @@ def owners_cmd(
     """List registered owners, or run a root-path census with --census.
 
     \\b
-    Mutation arms (nexus-cw262):
+    Mutation arms:
       --execute deactivate --no-dry-run --confirm
           Requires --census. Soft-deletes path_vanished and not_a_repository owners with 0 live
           documents. THE RESIDUAL (see module docstring): a doc_count==0
@@ -721,7 +721,7 @@ def owners_cmd(
           already performs with no separate command.
       --execute move --document <tumbler> --new-path <file>
       --execute move --owner <prefix> --new-root <dir>
-          RDR-254: keep an identity when a path moves. A dry run by default; it prints the counts and the
+          keep an identity when a path moves. A dry run by default; it prints the counts and the
           exact command that writes.
     """
     if action == "deactivate" and not do_census:

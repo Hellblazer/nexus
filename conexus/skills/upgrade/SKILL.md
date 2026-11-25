@@ -23,7 +23,7 @@ where `nx self install` refuses rather than doing the wrong thing.
 
 `nx upgrade` brings the package, engine, process, and provisioning
 preconditions current, then walks one ordered ladder that auto-applies whichever
-data migrations the install actually needs — T2 schema, pre-RDR-108 chunk
+data migrations the install actually needs — T2 schema, legacy chunk
 identity, embedder era. (The ChromaDB → Postgres+pgvector move is NOT among
 them on a current release: see "Installs that predate Postgres" below.) Each
 rung detects, converges, and verifies before completion is recorded; the walk is
@@ -57,7 +57,7 @@ reports not applicable. A managed tenant needs one interactive `nx upgrade` (thr
 If a rung ever asks a question (a billed re-embed, a choice the walk cannot derive), surface it to the user and let
 them choose; never answer on their behalf.
 
-## The RDR-229 stamp moves and the one restart
+## The collection-id stamp moves and the one restart
 
 An engine at 0.1.202 or later does collection-id work in the background after it serves, and
 `nx upgrade` does not drive it. The engine registers one data move per collection-bearing
@@ -72,11 +72,11 @@ When every stamp move is complete the engine lists one more `boot_work` entry, `
 the one manual step and nothing is lost by waiting: the user restarts the engine, never you. A rollback starts with the down-step
 ([runbook](https://github.com/Hellblazer/nexus/blob/main/docs/runbooks/rdr-229-p31-rollback.md)).
 
-## The RDR-192 backfill rung and its failure mode
+## The manifest backfill rung and its failure mode
 
 `rdr192-manifest-backfill` censuses every collection for legacy notes that
 have a catalog document but no manifest row (the engine hides them from search
-since RDR-192) and backfills them. It records completion, per tenant, only after
+since the manifest became the source of truth) and backfills them. It records completion, per tenant, only after
 a census reads zero (each collection read in that session or kept from one at
 most 24 hours earlier); the engine's reaper refuses to run on a tenant
 without that record; that refusal is complete only for a tenant with no earlier
@@ -138,7 +138,7 @@ there, then upgrade back to current. Three preconditions for the hop at the pin:
   managed`, or a ChromaDB Cloud key with no mode record), which `NX_LOCAL=1`
   overrides. Read from the 6.18.1 source, not run at the pin. Never run
   the pin's `nx guided-upgrade --service-url ...` or aim it at a managed
-  endpoint: unsupported, and it failed in every case measured (nexus-6g218).
+  endpoint: unsupported, and it failed in every case measured.
   Do not set `service_url` first "to save a step".
 - **Stop any current-engine local service** a 7.x install left running
   (`nx daemon service stop`) so the pin provisions its own engine.
@@ -147,7 +147,7 @@ there, then upgrade back to current. Three preconditions for the hop at the pin:
   or re-embedded to bge-768 and are not expected to import into a Voyage cloud.
 
 If the user wants the managed cloud, that is a second hop with the CURRENT
-client after the upgrade back. It has NOT been rehearsed end to end (nexus-xbqh9)
+client after the upgrade back. It has NOT been rehearsed end to end
 and carries less than the old direct path: T2 plans, taxonomy, `document_aspects`,
 the aspect queue, `frecency` and `relevance_log`, the telemetry stores, DEVONthink
 highlights, curated catalog metadata and owner tumblers are re-minted, and T2
@@ -157,7 +157,7 @@ in the cloud, BEFORE the switch). The migration runbook
 that data into the managed cloud, has the full list. Pick by user type:
 
 - Local-ONNX collections (bge-768): not expected to import into a Voyage cloud, and
-  what the cloud engine answers is unverified (nexus-xbqh9). For code, docs and rdr
+  what the cloud engine answers is unverified. For code, docs and rdr
   content, re-index from source in the cloud (`nx index repo`, `nx index pdf`).
 - Voyage collections from a Voyage-keyed hop 1: `nx store export --all` locally,
   then `nx store import FILE` in the cloud.

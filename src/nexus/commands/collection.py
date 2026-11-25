@@ -123,16 +123,16 @@ def _catalog_collection_rows() -> tuple[dict[str, dict], str]:
 def list_cmd(show_all: bool) -> None:
     """List T3 collections: live and stored chunk counts, and the catalog's
     columns (ID, content type, owner, embedding model, dimension, lifecycle
-    state). ID is the registry's ``collection_id`` (RDR-229 P3.12), ``-`` on a
+    state). ID is the registry's ``collection_id``, ``-`` on a
     row no stamp has given one yet.
 
-    RDR-204 Day 2 (nexus-ft04v.32): every column is read from the
+    every column is read from the
     collection's catalog row, never derived from its name, so a row whose
     name disagrees with its columns is visible rather than hidden behind a
     consistent-looking name. A collection with no catalog row prints ``-``
     in every column; a catalog row with no chunks prints 0.
 
-    nexus-sis0m.3: a collection retired by a re-embed job keeps its catalog
+    a collection retired by a re-embed job keeps its catalog
     row as a tombstone (superseded_by names the successor). An empty tombstone
     is not a collection and is left out unless ``--all``; one still holding
     chunks is listed, with STATE ``superseded-><successor>``. A rename on
@@ -224,7 +224,7 @@ def shape_cmd(as_json: bool, full: bool) -> None:
     """Read-only shape audit of the whole collection SET against the collection rules
     (the page is linked at the end of this help).
 
-    Distinct from ``nx collection audit NAME`` (the RDR-087 deep dive of one
+    Distinct from ``nx collection audit NAME`` (the deep dive of one
     collection).
 
     One finding per rule violation with a proposed action; never writes,
@@ -395,7 +395,7 @@ def aspects_cmd(
 ) -> None:
     """Show or set a collection's engine-side ``aspects_enabled`` attribute.
 
-    nexus-l46pu (follow-up to nexus-kk4ut): the tenant-wide, engine-hosted
+    the tenant-wide, engine-hosted
     home for the docs__ aspect-extraction opt-in, read by every machine
     indexing this collection. Round-2 critic decision (T2 critique-nexus-
     l46pu-tenant-wide-aspects-enabled item 1): the ENGINE IS AUTHORITATIVE
@@ -1025,7 +1025,7 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     is set; otherwise search hits would be garbage.
 
     A conformant new name is also checked against the source collection's
-    catalog-row ``embedding_model`` (nexus-7f4o4): the engine keeps the
+    catalog-row ``embedding_model``: the engine keeps the
     row's model across a rename, so a ``__<model>__`` token that differs
     from it is refused, naming both models and the name that would be
     accepted, unless ``--force-prefix-change`` is set.
@@ -2692,7 +2692,7 @@ def reembed_cmd(
       nx collection re-embed --all --skip NAME  the same, leaving NAME out (repeatable)
       nx collection re-embed --status [JOB]     jobs; --pause/--resume/--abort JOB act on one
 
-    nexus-bw65: rebuild embeddings for every chunk in NAME that has a
+    rebuild embeddings for every chunk in NAME that has a
     live catalog document, using --to MODEL. Chunk ids, document text,
     and metadata are preserved; only the vector changes. A chunk with no
     live document (no owner, or owned only by a deleted document) is left
@@ -2705,10 +2705,10 @@ def reembed_cmd(
 
     Also the repair for stored vectors that no longer match their text:
     re-embedding in place with the collection's own model recomputes every
-    vector server-side (nexus-tysei: voyage-context-3 chunks the retired
+    vector server-side (voyage-context-3 chunks the retired
     client path embedded with document context).
 
-    RDR-210 Phase 6: a different MODEL, or --all, runs a job on the local
+    a different MODEL, or --all, runs a job on the local
     engine. It moves each live document, one transaction apiece, into the
     sibling collection that carries the profile's model, then supersedes and
     deletes the source (--keep-source keeps it). The plan states the token
@@ -2962,7 +2962,7 @@ def rewrite_metadata_cmd(
     help="Output format.",
 )
 def health_cmd(sort_by: str, fmt: str) -> None:
-    """Composite per-collection health report (RDR-087 Phase 3.4).
+    """Composite per-collection health report.
 
     Folds catalog, T2 telemetry, and topic-assignment signals into one
     row per collection. Use ``--format=json`` for agents and dashboards.
@@ -3002,7 +3002,7 @@ def health_cmd(sort_by: str, fmt: str) -> None:
     help="Number of live-probe samples when --live fires.",
 )
 def audit_cmd(name: str, fmt: str, live: bool, live_n: int) -> None:
-    """Deep-dive audit for a single collection (RDR-087 Phase 4.2).
+    """Deep-dive audit for a single collection.
 
     Four sections: distance histogram (30d telemetry, ``--live`` to
     probe T3 when telemetry is cold), top-5 cross-projections,
@@ -3063,7 +3063,7 @@ def merge_candidates_cmd(
     exclude_hubs: bool, hub_top_n: int,
     limit: int, fmt: str, create_link: bool,
 ) -> None:
-    """(Unavailable) Pair-wise cross-collection overlap ranking (RDR-087 Phase 4.3).
+    """(Unavailable) Pair-wise cross-collection overlap ranking.
 
     Surfaces (a, b) pairs where collection *a* projects into topics in
     collection *b* with high similarity — hints at merge or bridge-

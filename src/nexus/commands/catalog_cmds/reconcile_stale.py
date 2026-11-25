@@ -1391,7 +1391,7 @@ def _run_drop_orphan_collections(
 def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_out: bool) -> None:
     """Classify + optionally repair catalog docs with unreliable chunk_count/manifest state.
 
-    nexus-cdypx: 61.2% of production catalog docs carry ``chunk_count == 0``;
+    61.2% of production catalog docs carry ``chunk_count == 0``;
     catalog-aware routing ranks over a corpus where most docs have no
     retrievable content. Default (no ``--execute``) is a read-only census —
     it constructs NO catalog writer. Exit 0 means the report was produced;
@@ -1410,7 +1410,7 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
                              ``nx catalog verify`` afterward.
       tombstone-vanished     delete zero-manifest docs in vanished
                              collections. Non-empty-manifest vanished docs
-                             are NEVER touched by this arm (nexus-3ck2g).
+                             are NEVER touched by this arm.
       tombstone-orphaned     delete zero-count docs whose confirmed on-disk
                              location is gone (file itself missing, or the
                              owner's repo_root/worktree itself deleted).
@@ -1422,21 +1422,21 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
       tombstone-zero-content delete zero-count docs whose confirmed on-disk
                              source is verifiably unchunkable by
                              construction (zero-byte, binary content or
-                             whitespace-only text — nexus-rqsh1, nexus-5j8fp): re-indexing can never produce a
+                             whitespace-only text): re-indexing can never produce a
                              chunk for these, so re-index is never the
                              correct remedy, only tombstone.
       tombstone-ghost-notes  delete store_put-origin notes (note-shaped: no
                              file_path, a recorded chash -- whatever
                              collection they were put in) that have NO
                              chunk in T3 under their chash OR their title,
-                             proved per row at execution time
-                             (nexus-1uekf). Notes whose chunks are present
+                             proved per row at execution time.
+                            Notes whose chunks are present
                              are manifest-only gaps and are never
                              tombstoned; rows whose T3 probe fails are
                              skipped. Reversible until ``purge-trash``.
       drop-orphan-collections  delete whole T3 collections that have
                              chunks but ZERO catalog documents referencing
-                             them (nexus-8tnz2: benchmark/gate debris --
+                             them (benchmark/gate debris --
                              the reverse direction of tombstone-vanished).
                              Consumes the same classification as
                              ``nx catalog doctor --t3-vs-catalog``

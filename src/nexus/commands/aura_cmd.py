@@ -179,7 +179,7 @@ def _unscanned_note(count: int) -> str:
 
 @click.group(name="aura")
 def aura_group() -> None:
-    """Declarative auras (RDR-249): check them and list them. Every aura is off until turned on."""
+    """Declarative auras: check them and list them. Every aura is off until turned on."""
 
 
 @aura_group.command(name="check")

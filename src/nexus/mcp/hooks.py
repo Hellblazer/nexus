@@ -321,7 +321,7 @@ def _description(spec: HookToolSpec) -> str:
     """
     body = spec.summary or f"the {spec.name} Claude Code hook"
     return (
-        f"Hook entry point (RDR-215): {body}. Registered so a Claude Code "
+        f"Hook entry point: {body}. Registered so a Claude Code "
         "hooks.json entry can call it as an mcp_tool; not a general-purpose "
         "capability, and not meant to be invoked directly."
     )

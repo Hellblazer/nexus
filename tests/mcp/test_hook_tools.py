@@ -91,7 +91,7 @@ class TestRegisterHookTools:
         for tool in tools:
             assert tool.name.startswith("hook_")
             assert tool.description is not None
-            assert tool.description.startswith("Hook entry point (RDR-215):")
+            assert tool.description.startswith("Hook entry point:")
 
     def test_input_schema_mirrors_flattened_payload_fields(self):
         mcp = _fresh_mcp()

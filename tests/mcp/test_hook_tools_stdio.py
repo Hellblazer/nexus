@@ -135,7 +135,7 @@ async def test_hook_tool_reachable_over_real_stdio(t2_service_env, tmp_path):
             tool = next((t for t in tools if t.name == "hook_stdio_probe"), None)
             assert tool is not None, [t.name for t in tools]
             assert tool.description is not None
-            assert tool.description.startswith("Hook entry point (RDR-215):")
+            assert tool.description.startswith("Hook entry point:")
 
             result = await session.call_tool("hook_stdio_probe", {"session_id": "abc123"})
             assert result.is_error is False

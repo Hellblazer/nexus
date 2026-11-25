@@ -30,7 +30,7 @@ def _head(root: Path) -> str:
               help="Every phase of the RDR, by its rdr:<NNN> tag (the rdr-close step); alone")
 @click.option("--accept-open", "accept_open", multiple=True,
               help="Let a bead through whose newest record is not justified (repeatable; the pointer records it). "
-                   "Pass it only with Sam's stamp for that bead (RDR-209 Step 2.3)")
+                   "Pass it only with the user's stamp for that bead")
 @click.option("--counted", type=click.IntRange(min=0), default=None,
               help="The count a --dry-run reported ('would be quarantined by the next expire sweep'); a real run that "
                    "writes a TTL needs it, and refuses unless it equals the count that dry run recorded")
@@ -38,7 +38,7 @@ def _head(root: Path) -> str:
 @click.option("--dry-run", is_flag=True, default=False, help="Print the listing and the count a real run would need; writes one T2 count row, no TTL and no T3 note")
 def gate_rollup_cmd(rdr: int, phase: str | None, beads: str | None, all_phases: bool, accept_open: tuple[str, ...],
                     counted: int | None, project: str | None, dry_run: bool) -> None:
-    """List a closed phase's gate records and keep them in T3 (RDR-209 Phase 3).
+    """List a closed phase's gate records and keep them in T3.
 
     Reads the repository's gate records (whole tag kind:gate, never <repo>_rdr). --dry-run writes one T2 count
     row (no TTL, no T3 note), which a real run that writes a TTL requires, with --counted N. Before anything is written

@@ -42,7 +42,7 @@ _log = structlog.get_logger()
     is_flag=True,
     default=False,
     help="Do not install/refresh the user-level beads PRIME.md this run "
-    "(nexus-cnzei.8). Explicit decline always wins; for a standing "
+    ". Explicit decline always wins; for a standing "
     "opt-out use `nx config set beads_prime.manage false`.",
 )
 def upgrade(
@@ -52,10 +52,10 @@ def upgrade(
     \f
     ``--yes`` is NOT a general "say yes to everything" switch, and must not
     become one: the only prompt the ladder can raise is the billed Voyage
-    re-embed (RDR-185 ## Constraints' third genuine decision; source-gone and
+    re-embed (source-gone and
     rollback DEFER rather than ask). It exists because `nx upgrade` is the one
     verb and an ancient install must still converge UNATTENDED (SC-1) — without
-    a consent channel, making the cost gate actually fire (nexus-k1m2f) traded a
+    a consent channel, making the cost gate actually fire traded a
     silent bill for a silent hang on a `click.confirm` no hook can answer.
     """
     _say_if_the_engine_is_migrating(auto_mode=auto_mode)

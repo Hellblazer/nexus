@@ -290,7 +290,7 @@ def config_list(keys_only: bool) -> None:
 
     Secrets are masked but keep their first and last four characters. When
     the output goes anywhere but your own terminal, use --keys-only, which
-    prints none, rather than redacting it yourself (nexus-6fvwo).
+    prints none, rather than redacting it yourself.
     """
     click.echo("Credentials  (env var takes precedence over config file)\n")
 
@@ -357,7 +357,7 @@ _STATIC_KEYS: tuple[str, ...] = ("service_token",)
 def config_init() -> None:
     """Interactive wizard to configure managed-service (cloud) credentials.
 
-    Asks the managed nexus service address (RDR-166), then the token (hidden as
+    Asks the managed nexus service address, then the token (hidden as
     you type it), then which kind it is: a mint credential, which is bound to
     one tenant and so also asks for the tenant (saved as ``mint_token`` and
     ``mint_tenant``), or a static service token (saved as ``service_token``).

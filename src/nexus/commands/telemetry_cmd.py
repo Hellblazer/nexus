@@ -526,7 +526,7 @@ def _render_text(data: dict[str, Any]) -> None:
 
 @click.group("telemetry")
 def telemetry_group() -> None:
-    """Telemetry baseline and diagnostics (nexus-v0x32)."""
+    """Telemetry baseline and diagnostics."""
 
 
 @telemetry_group.command("baseline")

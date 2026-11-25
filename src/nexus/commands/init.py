@@ -1094,7 +1094,7 @@ def _converge_ladder_best_effort() -> None:
     default=False,
     help=(
         "[DEPRECATED — plain `nx init` now does this by default] Provision the "
-        "local Postgres cluster for the RDR-152 Java service backend. Creates "
+        "local Postgres cluster for the Java service backend. Creates "
         "nexus_admin and nexus_svc roles and writes credentials to "
         "~/.config/nexus/pg_credentials. Idempotent: safe to re-run."
     ),
@@ -1105,7 +1105,7 @@ def _converge_ladder_best_effort() -> None:
     is_flag=True,
     default=False,
     help="Do not install/refresh the user-level beads PRIME.md this run "
-    "(nexus-cnzei.8). Explicit decline always wins, like --no-autostart; "
+    ". Explicit decline always wins, like --no-autostart; "
     "for a standing opt-out use `nx config set beads_prime.manage false`.",
 )
 @click.pass_context
@@ -1119,22 +1119,22 @@ def init_cmd(
 ) -> None:
     """Guided first-run setup — one command that provisions the right backend.
 
-    RDR-174 §1/§3 collapse: ``nx init`` is mode-detecting. ``_resolve_init_mode``
+    ``nx init`` is mode-detecting. ``_resolve_init_mode``
     decides LOCAL vs MANAGED (NX_LOCAL wins; otherwise on a configured
     ``service_url``). In LOCAL mode a plain ``nx init`` provisions and starts the
     local service stack (Postgres + the Java service, provisioned here for
-    bge-768, RDR-160) — the same body the now-deprecated ``--service`` flag
+    bge-768) — the same body the now-deprecated ``--service`` flag
     drives. In MANAGED mode a remote nexus service serves every tier, so there
     is nothing to provision locally (the credential wizard for that path lands
-    in P1.2, nexus-r2auz).
+    in a later release).
 
     ``--embedder`` selects bge-768 vs minilm-384 for the local service-embedder
     step (minilm-384 gets an advisory — this step always fetches the bge-768 ONNX).
-    A separate opt-in (nexus-umm29) switches the running service to Voyage
+    A separate opt-in switches the running service to Voyage
     instead — the page linked at the end of this help ("Local mode with Voyage") has the
     ``local.embed_model`` + ``voyage_api_key`` + restart steps; a later
-    ``nx init`` keeps a voyage-* ``local.embed_model`` and says so
-    (nexus-ddmfg). ``--service`` is still accepted (it
+    ``nx init`` keeps a voyage-* ``local.embed_model`` and says so.
+   ``--service`` is still accepted (it
     forces local provisioning) and is slated for a deprecation notice in P3.1.
     """
     # nexus-gynt2: stranded-install refusal, FIRST — before any provisioning.

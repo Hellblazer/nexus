@@ -106,7 +106,7 @@ def _targets(cat, tumbler: str | None, collection: str, path: str, owner: str) -
 def sensitive_cmd(
     tumbler: str | None, collection: str, path: str, owner: str, clear: bool, reason: str, as_json: bool,
 ) -> None:
-    """Flag documents sensitive, or clear the flag (RDR-243).
+    """Flag documents sensitive, or clear the flag.
 
     A sensitive document's content is kept away from the LLM-bound surfaces the privacy policy lists. The
     flag is one-way in every write path except this verb: setting needs no reason, clearing needs one, and

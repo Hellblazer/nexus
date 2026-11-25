@@ -46,7 +46,7 @@ class _OwnedExit(click.ClickException):
 
 @click.group("identity")
 def identity_group() -> None:
-    """Session identity: seats, take-over, release, rename, promote, purge, liveness (RDR-253)."""
+    """Session identity: seats, take-over, release, rename, promote, purge, liveness."""
 
 
 @identity_group.command("create")
@@ -218,7 +218,7 @@ def may_stop_cmd(ctx: click.Context, kind: str, ref: str) -> None:
 
 @identity_group.group("work")
 def work_group() -> None:
-    """Work this session owns: worktrees, tmux servers, waits, watchers, lab runs and dispatched agents (RDR-253)."""
+    """Work this session owns: worktrees, tmux servers, waits, watchers, lab runs and dispatched agents."""
 
 
 @work_group.command("register")
@@ -235,7 +235,7 @@ def work_register_cmd(ctx: click.Context, kind: str, ref: str) -> None:
 _OWNER = click.option(
     "--identity", "owner", default=None,
     help="The identity that registered the row (the id `register` printed), for a process that has lost its session: "
-         "a lab-remote whose shell ended before the run did. Default: the caller's own.")
+         "a remote run whose shell ended before the run did. Default: the caller's own.")
 
 
 def _owner_of(owner: str | None) -> Callable[[], str | None] | None:
@@ -325,7 +325,7 @@ def work_owners_cmd(ctx: click.Context, kind: str, ref: str) -> None:
 def work_run_cmd(ctx: click.Context, kind: str, ref: str, argv: tuple[str, ...]) -> None:
     """Register work, run the command after --, mark it done when it exits, and exit with its status.
 
-    nx identity work run --kind labrun --ref pytest-full -- lab-remote -c lab-m -- uv run pytest tests/x
+    nx identity work run --kind wait --ref nightly-suite -- ./run-suite.sh
     """
     from nexus.identity import work  # noqa: PLC0415
 

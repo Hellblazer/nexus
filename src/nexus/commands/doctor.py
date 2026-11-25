@@ -3043,7 +3043,7 @@ def _engine_work_lines() -> list[str]:
          "when the engine is unreachable, 1 on schema_error or zero "
          "applied changesets; an honest N/A (endpoint withholds the "
          "fingerprint by design) exits 0 unless combined with "
-         "--fail-on-violation. nexus-vl8lk, nexus-b1v9z.",
+         "--fail-on-violation.",
 )
 @click.option(
     "--check-search",
@@ -3057,7 +3057,7 @@ def _engine_work_lines() -> list[str]:
          "nearest real neighbours all fall past its threshold is a WARNING "
          "row naming that distance, the threshold, and the sample it rests "
          "on. Exits 2 only when a surface raises or a collection's embedding "
-         "model disagrees with its name. RDR-087 Phase 3.",
+         "model disagrees with its name.",
 )
 @click.option(
     "--check-resources",
@@ -3069,7 +3069,7 @@ def _engine_work_lines() -> list[str]:
          "when the namespace is exhausted (known sources: MinerU "
          "workers / orphan chroma children leaking via multiprocessing "
          "/ trackers re-parented to init after ungraceful MCP "
-         "shutdowns). Beads nexus-dc57 + nexus-ze2a + nexus-9h1s.",
+         "shutdowns).",
 )
 @click.option(
     "--check-quotas",
@@ -3080,7 +3080,7 @@ def _engine_work_lines() -> list[str]:
          "Chroma-era reference table), embedder model caps, reranker "
          "substrate, and any transient-error retries observed this "
          "process. Exits 1 when T3 is unreachable in cloud mode "
-         "(nexus-c590; relabeled for the pgvector substrate, nexus-d01js).",
+         "(relabeled for the pgvector substrate).",
 )
 @click.option(
     "--check-taxonomy",
@@ -3106,8 +3106,7 @@ def _engine_work_lines() -> list[str]:
     default=False,
     help="Report plan-library dimensional health: authored vs "
          "backfilled vs non-dimensional row counts, plus global-tier "
-         "builtin count. Exits 1 when builtin count < 9. RDR-092 "
-         "Phase 0c.2.",
+         "builtin count. Exits 1 when builtin count < 9.",
 )
 @click.option(
     "--check-mcp-logs",
@@ -3117,7 +3116,7 @@ def _engine_work_lines() -> list[str]:
     help="Scan Claude Code's per-server MCP cache for nx-mcp "
          "silent-death signatures ('STDIO connection dropped', "
          "'stdio transport error'). macOS only; skips cleanly on "
-         "Linux/Windows. RDR-094 Phase H (nexus-50u5).",
+         "Linux/Windows.",
 )
 @click.option(
     "--check-tier-discipline",
@@ -3126,19 +3125,18 @@ def _engine_work_lines() -> list[str]:
     default=False,
     help="Audit tier-write activity for the current session: prints "
          "the tier-write summary from the tier_writes table and "
-         "warns when a substantive session has no write-back. "
-         "Phase 1B nexus-a52i.",
+         "warns when a substantive session has no write-back.",
 )
 @click.option(
     "--check-storage-boundary",
     "check_storage_boundary",
     is_flag=True,
     default=False,
-    help="RDR-120 P0.A. AST-scan for direct sqlite3.connect / "
+    help="AST-scan for direct sqlite3.connect / "
          "voyageai.Client calls and T2Database/T3Database "
          "constructions outside the named allowlists in "
          "storage_boundary_lint.py. The per-line epsilon-allow "
-         "escape token is RETIRED (RDR-186 P4): surviving sites are "
+         "escape token is RETIRED: surviving sites are "
          "enumerated per file with exact counts; a new site is a "
          "hard violation, not a comment to write. Records "
          "catalog-allowlist count to T2 key 120-phase-<N>-catalog-"
@@ -3154,15 +3152,14 @@ def _engine_work_lines() -> list[str]:
          "found (informational without this flag). With --check-schema, "
          "treat an honest N/A (fingerprint withheld by design) as a "
          "failure too -- for release-gate callers that need an actual "
-         "OK, not an unprovable N/A that reads identically to a pass "
-         "(nexus-b1v9z).",
+         "OK, not an unprovable N/A that reads identically to a pass.",
 )
 @click.option(
     "--phase",
     "phase",
     type=str,
     default=None,
-    help="With --check-storage-boundary, the RDR-120 phase identifier "
+    help="With --check-storage-boundary, the phase identifier "
          "for the T2 metric key (e.g. `0`, `1`, `2`, `3a`, `3b`, "
          "`4`, `5`). Used to record `120-phase-<phase>-catalog-"
          "allowlist-count`. Omit to skip the metric write.",
@@ -3185,7 +3182,7 @@ def _engine_work_lines() -> list[str]:
          "autovacuum, overdue state, pci_ index bytes), read from the engine's "
          "operator-only GET /v1/admin/chunks-leaves; it needs the root service token "
          "and says so when it has none, and against an engine that predates the route "
-         "it prints one line saying so (nexus-i827c). Ignored by the --check-* modes.",
+         "it prints one line saying so. Ignored by the --check-* modes.",
 )
 @click.option(
     "--json",
@@ -3194,8 +3191,7 @@ def _engine_work_lines() -> list[str]:
     default=False,
     help="Emit machine-parseable JSON. Works with the main sweep (no mode "
          "flag) plus --check-search, --check-quotas, --check-mcp-logs. "
-         "Any other mode flag combined with --json is a usage error "
-         "(nexus-0vycz).",
+         "Any other mode flag combined with --json is a usage error.",
 )
 @click.option(
     "--trim-telemetry",
@@ -3203,7 +3199,7 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Delete search_telemetry rows older than --days (default 30) to "
-         "cap T2 disk use. RDR-087 Phase 2.4. Combine with --dry-run to "
+         "cap T2 disk use. Combine with --dry-run to "
          "preview the count without deleting.",
 )
 @click.option(
@@ -3212,7 +3208,7 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Enumerate post-store hooks registered on each of the three "
-         "chains (single-doc / batch / document-grain). nexus-b0ka.",
+         "chains (single-doc / batch / document-grain).",
 )
 @click.option(
     "--check-mineru",
@@ -3220,7 +3216,7 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Verify MinerU is importable. MinerU is part of the on-demand "
-         "pdf extra (nexus-2k66t.4.2; a default dependency from nexus-2fyb "
+         "pdf extra (a default dependency in earlier releases "
          "until then), so on an install without PDF support this reports "
          "N/A and names the command that installs it. Otherwise it surfaces "
          "a corrupt install at doctor-time instead of waiting for the first "
@@ -3235,7 +3231,7 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Report the aspect queue's depth: pending, claimed and dead "
-         "tasks of the 'aspects' tuple queue. nexus-1pfq.",
+         "tasks of the 'aspects' tuple queue.",
 )
 @click.option(
     "--check-t1",
@@ -3266,7 +3262,7 @@ def _engine_work_lines() -> list[str]:
     default=False,
     help="Sample chunks per collection, embed their stored text again with "
          "the collection's model, and compare with the stored vector "
-         "(nexus-f9duo). Exits 1 when any sampled chunk falls below cosine "
+         ". Exits 1 when any sampled chunk falls below cosine "
          "0.99 or any collection could not be probed. Costs one embedding "
          "call per sampled chunk.",
 )
@@ -3302,7 +3298,7 @@ def _engine_work_lines() -> list[str]:
          "cross-collection ('projection') ANN pick (POST /v1/taxonomy/"
          "assignments/cross-preview, never persisted) against an exact "
          "Python recompute over the SAME live foreign-centroid snapshot, "
-         "fetched in the same run (nexus-v4pj4: the engine-service-"
+         "fetched in the same run (the engine-service-"
          "v0.1.132 LATERAL/HNSW ANN rewrite measures equal to exact, but "
          "a future recall drift would be silent). A currently-stored "
          "assignment, if any, is shown in the report as context only, "
@@ -3354,8 +3350,7 @@ def _engine_work_lines() -> list[str]:
     default=False,
     help="Sample reference-only catalog documents (source_uri names an "
          "external, non-file:// resource) and stat each one's CURRENT "
-         "source against its RECORDED mtime/ETag (nexus-tb2yj, RDR-169 "
-         "Gap 6 leg 3). Every scheme but https:// is a cheap local check; "
+         "source against its RECORDED mtime/ETag. Every scheme but https:// is a cheap local check; "
          f"the https:// HEAD is bounded to {_REFERENCES_HTTPS_WORST_CASE_S:.1f}s "
          "worst case per document (aspect_readers.HTTPS_STAT_MAX_ATTEMPTS "
          "attempts, each up to twice HTTPS_STAT_TIMEOUT_S since httpx "
@@ -3405,12 +3400,11 @@ def _engine_work_lines() -> list[str]:
          "pg_ls_waldir(), escalating a nexus_svc session to pg_monitor "
          "with SET ROLE first — unconditionally, since nexus_svc is "
          "NOINHERIT in every deployment posture (cloud measured, local "
-         "provisioning aligned nexus-v80f2), so pg_monitor's privileges "
+         "provisioning aligned), so pg_monitor's privileges "
          "are never ambient without it. Reports UNMEASURED, never a "
          "false clean, when no local nexus_svc credentials exist "
          "(managed/BYO deployment) or the escalation is refused "
-         "(grants-004 not applied). Always exit 0 — informational. "
-         "nexus-bb5c8.",
+         "(grants-004 not applied). Always exit 0 — informational.",
 )
 @click.option(
     "--check-engine-activity",
@@ -3421,7 +3415,7 @@ def _engine_work_lines() -> list[str]:
          "is it actively embedding right now, chunks/s, queue depth, thread "
          "width. Also part of the default sweep. Always exit 0 — "
          "informational, UNKNOWN (never a traceback) when the endpoint is "
-         "unreachable or predates the route. nexus-s71lr.",
+         "unreachable or predates the route.",
 )
 @click.option(
     "--check-index-failures",
@@ -3429,7 +3423,7 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Report the durable index-failures backlog (nx index repo's "
-         "per-file failure record, nexus-nukn3). Also part of the default "
+         "per-file failure record). Also part of the default "
          "sweep. Exits 1 with a ✗ FAIL: marker on any nonzero backlog; "
          "UNKNOWN (never a traceback) when the service is unreachable.",
 )
@@ -3446,14 +3440,14 @@ def _engine_work_lines() -> list[str]:
     "probe_edge",
     is_flag=True,
     default=False,
-    help="Prove Idempotency-Key reaches the engine through the edge (nexus-t0ms7, "
-         "RDR-222). Sends ONE keyed expire-quarantine page with cutoff 2000-01-01, "
+    help="Prove Idempotency-Key reaches the engine through the edge. "
+         "Sends ONE keyed expire-quarantine page with cutoff 2000-01-01, "
          "which nothing qualifies for, and requires the key echoed on the 200 and "
          "GET /v1/requests/<key> answering committed; a failure names the hop that "
          "lost the key. OPT-IN and never part of the default sweep: it sends a "
          "mutating request (one request-ledger row per run, nothing deleted). "
          "Exit 1 on any failure, so a scheduler can run it as a smoke step. A second "
-         "row names what the path does to X-Correlation-ID (RDR-167 Phase 2: "
+         "row names what the path does to X-Correlation-ID ("
          "pass-through, inbound strip, overwrite or response strip, which an "
          "engine without Phase 1 also produces); it never changes the exit code.",
 )
@@ -3478,7 +3472,7 @@ def _engine_work_lines() -> list[str]:
          "to $HOME, so a bare sweep run from an isolated automation "
          "sandbox otherwise also sees (and can be reddened by) every "
          "other repo ever indexed on the same machine. Default: unscoped, "
-         "walks every registered repo. nexus-jds59.",
+         "walks every registered repo.",
 )
 def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                fix_paths: bool, dry_run: bool, check_schema: bool,

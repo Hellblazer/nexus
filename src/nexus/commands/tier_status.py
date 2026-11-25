@@ -116,7 +116,7 @@ def tier_status_cmd(
     since: str | None,
     json_out: bool,
 ) -> None:
-    """Audit tier-write activity. Phase 1B (nexus-a52i).
+    """Audit tier-write activity.
 
     Default mode reports the current session. Override with --session,
     --last, or --since (mutually exclusive — pick one).

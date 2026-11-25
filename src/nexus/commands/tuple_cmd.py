@@ -71,7 +71,7 @@ def _print_tuple_error(e: Exception) -> None:
 
 @click.group(name="tuple")
 def tuple_group() -> None:
-    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / release / templates / dictionary / list / stats / directory."""
+    """shared tuple space: out / rd / in / ack (with an optional reply) / nack / renew / release / templates / dictionary / list / stats / directory."""
 
 
 @tuple_group.command(name="out")
@@ -226,9 +226,9 @@ def tuple_rd_cmd(
     A plain read returns one page; when more rows exist past it, a note on
     stderr says so and names the --since cursor for the next one. --all pages
     through everything and stops at --max-rows, saying so on stderr
-    (nexus-sh1ea: the board read returned the 300 oldest rows with nothing
-    saying more existed). --newest asks the engine for a descending read
-    (nexus-kp5q3), so it returns the real newest -n whatever the subspace's
+    (the board read returned the 300 oldest rows with nothing
+    saying more existed). --newest asks the engine for a descending read,
+   so it returns the real newest -n whatever the subspace's
     size. Against an engine without one it pages oldest-first and keeps the
     tail, stops at --max-rows, and then exits 3 because the rows it printed
     are not the newest.
@@ -387,7 +387,7 @@ def tuple_wait_cmd(
 ) -> None:
     """Park until new mail or a board post for this session arrives, then exit.
 
-    The channel-free push path (RDR-233): run it with run_in_background in a
+    The channel-free push path: run it with run_in_background in a
     Claude Code session launched without --channels (the Claude Desktop Code
     tab). Its exit wakes the idle session, which acts on the printed notices and
     runs it again. Watches mailbox/<session id> and the board topics subscribed
@@ -544,7 +544,7 @@ def tuple_in_cmd(
     "--reply-subspace", "reply_subspace", default=None,
     help=(
         "Write a reply into this subspace in the same transaction that "
-        "consumes the claim (RDR-206). Must resolve to a keys+nonce "
+        "consumes the claim. Must resolve to a keys+nonce "
         "template (SchemaViolation on a keys-only target, e.g. "
         "lock/<resource>). Required by every other --reply-* flag."
     ),
@@ -654,7 +654,7 @@ def tuple_nack_cmd(claim_id: str, claimant: str) -> None:
 @click.argument("claim_id")
 @click.option("--claimant", required=True, help="Must match the identity that made the claim.")
 def tuple_release_cmd(claim_id: str, claimant: str) -> None:
-    """End a live claim WITHOUT counting an attempt (RDR-211) -- a
+    """End a live claim WITHOUT counting an attempt -- a
     hand-back that is not a failure. Use nack instead when the work
     genuinely failed and should count toward the template's max_attempts.
 
@@ -767,7 +767,7 @@ def _dictionary_totals_line(census: list[Any]) -> str:
 @click.argument("name", required=False)
 @click.option("--json", "json_out", is_flag=True, default=False, help="Output as JSON.")
 def tuple_dictionary_cmd(name: str | None, json_out: bool) -> None:
-    """The tuple-space dictionary (RDR-239): what each template is for.
+    """The tuple-space dictionary: what each template is for.
 
     With no NAME, every template with its one-line summary and the totals of
     its live census (subspaces, available, claimed, consumed, dead), from one
@@ -888,7 +888,7 @@ def tuple_list_cmd(prefix: str | None, limit: int | None, after: str | None, jso
     """Concrete tuple subspaces that exist.
 
     Unpaged by default (every matching subspace). Pass --limit to page
-    (a scalability research pass over this design, bead nexus-xapt8): a truncated page
+    (a scalability research pass over this design: a truncated page
     prints a "next: --after=<cursor>" hint line (or, under --json, the
     array's last element is {"next_cursor": "..."}).
     """
@@ -949,7 +949,7 @@ def tuple_stats_cmd(subspace: str, json_out: bool) -> None:
 @click.argument("name")
 @click.option("--json", "json_out", is_flag=True, default=False, help="Output as JSON.")
 def tuple_directory_cmd(name: str, json_out: bool) -> None:
-    """Show who holds NAME in the RDR-208 session directory.
+    """Show who holds NAME in the session directory.
 
     Prints each live directory/NAME entry's session_id, created_at and
     expires_at, and flags NAME as ambiguous when more than one distinct

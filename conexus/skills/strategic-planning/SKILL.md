@@ -72,7 +72,7 @@ The agent's method:
 6. Create beads for trackable work items
 7. Define success criteria and test strategy
 
-**REQUIRED STEP:** Call `mcp__plugin_conexus_nexus__nx_plan_audit` after creating any plan (RDR-080 — no agent spawn needed).
+**REQUIRED STEP:** Call `mcp__plugin_conexus_nexus__nx_plan_audit` after creating any plan (no agent spawn needed).
 
 ## Success Criteria
 
@@ -82,7 +82,7 @@ The agent's method:
 - [ ] Beads created for all tasks
 - [ ] Success criteria defined per task
 - [ ] Risks identified and mitigated
-- [ ] Plan validated via `mcp__plugin_conexus_nexus__nx_plan_audit` (RDR-080)
+- [ ] Plan validated via `mcp__plugin_conexus_nexus__nx_plan_audit`
 
 ## Agent-Specific PRODUCE
 

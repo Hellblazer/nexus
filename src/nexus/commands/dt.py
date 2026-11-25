@@ -935,9 +935,9 @@ def dt() -> None:
         "--collection is not set. PDFs route to "
         "``knowledge__<corpus>-papers`` (paper-shaped, aspect-eligible "
         "via scholarly-paper-v1); markdown notes route to "
-        "``docs__<corpus>``. Pre-nexus-cvaw the default was "
+        "``docs__<corpus>``. Earlier the default was "
         "``default`` and PDFs landed in ``docs__default`` where "
-        "aspect extraction is intentionally disabled (nexus-z70w)."
+        "aspect extraction is intentionally disabled."
     ),
 )
 @click.option(
@@ -966,7 +966,7 @@ def dt() -> None:
         "After a record indexes, stamp the nexus identity back onto the "
         "DEVONthink record (Layer F): nx-indexed / nx-tumbler:<t> tags "
         "(add-mode, no clobber), a tumbler backlink annotation, and "
-        "nxtumbler custom metadata. nexus-owned namespace only; never edits "
+        "nxtumbler custom metadata. Only nexus's own namespace; never edits "
         "user content; honours Exclude-from-AI&MCP on a best-effort basis "
         "(records with empty AI-extracted content are skipped). Opt-in, "
         "default off."
@@ -979,7 +979,7 @@ def dt() -> None:
     default=False,
     help=(
         "After indexing, run a DT-CrossRef bibliographic gap-fill pass over "
-        "each touched collection (RDR-139 Layer C): the 'auto' primary "
+        "each touched collection: the 'auto' primary "
         "backend, then DEVONthink's CrossRef resolver fills only still-empty "
         "bib_* fields. Strictly lowest-precedence; never overwrites an "
         "S2/OpenAlex value. DT unavailable -> primary-only. Opt-in, default off."
@@ -993,7 +993,7 @@ def dt() -> None:
     help=(
         "Index non-file-backed records (web archives, bookmarks, formatted "
         "notes — anything without a .pdf/.md file) from DEVONthink's "
-        "AI-extracted text instead of skipping them (RDR-139 Layer D). Every "
+        "AI-extracted text instead of skipping them. Every "
         "chunk is stamped extraction_source=dt_content; file-backed records "
         "still index from their file (provenance absent == file). DT "
         "unavailable -> records skipped exactly as today. Opt-in, default off."
@@ -1008,7 +1008,7 @@ def dt() -> None:
         "After a record indexes, ingest its DEVONthink highlights + mentions "
         "(extract_record_highlights / extract_record_mentions) as a markdown "
         "note attached to the record's catalog tumbler in the document_highlights "
-        "T2 table (RDR-139 Layer E). DT unavailable or no highlights -> nothing "
+        "T2 table. DT unavailable or no highlights -> nothing "
         "ingested. Opt-in, default off."
     ),
 )
@@ -1031,7 +1031,7 @@ def dt() -> None:
     default=False,
     help=(
         "Accept a PDF whose extracted pages do not cover DEVONthink's "
-        "pageCount (nexus-i0cwh). By default a gap is a per-record failure "
+        "pageCount. By default a gap is a per-record failure "
         "and the run exits non-zero; the gap is recorded on the catalog row "
         "as meta.page_gap either way."
     ),
@@ -1043,13 +1043,12 @@ def dt() -> None:
     help=(
         "Force re-indexing every record, bypassing the staleness check "
         "(re-chunks and re-sends every chunk in place) — same decoupled "
-        "semantics as ``nx index pdf --force`` (nexus-8143o): does NOT by "
+        "semantics as ``nx index pdf --force``: does NOT by "
         "itself force a Voyage re-embed, the server's own existence-"
         "partition still skips the embed call for a byte-identical chunk. "
         "Add --re-embed for the old force-re-embeds-everything behaviour. "
         "Applies to both file-backed records and, with --dt-content, "
-        "non-file-backed ones. Catalog identity and tumbler are preserved "
-        "(nexus-gup3b)."
+        "non-file-backed ones. Catalog identity and tumbler are preserved."
     ),
 )
 @click.option(
@@ -1059,7 +1058,7 @@ def dt() -> None:
     default=False,
     help=(
         "With --force: also force a Voyage re-embed of every chunk, even "
-        "ones whose text is unchanged (the pre-nexus-8143o --force "
+        "ones whose text is unchanged (the earlier --force "
         "behaviour). Has no effect without --force -- there is nothing to "
         "re-embed for a record the staleness check already skips. "
         "Reserve for a genuine embedding-model change; a plain "
@@ -1989,7 +1988,7 @@ def open_cmd(tumbler_or_uuid: str) -> None:
 def incorporate_cmd(uuid: str) -> None:
     """Incorporate an already-indexed DT record into the nexus graph.
 
-    Layer B + F composite (nexus-goypg: relocated verbatim from the retired
+    Composite (relocated verbatim from the retired
     nx-mcp-devonthink proxy's ``dt_incorporate`` tool — the one capability
     the proxy had that DEVONthink's own MCP server cannot provide): resolves
     the record's tumbler (it must already be indexed — run ``nx dt index``
@@ -2153,7 +2152,7 @@ def capture_cmd(
     sensitive: bool = False,
     ack_external_embedder: bool = False,
 ) -> None:
-    """Capture a URL, DOI, or file into DEVONthink and index it (RDR-139 Layer G).
+    """Capture a URL, DOI, or file into DEVONthink and index it.
 
     Provide exactly one source: a URL argument, ``--doi``, or ``--file``. The
     captured record is then indexed (and optionally linked / written-back /

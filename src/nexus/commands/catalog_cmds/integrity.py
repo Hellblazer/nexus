@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     is_flag=True,
     help=(
         "Sweep every physical_collection in the catalog and emit a "
-        "single summary report. nexus-3e4s Phase 3 — the post-fix "
+        "single summary report: the post-fix "
         "health check. Incompatible with --purge-non-canonical and "
         "--canonical-home (per-collection contexts)."
     ),
@@ -100,7 +100,7 @@ def audit_membership_cmd(
 ) -> None:
     """Detect cross-project source_uri contamination in COLLECTION.
 
-    Originated from ART-lhk1 (nexus-ow9f): 140 of 245 catalog rows
+    Originated from ART-lhk1: 140 of 245 catalog rows
     in ``rdr__ART-8c2e74c0`` had ``source_uri`` rooted in
     ``/Users/.../nexus/`` rather than the project's expected
     ``/Users/.../ART/`` root. The collection's chunks live under one
@@ -115,8 +115,8 @@ def audit_membership_cmd(
     standard ``delete_document`` path.
 
     With ``--all-collections`` the audit runs across every
-    physical_collection in the catalog and emits one summary report
-    (nexus-3e4s Phase 3). Read-only — purge is per-collection only.
+    physical_collection in the catalog and emits one summary report.
+   Read-only — purge is per-collection only.
     """
     if all_collections:
         if purge_non_canonical:
@@ -1578,10 +1578,10 @@ def _verify_scoped(cat: "CatalogReader", collection: str, *, heal: bool, json_ou
     help="Emit the machine-readable CI contract shape (see below).",
 )
 def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
-    """Reconcile the catalog against T3 on the RDR-108/180 chash identity.
+    """Reconcile the catalog against T3 on the chash identity.
 
     Independent finding classes, all keyed on tumbler ->
-    document_chunks.chash -> T3 chunk id (never the retired pre-RDR-108
+    document_chunks.chash -> T3 chunk id (never the retired legacy
     ``meta.doc_id``):
 
     \b
@@ -1601,10 +1601,10 @@ def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
                              notes with no file_path/source_uri —
                              legitimate BY DESIGN) and ``unclassified``
                              (everything else — candidate data loss, see
-                             nexus-cdypx). Report-only, never a finding,
+                             `nx catalog reconcile-stale`). Report-only, never a finding,
                              never affects the exit code either way.
       ghosts (full mode only)  read-only CENSUS of docs with blank/NULL
-                             physical_collection (nexus-xeux8) — a
+                             physical_collection — a
                              population BOTH this command's own health
                              classification and ``nx catalog
                              reconcile-stale`` exclude outright, so

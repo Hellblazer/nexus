@@ -187,14 +187,14 @@ def _raise_engine_floor(exc: httpx.HTTPStatusError) -> None:
     help="Emit the dry-run report as JSON on stdout. Cannot be combined with --no-dry-run.",
 )
 def purge_trash_cmd(older_than_days: int, dry_run: bool, confirm: bool, json_out: bool) -> None:
-    """Physically reclaim tombstoned catalog rows + their orphaned T3 chunks (nexus-3ck2g).
+    """Physically reclaim tombstoned catalog rows + their orphaned T3 chunks.
 
     Default (no flags) is a read-only preview: per-dim stranded-chunk
     counts and an aged-tombstone document count, BOTH gated by
     --older-than-days (catalog-026: tombstones inside the grace window
     keep row, manifest, and chunks together), computed engine-side via
     ``nexus.purge_trash(older_than_days, dry_run=true)``. Nothing is
-    deleted in this mode. The default window is ONE day (Sam, 2026-09-05: the 30-day
+    deleted in this mode. The default window is ONE day (the 30-day
     default held 880 documents and 1,503 stranded chunks for months while
     the request was to delete them; a day is the reversible period, and
     git already holds the source). Pass ``--older-than-days 30`` for the
@@ -211,12 +211,12 @@ def purge_trash_cmd(older_than_days: int, dry_run: bool, confirm: bool, json_out
 
     See the module docstring for why the writer is constructed up front
     here (deviates from reconcile-stale's lazy-writer pattern) and for
-    the pre-nexus-3ck2g engine-floor refusal.
+    the earlier engine-floor refusal.
 
-    POPULATION NOTE (nexus-heizf): the stranded-chunk count above is
+    POPULATION NOTE: the stranded-chunk count above is
     tombstoned-doc chunks with no live parent (chunk -> parent direction).
-    See the module docstring's POPULATION section — RDR-191 Phase 6
-    (nexus-o8dil.33) retired the counterpart population (`nx doctor`'s
+    See the module docstring's POPULATION section — a later phase
+    retired the counterpart population (`nx doctor`'s
     former "dangling manifest chashes" warn / the former catalog
     manifest-verify listing) this note used to disambiguate against; the
     manifest-chunk FK makes that population unreachable.
