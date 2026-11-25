@@ -65,6 +65,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md`: the relay validation and the relay example take a tracking id in the Bead field, nexus-sby49.3.
 - `conexus/commands/debug.md`: the relay's Bead field takes a tracking id, nexus-sby49.3.
 - `conexus/commands/review-code.md`: the relay's Bead field takes a tracking id, nexus-sby49.3.
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`: the maintainer's full guard also denies `git reflog delete` (plan 2.1), nexus-sby49.3.
 - `conexus/hooks/audience.yaml`: the audience manifest, one entry per hook registration, module and injected constant; read by the lint and the behaviour leg, nexus-sby49.3.
 - `conexus/hooks/scripts/routing/registry.yaml`: each rule carries its `audience`, nexus-sby49.3.
 - `conexus/skills/writing-nx-skills/promotion.md`: the target table gains an Audience column, a hook target is live only with its audience.yaml entry and a behaviour-leg case, and the loss check lists over-reach, nexus-sby49.3.
