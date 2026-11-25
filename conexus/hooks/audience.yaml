@@ -693,7 +693,7 @@ constants:
 - id: nexus.hooks.session_context:_INDEX_BEADS
   audience: EVERY-USER
   gate: data
-  evidence: 'I2: named only where the project has .beads/ or bd is on PATH'
+  evidence: 'I2: named only where the project has .beads/ and bd is on PATH'
   target_state: as is
   phase: '2'
 - id: nexus.hooks.session_context:_INDEX_RDR
