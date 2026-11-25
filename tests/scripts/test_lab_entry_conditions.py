@@ -390,6 +390,28 @@ def test_lab_commands_name_things_that_exist() -> None:
                 assert flag in text, f"{where}: {script} has no {flag} option"
 
 
+def test_a_script_a_command_runs_directly_is_executable() -> None:
+    """The first live run of the pipefail twin died with `env: scripts/watched_pytest.py: Permission denied`: the file is
+    mode 100644 and the repo runs it as `python3 scripts/watched_pytest.py`. A .py a command names runs under an
+    interpreter; a .sh runs under bash or is executable."""
+    reg = _registry()
+    seen = 0
+    for where, cmd, _e in _all_commands(reg):
+        for m in re.finditer(r"(?<![\w/])(scripts/[\w./-]+\.(?:py|sh))", cmd):
+            seen += 1
+            before = cmd[: m.start()].rstrip()
+            path = ROOT / m.group(1)
+            if path.suffix == ".py":
+                assert re.search(r"(?:python3?|python3\.\d+)$", before) and not before.endswith("env"), (
+                    f"{where}: {m.group(1)} is run without an interpreter in front of it: {cmd}"
+                )
+            else:
+                assert before.endswith("bash") or path.stat().st_mode & 0o111, (
+                    f"{where}: {m.group(1)} is not executable and not run under bash: {cmd}"
+                )
+    assert seen >= 10, "non-vacuity: too few script invocations found"
+
+
 def test_a_lint_marked_twin_runs_a_file_the_lint_bucket_selects() -> None:
     """`pytest -m lint <file>` runs nothing unless the file carries the lint mark."""
     reg = _registry()

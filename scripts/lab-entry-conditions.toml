@@ -190,7 +190,7 @@ host = "chas-test or qwent-test (first command), laptop worktree (second)"
 gap = "chas has no GraalVM, so no native image is built and no embedded-resources.json exists to check. The twin is the JVM-side census of the resource config (ResourceConfigCensusTest, also part of the engine main suite) plus the checker's own unit tests; it does not read a real binary's report or the build-order lines. A lane that changes service/pom.xml's -H:IncludeResources patterns, the native-image resource config or the checker's inputs takes the PR trip-wire 'engine-service native build (PR trip-wire)' (or the engine-release Step 3f dispatch run) as the verdict on a real binary, after the push."
 command = [
   "scripts/mvnw-leased.sh --lab-run lab-m -B test -Dtest=ResourceConfigCensusTest",
-  "lab-remote -c lab-m --fetch native-resources-status.json -- env NX_TEST_T2_SUBSTRATE=none scripts/watched_pytest.py --stall 180 --status native-resources-status.json -- uv run pytest tests/scripts/test_check_native_embedded_resources.py",
+  "lab-remote -c lab-m --fetch native-resources-status.json -- env NX_TEST_T2_SUBSTRATE=none python3 scripts/watched_pytest.py --stall 180 --status native-resources-status.json -- uv run pytest tests/scripts/test_check_native_embedded_resources.py",
 ]
 
 [[check]]
@@ -205,7 +205,7 @@ host = "laptop worktree"
 gap = "CI runs the whole lint bucket (about 2,100 tests in two hosted groups); this runs the one test file. Another lint-marked test a lane's diff reaches (a census, a frontmatter or hook lint) is not run here: checklist 0a's `scripts/meta_tests.py run --base <tip>` selects those by diff reach, and develop CI runs the rest."
 note = "The default addopts deselect `lint` everywhere else, so nothing in an ordinary hand run reaches this test. It scans every shell script with pipefail (it went red on service/native-smoke.sh), so run it on any lane that touches a .sh file. It is substrate-free, so no gate jar is needed."
 command = [
-  "lab-remote -c lab-m --fetch pipefail-lint-status.json -- env NX_TEST_T2_SUBSTRATE=none scripts/watched_pytest.py --stall 180 --status pipefail-lint-status.json -- uv run pytest -m lint tests/test_pipefail_early_exit_consumer_lint.py",
+  "lab-remote -c lab-m --fetch pipefail-lint-status.json -- env NX_TEST_T2_SUBSTRATE=none python3 scripts/watched_pytest.py --stall 180 --status pipefail-lint-status.json -- uv run pytest -m lint tests/test_pipefail_early_exit_consumer_lint.py",
 ]
 
 [[check]]
@@ -225,7 +225,7 @@ gap = "Transcribed from CI's steps and not yet run on a lab host: the first live
 note = "ca3_core includes the Liquibase changelog tree, so every changeset lane triggers this job on the develop push."
 command = [
   "uv sync -q --group dev",
-  'lab-run -c lab-m -- env NEXUS_CA3_BUNDLE="$PWD/bundle" scripts/watched_pytest.py --stall 180 --status ca3-live-status.json -- uv run pytest tests/db/test_pg_provision_ca3_bundle.py -o addopts= -m integration -rs --junit-xml=ca3.xml',
+  'lab-run -c lab-m -- env NEXUS_CA3_BUNDLE="$PWD/bundle" python3 scripts/watched_pytest.py --stall 180 --status ca3-live-status.json -- uv run pytest tests/db/test_pg_provision_ca3_bundle.py -o addopts= -m integration -rs --junit-xml=ca3.xml',
   "uv run python scripts/assert_ca3_ran.py ca3.xml",
 ]
 also_covers = ["tests/db/test_pg_provision_ca3_bundle.py"]
