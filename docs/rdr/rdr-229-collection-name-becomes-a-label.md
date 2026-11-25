@@ -4495,8 +4495,14 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
   (safe in effect; the ledger asks 8.5.6 to skip a re-entry whose job's
   target is retired or gone) (`docs/wire-contract-pending.md:112`, `:117`;
   T2 `229-research-335`). The client floor bumps in the release that first
-  depends on each, engine deployed first. Routes accept both a label and an
-  id from P3.5, so an older client keeps working until the floor bump,
+  depends on each, engine deployed first. Routes accept a label or an id in
+  each slot from P3.5, one form per slot: an id and a label in one slot is a
+  400 (`CollectionSelectorFilter.java:404-405`, `:444`, `:572`), and the 409
+  `collection_id_mismatch` is only an internal guard for an id and a label
+  that reach a write from different sources (bead nexus-p2m1x.23, linda's
+  rulings in its comments of 2026-11-22 11:25 and 2026-11-23 12:16;
+  `HttpUtil.java:628-640`). An older client, which names labels only, keeps
+  working until the floor bump (`CollectionSelectorFilter.java:47-48`),
   except for those three P3.7 changes and the delete's `collection_busy`.
   An install that skips
   releases is guarded by its own moves, not by the cut order: its readers
@@ -4730,3 +4736,4 @@ large, and moved under a ratchet.
 - 2026-11-24: P3.12 landed in part (nexus-p2m1x.32): the ID column and the doctor census rows, e643d66b67. `nx collection delete` by id did not ship: `delete_cmd` takes only a name (`src/nexus/commands/collection.py:556-559`); the by-id delete is item 2 of bead nexus-p2m1x.32 (in progress), which the RDR had not cited. The ID column is first of the catalog columns; the printed header is `NAME CHUNKS STORED ID CONTENT_TYPE OWNER MODEL DIM STATE` (`tests/test_collection_cmd.py:133`).
 - 2026-11-24: wording follow-up (grant 3, matching the code on develop 9c8bc0d04b; T2 `229-research-338`, from halcyon's docs audit and the counted observations of fix checks `229-fix-check-0b49917e9d` and `229-fix-check-9c4a5f77f8`; the latter's corrections: the deferred R7 pieces go to the next paired cut, after 0.1.202 / 8.5.6, not "the cut paired with 8.5.6" (bead nexus-p2m1x.25, comment of 2026-11-24 10:53); the per-reader tests are not attributed to a ruling, they did not ship and stay on that bead; the landing lines cover the code steps P3.3a-P3.12 with P3.10 not landed, and mark each sha already in an engine tag; 1b740b8a65 is the repository's delete by id and the route is `CollectionDeleteRoute`, 80d3e73a85; the by-id delete is item 2 of nexus-p2m1x.32; the printed list header puts ID fourth): the landing lines above; P3.5c states only the partial R7 as shipped; P3.12 says what shipped and defers the by-id delete; the kept page's cause is the finish BLOCKED branch logging no page and the sampler finding the move still announced (`MoveBootWork.announce`, `retainAnnounced`), not `entered`; the pre-fix loss was the page and the doctor's red row, while `boot_work` kept `waiting_for_builds`; the doctor's note and warning are for a move with no page; the drop move's page is named as such; the sampler assertion is cited.
 - 2026-11-24: final citation and vocabulary pass (grant 3, nexus-p2m1x; T2 `229-research-339`): the engine and client cites re-read from develop 4e6824e6ae, the dropped `isFileRoutedCollection`, the for_tuple filters and the `quarantine-` prefix census restated as the code has them, the client id-trust trigger on one rule (the name-key drop move's `completed_at` and `ids_stable`), "gate 3" changed to "the latch" where a sentence means the latch, and the 400 list completed (an id over 18 digits, an id key given twice). No Test sentence changed.
+- 2026-11-24: the Versioning sentence on routes follows linda's ruling on nexus-p2m1x.23 (T2 `229-research-340`): a route takes a label or an id in each slot, one form per slot; an id and a label in one slot is a 400; the 409 `collection_id_mismatch` is an internal guard for an id and a label from different sources.
