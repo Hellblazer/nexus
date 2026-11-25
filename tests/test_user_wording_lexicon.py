@@ -123,6 +123,10 @@ def _cli_hits(root: click.Group, excluded=_EXCLUDED_GROUPS) -> tuple[int, list[s
     """Walk every command of *root* (hidden ones included): help, short help, epilog, every option's help and spelling."""
     examined = 0
     found: list[str] = []
+    own = [("nx", root.help or ""), ("nx", root.epilog or "")] + [(f"nx {p.name}", getattr(p, "help", None) or "") for p in root.params]
+    for where, text in own:
+        examined += 1
+        found.extend(f"{where}: {h}" for h in hits(text))
     for name, cmd in sorted(root.commands.items()):
         if name in excluded:
             continue
