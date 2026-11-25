@@ -324,19 +324,18 @@ def _board_of_origin(store: Any, repo: str) -> str:
               help="The whole owner post, board/ci/<TOPIC>: a base, a double dash and `owner` (the same as --base "
                    "with `--owner` added; give one of the two).")
 @click.option("--not-mine", "not_mine", is_flag=True,
-              help="Say the red is not yours instead of acknowledging it: post a `disclaim` row for SHA. The engine "
-                   "does not act on it yet, so it is recorded only; from the engine cut that reads it, a disclaim "
-                   "from the red's current owner hands the red on at once, as a missed deadline does, and one from "
-                   "anyone else is ignored.")
+              help="Say the red is not yours instead of acknowledging it: post a `disclaim` row for SHA. A disclaim "
+                   "from the red's current owner hands the red on at once, as a missed deadline does (engine 0.1.201 "
+                   "and later; an older engine only records it), and one from anyone else is ignored.")
 @click.option("--note", default=None,
               help=f"With --not-mine, a line saying why or who has it (at most {_NOTE_MAX} characters, no control "
                    "characters). Shown by `nx group ack-times`.")
 def ci_ack_cmd(sha: str, base: str | None, topic: str | None, not_mine: bool, note: str | None) -> None:
     """Acknowledge a red develop: post the owner's ack for SHA, signed with this session's identity id.
 
-    With --not-mine the row is a `disclaim` instead: "this red is not mine". It is recorded only until the engine cut
-    that reads it; from then on a disclaim from the red's current owner hands the red on at once, without waiting for
-    the acknowledgement deadline. It takes the same SHA, the same owner check and the same identity as an ack. An ack
+    With --not-mine the row is a `disclaim` instead: "this red is not mine". The engine (0.1.201 and later; an older one
+    only records the row) hands the red on at once when its current owner disclaims, without waiting for the
+    acknowledgement deadline. It takes the same SHA, the same owner check and the same identity as an ack. An ack
     only says "seen", and a disclaim says "someone else should take it".
 
     SHA is the red's sha or a prefix of at least 7 hex digits; it is resolved against the tips of the CURRENT red on
@@ -412,8 +411,8 @@ def ci_ack_cmd(sha: str, base: str | None, topic: str | None, not_mine: bool, no
     except Exception as exc:  # noqa: BLE001 -- CLI boundary: one line and exit 1
         raise click.ClickException(f"could not post the {kind}: {type(exc).__name__}: {exc}") from exc
     if not_mine:
-        click.echo(f"disclaimed {full[:7]} on {subspace} as {identity} ({row_id[:12]}); recorded only until the engine "
-                   "cut that reads it hands the red on")
+        click.echo(f"disclaimed {full[:7]} on {subspace} as {identity} ({row_id[:12]}); the engine hands the red on "
+                   "at once (an engine older than 0.1.201 only records it)")
         return
     click.echo(f"acked {full[:7]} on {subspace} as {identity} ({row_id[:12]})")
 

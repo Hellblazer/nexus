@@ -937,7 +937,7 @@ def apply_catalog_content_hashes(
     skips it. The manifest-chunk FK (catalog-029) rejects a manifest row
     with no chunk and the sweeps only reap superseded rows, so a live
     'complete' doc losing its own chunks is not a state the store admits;
-    if it ever appears, ``nx index --force`` is the remedy.
+    if it ever appears, ``nx index repo <repo-root> --force`` is the remedy.
     """
     if not complete_doc_hashes:
         return 0

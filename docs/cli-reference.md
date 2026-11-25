@@ -3285,7 +3285,7 @@ Chunk counts come from T3's live `coll.count()` (same source as `nx collection l
 |------|-------------|
 | `-y` / `--yes` / `--confirm` | Skip interactive confirmation prompt |
 
-With conexus 8.5.6 and engine 0.1.202, a delete (by name or id) is refused with 409 `collection_busy`, and removes nothing, while a re-embed job in `planned`, `running`, `paused`, `cutover` or `failed` state holds the collection as its source or target (RDR-229 P3.5a, engine 0.1.202). The message names the job and the way out: wait for a running or cutover job, resume or abort a paused one, abort a failed one (`nx collection re-embed --status|--resume|--abort JOB`). `prune` and `reindex` meet the same refusal and report it without deleting.
+With conexus 8.5.6 and engine 0.1.203, a delete (by name or id) is refused with 409 `collection_busy`, and removes nothing, while a re-embed job in `planned`, `running`, `paused`, `cutover` or `failed` state holds the collection as its source or target (RDR-229 P3.5a, engine 0.1.202). The message names the job and the way out: wait for a running or cutover job, resume or abort a paused one, abort a failed one (`nx collection re-embed --status|--resume|--abort JOB`). `prune` and `reindex` meet the same refusal and report it without deleting.
 
 Delete cascade (engine-side, RDR-164 P2) covers the collection's chunks, taxonomy assignments + topics + centroids, aspects, highlights, aspect-queue rows, and catalog documents + manifest + collection registration; the streaming pipeline buffer is swept by its own engine endpoint (RDR-186). `chash_index` is retired (RDR-187).
 

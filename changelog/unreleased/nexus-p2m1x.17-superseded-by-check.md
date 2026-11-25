@@ -1,3 +1,0 @@
-### Fixed
-
-- **The superseded_by CHECK no longer fails D2's repair move on a skip-upgrade install.** `catalog_collections_superseded_by_id_check` is its own changeset (`vectors-068-19`), skipped and retried on each boot (RDR-246 `onFail="CONTINUE"`) while a registry tombstone has a blank `model_version` and no `superseded_by_id`, the rows D2's `repair-catalog-collection-model-version` UPDATE would otherwise hit with 23514. The id column (`vectors-068-2`) is not behind the wait, because the dual write sets it whether or not the CHECK exists. A lint fails when any changeset adds that constraint without the precondition (nexus-p2m1x.17).

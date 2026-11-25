@@ -1,5 +1,41 @@
 # Changelog
 
+## [8.5.6] - 2026-11-24
+
+Plugin version aligned with conexus 8.5.6. These plugin changes become live at this pin; all are text changes to skills, agents, commands and shared resources.
+
+- `conexus/skills/catalog/SKILL.md` -- `implements-heuristic` is a legacy type whose automated pass no longer runs (off since engine v0.1.57), and graph traversal excludes it by default, nexus-ybj1b.
+- `conexus/skills/nexus/SKILL.md` -- the link-type line marks `implements-heuristic` legacy (no longer generated), nexus-ybj1b.
+- `conexus/skills/rdr-close/SKILL.md` -- step 1 of catalog links no longer says the indexer auto-generates `implements-heuristic` links; it says to link a new RDR's files with `implements` directly, nexus-ybj1b.
+- `conexus/agents/architect-planner.md` -- the T2 context line says only the SubagentStart hook injects it (SessionStart prints an index), 8.5.6 docs audit.
+- `conexus/agents/code-review-expert.md` -- same T2 context line.
+- `conexus/agents/codebase-deep-analyzer.md` -- same T2 context line; the bead is closed by the caller, not the agent; the search example names the bare `code` corpus.
+- `conexus/agents/debugger.md` -- same T2 context line; the persistence default is T1 scratch (T3 only for validated findings); the caller closes the bead.
+- `conexus/agents/deep-analyst.md` -- same T2 context line; T1-first persistence default; the caller closes the bead.
+- `conexus/agents/deep-research-synthesizer.md` -- same T2 context line; a relay-specified T2 `ttl` omitted means permanent (there is no default 30); the collection example is a placeholder; the link-type list marks `implements-heuristic` legacy.
+- `conexus/agents/developer.md` -- same T2 context line; no Agent tool and no commit stated in When to Delegate and PRODUCE; the review gate is the caller's policy, not a push guard; T2 default TTL is permanent.
+- `conexus/agents/substantive-critic.md` -- same T2 context line.
+- `conexus/agents/test-validator.md` -- same T2 context line.
+- `conexus/commands/pdf-process.md` -- the collection argument is the bare subject, not a `knowledge__` name.
+- `conexus/commands/rdr-audit.md` -- the RDR-067 link-context tumbler is looked up in the catalog, not hard-coded.
+- `conexus/commands/rdr-gate.md` -- the preamble flag is `--skip-gaps`, the only override it honours; there is no `--skip-research`.
+- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` -- T1 lifetime and sharing, the restore advice for the shared tree, the PRODUCE and Beads rules for an implementer (no commit, no close), and the project-namespace count.
+- `conexus/resources/agent-shared/ERROR_HANDLING.md` -- T1 scope and lifetime errors, and the collection-name rules for new knowledge subjects.
+- `conexus/resources/agent-shared/MAINTENANCE.md` -- the search parameter is `limit`, not `n`.
+- `conexus/resources/rdr/TEMPLATE.md` -- Revision History holds one dated line per gate round, not the findings.
+- `conexus/skills/composition-probe/SKILL.md` -- the subagent's tool budget names the probe file write and the pinned runner it needs.
+- `conexus/skills/decision-drift-review/SKILL.md` -- the plan's required binding is `change_set`, filled from the question; nothing raises when it is missing.
+- `conexus/skills/document/SKILL.md` -- the document plan ends in a `compare`; no extract chain.
+- `conexus/skills/mailbox/SKILL.md` -- `mailbox_send` resolves a name to a session or an identity mailbox; `address_kind` values are agent, session and identity.
+- `conexus/skills/nexus/reference.md` -- tool count and list, the parameters the tables lacked, the nx_answer budget fields, store_get ids, no `--chunk-size`, and the collection-naming rule.
+- `conexus/skills/orchestration/SKILL.md` -- the mid-turn message to an agent goes through `mailbox_send`.
+- `conexus/skills/rdr-show/SKILL.md` -- the example catalog links show `implements` and mark `implements-heuristic` as an older edge.
+- `conexus/skills/rdr-audit-checklist/SKILL.md` -- the RDR-067 tumbler is resolved through the catalog; the schedule subcommands read triggers the user installed by hand; the prompt loads from the shipped file first.
+- `conexus/skills/rdr-gate-checklist/SKILL.md` -- the prior-art step lists collections with `collection_list`, not `store_list`.
+- `conexus/skills/upgrade/SKILL.md` -- a section on the RDR-229 stamp moves and the one engine restart; the managed-cloud hop text points at the migration runbook for the carry list.
+- `conexus/skills/why-was-this-written/SKILL.md` -- the plan's required binding is `symptom` only, filled from the question; the plan does one query, no link walk.
+- `conexus/skills/writing-nx-skills/SKILL.md` -- bead text is appended with `--append-notes`; `--body-file` and `--description` replace the description.
+
 ## [8.5.5] - 2026-11-21
 
 Plugin version aligned with conexus 8.5.5. No plugin file changed since 8.5.4.

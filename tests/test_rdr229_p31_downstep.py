@@ -356,6 +356,12 @@ def test_the_restore_runbook_says_what_an_orphan_row_does_to_a_restore_and_how_t
     assert "nothing is written" in flat.lower() or "nothing was written" in flat.lower()
 
 
+def _ledger_entries(ledger) -> list:
+    """Every ledger entry, Unshipped and Shipped: the release moves an entry from one section to the other, and what the entry
+    says (its direction-safety token, the old-client failure) is the same in both."""
+    return [*ledger.unshipped.values(), *ledger.shipped.values()]
+
+
 def test_the_client_lag_ledger_names_the_older_client_failure_against_the_p31_engine():
     """A client from before P3.1 registers a document before its collection, and the P3.1 engine answers 422 for a document under
     an unregistered collection: its first put into a new collection fails. The engine cut reads this ledger
@@ -365,8 +371,8 @@ def test_the_client_lag_ledger_names_the_older_client_failure_against_the_p31_en
         sys.path.insert(0, str(ROOT / "scripts"))
     wire = importlib.import_module("check_wire_contract_pairing")
     ledger = wire.parse_ledger(ROOT / "docs" / "wire-contract-pending.md")
-    entries = [e for e in ledger.unshipped.values() if e.bead == "nexus-p2m1x.17"]
-    assert entries, "no Unshipped entry for the P3.1 engine half: an older client's first put into a new collection is not named"
+    entries = [e for e in _ledger_entries(ledger) if e.bead == "nexus-p2m1x.17"]
+    assert entries, "no ledger entry (Unshipped or Shipped) for the P3.1 engine half: an older client's first put into a new collection is not named"
     note = " ".join(" ".join(e.note for e in entries).split())
     assert any(e.additive is False for e in entries), "old client + new engine is NOT safe: the entry must lead with [not-additive]"
     low = note.lower()
@@ -384,8 +390,8 @@ def test_the_client_lag_ledger_has_an_additive_entry_for_the_completion_status_f
         sys.path.insert(0, str(ROOT / "scripts"))
     wire = importlib.import_module("check_wire_contract_pairing")
     ledger = wire.parse_ledger(ROOT / "docs" / "wire-contract-pending.md")
-    entries = [e for e in ledger.unshipped.values() if "rdr229_completion" in e.note]
-    assert entries, "no Unshipped entry names the rdr229_completion status field"
+    entries = [e for e in _ledger_entries(ledger) if "rdr229_completion" in e.note]
+    assert entries, "no ledger entry (Unshipped or Shipped) names the rdr229_completion status field"
     for e in entries:
         assert e.additive is True, "an optional status field is additive"
         low = " ".join(e.note.split()).lower()

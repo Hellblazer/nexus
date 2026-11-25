@@ -3099,7 +3099,7 @@ class TestCheckStaleIndexingRuns:
 
     def test_a_stale_note_gets_the_re_put_remedy_not_the_repo_index_one(self, monkeypatch) -> None:
         """nexus-z0o2p.34: a note killed or failed after its write (or whose stamp failed) stays
-        'indexing' and nothing reruns it: it is not a file, so `nx index <path>` cannot reach it. The
+        'indexing' and nothing reruns it: it is not a file, so `nx index repo` cannot reach it. The
         remedy is to put it again (an idempotent re-write that fires its chains and stamps it)."""
         entries = [
             self._entry(index_state="indexing", index_started_at=self._iso_hours_ago(10),
@@ -3113,7 +3113,7 @@ class TestCheckStaleIndexingRuns:
         assert "note" in r.detail and "nx store put" in r.detail and "nx memory promote" in r.detail
         joined = " ".join(r.fix_suggestions)
         assert "nx store put" in joined, "the note remedy is a fix suggestion"
-        assert "nx index <path>" in joined, "and the file remedy is still offered for the file"
+        assert "nx index repo <repo-root>" in joined, "and the file remedy is still offered for the file"
 
     def test_a_stale_file_alone_does_not_get_the_note_remedy(self, monkeypatch) -> None:
         entries = [self._entry(index_state="indexing", index_started_at=self._iso_hours_ago(10),
@@ -4094,7 +4094,7 @@ class TestDoctorFenceNonRepoOwners:
         assert "2 of the named document(s) belong to a non-repo owner" in r.detail
         assert "nx catalog reconcile-fences" in r.detail
         assert r.fix_suggestions[0].startswith("nx catalog reconcile-fences --dry-run")
-        assert any("nx index <path> --force" in f for f in r.fix_suggestions), (
+        assert any("nx index repo <repo-root> --force" in f for f in r.fix_suggestions), (
             "the repo document still gets the repo remedy")
 
     def test_without_an_owner_table_every_candidate_keeps_the_repo_remedy(self, monkeypatch) -> None:

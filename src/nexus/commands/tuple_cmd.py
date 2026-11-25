@@ -577,6 +577,9 @@ def tuple_ack_cmd(
 ) -> None:
     """Consume a claimed tuple. The row is invisible to rd/in after this.
 
+    A row rewritten with `out` mode=replace while it was claimed is not
+    consumed by this ack: it goes back to available with the new body.
+
     With --reply-subspace, the engine writes the reply as it consumes the
     claim, in one transaction, and prints the reply's tuple id. There is no
     --reply-nonce flag: the engine sets the reply's nonce itself, to the

@@ -691,6 +691,17 @@ print(json.dumps([{k: r.get(k) for k in ('id', 'doc_id', 'collection', 'title', 
   dg_ok "$1"
 }
 
+# dg_coll_family_check NAME MODEL DESCRIPTION: the catalog row of the collection NAME is a knowledge collection
+# embedded with EXACTLY MODEL. A collection's name is a label, not its identity (RDR-229): a first put to a new
+# subject lands on the engine's c<id> label (8.5.6), an older install on a conformant four-segment name, so the
+# family is read from the registered attributes, never parsed out of the name. A row that is absent (404) or
+# carries another family fails here, exactly as a wrong name failed the old pattern.
+dg_coll_family_check() {
+  dg_request GET "/v1/catalog/collections/get?name=$1"
+  dg_expect_200 "GET /v1/catalog/collections/get ($1) answered $DG_CODE, so the collection has no catalog row"
+  dg_check "$3" "d.get('content_type')=='knowledge' and d.get('embedding_model')=='$2'"
+}
+
 # dg_mvv_require_gone COLLECTION: the catalog has no row for COLLECTION (404), where the same route answers 200
 # for the live Voyage collection, so the 404 is not a wrong path or tenant. A superseded source that a job kept
 # (kept_tombstoned, kept_by_flag, kept_residue) still has its row and fails here.
@@ -767,10 +778,13 @@ print(json.dumps({'collection': sys.argv[1], 'source_path': sys.argv[2], 'doc_id
     --title "gate-mvv-note-$DG_UID" <"$SCRATCH/mvv/note.txt" >"$DG_DIR/client.out" 2>"$DG_DIR/client.err" \
     || dg_mvv_client_fail "the store put of the mvv note exited non-zero"
   DG_MVV_NOTE_COLL="$(awk '/^Stored: / { print $NF }' "$DG_DIR/client.out")"
-  case "$DG_MVV_NOTE_COLL" in
-    knowledge__*__bge-base-en-v15-768__v*) dg_ok "the store put wrote the note to a bge collection ($DG_MVV_NOTE_COLL)" ;;
-    *) dg_mvv_client_fail "the store put did not report a bge-768 knowledge collection (got '$DG_MVV_NOTE_COLL')" ;;
-  esac
+  # A conformant name (an older install) or an engine-minted c<id> label (8.5.6); anything else is not a collection
+  # this client could have written, and its family is then read from the catalog, not from the name.
+  if ! { [[ "$DG_MVV_NOTE_COLL" =~ ^c[0-9]+$ ]] || [[ "$DG_MVV_NOTE_COLL" == knowledge__*__*__v* ]]; }; then
+    dg_mvv_client_fail "the store put reported '$DG_MVV_NOTE_COLL', neither a conformant knowledge name nor an engine-minted c<id> label"
+  fi
+  dg_coll_family_check "$DG_MVV_NOTE_COLL" bge-base-en-v15-768 \
+    "the store put wrote the note to a bge-768 knowledge collection ($DG_MVV_NOTE_COLL)"
 }
 
 # dg_run_mvv: the scenario, from the bge-profile engine of pass 2 to a second, empty --all.
@@ -814,10 +828,10 @@ d = json.load(open('$DG_DIR/resp.json'))
 jobs = d.get('jobs', d) if isinstance(d, dict) else d
 print(next((j.get('target_collection') or '' for j in jobs if j.get('source_collection')=='$DG_MVV_NOTE_COLL' and j.get('state')=='done'), ''))")" \
     || dg_fail "could not read the note's job from GET /v1/vectors/reembed/status"
-  case "$target" in
-    knowledge__*__voyage-context-3__v*) dg_ok "the job on the note's collection ended done, into $target" ;;
-    *) dg_fail "no done job moved $DG_MVV_NOTE_COLL to a voyage-context-3 sibling (target '$target')" ;;
-  esac
+  [ -n "$target" ] && [ "$target" != "$DG_MVV_NOTE_COLL" ] \
+    || dg_fail "no done job moved $DG_MVV_NOTE_COLL to another collection (target '$target')"
+  dg_coll_family_check "$target" voyage-context-3 \
+    "the job on the note's collection ended done, into $target (a voyage-context-3 knowledge collection)"
 
   dg_mvv_require_gone "$DG_BGE_COLL"
   dg_mvv_require_gone "$DG_MVV_NOTE_COLL"

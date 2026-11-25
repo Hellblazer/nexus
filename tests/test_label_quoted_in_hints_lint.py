@@ -18,6 +18,7 @@ import ast
 import pathlib
 import re
 import shlex
+import time
 
 import pytest
 
@@ -35,6 +36,10 @@ _LABEL_FLAGS: frozenset[str] = frozenset({"--collection", "-c"})
 #: Where a printed command ends inside its sentence.
 _COMMAND_END = re.compile(r"[`'\")\n;]| {2}|, | \(")
 _PLACEHOLDER = re.compile(r"^\{(.+)\}$")
+#: One ``{expression}`` of a template, where a call's parentheses may hold braces (``{f(a, {b})}``). Two alternatives, each
+#: unambiguous, so a ``{`` with no ``}`` after it fails in linear time: the nested ``(...)*`` form this replaces let a
+#: ``(`` be read as a plain character or as a group's opener, which backtracks exponentially on ``{`` followed by many ``()``.
+_PLACEHOLDER_EXPR = re.compile(r"\{[^{}]*\}|\{(?:[^{}()]|\([^()]*\))*\}")
 
 #: Sites left for a series that is editing the same file now: "<path>" -> ((exact command text, count), ...). Empty;
 #: an entry must match its count exactly, so a stale one fails.
@@ -71,7 +76,7 @@ def _bare_labels_in(text: str) -> list[str]:
         held.append(m.group(0))
         return f"\x00{len(held) - 1}\x00"
 
-    masked = re.sub(r"\{[^{}]*(?:\([^()]*\)[^{}]*)*\}", hold, text)
+    masked = _PLACEHOLDER_EXPR.sub(hold, text)
 
     def unmask(token: str) -> str:
         return re.sub(r"\x00(\d+)\x00", lambda m: held[int(m.group(1))], token)
@@ -139,6 +144,25 @@ def test_the_detector_finds_the_shapes_it_claims_to() -> None:
         'l = f"nx collection re-embed {shlex.quote(legacy)} --to {model}"\n'  # 12: --to takes a model, not a label
     )
     assert [f.split(":")[1] for f in _scan(src, "x.py")] == ["1", "3", "4", "7", "9", "10", "11"]
+
+
+def test_the_placeholder_pattern_matches_its_cases_and_does_not_backtrack() -> None:
+    def found(text: str) -> list[str]:
+        return [m.group(0) for m in _PLACEHOLDER_EXPR.finditer(text)]
+
+    assert found("nx collection delete {name}") == ["{name}"]
+    assert found("{shlex.quote(old)} {new}") == ["{shlex.quote(old)}", "{new}"]
+    assert found("{f(a, b)}") == ["{f(a, b)}"]
+    assert found("{f(a)} then {g(b)(c)}") == ["{f(a)}", "{g(b)(c)}"]
+    assert found("{f({x})}") == ["{f({x})}"]  # a call's parentheses may hold a nested placeholder
+    assert found("{a(b}") == ["{a(b}"]  # an unclosed paren is a plain character, as it always was
+    assert found("no placeholder (here)") == []
+    # The shape CodeQL reported: '{' then many '()' with no closing '}' ran exponentially (about 0.9 s at 24 pairs, doubling
+    # with each pair). Linear now: a few thousand pairs finish at once.
+    started = time.perf_counter()
+    assert found("{" + "()" * 5000) == []
+    assert found("{" + "(a)" * 5000 + "{{") == []
+    assert time.perf_counter() - started < 1.0
 
 
 def test_no_command_hint_prints_a_label_unquoted() -> None:
