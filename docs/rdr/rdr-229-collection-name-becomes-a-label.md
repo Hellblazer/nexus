@@ -111,8 +111,9 @@ file-routed identity.
 #### Gap 2: Lifecycle state is still read from the `quarantine-` name prefix
 
 RDR-204 Gap 4 replaced the `quarantine-` prefix with a `lifecycle_state`
-column for corpus resolution. The engine still infers `lifecycle_state` from
-the prefix when it registers a row, still guards quarantine operations by the
+column for corpus resolution. At the draft the engine inferred `lifecycle_state` from
+the prefix when it registered a row (since P2.5 only the ETL import's fallback
+does, item 4), still guards quarantine operations by the
 prefix (`QuarantineOrigin.isQuarantineName`), routes reaper work by it, and
 two live SQL functions refuse or select by it (the Java reads it in 12
 places at the draft; the gates pinned 6 `quarantine-` literals plus the one
@@ -406,9 +407,11 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
      In `scripts/`:
      `rdr-108-je0b-backfill.py:92`, `upgrade_boot_seed.py:67/86`, and seven
      in `bench/`, `experiments/` and `spikes/`. *T2 `229-research-21`.*
-  4. *Engine Java* (14 sites; the P1.3 gate pins 6 `quarantine-` literals and
-     35 reads, and the SQL gate 11 name-parsing expressions in 3 functions over
-     119 live functions at the draft; since P2.6 the ceiling is 0,
+  4. *Engine Java* (14 sites at the draft, 7 `quarantine-` tests and 2 file-routed
+     tests now; the P1.3 gate pinned 6 `quarantine-` literals and 35 reads at the
+     draft, and since P2.5 pins no literal besides the exempt constant and 36 reads,
+     `CollectionParseGateTest.java:343`, `:402`; the SQL gate 11 name-parsing
+     expressions in 3 functions over 119 live functions at the draft; since P2.6 the ceiling is 0,
      `CollectionNameSqlLiveBodyGateTest.java:135`, over 168 live functions, `:167`). The
      `quarantine-` prefix (12 tests at the draft, 7 since P2.5, which moved the
      rest to the row's `lifecycle_state`): `QuarantineOrigin.java:135`
@@ -2040,7 +2043,8 @@ while the engine serves:
     T2 `nexus/sam-ruling-rdr229-restart-request-follows-p37-code-2026-11-24`; T2 `229-research-329`). That is the one restart the
     chain from a half-stamped store needs. A client cache
     keyed by id holds a stable id only from the name-key drop move's
-    `completed_at` on the install, when the
+    `completed_at` on the install, and only once the rename answer's
+    `ids_stable` says so (`http_catalog_client.py:518-524`), when the
     rename becomes one row: before it, the name-path rename inserts a new
     registry row with a new id (T2 `229-research-53`), so until then the
     client refreshes an id-keyed entry on a rename and keys its lookups by
@@ -2223,7 +2227,7 @@ collision pre-check also goes through it (`CatalogRepository.java`; T2
 - the re-embed move (`completeMove`, `:7548`, `:7569`, `:7577`; pre-check
   `moveUriCollisions`, `:7615`);
 - re-home (`moveScopedTable`, `:12248`; pre-check `scope.requireUrisFree`,
-  `:12093`, which reaches `requireCollectionUrisFree`, `:11660-11664`);
+  `:12093`, which calls `moveUriCollisions` itself, `CollectionRehomeScope.java:159-166`);
 - rename (`:11825`, `:11830`, `:11835`, its rows selected by
   `namesCollection` at `:11828`, `:11833`, `:11838`; pre-check
   `requireCollectionUrisFree`, `:11686`).
@@ -3765,7 +3769,7 @@ its acceptance is that test green plus the census pin it lowers.
   `db/rdr229/p35b-continue-changesets.txt` in `databasechangelog` (item 6, Switch;
   `p35b-continue-changesets.txt:4-18`; T2
   `229-research-58`, `229-research-61`, `229-research-64`,
-  `229-research-320`). From gate 3
+  `229-research-320`). From the latch
   until the one-row rename can run, that is while the move has no
   `completed_at` or a P3.5b changeset has not applied, the engine refuses
   a rename with a typed error that names the missing condition (item 6
@@ -3891,7 +3895,7 @@ its acceptance is that test green plus the census pin it lowers.
 **Phase 4: contract and retire**
 
 - P4.0 Engine release that retires the Java name path: the jOOQ readers
-  of the name columns that P3.5 switched at gate 3, `renameCollectionTxn`'s
+  of the name columns that P3.5 switched once gate 3 had latched, `renameCollectionTxn`'s
   fourteen-table rewrite (the one-row rename of P3.7 is the only rename
   left), and the name-based arms of `COLLECTION_SCOPED_TABLES`
   (`CatalogRepository.java:11266`), which keep serving delete and
@@ -3945,7 +3949,7 @@ its acceptance is that test green plus the census pin it lowers.
   an install whose stamps are not yet complete `vectors-078`'s CONTINUE
   changesets apply at a later boot and put name-reading bodies back. The
   `on_complete` runs after both: the drop move registers only once gate 3
-  holds, and gate 3 waits for `vectors-078-8` (P3.5), whose precondition
+  has latched, and gate 3 waits for `vectors-078-8` (P3.5), whose precondition
   the other fourteen listed P3.5b changesets, of `vectors-078` and
   `vectors-084`, share word for word, so by
   then `vectors-078-3` and `-8`, the two that redefine survivors, have
@@ -4106,7 +4110,7 @@ validation move; the engine's id readers, P3.7's name-key drop move and
 one-row rename and P4.1's
 drop move wait also for P3.4 on that install; the one-row rename waits
 also for the name-key drop move's `completed_at` and for every P3.5b
-changeset to have applied, and from gate 3 until then the engine refuses
+changeset to have applied, and from the latch until then the engine refuses
 a rename. P3.5b's SQL readers outside the chunk family wait for
 the stamp moves, and apply at the first boot after them
 (`vectors-078:3-5`); those on the chunk family read both shapes, except the
@@ -4314,7 +4318,7 @@ these in the round 2 fixes, now addressed in the text:
 - Name-keyed upsert targets and name-only child cascades after a swap that
   dropped the name key, and client caches trusting ids a name-path rename
   replaces: P3.3b's pass adds the id key beside the name keys and P3.3c
-  adds the child id keys, all until P4.1; the writers move at gate 3, the
+  adds the child id keys, all until P4.1; the writers move once gate 3 has latched, the
   rename sets the new id, and caches trust ids
   once P3.7's name-key drop move has `completed_at` and the rename answer's
   `ids_stable` says so (item 6, P3.3c, P3.5, P4.1; T2 `229-research-53`).
@@ -4340,7 +4344,7 @@ DISCOVER-AT-IMPLEMENTATION ones as beads at accept (ask
   Assumption 3, P1.2, P2.10; T2 `229-research-57`).
 - The name composite foreign keys refused P3.7's one-row rename: seven of
   the eight name keys refuse it, and P3.7's name-key drop move drops them
-  once gate 3 holds, before the rename (item 6 Switch and Contract, P3.3a,
+  once gate 3 has latched, before the rename (item 6 Switch and Contract, P3.3a,
   P3.3c, P3.7, P4.1; T2 `229-research-58`).
 - S-1, Phase 4 retired the engine's name path with no per-install guard:
   P4.0, behind a boot floor (Contract, P4.0, Phase dependencies,
@@ -4357,7 +4361,7 @@ found these in those fixes, now resolved in the text:
   Contract, P4.1, Phase dependencies; T2 `229-research-61`).
 - `catalog_reconcile_commit` is a fifth URI-move path: P2.10 redefines it
   (item 7, item 12, P2.10; T2 `229-research-62`).
-- Readers on the id from gate 3 while a rename still minted a new id: the
+- Readers on the id from the latch while a rename still minted a new id: the
   engine refuses a rename until the name-key drop move completes and
   every P3.5b changeset has applied (item 6, P3.5a, P3.7, Versioning; T2
   `229-research-63`, `229-research-69`).
@@ -4500,8 +4504,8 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
   400 (`CollectionSelectorFilter.java:404-405`, `:444`, `:572`), and the 409
   `collection_id_mismatch` is only an internal guard for an id and a label
   that reach a write from different sources (bead nexus-p2m1x.23, linda's
-  rulings in its comments of 2026-11-22 11:25 and 2026-11-23 12:16;
-  `HttpUtil.java:628-640`). An older client, which names labels only, keeps
+  rulings in its comments of 2026-11-22 11:25 and 2026-11-23 12:53;
+  `CollectionSelectorFilter.java:64-68`, `CollectionRefusals.java:69-76`). An older client, which names labels only, keeps
   working until the floor bump (`CollectionSelectorFilter.java:47-48`),
   except for those three P3.7 changes and the delete's `collection_busy`.
   An install that skips
@@ -4737,3 +4741,4 @@ large, and moved under a ratchet.
 - 2026-11-24: wording follow-up (grant 3, matching the code on develop 9c8bc0d04b; T2 `229-research-338`, from halcyon's docs audit and the counted observations of fix checks `229-fix-check-0b49917e9d` and `229-fix-check-9c4a5f77f8`; the latter's corrections: the deferred R7 pieces go to the next paired cut, after 0.1.202 / 8.5.6, not "the cut paired with 8.5.6" (bead nexus-p2m1x.25, comment of 2026-11-24 10:53); the per-reader tests are not attributed to a ruling, they did not ship and stay on that bead; the landing lines cover the code steps P3.3a-P3.12 with P3.10 not landed, and mark each sha already in an engine tag; 1b740b8a65 is the repository's delete by id and the route is `CollectionDeleteRoute`, 80d3e73a85; the by-id delete is item 2 of nexus-p2m1x.32; the printed list header puts ID fourth): the landing lines above; P3.5c states only the partial R7 as shipped; P3.12 says what shipped and defers the by-id delete; the kept page's cause is the finish BLOCKED branch logging no page and the sampler finding the move still announced (`MoveBootWork.announce`, `retainAnnounced`), not `entered`; the pre-fix loss was the page and the doctor's red row, while `boot_work` kept `waiting_for_builds`; the doctor's note and warning are for a move with no page; the drop move's page is named as such; the sampler assertion is cited.
 - 2026-11-24: final citation and vocabulary pass (grant 3, nexus-p2m1x; T2 `229-research-339`): the engine and client cites re-read from develop 4e6824e6ae, the dropped `isFileRoutedCollection`, the for_tuple filters and the `quarantine-` prefix census restated as the code has them, the client id-trust trigger on one rule (the name-key drop move's `completed_at` and `ids_stable`), "gate 3" changed to "the latch" where a sentence means the latch, and the 400 list completed (an id over 18 digits, an id key given twice). No Test sentence changed.
 - 2026-11-24: the Versioning sentence on routes follows linda's ruling on nexus-p2m1x.23 (T2 `229-research-340`): a route takes a label or an id in each slot, one form per slot; an id and a label in one slot is a 400; the 409 `collection_id_mismatch` is an internal guard for an id and a label from different sources.
+- 2026-11-24: the fix checks' counted citations (grant 3, nexus-p2m1x; T2 `229-research-341`, from fix checks `229-fix-check-3de92acf1e` and `229-fix-check-6eec323c91`): the re-home pre-check calls `moveUriCollisions` itself (`CollectionRehomeScope.java:159-166`), not `requireCollectionUrisFree`; "gate 3" is "the latch" where the engine refuses a rename (and "once gate 3 has latched" where readers, writers and the drop move's registration read the latched value); item 4's header and Gap 2 separate the draft's counts from the current ones; the client's id trust names `ids_stable`; the Versioning sentence cites the bead's comments of 2026-11-22 11:25 and 2026-11-23 12:53 and the filter and refusal code. No Test sentence changed.
