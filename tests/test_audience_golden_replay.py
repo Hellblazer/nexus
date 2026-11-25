@@ -28,7 +28,10 @@ an old commit and the second needs the corpus:
 
     uv run pytest -m slow tests/test_audience_golden_replay.py -s
 
-Phase 2 retires the pin when it changes the maintainer path on purpose.
+Phase 2 retires ``PHASE1_PARENT`` (and with it the synthetic test) when it changes the maintainer path on
+purpose. The nightly ``slow`` job (``local-service-gate-nightly.yml``) runs both on a runner with full history
+and no corpus: the corpus test skips there unless ``NX_REQUIRE_REAL_CORPUS=1``, which the hand run that is
+evidence sets (``NX_REQUIRE_REAL_CORPUS=1 uv run pytest -m slow tests/test_audience_golden_replay.py -s``).
 """
 from __future__ import annotations
 
@@ -66,6 +69,11 @@ def _real_home() -> pathlib.Path:
 CORPUS = _real_home() / ".local" / "state" / "nexus" / "plans" / "corpus" / "subagent-bash-30d.jsonl"
 FLOOR_CWDS = 20
 FLOOR_COMMANDS = 500
+#: The hand run that is shipping evidence sets this to 1: a missing corpus then FAILS instead of skipping.
+#: The nightly `-m slow` job runs on a runner with no corpus, where the skip is right.
+REQUIRE_CORPUS_ENV = "NX_REQUIRE_REAL_CORPUS"
+#: A replay in which the old guard denied nothing proves nothing about its denies.
+FLOOR_OLD_DENIES = 1000
 SYNTHETIC_FLOOR = 1500
 REMOTE_HOSTS = "chas,chas-test"
 
@@ -210,7 +218,10 @@ def _toplevel(cwd: str) -> str | None:
 
 def test_the_real_corpus_replay_meets_the_floor_and_the_bars(old_tree, tmp_path):
     if not CORPUS.is_file():
-        pytest.fail(f"the real corpus is absent ({CORPUS}): Phase 0 extracts it. UNVERIFIED.")
+        reason = f"the real corpus is absent ({CORPUS}): Phase 0 extracts it on the maintainer's machine. UNVERIFIED."
+        if os.environ.get(REQUIRE_CORPUS_ENV) == "1":
+            pytest.fail(reason)
+        pytest.skip(reason + f" Set {REQUIRE_CORPUS_ENV}=1 on the hand run that is evidence, so an absent corpus fails there.")
     pairs: dict[tuple[str, str], None] = {}
     sessions: dict[str, int] = collections.Counter()
     for line in CORPUS.open(encoding="utf-8"):
@@ -248,8 +259,14 @@ def test_the_real_corpus_replay_meets_the_floor_and_the_bars(old_tree, tmp_path)
     # Bar 1: with the flag, maintainer() is true everywhere, and the verdicts are identical.
     not_maintainer = sorted({c["cwd"] for c, r in zip(cases, new_rows) if r["maintainer"] is not True})
     verdict_diffs = [c for c, o, n in zip(cases, old_rows, new_rows) if o["verdict"] != n["verdict"]]
+    old_denies = sum('"deny"' in r["verdict"] for r in old_rows)
+    denied_cwds = len({c["cwd"] for c, r in zip(cases, old_rows) if '"deny"' in r["verdict"]})
     print(f"flag present: maintainer() true for {len(existing) - len(not_maintainer)}/{len(existing)} cwds; "
-          f"verdicts identical for {len(cases) - len(verdict_diffs)}/{len(cases)} commands")
+          f"verdicts identical for {len(cases) - len(verdict_diffs)}/{len(cases)} commands; "
+          f"the old guard denied {old_denies} of them, in {denied_cwds} cwds")
+    assert old_denies >= FLOOR_OLD_DENIES, (
+        f"a vacuous corpus replay: the old guard denied {old_denies} commands (floor {FLOOR_OLD_DENIES})"
+    )
 
     # Bar 2: the flag removed through the seam; the marker alone must carry every nexus checkout that has one.
     by_cwd = {}
@@ -278,3 +295,14 @@ def test_the_real_corpus_replay_meets_the_floor_and_the_bars(old_tree, tmp_path)
     assert verdict_diffs == [], [(d["cwd"], d["command"][:100]) for d in verdict_diffs[:10]]
     assert nexus_like, "no nexus checkout among the existing cwds: the marker bar examined nothing"
     assert user_mode == marker_missing, "a nexus checkout WITH the marker fell to user mode"
+
+
+def test_an_absent_corpus_skips_unless_it_is_required(tmp_path, monkeypatch):
+    """The nightly slow job has no corpus and must not go red; the evidence run must not skip silently."""
+    monkeypatch.setattr(sys.modules[__name__], "CORPUS", tmp_path / "missing.jsonl")
+    monkeypatch.delenv(REQUIRE_CORPUS_ENV, raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        test_the_real_corpus_replay_meets_the_floor_and_the_bars(None, tmp_path)
+    monkeypatch.setenv(REQUIRE_CORPUS_ENV, "1")
+    with pytest.raises(pytest.fail.Exception):
+        test_the_real_corpus_replay_meets_the_floor_and_the_bars(None, tmp_path)
