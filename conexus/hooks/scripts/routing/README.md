@@ -57,6 +57,12 @@ and accepted, and are not to be patched with more spellings: raw writes into
 `.git/config` and `.git/hooks`; index, ref and HEAD writers reached through
 plumbing; verbs held in `$VAR`; decode-then-exec; and writing a script and
 then running it. The guard's own KNOWN LIMITS docstring carries the same list.
+Sam lifted the freeze once, for six named fixes (2026-11-25, nexus-5y47c, T2
+`nexus/sam-ruling-subagent-git-guard-fixes-2026-11-25`): the admission module
+`_git_admit.py` adds passes (read-only git and verb words in text, chained writes
+in a worktree git proves, a plain fetch, a detached worktree outside every repo, a
+scratch repository, a push of the worktree's own branch) and never removes a
+denial; the freeze otherwise stands.
 
 **`destructive_action_advice` is one hook, not eight** (nexus-qo7ie.36). It is a
 table: each `Row` in the script's `ROWS` names a rule (and where that rule comes

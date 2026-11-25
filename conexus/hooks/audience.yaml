@@ -463,6 +463,9 @@ modules:
   hooks/scripts/routing/_user_git_seatbelt.py:
     wrapper: none
     predicates: []
+  hooks/scripts/routing/_git_admit.py:
+    wrapper: none
+    predicates: []
   hooks/scripts/_audience.py:
     wrapper: none
     predicates: []

@@ -78,6 +78,15 @@ An agent's hand-back on this relay is not accepted on prose alone (bead nexus-cn
 - [Related bead ID and brief description]
 ```
 
+## Git in an Implementer Relay (nexus-5y47c)
+
+A subagent's Bash cwd is its session's start directory, which is the primary checkout even when its session works in a linked worktree, and the cwd does not persist between its calls. The subagent git-write guard judges every call from that cwd, so a brief that leaves git unsaid sends the agent into the guard (2,199 denials in the three weeks to 2026-11-25: 28% were agents already in an assigned worktree denied on the shape of the command, 5% followed a brief that ordered a forbidden step). An implementer relay that touches git carries these four lines, in `Context Notes`:
+
+- **Where.** The worktree is provisioned before dispatch, and the brief gives its absolute root. Never brief `git worktree add`: the guard denies it, apart from `git worktree add --detach <absolute path outside every repo>` for a read-only look at a ref.
+- **Which shape.** `git -C <absolute root> <verb> <flags spelled out>`, as one call or several chained with `&&` or `;`, or `cd <absolute root> && git <verb> ...`. Verbs: add, commit, rm, mv, switch -c, reset --soft/--mixed, rebase, cherry-pick, revert, merge, branch <new>. No `-am` or flag abbreviations; a commit message that names a git verb goes through `-F <file>` (write the file with the Write tool); `git fetch` is open. Checkout, stash, restore, reset --hard, clean and any write in the primary stay with the orchestrator.
+- **Who pushes.** Name it. Either the orchestrator pushes, or the agent runs `git -C <absolute root> push -u origin HEAD` for the branch that worktree has checked out (never `develop` or `main`, never `--force`). A push by any other shape is not briefed.
+- **Who commits.** Unchanged: the agent commits when the brief tells it to; in a linked worktree the brief assigned it, it commits as the brief says (D13).
+
 ## Validation Checklist
 
 A valid relay MUST have:
