@@ -49,6 +49,8 @@ EXEMPT: dict[tuple[str, str], int] = {
     # pwd.getpwuid(os.getuid()): the OS account's home, read from the account database and never from
     # $HOME (nexus-sby49); the audience helper's POSIX branch, behind `import pwd`.
     ("conexus/hooks/scripts/_audience.py", "account_home"): 1,
+    # The same lookup, to compare a config --file path with the account's own gitconfig (nexus-sby49).
+    ("conexus/hooks/scripts/routing/_user_git_seatbelt.py", "_homes"): 1,
     # Same shape, for the mint-lock creation log (nexus-28bzt): does $HOME match the account's pwd home.
     ("src/nexus/db/data_token.py", "_home_matches_pwd_home"): 1,
 }

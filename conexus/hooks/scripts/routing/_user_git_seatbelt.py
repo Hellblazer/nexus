@@ -31,8 +31,10 @@ How a command is read: the raw text is tokenised with ``shlex`` in
 bodies and comments are dropped. A ``git`` word counts when it sits in command
 position: at the start, after ``; & | ( ) {``, after ``then do else elif if
 while until !``, after ``VAR=x`` assignments and after ``env``, ``command``,
-``exec``, ``time``, ``nohup`` and ``sudo``. ``$(...)`` and backtick bodies are
-read the same way, recursively. Quoted text and arguments to other programs are
+``exec``, ``time``, ``nohup``, ``sudo``, ``nice`` and ``timeout``. A ``$(...)`` or backtick span is
+one word to the command around it (so a flag after it is still that command's flag), and its body is
+read the same way, recursively. The body of a heredoc whose delimiter is quoted (``<<'EOF'``) is text,
+backticks included; the body of an unquoted one expands, so a substitution in it is still read. Quoted text and arguments to other programs are
 never in command position, so ``echo "git reset --hard"`` and
 ``grep -rn 'git add' .`` pass. Global options ``-C <path>``, ``-c k=v``,
 ``--git-dir``, ``--work-tree`` and the like are skipped to reach the subcommand;
@@ -40,9 +42,14 @@ never in command position, so ``echo "git reset --hard"`` and
 
 Accepted gaps (this is a seatbelt against accidents, not a boundary):
 ``bash -c '...'``, ``sh -c`` and ``eval`` strings, ``xargs git``, ``find -exec
-git``, a heredoc fed to a shell, aliases, shell functions, scripts on disk, and
-text shlex cannot tokenise (it fails open), and a ``-C`` path written with Windows backslashes (read as
-shell escapes, so the checkout is unreadable and a git-state row passes). Tests pin the first four.
+git``, a heredoc fed to a shell, aliases, shell functions, scripts on disk, any
+wrapper not named above, a long option written as an abbreviation (``--forc``
+for ``--force``, which git accepts), a variable or ANSI-quoted word standing for
+the command or a flag, text shlex cannot tokenise (it fails open), and a ``-C``
+path written with Windows backslashes (read as shell escapes, so the checkout is
+unreadable and a git-state row passes). A ``-C`` path that cannot be resolved
+here (``$PWD``, ``~``, a substitution) reads the checkout the cwd names. Tests
+pin the first four and the variable and ANSI forms.
 
 Stdlib only.
 """
@@ -59,9 +66,18 @@ _GIT_TIMEOUT = 5
 
 _SEPARATOR_CHARS = frozenset(";&|()")
 _LEADING_WORDS = frozenset({"then", "do", "else", "elif", "!", "{", "}", "if", "while", "until", "time"})
-_WRAPPERS = frozenset({"env", "command", "exec", "nohup", "sudo", "nice"})
-#: Wrapper options that take a value as the next word.
-_WRAPPER_VALUE_FLAGS = frozenset({"-u", "-n", "-C", "-g", "-a", "-S", "-p", "-U", "-h", "-r", "-t"})
+_WRAPPERS = frozenset({"env", "command", "exec", "nohup", "sudo", "nice", "timeout"})
+#: Per wrapper, the options that take a value as the next word (``sudo -n`` is a flag, ``nice -n`` is not).
+_WRAPPER_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+    "sudo": frozenset({"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-U", "-D", "-R", "-T"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+}
+#: A command or backtick substitution, blanked to this word so it cannot split the command around it.
+_SUBST = "NXSUBST"
+#: ``<<-? ws* 'EOF'`` / ``"EOF"`` / ``\EOF``: a heredoc whose body is text.
+_QUOTED_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([A-Za-z0-9_]+))")
 #: What the word in command position is called when it is git (read, never spawned).
 _GIT_NAMES = frozenset({"git", "git.exe"})
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -168,38 +184,84 @@ def _tokens(text: str) -> "list[str] | None":
         return None
 
 
-def _substitutions(text: str) -> list[str]:
-    """Bodies of ``$(...)`` and backtick substitutions (also inside double quotes)."""
-    found: list[str] = []
+def _strip_quoted_heredocs(text: str) -> str:
+    """Drop the body of every heredoc whose delimiter is quoted: that text is data, never code.
+
+    The ``<<'EOF'`` line and the terminator line stay (so the later pass still sees a
+    heredoc); the lines between go. With no terminator line, nothing is dropped, so a
+    stray ``<<'X'`` inside a string cannot hide the commands after it.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        m = _QUOTED_HEREDOC_RE.search(line)
+        if m is None:
+            continue
+        delim = m.group(2) or m.group(3) or m.group(4)
+        strip_tabs = m.group(1) == "-"
+        j = i
+        while j < len(lines):
+            candidate = lines[j].rstrip("\r")
+            if (candidate.lstrip("\t") if strip_tabs else candidate) == delim:
+                break
+            j += 1
+        if j < len(lines):
+            i = j
+    return "\n".join(out)
+
+
+def _split_substitutions(text: str) -> "tuple[str, list[str]]":
+    """``(text with each top-level $(...) / backtick span blanked to one word, the span bodies)``.
+
+    One pass: a nested span is part of its parent's body and is found when that body is
+    read in turn, so the cost stays linear in the depth cap, not exponential in the nesting.
+    """
+    out: list[str] = []
+    bodies: list[str] = []
     i, n = 0, len(text)
     sq = False
     while i < n:
         c = text[i]
         if sq:
+            out.append(c)
             sq = c != "'"
-        elif c == "\\":
             i += 1
+        elif c == "\\":
+            out.append(text[i:i + 2])
+            i += 2
         elif c == "'":
             sq = True
+            out.append(c)
+            i += 1
         elif c == "$" and text[i + 1:i + 2] == "(":
             depth, j = 1, i + 2
             while j < n and depth:
-                if text[j] == "\\":
+                ch = text[j]
+                if ch == "\\":
                     j += 1
-                elif text[j] == "(":
+                elif ch == "(":
                     depth += 1
-                elif text[j] == ")":
+                elif ch == ")":
                     depth -= 1
                 j += 1
-            found.append(text[i + 2:j - 1] if depth == 0 else text[i + 2:])
+            bodies.append(text[i + 2:j - 1] if depth == 0 else text[i + 2:])
+            out.append(_SUBST)
+            i = j
         elif c == "`":
             j = i + 1
             while j < n and text[j] != "`":
                 j += 2 if text[j] == "\\" else 1
-            found.append(text[i + 1:j])
-            i = j
-        i += 1
-    return found
+            bodies.append(text[i + 1:j])
+            out.append(_SUBST)
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), bodies
 
 
 def _split_commands(tokens: list[str]) -> list[list[str]]:
@@ -222,8 +284,11 @@ def _git_invocation(words: list[str]) -> "list[str] | None":
             i += 1
         elif base in _WRAPPERS:
             i += 1
+            value_flags = _WRAPPER_VALUE_FLAGS.get(base, frozenset())
             while i < len(words) and (words[i].startswith("-") or _ASSIGN_RE.match(words[i])):
-                i += 2 if words[i] in _WRAPPER_VALUE_FLAGS else 1
+                i += 2 if words[i] in value_flags else 1
+            if base == "timeout":
+                i += 1  # the duration
         else:
             return words[i + 1:] if base in _GIT_NAMES else None
     return None
@@ -283,6 +348,64 @@ def _long_prefix(flags: list[str], prefix: str) -> bool:
     return any(f.startswith(prefix) for f in flags)
 
 
+def _without_quiet(args: list[str]) -> list[str]:
+    """*args* with ``-q`` / ``--quiet`` removed: a quiet dry run lists nothing, so it proves nothing."""
+    out: list[str] = []
+    for i, a in enumerate(args):
+        if a == "--":
+            out.extend(args[i:])
+            break
+        if a == "--quiet":
+            continue
+        if a.startswith("-") and not a.startswith("--") and "q" in a:
+            a = "-" + a[1:].replace("q", "")
+            if a == "-":
+                continue
+        out.append(a)
+    return out
+
+
+def _homes() -> list[str]:
+    homes = [os.path.expanduser("~")]
+    try:
+        import pwd  # noqa: PLC0415 -- POSIX only; the ImportError arm is the non-POSIX branch
+
+        homes.append(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:  # noqa: BLE001 -- no passwd entry or not POSIX
+        pass
+    return [h for h in homes if h and h != "~"]
+
+
+def _is_hostwide_config_file(path: str) -> bool:
+    """True when *path* names the account's ``~/.gitconfig`` or ``~/.config/git/config``, or ``/etc/gitconfig``."""
+    p = path.strip()
+    for prefix in ("~/", "$HOME/", "${HOME}/"):
+        if p.startswith(prefix):
+            return p[len(prefix):] in (".gitconfig", ".config/git/config")
+    if p.replace("\\", "/").lower() == "/etc/gitconfig":
+        return True
+    norm = os.path.normcase(os.path.normpath(p))
+    return any(
+        norm == os.path.normcase(os.path.join(home, *rel))
+        for home in _homes()
+        for rel in ((".gitconfig",), (".config", "git", "config"))
+    )
+
+
+def _config_file_args(args: list[str]) -> list[str]:
+    files: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-f", "--file") and i + 1 < len(args):
+            files.append(args[i + 1])
+            i += 1
+        elif a.startswith("--file="):
+            files.append(a[len("--file="):])
+        i += 1
+    return files
+
+
 def _config_hit(args: list[str]) -> "Hit | None":
     flags, pos, _ = _parts(args, _CONFIG_VALUE_FLAGS)
     if pos and pos[0] in ("get", "list"):
@@ -299,6 +422,8 @@ def _config_hit(args: list[str]) -> "Hit | None":
         return None
     if _long(flags, "--global", "--system"):
         return Hit("config --global/--system", "text")
+    if any(_is_hostwide_config_file(f) for f in _config_file_args(args)):
+        return Hit("config --file <host-wide file>", "text")
     k = key.lower()
     if k in _DANGEROUS_CONFIG_KEYS or k.startswith(("include.", "includeif.")):
         return Hit(f"config {key}", "text")
@@ -380,7 +505,7 @@ def _form(sub: str, args: list[str], base: "str | None") -> "Hit | None":
             return Hit("rm -f", "state")
     elif sub == "clean":
         if not (_short(flags, "n") or _long(flags, "--dry-run")):
-            return Hit("clean", "state", clean_args=tuple(args))
+            return Hit("clean", "state", clean_args=tuple(_without_quiet(args)))
     return None
 
 
@@ -400,7 +525,8 @@ def _run_git(target: str, *args: str) -> "subprocess.CompletedProcess[str] | Non
         env = dict(os.environ)
         env["GIT_OPTIONAL_LOCKS"] = "0"
         done = subprocess.run(
-            [git, *args], cwd=target, capture_output=True, text=True,
+            [git, "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}", *args],
+            cwd=target, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=_GIT_TIMEOUT, env=env,
         )
     except Exception:  # noqa: BLE001 -- unreadable state passes a state form
@@ -422,6 +548,8 @@ def _target_dir(cwd: "str | None", dash_c: list[str]) -> "str | None":
         return None
     target = cwd
     for p in dash_c:
+        if _SUBST in p or "$" in p or "`" in p or p.startswith("~"):
+            continue  # cannot be resolved here: read the checkout the cwd names
         target = os.path.normpath(p if os.path.isabs(p) else os.path.join(target, p))
     return target if os.path.isdir(target) else None
 
@@ -434,11 +562,13 @@ def _target_dir(cwd: "str | None", dash_c: list[str]) -> "str | None":
 def _scan(text: str, cwd: "str | None", depth: int) -> "Hit | None":
     if depth > _MAX_DEPTH:
         return None
-    for body in _substitutions(text):
+    text = _strip_quoted_heredocs(text)
+    blanked, bodies = _split_substitutions(text)
+    for body in bodies:
         hit = _scan(body, cwd, depth + 1)
         if hit is not None:
             return hit
-    tokens = _tokens(_preprocess(text))
+    tokens = _tokens(_preprocess(blanked))
     if tokens is None:
         return None
     for words in _split_commands(tokens):

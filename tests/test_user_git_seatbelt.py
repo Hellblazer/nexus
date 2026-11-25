@@ -73,6 +73,19 @@ def dirty_repo(clean_repo: pathlib.Path) -> pathlib.Path:
 
 
 @pytest.fixture()
+def pristine_repo(tmp_path: pathlib.Path) -> pathlib.Path:
+    """A second, clean checkout: ``dirty_repo`` is ``clean_repo`` with edits, so a test
+    that needs both a clean and a dirty tree cannot use those two together."""
+    repo = tmp_path / "pristine"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "f").write_text("one\n")
+    _git(repo, "add", "f")
+    _git(repo, "commit", "-q", "-m", "init")
+    return repo
+
+
+@pytest.fixture()
 def linked_dirty(clean_repo: pathlib.Path, tmp_path: pathlib.Path) -> pathlib.Path:
     wt = tmp_path / "userwt"
     _git(clean_repo, "worktree", "add", "-q", "-b", "wtb", str(wt))
@@ -470,8 +483,9 @@ def test_the_main_conversation_is_never_gated(dirty_repo, no_flag_home):
 
 
 def test_user_mode_records_no_telemetry(dirty_repo, no_flag_home):
-    _hook("git checkout -- f", dirty_repo, no_flag_home)
-    _hook("git branch -D x", dirty_repo, no_flag_home)
+    first = _hook("git checkout -- f", dirty_repo, no_flag_home)
+    second = _hook("git branch -D x", dirty_repo, no_flag_home)
+    assert first["permissionDecision"] == "deny" and second["permissionDecision"] == "deny", (first, second)
     assert not (no_flag_home / "routing.jsonl").exists()
     assert not (no_flag_home / "dropped.jsonl").exists()
 
@@ -484,3 +498,219 @@ def test_a_flagged_account_gets_the_full_form_in_a_user_repo(clean_repo, tmp_pat
     out = _hook("git commit -am x", clean_repo, home)
     assert out["permissionDecision"] == "deny"
     assert "STRUCTURE-AGNOSTIC" in out["permissionDecisionReason"]
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (nexus-sby49.2): review findings, each pinned by a case that failed first
+# ---------------------------------------------------------------------------
+
+#: A $(...) span is one word to the decider: a flag after it is still the command's flag.
+SUBSTITUTED_TEXT_DENY = [
+    "git push origin $(git branch --show-current) --force",
+    "git push $(echo origin) -f",
+    "git push origin `git branch --show-current` --force",
+    "git push origin \"$(git branch --show-current)\" --delete",
+    "git branch $(date +%s) -D",
+    "git branch -m $(echo a) --force",
+    "git config $(echo core.hooksPath) /tmp/x --global",
+    "git -C $(pwd) branch -D x",
+]
+SUBSTITUTED_STATE_DENY = [
+    "git reset $(git rev-parse HEAD~1) --hard",
+    "git reset --hard $(git rev-parse HEAD~1)",
+    "git checkout $(git rev-parse HEAD) -- f",
+    "git checkout $(echo HEAD) f",
+    "git restore --source=$(git rev-parse HEAD) f",
+    "git rm $(echo f) -f",
+    "git switch $(echo main) --discard-changes",
+    "git stash push -m $(date +%s)",
+]
+
+
+@pytest.mark.parametrize("cmd", SUBSTITUTED_TEXT_DENY)
+def test_a_flag_after_a_command_substitution_is_still_the_commands_flag(cmd, tmp_path):
+    hit = sb.decide(cmd, str(tmp_path))
+    assert hit is not None and hit.kind == "text", f"{cmd!r}: {hit}"
+
+
+@pytest.mark.parametrize("cmd", SUBSTITUTED_STATE_DENY)
+def test_a_state_form_with_a_substitution_in_it_still_denies_on_a_dirty_tree(cmd, dirty_repo, pristine_repo):
+    hit = sb.decide(cmd, str(dirty_repo))
+    assert hit is not None and hit.kind == "state", f"{cmd!r}: {hit}"
+    assert sb.decide(cmd, str(pristine_repo)) is None, f"{cmd!r} denied a clean tree"
+
+
+@pytest.mark.parametrize("cmd", [
+    "git push origin $(git branch --show-current)",
+    "git branch $(date +%s)",
+    "git reset $(git rev-parse HEAD~1)",
+    "git log $(git rev-parse HEAD~3)..HEAD",
+    "git push origin \"$(git branch --show-current)\" --follow-tags",
+])
+def test_a_substitution_alone_does_not_make_a_command_a_denied_form(cmd, dirty_repo):
+    assert sb.decide(cmd, str(dirty_repo)) is None, cmd
+
+
+def test_nested_substitutions_are_scanned_in_linear_time(tmp_path):
+    import time
+
+    nested = "git status" + " $(echo" * 60 + " x" + ")" * 60
+    t0 = time.monotonic()
+    sb.decide(nested, str(tmp_path))
+    sb.decide("git branch -D x " + "$(" * 60 + ")" * 60, str(tmp_path))
+    assert time.monotonic() - t0 < 1.0
+
+
+#: Backticks and $(...) inside a QUOTED heredoc are text, not code (plan 1.3: bodies are never command position).
+QUOTED_HEREDOC_ALLOW = [
+    "git commit -m \"$(cat <<'EOF'\nfix: stop running `git push --force` here\nEOF\n)\"",
+    "git commit -m \"$(cat <<'EOF'\nfix: $(git branch -D x) is text\nEOF\n)\"",
+    "gh pr create --title t --body \"$(cat <<'EOF'\n## Summary\n- never `git reset --hard` in a user repo\nEOF\n)\"",
+    "git commit -F - <<\"EOF\"\nmessage with `git push -f`\nEOF",
+    "git commit -F - <<-'EOF'\n\tmessage with `git push -f`\n\tEOF",
+    "git commit -F - <<\\EOF\nmessage with `git push -f`\nEOF",
+]
+#: An UNQUOTED heredoc expands: a $(...) or backtick body runs, so it is still scanned.
+UNQUOTED_HEREDOC_DENY = [
+    "cat <<EOF\n$(git push --force)\nEOF",
+    "cat <<EOF\n`git branch -D x`\nEOF",
+    "git commit -F - <<EOF\n$(git push -f)\nEOF",
+]
+
+
+@pytest.mark.parametrize("cmd", QUOTED_HEREDOC_ALLOW)
+def test_a_quoted_heredoc_body_is_text_even_with_backticks_and_substitutions(cmd, dirty_repo):
+    assert sb.decide(cmd, str(dirty_repo)) is None, repr(cmd)
+
+
+@pytest.mark.parametrize("cmd", UNQUOTED_HEREDOC_DENY)
+def test_an_unquoted_heredoc_body_that_substitutes_is_still_scanned(cmd, tmp_path):
+    assert sb.decide(cmd, str(tmp_path)) is not None, repr(cmd)
+
+
+def test_a_quoted_heredoc_with_no_terminator_hides_nothing(tmp_path):
+    cmd = "echo \"<<'X'\"\ngit push --force"
+    assert sb.decide(cmd, str(tmp_path)) is not None
+
+
+#: -q silences the dry run, so the guard must not forward it.
+CLEAN_QUIET = ["git clean -fdq", "git clean -f -q", "git clean --force --quiet", "git clean -qfd", "git clean -f --quiet -d"]
+
+
+@pytest.mark.parametrize("cmd", CLEAN_QUIET)
+def test_clean_with_quiet_still_denies_when_the_dry_run_lists_something(cmd, clean_repo):
+    assert sb.decide(cmd, str(clean_repo)) is None, f"{cmd!r} denied a tree with nothing to remove"
+    (clean_repo / "stray").write_text("x")
+    hit = sb.decide(cmd, str(clean_repo))
+    assert hit is not None and hit.kind == "state", f"{cmd!r}: {hit}"
+
+
+# An untrusted repo's config must not run while the guard reads its state.
+def test_reading_the_state_does_not_run_the_repos_fsmonitor(dirty_repo, tmp_path):
+    marker = tmp_path / "fsmonitor-ran"
+    hook = tmp_path / "fsmon.sh"
+    hook.write_text(f"#!/bin/sh\necho ran > '{marker.as_posix()}'\n")
+    hook.chmod(0o755)
+    _git(dirty_repo, "config", "core.fsmonitor", hook.as_posix())
+    hit = sb.decide("git reset --hard", str(dirty_repo))
+    assert hit is not None, "the dirty tree must still deny"
+    assert not marker.exists(), "the repo's core.fsmonitor ran during the guard's status"
+
+
+def test_a_state_probe_pins_the_two_code_running_config_keys(monkeypatch, dirty_repo):
+    argvs: list[list[str]] = []
+    real = subprocess.run
+
+    def spy(argv, *a, **k):
+        argvs.append(list(argv))
+        return real(argv, *a, **k)
+
+    setattr_in(monkeypatch, sb, "subprocess.run", spy)
+    assert sb.decide("git reset --hard", str(dirty_repo)) is not None
+    assert sb.decide("git clean -fd", str(dirty_repo)) is not None
+    assert len(argvs) == 2, argvs
+    for argv in argvs:
+        assert "core.fsmonitor=false" in argv, argv
+        assert any(w.startswith("core.hooksPath=") for w in argv), argv
+
+
+# D1: a config write aimed at a host-wide file with -f/--file is the same hazard as --global.
+GLOBAL_FILE_CONFIG_DENY = [
+    "git config --file ~/.gitconfig user.name x",
+    "git config -f ~/.gitconfig core.hooksPath /x",
+    "git config --file=$HOME/.gitconfig user.name x",
+    "git config --file ${HOME}/.config/git/config user.name x",
+    "git config -f /etc/gitconfig user.name x",
+    "git config --file ~/.config/git/config --add safe.directory '*'",
+]
+GLOBAL_FILE_CONFIG_ALLOW = [
+    "git config --file .git/config user.name x",
+    "git config -f /tmp/scratch.cfg user.name x",
+    "git config --file ~/.gitconfig --get user.name",
+    "git config --file ~/.gitconfig --list",
+    "git config --file ./local.cfg user.name x",
+]
+
+
+@pytest.mark.parametrize("cmd", GLOBAL_FILE_CONFIG_DENY)
+def test_a_config_write_to_a_host_wide_file_denies_in_any_cwd(cmd, tmp_path):
+    hit = sb.decide(cmd, str(tmp_path))
+    assert hit is not None and hit.kind == "text", f"{cmd!r}: {hit}"
+
+
+def test_a_config_write_to_the_account_homes_gitconfig_by_absolute_path_denies(tmp_path):
+    home = os.path.expanduser("~")
+    assert sb.decide(f"git config --file {home}/.gitconfig user.name x", str(tmp_path)) is not None
+
+
+@pytest.mark.parametrize("cmd", GLOBAL_FILE_CONFIG_ALLOW)
+def test_a_config_file_aimed_at_a_local_or_scratch_file_or_a_read_passes(cmd, tmp_path):
+    assert sb.decide(cmd, str(tmp_path)) is None, cmd
+
+
+# -C with a path the decider cannot resolve reads the checkout the cwd names.
+UNRESOLVABLE_DASH_C = [
+    'git -C "$PWD" reset --hard',
+    "git -C ~ reset --hard",
+    "git -C $(pwd) reset --hard",
+    "git -C ${PWD} reset --hard",
+    "git -C `pwd` reset --hard",
+    "git -C $HOME/x reset --hard",
+]
+
+
+@pytest.mark.parametrize("cmd", UNRESOLVABLE_DASH_C)
+def test_an_unresolvable_dash_c_falls_back_to_the_cwd_checkout(cmd, dirty_repo, pristine_repo):
+    hit = sb.decide(cmd, str(dirty_repo))
+    assert hit is not None and hit.kind == "state", f"{cmd!r}: {hit}"
+    assert sb.decide(cmd, str(pristine_repo)) is None
+
+
+# Wrappers: timeout hands its command on; sudo -n is a flag, nice -n takes a value.
+WRAPPED_DENY = [
+    "timeout 30 git push --force",
+    "timeout -s KILL 30 git branch -D x",
+    "timeout --signal=KILL --kill-after=5 30 git branch -D x",
+    "sudo -n git push -f",
+    "sudo -u root git push -f",
+    "nice -n 5 git push -f",
+    "env -u FOO git push -f",
+    "nohup git push -f",
+]
+
+
+@pytest.mark.parametrize("cmd", WRAPPED_DENY)
+def test_a_wrapper_in_front_of_git_does_not_hide_it(cmd, tmp_path):
+    assert sb.decide(cmd, str(tmp_path)) is not None, cmd
+
+
+def test_wrappers_that_run_something_else_are_not_git(tmp_path):
+    assert sb.decide("timeout 30 make test", str(tmp_path)) is None
+    assert sb.decide("sudo -n ls", str(tmp_path)) is None
+    assert sb.decide("nice -n 5 echo git push -f", str(tmp_path)) is None
+
+
+def test_the_accepted_gaps_are_named_in_the_module_docstring():
+    doc = sb.__doc__ or ""
+    for gap in ("abbreviation", "xargs", "bash -c", "eval", "backslash"):
+        assert gap in doc, f"the module docstring does not name the gap: {gap}"
