@@ -68,6 +68,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`: the maintainer's full guard also denies `git reflog delete` (plan 2.1), nexus-sby49.3; it admits read-only git and verb words in text, chained writes in a worktree git proves, a plain fetch, a detached worktree outside every repo, a scratch repository the command creates, and a push of the worktree's own branch, and its deny text is 1.3 KB where it was 2.9 KB, nexus-5y47c.
 - `conexus/hooks/scripts/routing/_git_admit.py`: new module, the admission half of nexus-5y47c: a strict lexer, per-segment shapes and the unchanged guard as the fallback for every segment it does not recognise.
 - `conexus/skills/orchestration/SKILL.md`: the implementer dispatch section says what a brief gives a subagent about git, nexus-5y47c.
+- `conexus/hooks/scripts/routing/README.md`: the git guard's freeze note records the one lift for the six nexus-5y47c fixes (Sam, 2026-11-25).
 - `conexus/hooks/audience.yaml`: the audience manifest, one entry per hook registration, module and injected constant; read by the lint and the behaviour leg, nexus-sby49.3; a module entry for `_git_admit.py`, nexus-5y47c.
 - `conexus/hooks/scripts/routing/registry.yaml`: each rule carries its `audience`, nexus-sby49.3.
 - `conexus/skills/writing-nx-skills/promotion.md`: the target table gains an Audience column, a hook target is live only with its audience.yaml entry and a behaviour-leg case, and the loss check lists over-reach, nexus-sby49.3.
