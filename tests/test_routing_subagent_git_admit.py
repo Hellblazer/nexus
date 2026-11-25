@@ -331,6 +331,9 @@ _WT_ADMITTED = [
     "cd {wt} && git add f.txt && git commit -m 'a' && cd {wt} && git commit --amend --no-edit",
     "cd {wt} && (git status --short; git add -A) && git commit -m x",
     "git -C {wt} branch step-5 abc1234 && git -C {wt} switch step-5",
+    "git -C {wt} cherry-pick --no-edit abc1234 2>&1 | tail -3",
+    "git -C {wt} commit --dry-run",
+    "git -C {wt} merge -F /tmp/msg.txt abc1234",
 ]
 
 
@@ -677,10 +680,9 @@ def test_a_command_the_lexer_cannot_read_falls_through_to_the_old_verdict(primar
         "echo " + D + "'\\x67it' checkout f.txt",
         "git stash list" + chr(13) + "; git stash",
     ]
-    # none of these may be admitted on the strength of the read-only part; the ones that spell
-    # a write deny (the rest pass for the reason they always did)
-    must_deny = [c for c in unreadable if "stash;" in c.replace(" ", "") or "git stash" in c.split("stash list", 1)[-1]]
-    leaked = [c for c in must_deny if not _denied(c, primary)]
+    # Each holds a verb word after a git word, so the unchanged rule denies it; a construct the
+    # lexer cannot read must leave that verdict alone, however read-only the rest of it looks.
+    leaked = [c for c in unreadable if not _denied(c, primary)]
     assert not leaked, leaked
 
 

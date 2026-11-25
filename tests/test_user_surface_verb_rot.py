@@ -304,6 +304,13 @@ _AND_CHAIN_ALLOWED: dict[tuple[str, str], str] = {
     ("conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py", "(?:&&|"): (
         "a regex that splits a shell command line at its separators"
     ),
+    ("conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py", "cd <worktree root> && git"): (
+        "the deny text names the one shell shape the guard admits to a SUBAGENT, whose Bash tool runs bash or zsh; "
+        "it is not a remedy a user pastes into PowerShell (nexus-5y47c)"
+    ),
+    ("conexus/hooks/scripts/routing/_git_admit.py", "&&"): (
+        "the lexer's operator tokens and shape names, read from a command line; the module prints nothing (nexus-5y47c)"
+    ),
 }
 
 

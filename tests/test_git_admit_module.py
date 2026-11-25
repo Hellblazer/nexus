@@ -7,6 +7,7 @@ pin the parts a subprocess verdict cannot name: WHY a command is not admitted.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import pathlib
 import re
@@ -233,14 +234,15 @@ def test_a_destroyed_primary_shape_is_never_a_kind():
         assert _kind(cmd) is None, cmd
 
 
-def test_the_module_stays_pure(monkeypatch):
-    """Analysis reads paths for the scratch rules and nothing else: no subprocess, no network."""
-    def boom(*a, **k):
-        raise AssertionError("the module spawned a process")
-
-    monkeypatch.setattr(subprocess, "run", boom)
-    monkeypatch.setattr(subprocess, "Popen", boom)
+def test_the_module_stays_pure():
+    """Analysis reads paths for the scratch rules and nothing else: no process, no network."""
+    tree = ast.parse((ROUTING / "_git_admit.py").read_text(encoding="utf-8"))
+    imported = {
+        alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
+    } | {node.module.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
+    assert imported <= {"__future__", "os", "re", "tempfile", "typing"}, imported
     assert _kind("git stash list | head -1; cd " + ROOT + " && git add -A") == "worktree"
+
 
 
 def test_a_verb_word_in_a_command_beside_a_git_word_elsewhere_is_left_to_the_old_verdict():

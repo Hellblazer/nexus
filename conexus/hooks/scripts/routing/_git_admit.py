@@ -57,7 +57,8 @@ _MAX_SUBST = 8192
 #: so a refusal list leaks (review round 1 of the ``git -C`` carve-out, 2026-11-19).
 #: Nothing admitted runs a command, discards uncommitted work or moves state other
 #: worktrees share. nexus-5y47c adds only long spellings of flags already admitted
-#: (``--quiet``, ``--verbose``, ``--dry-run``) and ``merge --no-commit``.
+#: (``--quiet``, ``--verbose``, ``--dry-run``), ``merge --no-commit`` and ``-F``, ``commit
+#: --dry-run`` and ``cherry-pick --no-edit``.
 DASH_C_FLAGS: dict[str, dict[str, bool]] = {
     "add": {"-A": False, "--all": False, "-u": False, "--update": False,
             "-N": False, "--intent-to-add": False, "-v": False, "--verbose": False,
@@ -66,7 +67,7 @@ DASH_C_FLAGS: dict[str, dict[str, bool]] = {
                "-a": False, "--all": False, "--amend": False, "--no-edit": False,
                "--allow-empty": False, "-s": False, "--signoff": False,
                "--fixup": True, "--squash": True, "-q": False, "--quiet": False,
-               "--": False},
+               "--dry-run": False, "--": False},
     "rm": {"--cached": False, "-r": False, "-q": False, "--quiet": False, "--": False},
     "mv": {"-k": False, "-v": False, "--verbose": False},
     "switch": {"-c": True, "--create": True, "--detach": False, "-q": False,
@@ -77,12 +78,13 @@ DASH_C_FLAGS: dict[str, dict[str, bool]] = {
                "--no-autosquash": False, "-r": False, "--rebase-merges": False,
                "--keep-base": False, "-q": False, "--quiet": False},
     "cherry-pick": {"--continue": False, "-x": False, "-n": False, "--no-commit": False,
-                    "--allow-empty": False, "-m": True, "--mainline": True},
+                    "--no-edit": False, "--allow-empty": False, "-m": True, "--mainline": True},
     "revert": {"--continue": False, "-n": False, "--no-commit": False,
                "--no-edit": False, "-m": True, "--mainline": True},
     "merge": {"--ff-only": False, "--no-ff": False, "--ff": False,
               "--no-edit": False, "--continue": False, "--no-commit": False,
-              "--squash": False, "-m": True, "-q": False, "--quiet": False},
+              "--squash": False, "-m": True, "-F": True, "--file": True, "-q": False,
+              "--quiet": False},
     "branch": {},  # create only: `git branch <name> [<start>]`
 }
 
