@@ -1,0 +1,3 @@
+### Fixed
+
+- **The push-time check gate no longer counts files develop changed since a merged branch's base; a merge counts only what it brings to develop.** `outbound_paths` used `git log -m`, which diffs a merge against every parent, so merging a stale branch selected the docs-readers and write-seam proofs through a `CatalogRepository.java` and a docs file the push never touched. A merge now contributes one diff, against the parent already in the push's base (the first such parent), or, when both parents are outbound, the parent carrying fewer range commits. Non-merge commits still contribute their own diffs, so a path touched and reverted inside the range, on either side of a merge, still selects its checks (nexus-igea9).

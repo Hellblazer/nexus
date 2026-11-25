@@ -384,10 +384,10 @@ def test_the_cluster_check_runs_the_conf_census_with_the_integration_marker_incl
 
 # ── outbound_paths: what a merge contributes (nexus-igea9) ──
 
-def _run_git(repo: Path, *args: str) -> str:
+def _run_git(repo: Path, *args: str, check: bool = True) -> str:
     env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITTER_NAME": "t",
            "GIT_COMMITTER_EMAIL": "t@example.com", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
-    proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, env=env, check=True)
+    proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, env=env, check=check)
     return proc.stdout.strip()
 
 
@@ -443,3 +443,97 @@ def test_a_path_touched_and_reverted_in_separate_commits_still_selects_its_check
     tip = _run_git(repo, "rev-parse", "HEAD")
     assert _run_git(repo, "diff", "--name-only", base, tip) == "", "the net diff is empty"
     assert gate.outbound_paths(repo, base, tip) == {"service/Seam.java"}
+
+
+def _init_with_base(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run_git(repo, "init", "-q", "-b", "develop")
+    _commit(repo, "shared.txt", "one\n", "base")
+    _commit(repo, "service/Seam.java", "// one\n", "base seam")
+    return repo
+
+
+def _head(repo: Path) -> str:
+    return _run_git(repo, "rev-parse", "HEAD")
+
+
+def test_a_merges_own_resolution_selects_a_file_a_later_merge_removes_again(tmp_path: Path) -> None:
+    """Guards the merge's own diff: the file the resolution adds is in no non-merge commit, and a later merge hides it from
+    the net diff (a later plain commit would list it itself)."""
+    repo = _init_with_base(tmp_path)
+    _run_git(repo, "checkout", "-q", "-b", "feature")
+    _commit(repo, "shared.txt", "feature\n", "feature edits shared")
+    _run_git(repo, "checkout", "-q", "-b", "feature2", "develop")
+    _commit(repo, "notes/f2.md", "f2", "feature two")
+    _run_git(repo, "checkout", "-q", "develop")
+    _commit(repo, "shared.txt", "develop\n", "develop edits shared")
+    base = _head(repo)
+    _run_git(repo, "merge", "--no-ff", "--no-commit", "feature", check=False)       # conflicts on shared.txt
+    (repo / "shared.txt").write_text("resolved\n")
+    (repo / "resolution-only.txt").write_text("added by the merge\n")
+    _run_git(repo, "add", "shared.txt", "resolution-only.txt")
+    _run_git(repo, "commit", "-q", "-m", "merge with resolution")
+    _run_git(repo, "merge", "--no-ff", "--no-commit", "feature2")
+    _run_git(repo, "rm", "-q", "resolution-only.txt")
+    _run_git(repo, "commit", "-q", "-m", "merge that removes the added file")
+    tip = _head(repo)
+    assert "resolution-only.txt" not in _run_git(repo, "diff", "--name-only", base, tip).split()
+    assert gate.outbound_paths(repo, base, tip) == {"shared.txt", "notes/f2.md", "resolution-only.txt"}
+
+
+def test_an_octopus_merge_selects_what_it_brings_and_not_what_develop_changed_since_the_branches(tmp_path: Path) -> None:
+    """Guards picking the in-base parent among N parents (a two-parent assumption would crash or pick the wrong side)."""
+    repo = _init_with_base(tmp_path)
+    for name in ("one", "two"):
+        _run_git(repo, "checkout", "-q", "-b", f"f-{name}", "develop")
+        _commit(repo, f"notes/{name}.md", name, f"feature {name}")
+        _run_git(repo, "checkout", "-q", "develop")
+    _commit(repo, "service/src/main/java/dev/nexus/service/db/CatalogRepository.java", "// develop\n", "develop advances")
+    base = _head(repo)
+    _run_git(repo, "merge", "-q", "--no-ff", "-m", "octopus", "f-one", "f-two")
+    tip = _head(repo)
+    assert len(_run_git(repo, "rev-list", "--parents", "-n1", tip).split()) == 4, "three parents"
+    assert gate.outbound_paths(repo, base, tip) == {"notes/one.md", "notes/two.md"}
+
+
+def test_a_path_touched_and_reverted_on_the_merged_branch_still_selects_its_checks(tmp_path: Path) -> None:
+    """Guards walking the merged-in branch's own commits (a first-parent-only traversal would lose them)."""
+    repo = _init_with_base(tmp_path)
+    _run_git(repo, "checkout", "-q", "-b", "feature")
+    _commit(repo, "service/Seam.java", "// two\n", "feature touches the seam")
+    _commit(repo, "service/Seam.java", "// one\n", "feature reverts it")
+    _run_git(repo, "checkout", "-q", "develop")
+    _commit(repo, "docs/develop-only.md", "develop\n", "develop advances")
+    base = _head(repo)
+    _run_git(repo, "merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+    tip = _head(repo)
+    assert _run_git(repo, "diff", "--name-only", base, tip) == "", "net and merge diffs are both empty"
+    assert gate.outbound_paths(repo, base, tip) == {"service/Seam.java"}
+
+
+def test_an_empty_range_has_no_outbound_paths(tmp_path: Path) -> None:
+    """Pins the no-commits case: no merge lines, no diff, an empty set and no crash."""
+    repo = _init_with_base(tmp_path)
+    tip = _head(repo)
+    assert gate.outbound_paths(repo, tip, tip) == set()
+
+
+def test_a_merge_with_neither_parent_in_base_diffs_against_the_side_with_fewer_range_commits(tmp_path: Path) -> None:
+    """Guards the fallback: develop has an unpushed commit (1 range commit) and the stale branch has two, and the merge lists
+    the branch first. The first parent would select X, which develop changed after the branch's base and the push never does."""
+    repo = _init_with_base(tmp_path)
+    _run_git(repo, "checkout", "-q", "-b", "feature")
+    _commit(repo, "notes/f1.md", "f1", "feature one")
+    _commit(repo, "notes/f2.md", "f2", "feature two")
+    _run_git(repo, "checkout", "-q", "develop")
+    _commit(repo, "service/X.java", "// develop after the branch's base\n", "develop advances")
+    base = _head(repo)                                         # origin/develop
+    _commit(repo, "notes/unpushed.md", "p", "unpushed develop commit")
+    _run_git(repo, "checkout", "-q", "feature")
+    _run_git(repo, "merge", "-q", "--no-ff", "-m", "merge develop into feature", "develop")   # parents: feature, develop
+    tip = _head(repo)
+    parents = _run_git(repo, "rev-list", "--parents", "-n1", tip).split()[1:]
+    assert all(subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", p, base]).returncode == 1
+               for p in parents), "neither parent is in base"
+    assert gate.outbound_paths(repo, base, tip) == {"notes/unpushed.md", "notes/f1.md", "notes/f2.md"}

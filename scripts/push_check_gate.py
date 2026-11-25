@@ -261,25 +261,26 @@ def _git(repo: Path, *args: str, check: bool = True) -> str:
     return proc.stdout
 
 
-def _in_base(repo: Path, rev: str, base: str) -> bool:
-    return subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", rev, base], capture_output=True,
-                          env=_env(), check=False).returncode == 0
-
-
 def outbound_paths(repo: Path, base: str, tip: str) -> set[str]:
     """Every path the outbound range touches: the net diff of the two trees, plus each non-merge commit's own diff (so a path
     touched and reverted inside the range still selects its checks), plus what each merge brings to the base side.
 
-    A merge contributes ONE diff, against the parent already in *base* (else its first parent): what it adds to develop.
-    ``git log -m`` diffs a merge against every parent, so merging a stale branch counted everything develop had changed since
-    the branch's base, files the push never changes relative to develop."""
+    A merge contributes ONE diff, against the parent already in *base* (the first such parent; one not in the range is in base),
+    else the parent carrying fewer range commits (the develop side of a merge of develop into a stale branch, when develop has
+    unpushed commits too). ``git log -m`` diffs a merge against every parent, so merging a stale branch counted everything
+    develop had changed since the branch's base, files the push never changes relative to develop."""
     paths: set[str] = set()
     chunks = [_git(repo, "diff", "--name-only", "--no-renames", "-z", base, tip),
               _git(repo, "log", "--no-merges", "--name-only", "--no-renames", "--format=", "-z", f"{base}..{tip}")]
-    for line in _git(repo, "rev-list", "--merges", "--parents", f"{base}..{tip}").splitlines():
-        merge, *parents = line.split()
-        side = next((p for p in parents if _in_base(repo, p, base)), parents[0])
-        chunks.append(_git(repo, "diff", "--name-only", "--no-renames", "-z", side, merge))
+    merges = _git(repo, "rev-list", "--merges", "--parents", f"{base}..{tip}").splitlines()
+    if merges:
+        outbound = set(_git(repo, "rev-list", f"{base}..{tip}").split())
+        for line in merges:
+            merge, *parents = line.split()
+            side = next((p for p in parents if p not in outbound), None)
+            if side is None:
+                side = min(parents, key=lambda p: int(_git(repo, "rev-list", "--count", f"{base}..{p}").strip()))
+            chunks.append(_git(repo, "diff", "--name-only", "--no-renames", "-z", side, merge))
     for chunk in chunks:
         paths.update(p for p in chunk.split("\0") if p.strip())
     return paths
