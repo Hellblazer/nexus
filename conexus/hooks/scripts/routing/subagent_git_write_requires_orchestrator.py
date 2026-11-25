@@ -630,6 +630,7 @@ try:
         maintainer as _maintainer,
         note_marker_only as _note_marker_only,
         remote_test_hosts as _remote_hosts_reader,
+        note_hook_error as _note_hook_error,
     )
 except BaseException:  # noqa: BLE001
     def _maintainer(payload: object) -> bool:
@@ -637,6 +638,9 @@ except BaseException:  # noqa: BLE001
 
     def _remote_hosts_reader() -> frozenset[str]:  # loosening: no helper, no exempt host
         return frozenset()
+
+    def _note_hook_error(payload: object, what: str) -> None:
+        return None
 
     def _note_marker_only(payload: object) -> None:
         return None
@@ -4051,7 +4055,7 @@ def _in_linked_worktree(cwd: str) -> bool | None:
             [git, "rev-parse", "--git-common-dir"],
             cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
-    except Exception:  # noqa: BLE001 — undeterminable: fail open
+    except Exception:  # noqa: BLE001 — undeterminable: None, which the caller fails CLOSED on
         return None
     if git_dir.returncode != 0 or common.returncode != 0:
         return None
@@ -4599,7 +4603,8 @@ def _user_mode(payload: dict[str, Any], command: str) -> None:
     cwd = str(payload.get("cwd") or "") or os.environ.get("CLAUDE_PROJECT_DIR", "")
     try:
         hit = _user_git_seatbelt.decide(command, cwd or None)
-    except Exception:  # noqa: BLE001 -- the seatbelt never wedges a user's Bash
+    except Exception as exc:  # noqa: BLE001 -- the seatbelt never wedges a user's Bash
+        _note_hook_error(payload, f"user-mode seatbelt raised {type(exc).__name__}")
         hit = None
     if hit is None:
         _lib.pass_through()

@@ -40,6 +40,7 @@ SAFE_ANSWER: dict[str, object] = {
     "account_flag": False,
     "remote_test_hosts": "empty",
     "note_marker_only": None,
+    "note_hook_error": None,
 }
 WRAPPERS = {"run_hook", "never_fail"}
 
