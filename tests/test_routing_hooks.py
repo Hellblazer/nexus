@@ -36,6 +36,14 @@ REGISTRY_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "re
 README_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "README.md"
 
 
+@pytest.fixture(autouse=True)
+def _a_maintainers_account(plugin_account):
+    """``log_routing_event`` records only under ``maintainer()`` (nexus-sby49.3), and these in-process cases exercise
+    the recorder itself, so they run on an account that carries the flag. The user's case is
+    tests/test_routing_telemetry_audience.py."""
+    plugin_account(flagged=True)
+
+
 def _load_lib(*, detached: bool = False):
     """Load the routing library fresh.
 

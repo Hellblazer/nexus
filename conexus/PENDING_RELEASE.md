@@ -59,5 +59,6 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/agents/substantive-critic.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
 - `conexus/agents/test-validator.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
 - `conexus/resources/agent-shared/RELAY_TEMPLATE.md`: the Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/hooks/scripts/routing/_lib.py`: `log_routing_event` records only under `maintainer()`, so a user's command fragments no longer reach their engine as routing_events rows, nexus-sby49.3.
 
 ## Deferred to the next client release

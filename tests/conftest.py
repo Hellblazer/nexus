@@ -3002,6 +3002,38 @@ def nexus_marked_repo(tmp_path):
     return repo
 
 
+def _plugin_audience():
+    """The PLUGIN copy of the audience helper, imported the way the hook scripts import it (``import _audience``)."""
+    import sys  # noqa: PLC0415
+
+    scripts = str(Path(__file__).resolve().parents[1] / "conexus" / "hooks" / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import _audience  # noqa: PLC0415 — the module name the plugin scripts use
+
+    return _audience
+
+
+@pytest.fixture
+def plugin_account(monkeypatch, tmp_path_factory):
+    """The plugin copy of the audience helper (``conexus/hooks/scripts/_audience.py``), pinned to an account with no
+    flag; call ``plugin_account(flagged=True)`` to give it the flag. In-process only: a hook script run as a child
+    process goes through ``tests/hooks/audience_harness.py``."""
+    audience = _plugin_audience()
+
+    def pin(*, flagged: bool = False):
+        home = tmp_path_factory.mktemp("plugin-acct-flagged" if flagged else "plugin-acct-unflagged")
+        if flagged:
+            flag = home.joinpath(*audience.FLAG_PARTS)
+            flag.parent.mkdir(parents=True)
+            flag.write_text("")
+        monkeypatch.setattr(audience, "_ACCOUNT_HOME_OVERRIDE", str(home))
+        return home
+
+    pin()
+    return pin
+
+
 @pytest.fixture(autouse=True)
 def _restore_cwd():
     """Put the working directory back after every test. Production code moves

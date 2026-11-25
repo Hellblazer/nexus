@@ -96,6 +96,15 @@ from typing import Any, Callable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _endpoint_resolve as _ep  # noqa: E402 -- must follow the sys.path insert
 
+# nexus-sby49.3: routing telemetry (a routing_events row carries the user's command fragment to their engine, for
+# nexus's own census work) is SAM-WIDE. ``maintainer`` tightens (it keeps today's logging), so a helper that cannot be
+# imported binds it to True: a broken helper restores the logging, never removes a guard.
+try:
+    from _audience import maintainer as _maintainer  # noqa: E402 -- same sys.path insert
+except BaseException:  # noqa: BLE001
+    def _maintainer(payload: object) -> bool:
+        return True
+
 ESCAPE_TOKEN = "# routing-allow:"
 ESCAPE_REASON_MIN_LENGTH = 8
 
@@ -555,6 +564,9 @@ _DEFAULT_TENANT = "default"
 #: handles one payload, so :func:`log_routing_event` defaults to it.
 _payload_session_id: str = ""
 
+#: The payload :func:`run_hook` read, for the audience gate on :func:`log_routing_event`.
+_payload: dict = {}
+
 #: Mirrors ``nexus.dropped_writes.NAMED_DROP_CAUSES`` verbatim (nexus-gjv9b
 #: review fold-in round 5, code-review non-blocking item 1) -- the FULL
 #: shared cause vocabulary every drop-meter producer and reader (this
@@ -801,8 +813,14 @@ def log_routing_event(
     An empty ``session_id`` falls back to the session of the payload
     :func:`run_hook` read (nexus-m4lej: two guards' seven call sites never
     passed it, so every routing_events row carried an empty session).
+
+    Audience (nexus-sby49.3): the event carries the user's command fragment to their engine, for nexus's own
+    census work, so it is recorded only under ``maintainer()``; for anyone else this returns before it resolves
+    an endpoint, starts a child or meters a drop. A predicate error records, as before.
     """
     try:
+        if not _maintainer(_payload):
+            return
         record: dict = {
             "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
             "rule": rule,
@@ -966,8 +984,9 @@ def run_hook(
         raw = ""
 
     payload = parse_stdin(raw)
-    global _payload_session_id
+    global _payload_session_id, _payload
     _payload_session_id = str(payload.get("session_id") or "")
+    _payload = payload
 
     try:
         body(payload)

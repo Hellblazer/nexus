@@ -31,6 +31,25 @@ def mark_nexus(repo: "os.PathLike[str] | str") -> None:
         handle.write("#!/bin/sh\n")
 
 
+def marked_repo(path: "os.PathLike[str] | str") -> str:
+    """A directory with a ``.git`` entry and the nexus marker: ``nexus_repo`` is True for a payload naming it."""
+    os.makedirs(os.path.join(os.fspath(path), ".git"), exist_ok=True)
+    mark_nexus(path)
+    return os.fspath(path)
+
+
+def plain_repo(path: "os.PathLike[str] | str") -> str:
+    """A directory with a ``.git`` entry and no marker: a user's repo. ``nexus_repo`` is False for a payload naming it."""
+    os.makedirs(os.path.join(os.fspath(path), ".git"), exist_ok=True)
+    return os.fspath(path)
+
+
+def unflagged_home(home: "os.PathLike[str] | str") -> str:
+    """An account home with no maintainer flag; returns it as a string."""
+    os.makedirs(os.fspath(home), exist_ok=True)
+    return os.fspath(home)
+
+
 def flagged_home(home: "os.PathLike[str] | str") -> str:
     """An account home that carries the maintainer flag; returns it as a string."""
     flag = os.path.join(os.fspath(home), ".config", "nexus", "maintainer-profile")

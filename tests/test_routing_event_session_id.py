@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from tests.hooks.audience_harness import mark_nexus
+from tests.hooks.audience_harness import mark_nexus, marked_repo
 
 ROUTING = pathlib.Path(__file__).parent.parent / "conexus" / "hooks" / "scripts" / "routing"
 SESSION = "m4lej-session-0001"
@@ -84,12 +84,12 @@ def _run(script: str, payload: dict, env: dict) -> dict:
     return json.loads(proc.stdout)["hookSpecificOutput"]
 
 
-def test_credential_print_guard_deny_row_carries_session(engine):
+def test_credential_print_guard_deny_row_carries_session(engine, tmp_path):
     bodies, env = engine
     out = _run(
         "credential_print_guard.py",
         {"tool_name": "Bash", "tool_input": {"command": "cat /proc/1234/environ"},
-         "session_id": SESSION},
+         "session_id": SESSION, "cwd": marked_repo(tmp_path / "nexus")},  # the event is the maintainer's (nexus-sby49.3)
         env,
     )
     assert out["permissionDecision"] == "deny"
@@ -117,7 +117,7 @@ def test_subagent_git_write_deny_row_carries_session(engine, tmp_path):
     assert bodies[0]["session_id"] == SESSION
 
 
-def test_explicit_session_id_wins_over_payload(engine):
+def test_explicit_session_id_wins_over_payload(engine, tmp_path):
     """A caller that passes session_id keeps it; the payload is only the default."""
     bodies, env = engine
     stub = (
@@ -129,7 +129,8 @@ def test_explicit_session_id_wins_over_payload(engine):
         "_lib.run_hook(body, rule_name='r')\n"
     )
     proc = subprocess.run(
-        [sys.executable, "-c", stub], input=json.dumps({"session_id": SESSION}),
+        [sys.executable, "-c", stub],
+        input=json.dumps({"session_id": SESSION, "cwd": marked_repo(tmp_path / "nexus")}),
         capture_output=True, text=True, timeout=20, env=env,
     )
     assert proc.returncode == 0, proc.stderr
@@ -180,7 +181,7 @@ def test_dropped_event_keeps_session(tmp_path):
     out = _run(
         "credential_print_guard.py",
         {"tool_name": "Bash", "tool_input": {"command": "cat /proc/1234/environ"},
-         "session_id": SESSION},
+         "session_id": SESSION, "cwd": marked_repo(tmp_path / "nexus")},
         env,
     )
     assert out["permissionDecision"] == "deny"
