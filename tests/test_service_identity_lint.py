@@ -46,6 +46,9 @@ EXEMPT: dict[tuple[str, str], int] = {
     ("src/nexus/daemon/installer.py", "_launchd_loaded_now"): 1,
     # pwd.getpwuid(os.getuid()): behind `import pwd`, whose ImportError arm IS the non-POSIX branch.
     ("src/nexus/db/onnx_model_root.py", "_home_base"): 1,
+    # pwd.getpwuid(os.getuid()): the OS account's home, read from the account database and never from
+    # $HOME (nexus-sby49); the audience helper's POSIX branch, behind `import pwd`.
+    ("conexus/hooks/scripts/_audience.py", "account_home"): 1,
     # Same shape, for the mint-lock creation log (nexus-28bzt): does $HOME match the account's pwd home.
     ("src/nexus/db/data_token.py", "_home_matches_pwd_home"): 1,
 }

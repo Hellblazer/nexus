@@ -25,6 +25,8 @@ import sys
 
 import pytest
 
+from tests._module_seam import setattr_in
+
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 SCRIPTS = PROJECT_ROOT / "conexus" / "hooks" / "scripts"
 ROUTING = SCRIPTS / "routing"
@@ -113,7 +115,7 @@ def test_a_tightening_predicate_answers_true_when_it_raises(home, tmp_path, monk
     def boom(*a, **k):
         raise RuntimeError("broken")
 
-    monkeypatch.setattr(_audience.os.path, "realpath", boom)
+    setattr_in(monkeypatch, _audience, "os.path.realpath", boom)
     assert _audience.nexus_repo(_p(repo)) is True
     assert _audience.maintainer(_p(repo)) is True
 
@@ -423,7 +425,7 @@ def test_the_tripwire_never_raises(home, tmp_path, monkeypatch):
     def boom(*a, **k):
         raise OSError("disk")
 
-    monkeypatch.setattr(_audience.os, "open", boom)
+    setattr_in(monkeypatch, _audience, "os.open", boom)
     _audience.note_marker_only({"cwd": str(repo), "session_id": "s"})
 
 

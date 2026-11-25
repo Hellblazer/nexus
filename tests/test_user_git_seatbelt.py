@@ -26,6 +26,8 @@ import sys
 
 import pytest
 
+from tests._module_seam import setattr_in
+
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 SCRIPTS = PROJECT_ROOT / "conexus" / "hooks" / "scripts"
 ROUTING = SCRIPTS / "routing"
@@ -262,7 +264,7 @@ def test_state_rows_pass_when_a_git_spawn_times_out(cmd, dirty_repo, monkeypatch
     def boom(*a, **k):
         raise subprocess.TimeoutExpired("git", 5)
 
-    monkeypatch.setattr(sb.subprocess, "run", boom)
+    setattr_in(monkeypatch, sb, "subprocess.run", boom)
     assert sb.decide(cmd, str(dirty_repo)) is None, cmd
 
 
@@ -271,7 +273,7 @@ def test_text_rows_deny_when_a_git_spawn_times_out(cmd, dirty_repo, monkeypatch)
     def boom(*a, **k):
         raise subprocess.TimeoutExpired("git", 5)
 
-    monkeypatch.setattr(sb.subprocess, "run", boom)
+    setattr_in(monkeypatch, sb, "subprocess.run", boom)
     assert sb.decide(cmd, str(dirty_repo)) is not None
 
 
