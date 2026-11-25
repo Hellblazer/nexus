@@ -393,9 +393,11 @@ def test_dash_c_names_the_target_checkout(clean_repo, dirty_repo, tmp_path):
     other = tmp_path / "elsewhere"
     other.mkdir()
     # cwd is not a repo, -C points at the dirty one.
-    assert sb.decide(f"git -C {dirty_repo} reset --hard", str(other)) is not None
+    assert sb.decide(f"git -C {dirty_repo.as_posix()} reset --hard", str(other)) is not None
     # cwd is the dirty repo, -C points at somewhere with nothing to lose.
-    assert sb.decide(f"git -C {other} reset --hard", str(dirty_repo)) is None
+    assert sb.decide(f"git -C {other.as_posix()} reset --hard", str(dirty_repo)) is None
+    # (Forward slashes: shlex reads a backslash as a shell escape, so a Windows-style -C path is
+    # unreadable here and a state row on it passes, like any state that cannot be read.)
     # A relative -C resolves against the cwd.
     assert sb.decide("git -C userrepo reset --hard", str(dirty_repo.parent)) is not None
 
