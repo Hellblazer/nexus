@@ -35,9 +35,20 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from tests.hooks.audience_harness import flagged_home, mark_nexus
+
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 ROUTING = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing"
 SCRIPT = ROUTING / "subagent_git_write_requires_orchestrator.py"
+HARNESS = PROJECT_ROOT / "tests" / "hooks" / "audience_harness.py"
+
+#: The account home the guard sees in the current test (nexus-sby49). The guard's
+#: full rule is the MAINTAINER's: a repo needs the nexus marker (``shared_repo``
+#: and ``linked_worktree`` carry it, committed before any ``worktree add``) or the
+#: account needs the flag. Tests on those two fixtures run with an UNFLAGGED home,
+#: so the marker alone is what makes them maintainer mode; every other test builds
+#: its own repo or has none, and runs under a flagged home (see ``_account_home``).
+_CURRENT_HOME: list[pathlib.Path | None] = [None]
 
 AGENT_ID = "aworker-x-6f59dab8bbb14864"
 
@@ -68,9 +79,17 @@ def _run_raw(stdin_text: str, env_extra: dict[str, str] | None = None):
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
-        [sys.executable, str(SCRIPT)],
+        _guard_argv(),
         input=stdin_text, capture_output=True, text=True, timeout=20, env=env,
     )
+
+
+def _guard_argv() -> list[str]:
+    """The guard through the audience harness, so the account home is the test's own
+    and the box's real home (which may carry the flag) never decides a verdict."""
+    home = _CURRENT_HOME[0]
+    assert home is not None, "the _account_home fixture did not run"
+    return [sys.executable, str(HARNESS), str(home), str(SCRIPT)]
 
 
 def _run(payload: dict):
@@ -122,19 +141,32 @@ def _isolate_log(tmp_path, monkeypatch):
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "dropped_writes.jsonl"))
 
 
+@pytest.fixture(autouse=True)
+def _account_home(request, tmp_path):
+    home = tmp_path / "acct-home"
+    home.mkdir()
+    if not {"shared_repo", "linked_worktree"} & set(request.fixturenames):
+        flagged_home(home)
+    _CURRENT_HOME[0] = home
+    yield home
+    _CURRENT_HOME[0] = None
+
+
 @pytest.fixture()
 def shared_repo(tmp_path: pathlib.Path) -> pathlib.Path:
-    """A PRIMARY git checkout (git-dir == git-common-dir)."""
+    """A PRIMARY git checkout (git-dir == git-common-dir) with the nexus marker."""
     repo = tmp_path / "shared"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    mark_nexus(repo)
     return repo
 
 
 @pytest.fixture()
 def linked_worktree(shared_repo: pathlib.Path, tmp_path: pathlib.Path) -> pathlib.Path:
     (shared_repo / "f.txt").write_text("x")
-    subprocess.run(["git", "add", "f.txt"], cwd=shared_repo, check=True)
+    # The marker is committed before `worktree add`, so the worktree checkout has it.
+    subprocess.run(["git", "add", "f.txt", "scripts/agent-worktree-preflight.sh"], cwd=shared_repo, check=True)
     subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"],
         cwd=shared_repo, check=True,
@@ -1593,7 +1625,7 @@ def test_a_payload_without_cwd_takes_the_project_from_claude_project_dir(linked_
     payload = json.dumps(_payload("git commit -m msg"))
     env = {**os.environ, "NX_HOOK_PYTHON": sys.executable, "CLAUDE_PROJECT_DIR": str(linked_worktree)}
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT)], input=payload, capture_output=True, text=True,
+        _guard_argv(), input=payload, capture_output=True, text=True,
         timeout=20, env=env, cwd=str(elsewhere),
     )
     assert "permissionDecision" not in _hso(proc), proc.stdout
@@ -1606,8 +1638,10 @@ def test_the_process_cwd_is_never_the_project(linked_worktree):
     payload = json.dumps(_payload("git commit -m msg"))
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
     env["NX_HOOK_PYTHON"] = sys.executable
+    # Flagged: with no project known there is no marker to find, so the account decides.
+    flagged_home(_CURRENT_HOME[0])
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT)], input=payload, capture_output=True, text=True,
+        _guard_argv(), input=payload, capture_output=True, text=True,
         timeout=20, env=env, cwd=str(linked_worktree),
     )
     assert _hso(proc).get("permissionDecision") == "deny", proc.stdout
@@ -4069,11 +4103,24 @@ _CHAS_DENIED = [
 ]
 
 
+def _write_remote_hosts_file(hosts: str | None) -> None:
+    """Name the exempt ssh hosts the only way the guard reads them: the
+    ``remote-test-hosts`` file under the test's account home (nexus-sby49 D11)."""
+    home = _CURRENT_HOME[0]
+    assert home is not None
+    f = home / ".config" / "nexus" / "remote-test-hosts"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    if hosts is None:
+        f.unlink(missing_ok=True)
+    else:
+        f.write_text(hosts + "\n")
+
+
 @pytest.fixture()
-def remote_hosts(monkeypatch):
-    """The carve-out only fires for a host the session names: these cases name
+def remote_hosts():
+    """The carve-out only fires for a host the account names: these cases name
     the two aliases the _CHAS_* commands use."""
-    monkeypatch.setenv("NX_REMOTE_TEST_HOSTS", "chas,chas-test")
+    _write_remote_hosts_file("chas,chas-test")
 
 
 def test_a_subagent_ssh_to_chas_is_allowed(shared_repo, remote_hosts):
@@ -4103,16 +4150,19 @@ def test_the_chas_carve_out_is_not_vacuous(shared_repo, remote_hosts):
 _REMOTE_CMD = "ssh {host} 'git -C x add f'"
 
 
-def _remote_verdict(host: str, cwd: pathlib.Path, hosts: str | None) -> dict:
-    """Verdict for one ssh-to-``host`` git write with ``NX_REMOTE_TEST_HOSTS``
-    set to ``hosts`` (``None`` = variable absent)."""
+def _remote_verdict(host: str, cwd: pathlib.Path, hosts: str | None, *, env_hosts: str | None = None) -> dict:
+    """Verdict for one ssh-to-``host`` git write with the account's
+    ``remote-test-hosts`` file holding ``hosts`` (``None`` = no file) and the
+    ``NX_REMOTE_TEST_HOSTS`` environment variable set to ``env_hosts`` (``None`` =
+    absent). The variable is a project-controllable input and must never matter."""
+    _write_remote_hosts_file(hosts)
     env = os.environ.copy()
     env["NX_HOOK_PYTHON"] = sys.executable
     env.pop("NX_REMOTE_TEST_HOSTS", None)
-    if hosts is not None:
-        env["NX_REMOTE_TEST_HOSTS"] = hosts
+    if env_hosts is not None:
+        env["NX_REMOTE_TEST_HOSTS"] = env_hosts
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT)],
+        _guard_argv(),
         input=json.dumps(_payload(_REMOTE_CMD.format(host=host), agent=True, cwd=str(cwd))),
         capture_output=True, text=True, timeout=20, env=env,
     )
@@ -4125,13 +4175,23 @@ def test_remote_test_hosts_unset_exempts_none(shared_repo):
         assert _remote_verdict(host, shared_repo, None).get("permissionDecision") == "deny", host
 
 
-def test_remote_test_hosts_env_names_the_users_own_host(shared_repo):
+def test_remote_test_hosts_file_names_the_users_own_host(shared_repo):
     assert _remote_verdict("devbox", shared_repo, "devbox,ci-box").get("permissionDecision") != "deny"
-    assert _remote_verdict("ci-box", shared_repo, "devbox, ci-box").get("permissionDecision") != "deny"
+    assert _remote_verdict("ci-box", shared_repo, "devbox\n# a comment\nci-box").get("permissionDecision") != "deny"
     # only the named aliases are exempt
     assert _remote_verdict("chas-test", shared_repo, "devbox").get("permissionDecision") == "deny"
 
 
-def test_remote_test_hosts_env_empty_exempts_none(shared_repo):
+def test_remote_test_hosts_file_empty_exempts_none(shared_repo):
     assert _remote_verdict("chas-test", shared_repo, "").get("permissionDecision") == "deny"
-    assert _remote_verdict("chas", shared_repo, " , ").get("permissionDecision") == "deny"
+    assert _remote_verdict("chas", shared_repo, " , # none").get("permissionDecision") == "deny"
+
+
+@pytest.mark.parametrize("env_hosts", ["devbox", "chas,chas-test,devbox", ""])
+def test_a_project_env_variable_exempts_no_ssh_host(shared_repo, env_hosts):
+    """D11 (nexus-sby49): a project's settings ``env`` reaches command hooks, so the
+    variable that used to name the exempt hosts is not read at all."""
+    assert _remote_verdict("devbox", shared_repo, None, env_hosts=env_hosts).get("permissionDecision") == "deny"
+    # and it cannot widen a file that names other hosts
+    assert _remote_verdict("devbox", shared_repo, "ci-box", env_hosts=env_hosts).get("permissionDecision") == "deny"
+    assert _remote_verdict("ci-box", shared_repo, "ci-box", env_hosts=env_hosts).get("permissionDecision") != "deny"

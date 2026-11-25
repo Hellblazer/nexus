@@ -51,9 +51,10 @@ rules:
       agents are exempt when the worktree is positively proven.
     escape_token: "# routing-allow:"
     # Hook-level: a crash in the guard must not brick every agent's Bash.
-    # NOTE the split INSIDE the hook (nexus-ays2l item 3, Hal 2026-07-25):
-    # an UNDETERMINABLE worktree state fails OPEN for commit/add (hygiene)
-    # and CLOSED for the working-tree destroyers (silent data loss).
+    # An UNDETERMINABLE worktree state fails CLOSED for every write verb
+    # (nexus-3c92m round 4 retired the older commit/add fail-open split).
+    # The full rule is the maintainer's; other audiences get the short
+    # seatbelt in _user_git_seatbelt.py (nexus-sby49).
     fail_closed: false
   credential_print_guard:
     hook_script: credential_print_guard.py

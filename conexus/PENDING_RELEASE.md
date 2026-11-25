@@ -47,4 +47,9 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/scripts/_audience.py` (nexus-sby49.2): new. Answers who a hook runs for: `maintainer()` (account flag file under the OS account's home, or a nexus marker in the checkout), `nexus_repo()`, `account_flag()`, the `remote-test-hosts` file reader and a once-per-session tripwire. Strict on error.
+- `conexus/hooks/scripts/routing/_user_git_seatbelt.py` (nexus-sby49.2): new. The git guard's short user-mode deny list (force pushes, `branch -D`, reflog and gc pruning, hook-path and global config writes, discards of uncommitted work).
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` (nexus-sby49.2): the full rule now runs only for a maintainer; anyone else gets the seatbelt, so a user's subagent can commit, add, push, rebase and merge. `NX_REMOTE_TEST_HOSTS` is no longer read: the exempt ssh hosts come from `~/.config/nexus/remote-test-hosts`.
+- `conexus/hooks/scripts/routing/registry.yaml` (nexus-sby49.2): stale fail-open text corrected.
+
 ## Deferred to the next client release
