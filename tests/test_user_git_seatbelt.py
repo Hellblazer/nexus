@@ -180,6 +180,9 @@ TEXT_ALLOW = [
     "cat <<'EOF'\ngit branch -D x\nEOF\ngit status",
     "# git reset --hard\ngit status",
     "git commit -m 'git push --force and git reset --hard'",
+    # The usual commit-message shape: a heredoc inside a substitution, text with
+    # git words and an unbalanced paren in it.
+    'git commit -m "$(cat <<\'EOF\'\nfix: stop git push --force and git reset --hard (partly\nEOF\n)"',
 ]
 
 
@@ -330,6 +333,15 @@ POSITION_FORMS = [
     "git -C /tmp -c a=b --no-pager branch -D x",
     "cat <<EOF\nhello\nEOF\ngit branch -D x",
     "git push origin main && git push --force",
+    'git commit -m "$(cat <<\'EOF\'\nmsg\nEOF\n)" && git push --force',
+    "git branch | while read b; do git branch -D $b; done",
+    "(cd /tmp && git push -f)",
+    "true;git push -f",
+    "true&&git push -f",
+    "\\git push --force",
+    "'git' push --force",
+    "echo $(git push -f)",
+    'git -C "$(pwd)" push -f',
 ]
 
 
@@ -365,6 +377,8 @@ DOCUMENTED_GAPS = [
     "echo x | xargs git branch -D",
     "find . -exec git branch -D x {} ;",
     "bash <<EOF\ngit branch -D x\nEOF",
+    "g=git; $g push --force",
+    "git push $'--force'",
 ]
 
 
