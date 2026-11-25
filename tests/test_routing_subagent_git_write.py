@@ -4195,3 +4195,66 @@ def test_a_project_env_variable_exempts_no_ssh_host(shared_repo, env_hosts):
     # and it cannot widen a file that names other hosts
     assert _remote_verdict("devbox", shared_repo, "ci-box", env_hosts=env_hosts).get("permissionDecision") == "deny"
     assert _remote_verdict("ci-box", shared_repo, "ci-box", env_hosts=env_hosts).get("permissionDecision") != "deny"
+
+
+# ---------------------------------------------------------------------------
+# nexus-sby49 T1-T3: the maintainer path is selected by the marker, not by luck
+# ---------------------------------------------------------------------------
+
+
+def _audience_module():
+    scripts = str(PROJECT_ROOT / "conexus" / "hooks" / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import _audience
+
+    return _audience
+
+
+def test_the_fixture_repos_are_maintainer_checkouts_by_their_marker(shared_repo, linked_worktree):
+    """T1: asserted directly, so no verdict below depends on where the suite runs. It
+    FAILS, never skips, when the marker is missing from the checkout under test."""
+    audience = _audience_module()
+    for repo in (shared_repo, linked_worktree):
+        assert (repo / "scripts" / "agent-worktree-preflight.sh").is_file(), f"no marker at {repo}"
+        assert audience.nexus_repo({"cwd": str(repo)}) is True, repo
+        assert audience.maintainer({"cwd": str(repo)}) is True, repo
+    assert _CURRENT_HOME[0] is not None and not (
+        _CURRENT_HOME[0] / ".config" / "nexus" / "maintainer-profile"
+    ).exists(), "these tests must run unflagged: the marker alone has to carry them"
+
+
+def test_a_marked_linked_worktree_keeps_its_exemptions_and_the_config_deny(linked_worktree):
+    """T2: a commit passes in the proven linked worktree, a plain config write is denied."""
+    assert _verdict("git commit -m msg", linked_worktree).get("permissionDecision") != "deny"
+    out = _verdict("git config user.name someone", linked_worktree)
+    assert out.get("permissionDecision") == "deny", out
+
+
+def test_a_worktree_on_a_branch_older_than_the_marker_gets_the_full_form_only_with_the_flag(
+    shared_repo, linked_worktree, tmp_path,
+):
+    """T2: the marker is tracked, so a branch that predates it checks out without one."""
+    old = tmp_path / "old-branch-wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "--orphan", "-b", "old-branch", str(old)],
+        cwd=shared_repo, check=True, capture_output=True,
+    )
+    assert not (old / "scripts" / "agent-worktree-preflight.sh").exists()
+    cmd = "git config user.name someone"
+    assert _verdict(cmd, old).get("permissionDecision") != "deny", "no marker, no flag: a user repo"
+    flagged_home(_CURRENT_HOME[0])
+    assert _verdict(cmd, old).get("permissionDecision") == "deny", "the flag restores the full form"
+
+
+def test_a_clone_with_no_origin_is_still_a_maintainer_checkout(shared_repo, linked_worktree, tmp_path):
+    """T3: the lab-remote shape (a clone with its origin removed): tracked files are
+    copied, so the marker is there and the guard gets the full form."""
+    clone = tmp_path / "lab-remote-copy"
+    subprocess.run(
+        ["git", "clone", "-q", "--no-hardlinks", str(shared_repo), str(clone)], check=True, capture_output=True,
+    )
+    subprocess.run(["git", "remote", "remove", "origin"], cwd=clone, check=True, capture_output=True)
+    assert _audience_module().maintainer({"cwd": str(clone)}) is True
+    out = _verdict("git commit -m msg", clone)
+    assert out.get("permissionDecision") == "deny", out
