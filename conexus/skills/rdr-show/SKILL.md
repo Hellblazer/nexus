@@ -50,8 +50,8 @@ effort: low
 (none)
 
 ### Catalog Links (from link graph)
-- ← catalog.py (implements-heuristic, by index_hook)
-- ← tumbler.py (implements-heuristic, by index_hook)
+- ← catalog.py (implements, by a person or agent)
+- ← tumbler.py (implements-heuristic, an older edge: no pass writes this type any more)
 - → "Delos: Theory of Schema Mappings" (cites, by rdr-close)
 (or: "No catalog entry — run `nx index rdr` to populate")
 

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
@@ -127,6 +128,7 @@ class CatalogManifestSweepRepositoryTest {
             return ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant)
                 .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
                 .set(CHUNKS.CHUNK_TEXT, "stub")
@@ -198,7 +200,18 @@ class CatalogManifestSweepRepositoryTest {
         return repo.writeManifestMany(tenant, docs, collection, complete, sweep);
     }
 
+    /**
+     * RDR-229 P3.1: a document names its collection by registry id, so the collection is registered first (idempotent).
+     * Each name has its own owner (P3.8: a tuple has one live collection).
+     */
+    private void registerCollection(String tenant, String collection) {
+        repo.upsertCollection(tenant, Map.of(
+            "name", collection, "content_type", "code", "owner_id", "sweep-" + collection.split("__")[1],
+            "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
+    }
+
     private void registerDoc(String tenant, String tumbler, String collection) {
+        registerCollection(tenant, collection);
         repo.upsertDocument(tenant, Map.of(
             "tumbler", tumbler, "title", "sweep-test-" + tumbler,
             "content_type", "code", "corpus", "code",
@@ -207,9 +220,7 @@ class CatalogManifestSweepRepositoryTest {
 
     /** Registers the collection FK target, then inserts a zero-vector 384-dim chunk row. */
     private void seedChunk384(String tenant, String collection, String hexChash) throws Exception {
-        repo.upsertCollection(tenant, Map.of(
-            "name", collection, "content_type", "code", "owner_id", "sweep-owner",
-            "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
+        registerCollection(tenant, collection);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
@@ -223,6 +234,7 @@ class CatalogManifestSweepRepositoryTest {
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant)
                 .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChash))
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
                 .set(CHUNKS.CHUNK_TEXT, "seed text " + hexChash)
@@ -661,6 +673,7 @@ class CatalogManifestSweepRepositoryTest {
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
             .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 0)
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT_A, collection))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, "minilm-l6-v2-384")
             .execute();
     }

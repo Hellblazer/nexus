@@ -57,6 +57,9 @@ class Episode:
     key: str
     rows: list[tuple[datetime, Any, dict[str, Any]]]
     cleared: datetime | None = None
+    #: The ``kind=disclaim`` rows ("this red is not mine", ``nx ci ack --not-mine``) posted while the red was open, oldest
+    #: first, as ``(time, row)``. Recorded for display only: whether one hands the red on is the engine's call.
+    disclaims: list[tuple[datetime, Any]] = field(default_factory=list)
 
 
 def _is_state(row: Any, kind: str) -> bool:
@@ -76,7 +79,8 @@ def _is_state(row: Any, kind: str) -> bool:
 
 def split(rows: list[Any]) -> tuple[list[Episode], list[tuple[datetime, Any]]]:
     """The reds of *rows* oldest first, and the ack rows with their times. A row with no readable time is skipped, and
-    so is an owner or clear row the engine did not write (:func:`_is_state`)."""
+    so is an owner or clear row the engine did not write (:func:`_is_state`). A ``disclaim`` row joins the red open at its
+    time (:attr:`Episode.disclaims`); one posted with no red open is dropped."""
     ordered = sorted(rows, key=lambda r: (r.created_at or "", r.id))
     reds: list[Episode] = []
     open_red: Episode | None = None
@@ -102,6 +106,8 @@ def split(rows: list[Any]) -> tuple[list[Episode], list[tuple[datetime, Any]]]:
                 open_red = None
         elif kind == "ack":
             acks.append((at, row))
+        elif kind == "disclaim" and open_red is not None:
+            open_red.disclaims.append((at, row))
     return reds, acks
 
 
@@ -195,3 +201,15 @@ class AckResolver:
         elif who is None:
             self.ignored += 1
         return who
+
+    def identity_of(self, row: Any) -> tuple[str | None, bool]:
+        """``(identity, known)``: the identity *row*'s sender-session stamp maps to (a delegated child to its parent), and
+        whether that could be told. ``(None, True)`` for a row with no stamp or one the index maps to nobody; ``(None, False)``
+        when the lookup failed. Unlike :meth:`poster` it counts nothing in :attr:`ignored` or :attr:`unresolved`: for a row
+        that is shown, not one the ack-times figures are built from."""
+        sender = getattr(row, "sender_session", None)
+        if not sender:
+            return None, True
+        failures = self._failures
+        who = self.session(str(sender))
+        return (None, False) if self._failures > failures else (who, True)

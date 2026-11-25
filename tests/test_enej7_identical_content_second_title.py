@@ -25,7 +25,7 @@ from nexus.aspect_readers import uri_for
 from nexus.catalog.factory import make_catalog_reader
 from nexus.cli import main
 from nexus.corpus import t3_collection_name
-from nexus.db.http_vector_client import HttpVectorClient
+from nexus.db.http_vector_client import HttpVectorClient, get_http_vector_client
 
 pytestmark = pytest.mark.integration
 
@@ -53,7 +53,9 @@ def _assert_two_documents(client, collection: str, titles: tuple[str, str]) -> N
 
 
 def test_cli_second_title_registers_a_second_document(t2_service_env, tmp_path):
-    client = HttpVectorClient(tenant=t2_service_env)
+    # RDR-229 P3.8: the commands under test find the subject's minted label (c<id>) by its row, which only the
+    # process client answers (nexus-fryrd); the engine binds the tenant to the bearer.
+    client = get_http_vector_client()
     subject = "enej7-cli"
     body = "enej7 identical body stored under two titles"
 
@@ -62,7 +64,10 @@ def test_cli_second_title_registers_a_second_document(t2_service_env, tmp_path):
     assert first.exit_code == 0, first.output
     assert second.exit_code == 0, second.output
 
-    collection = t3_collection_name(subject, t3=client)
+    # RDR-229 P3.8: the subject's collection is a minted label (c<id>), found only through its registry row;
+    # a client built under the minted tenant's name answers no row (nexus-fryrd), so the read goes through the
+    # process client, as the CLI's does (the engine binds the tenant to the bearer).
+    collection = t3_collection_name(subject, t3=get_http_vector_client())
     _assert_two_documents(client, collection, ("shared-A", "shared-B"))
 
     # Both titles resolve. The shared chunk row carries only the last
@@ -78,7 +83,9 @@ def test_cli_second_title_registers_a_second_document(t2_service_env, tmp_path):
 def test_mcp_second_title_registers_a_second_document_and_both_resolve(t2_service_env):
     from nexus.mcp.core import store_get, store_put
 
-    client = HttpVectorClient(tenant=t2_service_env)
+    # RDR-229 P3.8: the commands under test find the subject's minted label (c<id>) by its row, which only the
+    # process client answers (nexus-fryrd); the engine binds the tenant to the bearer.
+    client = get_http_vector_client()
     subject = "enej7-mcp"
     body = "enej7 identical MCP body stored under two titles"
     with patch("nexus.mcp.core._get_t3", return_value=client):
@@ -87,7 +94,10 @@ def test_mcp_second_title_registers_a_second_document_and_both_resolve(t2_servic
         got_a = store_get("mcp-A", collection=subject)
         got_b = store_get("mcp-B", collection=subject)
 
-    collection = t3_collection_name(subject, t3=client)
+    # RDR-229 P3.8: the subject's collection is a minted label (c<id>), found only through its registry row;
+    # a client built under the minted tenant's name answers no row (nexus-fryrd), so the read goes through the
+    # process client, as the CLI's does (the engine binds the tenant to the bearer).
+    collection = t3_collection_name(subject, t3=get_http_vector_client())
     _assert_two_documents(client, collection, ("mcp-A", "mcp-B"))
     assert body in got_a, got_a
     assert body in got_b, got_b
@@ -95,13 +105,18 @@ def test_mcp_second_title_registers_a_second_document_and_both_resolve(t2_servic
 
 def test_reput_under_the_same_title_still_reconciles(t2_service_env, tmp_path):
     """Control: the same content under the same title stays ONE document."""
-    client = HttpVectorClient(tenant=t2_service_env)
+    # RDR-229 P3.8: the commands under test find the subject's minted label (c<id>) by its row, which only the
+    # process client answers (nexus-fryrd); the engine binds the tenant to the bearer.
+    client = get_http_vector_client()
     subject = "enej7-same"
     body = "enej7 same title twice"
     assert _put(client, tmp_path, subject, "same", body).exit_code == 0
     assert _put(client, tmp_path, subject, "same", body).exit_code == 0
 
-    collection = t3_collection_name(subject, t3=client)
+    # RDR-229 P3.8: the subject's collection is a minted label (c<id>), found only through its registry row;
+    # a client built under the minted tenant's name answers no row (nexus-fryrd), so the read goes through the
+    # process client, as the CLI's does (the engine binds the tenant to the bearer).
+    collection = t3_collection_name(subject, t3=get_http_vector_client())
     reader = make_catalog_reader()
     assert reader is not None
     matches = [

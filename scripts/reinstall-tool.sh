@@ -302,7 +302,8 @@ for _gen in "$TOOLS_DIR"/"$NX_GENERATION_PREFIX"*; do
     echo "${_count} holder(s) still bound to $(basename "$_gen"); they converge at their next spawn."
 done
 
-# Reap what no rule protects. The four never-delete rules (current, previous,
-# any generation with a live holder, and the generation hosting this installer)
+# Reap what no rule protects. The five never-delete rules (current, previous,
+# any generation with a live holder (the process census, or a live interpreter
+# holding its lease), the generation hosting this installer, and the lease itself)
 # are absolute, so a held tree survives this call however old it is.
 nx_gc_generations --keep 3 "$TOOLS_DIR" || true

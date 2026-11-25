@@ -11,6 +11,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CollectionLabel;
 import dev.nexus.service.db.GraphScopeFilter;
 import dev.nexus.service.vectors.ChunkKeyAllowlistCheck;
 import org.slf4j.Logger;
@@ -65,6 +66,7 @@ import java.util.*;
  *   GET   /v1/catalog/manifest/fill/{job_id}  the fill job: state, stage, done_rows, total_rows, filled, cursor, counts (nexus-f3yqd, R2)
  *   GET   /v1/catalog/manifest/foreign_collection?limit=N  live documents whose manifest names chunks outside their physical_collection (GH #1611)
  *   GET   /v1/catalog/uri_segment_census?limit=N  chroma:// and nx-note:// source-URI rows grouped by table, scheme, segment and collection, with the collection's content type (RDR-229 P1.2)
+ *   GET   /v1/catalog/rdr229_completion_counts  the caller's tenant's registry rows, live collections, dangling and self-id tombstones, and orphan/unstamped rows per NOT VALID table (RDR-229 P3.1; /v1/status carries none)
  *   GET   /v1/catalog/sensitive?limit=N  the tenant's live sensitive documents, listed up to N, with the total (nexus-f3yqd)
  *   GET   /v1/catalog/sensitive/locators?limit=N  the live sensitive documents and the live aliases of them, with the six locator fields, sensitive included (nexus-uwggq.2.5)
  *   GET   /v1/catalog/docs/by-scheme?scheme=S&limit=&offset=  live documents whose urlparse(source_uri).scheme is S lowercased, a page of at most 1000 with the exact count (nexus-uwggq.1.5)
@@ -92,8 +94,8 @@ import java.util.*;
  *   POST  /v1/catalog/owners/reactivate  clear an owner's deactivated_at (nexus-cw262)
  *   GET   /v1/catalog/owners/by_repo     get owner by repo_hash
  *   POST  /v1/catalog/collections/upsert upsert collection
- *   GET   /v1/catalog/collections/list   list collections
- *   GET   /v1/catalog/collections/get    get collection by name
+ *   GET   /v1/catalog/collections/list   list collections (rows carry collection_id, RDR-229 P3.5a, read-only)
+ *   GET   /v1/catalog/collections/get    get collection by name (row carries collection_id; so does /collections/for_tuple)
  *   POST  /v1/catalog/collections/supersede supersede collection
  *   POST  /v1/catalog/collections/rename rename collection (cascade)
  *   POST  /v1/catalog/collections/rehome re-home a collection onto a live target (one txn)
@@ -275,11 +277,11 @@ public final class CatalogHandler implements HttpHandler {
         this.repo = repo;
         this.linkRoutes = new CatalogLinksHandler(new dev.nexus.service.db.CatalogLinksRepository(repo));
         this.boundedReads = new CatalogBoundedReadRoutes(repo);
-        this.stubMetadataRoute = new CatalogStubMetadataRoute(new dev.nexus.service.db.PdfStubMetadataReads(repo));
+        this.stubMetadataRoute = new CatalogStubMetadataRoute(new dev.nexus.service.db.PdfStubMetadataReads(repo, repo.gate3()));
         this.ownerRoutes = new CatalogOwnerRoutes(repo);
         this.moveRoutes = new CatalogMoveRoutes(new dev.nexus.service.db.CatalogMoves(repo));
         this.censusRoutes = new CatalogCensusRoutes(
-            new dev.nexus.service.db.IndexRunCensusReads(repo), new dev.nexus.service.db.NextSeqDriftReads(repo));
+            new dev.nexus.service.db.IndexRunCensusReads(repo, repo.gate3()), new dev.nexus.service.db.NextSeqDriftReads(repo));
         this.manifestFill = new CatalogManifestFillRoutes(new dev.nexus.service.db.ManifestFill(repo),
             new dev.nexus.service.db.ManifestFillableCount(repo), manifestFillJobs, coverage);
         this.combinedWriteService = combinedWriteService;
@@ -361,6 +363,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/stub-metadata"         -> handleStubMetadata(exchange, tenant, method);
                 case "/manifest/foreign_collection" -> handleManifestForeignCollection(exchange, tenant, method);
                 case "/uri_segment_census"    -> handleUriSegmentCensus(exchange, tenant, method);
+                case "/rdr229_completion_counts" -> boundedReads.rdr229CompletionCounts(exchange, tenant, method);   // RDR-229 P3.1 review N2: the caller's own counts
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /docs/orphaned already
                 // existed; links had no equivalent, which is why the client
@@ -516,6 +519,12 @@ public final class CatalogHandler implements HttpHandler {
             // /update. Same 409 shape as CollectionMergeRefused above: a
             // refusal, not a server error.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (dev.nexus.service.db.MintedLabel.SequenceBehindDataException
+                 | dev.nexus.service.db.MintedLabel.LabelsTakenException
+                 | dev.nexus.service.db.CollectionMint.LiveTupleConflict e) {
+            // RDR-229 P3.8: a refusal of the collection mint or of a registering row that would hold a live tuple
+            // another collection holds. The message names the collections or the remedy; nothing was written.
+            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (CatalogRepository.EmbeddingProfileConflictException e) {
             // RDR-204 Phase 1 (bead nexus-ft04v.8): the request is
             // well-formed, but this install's collection authority (the
@@ -524,7 +533,10 @@ public final class CatalogHandler implements HttpHandler {
             // "well-formed but unprocessable in this configuration" contract.
             // The message names the authoritative value; tests assert its
             // content, not just the status.
-            HttpUtil.send(exchange, 422, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+            // RDR-229 P3.1 (nexus-p2m1x.17): a typed reason beside the message when the refusal carries one.
+            HttpUtil.send(exchange, 422, MAPPER.writeValueAsString(e.reason() == null
+                ? java.util.Map.of("error", e.getMessage())
+                : java.util.Map.of("error", e.getMessage(), "reason", e.reason())));
         } catch (CatalogRepository.DocumentNotFoundException e) {
             // nexus-s13u0/RDR-191 GATE-2 review High: a manifest write
             // (write/append/import_chunks_batch) against a doc_id with no
@@ -654,7 +666,7 @@ public final class CatalogHandler implements HttpHandler {
         // nexus-rfvyy.6.6: the owner row and the document row are separate transactions, so a non-boolean
         // 'sensitive' must be refused (IllegalArgumentException, the ladder's 400) BEFORE the owner write, or a
         // refused request would leave an owner row behind.
-        if (body.containsKey("tumbler")) CatalogRepository.sensitiveFlag(body);
+        if (body.containsKey("tumbler")) { CatalogRepository.sensitiveFlag(body); CatalogRepository.checkDocumentCollection(body); }
         // Owner upsert (if tumbler_prefix present)
         if (body.containsKey("tumbler_prefix")) {
             repo.upsertOwner(tenant, body);
@@ -2448,6 +2460,24 @@ public final class CatalogHandler implements HttpHandler {
     private void handleCollectionUpsert(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        // RDR-229 P3.8: a body naming a collection_id is refused (400) before anything is written, the profile seed below
+        // included.
+        dev.nexus.service.db.CollectionMint.refuseSuppliedId(body);
+        // RDR-229 P3.6: a refused label writes nothing, so it is judged before the lazy profile seed below, which
+        // commits on its own. A NEW label gets the whole rule; an existing row keeps its label whatever it is (the
+        // repository applies the same rule inside the registration, this only moves the refusal ahead of the seed).
+        // A name that is present but not a string is a 400 here, as on the other collection routes (before r2 it reached
+        // the INSERT). A missing or blank name is P3.8's mint branch and falls through to the repository.
+        Object rawName = body.get("name");
+        if (rawName != null && !(rawName instanceof String)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"name must be a string\"}"); return;
+        }
+        if (rawName instanceof String label && !label.isBlank()) {
+            CollectionLabel.requireStorable(label);
+            if (!repo.collectionExists(tenant, label)) {
+                CollectionLabel.validateUserLabel(label);
+            }
+        }
         // RDR-204 Phase 1 (bead nexus-ft04v.6/.8): this IS the single choke
         // point for "register a collection" (the client's
         // register_collection() -> POST /v1/catalog/collections/upsert ->
@@ -2473,6 +2503,14 @@ public final class CatalogHandler implements HttpHandler {
                 // registration can never 400 on an unrecognised content_type.
                 combinedWriteService.seedEmbeddingProfileForContentType(tenant, s);
             }
+        }
+        if (!(body.get("name") instanceof String registeredName) || registeredName.isBlank()) {
+            // RDR-229 P3.8: no name, the engine mints one and answers the row it registered (collection_id, name and
+            // the attributes), beside the "ok" every answer of this route has carried.
+            Map<String, Object> minted = new LinkedHashMap<>(repo.mintCollection(tenant, body, true));
+            minted.put("ok", true);
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(minted));
+            return;
         }
         repo.upsertCollection(tenant, body, true);
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
@@ -2581,6 +2619,16 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("updated", updated)));
     }
 
+    /** The id the route boundary resolved the request's source to ({@link CollectionSelectorFilter#RESOLVED_ID}), or null for a request by label. */
+    private static Long resolvedSourceId(Map<String, Object> body) {
+        return body.get(CollectionSelectorFilter.RESOLVED_ID) instanceof Number n ? n.longValue() : null;
+    }
+
+    /** The id the route boundary resolved a supersede's SUCCESSOR to ({@link CollectionSelectorFilter#RESOLVED_SUCCESSOR_ID}), or null for a successor named by label. */
+    private static Long resolvedSuccessorId(Map<String, Object> body) {
+        return body.get(CollectionSelectorFilter.RESOLVED_SUCCESSOR_ID) instanceof Number n ? n.longValue() : null;
+    }
+
     private void handleCollectionSupersede(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
@@ -2601,6 +2649,8 @@ public final class CatalogHandler implements HttpHandler {
         // pointing at its own name: permanently excluded from collectionForTuple (which
         // skips anything with superseded_by set) with nothing to redirect to. Its sibling
         // handleCollectionRename refuses the identical old==new case for the same reason.
+        Long sourceId = resolvedSourceId(body);
+        Long successorId = resolvedSuccessorId(body);
         if (name.equals(supersededBy)) {
             HttpUtil.send(exchange, 400,
                 "{\"error\":" + MAPPER.writeValueAsString(
@@ -2608,10 +2658,15 @@ public final class CatalogHandler implements HttpHandler {
         }
         // Guard 1 — old_name must be registered. Superseding a name that does not exist
         // is a typo on an explicit destructive-ish action; it must fail loud, not no-op.
-        Map<String, Object> oldRow = repo.getCollection(tenant, name);
-        if (oldRow == null) {
-            HttpUtil.send(exchange, 404,
-                "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + name) + "}"); return;
+        // Guards 1 and 2 read the SOURCE by its label, and guard 3 the successor by its label: a request that named that end by id skips
+        // them (the label's holder now may not be the row of the id), so the verb's typed by-id answer is the one given (row 16).
+        Map<String, Object> oldRow = null;
+        if (sourceId == null) {
+            oldRow = repo.getCollection(tenant, name);
+            if (oldRow == null) {
+                HttpUtil.send(exchange, 404,
+                    "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + name) + "}"); return;
+            }
         }
         // Guard 3 — superseded_by must name a registered, LIVE collection. This used to
         // be repo.collectionExists(tenant, supersededBy) — "a row exists, tombstone
@@ -2638,13 +2693,13 @@ public final class CatalogHandler implements HttpHandler {
         // c29vr) and the rename TARGET guard (nexus-cecqy/nexus-v6za0) already read
         // getCollection()+superseded_by directly, not collectionExists. This was the last
         // remaining direct repo.collectionExists call in this handler.
-        Map<String, Object> targetRow = repo.getCollection(tenant, supersededBy);
-        if (targetRow == null) {
+        Map<String, Object> targetRow = successorId == null ? repo.getCollection(tenant, supersededBy) : null;
+        if (successorId == null && targetRow == null) {
             HttpUtil.send(exchange, 404,
                 "{\"error\":" + MAPPER.writeValueAsString(
                     "superseded_by names an unregistered collection: " + supersededBy) + "}"); return;
         }
-        Object targetSupersededObj = targetRow.get("superseded_by");
+        Object targetSupersededObj = targetRow == null ? null : targetRow.get("superseded_by");
         String targetRetiredBy = targetSupersededObj instanceof String s ? s : "";
         if (!targetRetiredBy.isEmpty()) {
             HttpUtil.send(exchange, 409,
@@ -2657,7 +2712,7 @@ public final class CatalogHandler implements HttpHandler {
         // is idempotent, not a chain: the canonical rename now tombstones X -> Y itself
         // (nexus-cecqy) and its caller then issues supersede(X, Y), which must succeed.
         // A DIFFERENT target would rewrite the supersession chain unaudited.
-        Object current = oldRow.get("superseded_by");
+        Object current = oldRow == null ? null : oldRow.get("superseded_by");
         String currentBy = current instanceof String s ? s : "";
         if (!currentBy.isEmpty()) {
             if (!currentBy.equals(supersededBy)) {
@@ -2671,9 +2726,15 @@ public final class CatalogHandler implements HttpHandler {
             // its CollectionSuperseded message on a non-zero count) but do NOT re-run the
             // UPDATE — re-stamping superseded_at would move the supersession's recorded
             // instant every time the operation is retried.
-            HttpUtil.send(exchange, 200, "{\"updated\":1}"); return;
+            // A successor named by id skips this label shortcut: the verb decides under the lock, by id (row 16; a source by id has no oldRow).
+            if (successorId == null) {
+                HttpUtil.send(exchange, 200, "{\"updated\":1}"); return;
+            }
         }
-        int updated = repo.supersedeCollection(tenant, name, supersededBy, supersededAt != null ? supersededAt : "");
+        // row 16: a request by collection_id has its source read and locked by that id in the verb's own transaction (the route boundary
+        // left the id it resolved in the body)
+        int updated = repo.supersedeCollection(tenant, name, sourceId, supersededBy, successorId,
+            supersededAt != null ? supersededAt : "");
         if (updated == 0) {
             // The UPDATE carries guard 2's precondition in its WHERE, so zero rows here
             // means the row we just read has already changed. That precondition rules out
@@ -2804,6 +2865,15 @@ public final class CatalogHandler implements HttpHandler {
         String newName = body.get("new_name") instanceof String s ? s : (String) body.get("new");
         if (oldName == null || newName == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
+        }
+        // RDR-229 P3.6: a NEW rename target is a user-supplied label, so the label rule applies (a 400 through the
+        // route's IllegalArgumentException arm). A target row that already exists, a tombstone a past rename left,
+        // keeps its label whatever it is, so renaming back onto it (the undo) is not refused. A NUL is refused first
+        // of all, before the first read: bound into a lookup it would be a database error, not a 400. A quarantine-
+        // label is a legal label, so the quarantine refusal that follows still answers for it.
+        CollectionLabel.requireStorable(newName);
+        if (!repo.collectionExists(tenant, newName)) {
+            CollectionLabel.validateUserLabel(newName);
         }
         // nexus-wbfpw.71: refused on a quarantine collection, source or target, before any other check can
         // answer with a different status. CatalogRepository.renameCollection carries the same guard.
@@ -2937,9 +3007,22 @@ public final class CatalogHandler implements HttpHandler {
         // whenever the target turns out live or absent anyway; it only compares when the
         // target is STILL a non-live tombstone at commit time, same as this handler's own
         // identityOk/empty gate above.
-        Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName, tgtSuperseded,
+        var renamed = repo.renameCollectionOutcome(tenant, oldName, newName, resolvedSourceId(body), tgtSuperseded,
             newContentType, newOwnerId, newNameEmbeddingModel);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
+        // RDR-229 P3.5a: the renamed row, for the client to rebind from (residual S-7): the new label, its id and whether
+        // ids survive a rename here, with the catalog epoch an id cache keys on. The key is omitted, never null, when the
+        // engine role cannot read the cluster.
+        Map<String, Object> answer = new LinkedHashMap<>();
+        answer.put("renamed", renamed.counts());
+        answer.put("name", newName);
+        if (renamed.collectionId() > 0) {
+            answer.put("collection_id", renamed.collectionId());
+        }
+        answer.put("ids_stable", renamed.idsStable());
+        if (renamed.catalogEpoch() != null) {
+            answer.put("catalog_epoch", renamed.catalogEpoch());
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(answer));
     }
 
     /**
@@ -2968,9 +3051,10 @@ public final class CatalogHandler implements HttpHandler {
         if (keepRaw != null && !(keepRaw instanceof Boolean)) {
             HttpUtil.send(exchange, 400, "{\"error\":\"keep_quarantine must be a JSON boolean\"}"); return;
         }
-        boolean keepQuarantine = Boolean.TRUE.equals(keepRaw);
-        Map<String, Integer> counts = repo.deleteCollection(tenant, name, keepQuarantine);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("deleted", counts)));
+        // RDR-229 P3.5a: by label or by collection_id (the route boundary replaced an id with its label and, here only, left the
+        // id it resolved in the body); the refusals and the 200's collection_id and name are CollectionDeleteRoute's.
+        CollectionDeleteRoute.handle(exchange, tenant, repo, name, Boolean.TRUE.equals(keepRaw),
+            body.get(CollectionSelectorFilter.RESOLVED_ID));
     }
 
     private void handleCollectionForTuple(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -3112,6 +3196,9 @@ public final class CatalogHandler implements HttpHandler {
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("imported", result.imported());
         out.put("state_corrected", result.stateCorrected());
+        // RDR-229 P3.6 and item 10 (additive): the rows whose label the rule refused, each {name, rule, reason}; the
+        // rest of the batch imported. An older engine omits it, which reads as none.
+        out.put("refused", result.refused());
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
     }
 

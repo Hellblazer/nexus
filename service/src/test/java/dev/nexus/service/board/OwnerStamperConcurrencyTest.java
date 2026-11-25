@@ -91,7 +91,7 @@ class OwnerStamperConcurrencyTest {
     void aRedAndAGreenEvaluatedAtOnceLeaveTheStateOfTheNewestTip() throws Exception {
         String[] f = redOnY();
         se.done(f[0], StamperEnv.BASE, "Y", "failure");
-        se.push(f[0], StamperEnv.BASE, "Z", "Y", "sess-alpha");
+        se.push(f[0], StamperEnv.BASE, "Z", "Y", "sess-carol");
         se.doneRowOnly(f[0], StamperEnv.BASE, "Z", "success");
         se.doneRowOnly(f[0], StamperEnv.BASE, "Y", "failure");
 
@@ -114,7 +114,7 @@ class OwnerStamperConcurrencyTest {
             se.env.renew(f[0], f[1]);
             se.env.renew(f[0], f[2]);
             se.env.renew(f[0], f[3]);
-            se.push(f[0], StamperEnv.BASE, "Z", "Y", "sess-alpha");
+            se.push(f[0], StamperEnv.BASE, "Z", "Y", null);   // unstamped: it restarts no one's deadline
             se.doneRowOnly(f[0], StamperEnv.BASE, "Z", "failure");
 
             together(List.of(

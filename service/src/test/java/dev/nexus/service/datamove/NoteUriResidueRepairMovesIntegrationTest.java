@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.datamove;
 
+import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
@@ -122,6 +123,7 @@ class NoteUriResidueRepairMovesIntegrationTest extends DataMoveIntegrationBase {
         ctx().insertInto(CATALOG_DOCUMENTS)
             .set(CATALOG_DOCUMENTS.TENANT_ID, tenant).set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
             .set(CATALOG_DOCUMENTS.TITLE, tumbler).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))   // RDR-229 P3.1: the id beside the name
             .set(CATALOG_DOCUMENTS.SOURCE_URI, uri)
             .set(CATALOG_DOCUMENTS.DELETED_AT, tombstoned ? NOW : null)
             .execute();
@@ -133,11 +135,13 @@ class NoteUriResidueRepairMovesIntegrationTest extends DataMoveIntegrationBase {
             .set(DOCUMENT_ASPECTS.TENANT_ID, tenant).set(DOCUMENT_ASPECTS.COLLECTION, collection)
             .set(DOCUMENT_ASPECTS.SOURCE_PATH, "p/" + tumbler).set(DOCUMENT_ASPECTS.EXTRACTED_AT, NOW)
             .set(DOCUMENT_ASPECTS.MODEL_VERSION, "test").set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "test")
-            .set(DOCUMENT_ASPECTS.DOC_ID, tumbler).set(DOCUMENT_ASPECTS.SOURCE_URI, uri).execute();
+            .set(DOCUMENT_ASPECTS.DOC_ID, tumbler).set(DOCUMENT_ASPECTS.SOURCE_URI, uri)
+            .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(tenant, collection)).execute();   // RDR-229 P3.1
         ctx().insertInto(DOCUMENT_HIGHLIGHTS)
             .set(DOCUMENT_HIGHLIGHTS.TENANT_ID, tenant).set(DOCUMENT_HIGHLIGHTS.DOC_ID, tumbler)
             .set(DOCUMENT_HIGHLIGHTS.COLLECTION, collection).set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, uri)
-            .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, "- h").set(DOCUMENT_HIGHLIGHTS.INGESTED_AT, NOW).execute();
+            .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, "- h").set(DOCUMENT_HIGHLIGHTS.INGESTED_AT, NOW)
+            .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CollectionIds.idOf(tenant, collection)).execute();   // RDR-229 P3.1
     }
 
     /** Every document of the fixture, with its satellites, for one tenant; returns nothing: the scenarios read by tumbler. */

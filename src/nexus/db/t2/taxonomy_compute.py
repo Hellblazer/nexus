@@ -26,6 +26,7 @@ in P4). Do not fold them in.
 
 from __future__ import annotations
 
+import shlex
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -734,7 +735,7 @@ def compute_rebuild_plan(
             "Rebuilding anyway would drop every label on this collection. "
             "Either re-embed so both sides share one space and then rebuild, "
             f"or discard this collection's taxonomy deliberately with "
-            f"`nx taxonomy reset -c {collection_name}` and discover afresh."
+            f"`nx taxonomy reset -c {shlex.quote(collection_name)}` and discover afresh."
         )
 
     doc_ids, embeddings, texts = _drop_nonfinite_rows(

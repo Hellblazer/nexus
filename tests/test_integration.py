@@ -337,7 +337,10 @@ def _write_owned_note(collection: str, title: str, content: str, metadata: dict)
     from datetime import UTC, datetime
 
     from nexus.catalog.factory import make_catalog_writer
-    from nexus.catalog.store_hook import catalog_store_hook_tracked, single_chunk_manifest_metadata
+    from nexus.catalog.store_hook import single_chunk_manifest_metadata
+    # RDR-229 P3.1: the engine refuses a document whose collection has no registry row, and put_note registers
+    # the collection before it calls the hook, so this helper (which calls the hook directly) does the same.
+    from tests._catalog_fixture_ops import catalog_store_hook_tracked_seeded as catalog_store_hook_tracked
 
     chash, _metadatas = single_chunk_manifest_metadata(content)
     owner, _created = catalog_store_hook_tracked(

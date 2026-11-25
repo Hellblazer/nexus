@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -12,90 +13,151 @@ import structlog
 
 from nexus.catalog.rows import legacy_names as _legacy
 from nexus.collection_errors import SupersededCollectionWriteError  # noqa: F401 — re-exported: callers import it from here
+from nexus.registration_retry import REGISTRATION_RETRY_ACTIVE, reregister_after_unregistered
+from nexus.collection_mint import mint_knowledge_subject_label
 from nexus.knowledge_subject import CollectionRegistryUnreadableError, CollectionStoreUnreadableError, SubjectFinder, catalog_subject_finder, knowledge_subject_label  # noqa: F401 — re-exported (RDR-229 P2.8)
 from nexus.owner_segment_guard import TumblerShapedCorpusError, require_corpus_name  # noqa: F401 — re-exported (nexus-p2m1x.28)
 
 _log = structlog.get_logger(__name__)
 
-# ChromaDB collection name constraints:
-# - 3–63 characters
-# - Must start and end with an alphanumeric character
-# - May contain alphanumeric characters, hyphens, or underscores in the middle
-_COLLECTION_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{1,61}[a-zA-Z0-9]$")
-
-# Canonical content_type prefixes.  Defined here (before validate_collection_name)
-# so the overflow hint can include a concrete ``--content-type`` flag when the
-# name's prefix is recognisable.  The public alias ``CONTENT_TYPES`` is re-exported
-# below for backward-compat.
+# Canonical content_type prefixes.  The public alias ``CONTENT_TYPES`` is
+# re-exported below for backward-compat.
 _CONTENT_TYPES = ("code", "docs", "rdr", "knowledge")
 
 
+#: RDR-229 item 7: a label holding ``/`` is refused (Sam's ruling, T2 ``nexus/sam-ruling-rdr229-label-slash-2026-11-21``).
+#: ``NoteUri.collectionOf`` ends a collection at the first ``/``, so such a label would mis-parse
+#: ``nx-note://<label>/...``, and some file paths are built from a label (``nexus.label_filename`` makes those safe
+#: for every character but this one). One named clause so a later ruling is one line here and one in the engine
+#: (``CollectionLabel.REFUSE_SLASH``), plus ``test_rdr229_label_rule.py``'s one slash test.
+LABEL_REFUSES_SLASH: bool = True
+
+#: RDR-229 item 7: a label holding ``,`` or beginning or ending with whitespace is refused (Sam's ruling on ask
+#: ``rdr229-label-comma-space``, 2026-11-21). MCP search and plan confinement read a corpus list with ``split(",")``
+#: then ``strip()``, so such a label could be registered but never named there. Relaxable later, like ``/``: the
+#: engine's twin is ``CollectionLabel.REFUSE_COMMA_AND_EDGE_SPACE``.
+LABEL_REFUSES_COMMA_SPACE: bool = True
+
+#: The engine's own label form, ``c`` + ASCII digits (RDR-229 item 8). The client never mints one; the engine's
+#: minter does (P3.8). Twin of ``CollectionLabel.isMintedForm``: ``[0-9]``, not ``\d``, so no other script's digit counts.
+_MINTED_LABEL_RE = re.compile(r"c[0-9]+")
+
+#: UTF-8 bytes in a label (RDR-229 item 7).
+_LABEL_MAX_BYTES = 255
+
+#: Characters a label may not hold, by Unicode category: Cc (the C0 and C1 controls, NUL and DEL among them), Zl
+#: and Zp (U+2028 and U+2029, which break a line in a terminal, a log or a note URI). Cf is allowed on purpose: the
+#: zero-width joiner and non-joiner spell words in Persian and the Indic scripts and join emoji sequences, and a
+#: label is not a security principal (uniqueness is on the exact string), so a bidi override can no more spoof it
+#: than a homoglyph can, which no rule catches either.
+_LABEL_REFUSED_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+
+
+def _label_not_empty(name: str) -> None:
+    if not name:
+        raise ValueError("a collection label must not be empty")
+
+
+def _label_is_utf8(name: str) -> None:
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"collection label {name!r} is not valid UTF-8: {exc.reason}") from exc
+
+
+def _label_within_byte_limit(name: str) -> None:
+    n = len(name.encode("utf-8"))
+    if n > _LABEL_MAX_BYTES:
+        raise ValueError(f"collection label {name[:40]!r}... is {n} bytes in UTF-8; the limit is {_LABEL_MAX_BYTES}")
+
+
+def _label_has_no_control_character(name: str) -> None:
+    for ch in name:
+        if unicodedata.category(ch) in _LABEL_REFUSED_CATEGORIES:
+            raise ValueError(f"collection label {name!r} holds a control character (U+{ord(ch):04X})")
+
+
+def _label_has_no_slash(name: str) -> None:
+    if LABEL_REFUSES_SLASH and "/" in name:
+        raise ValueError(f"collection label {name!r} holds '/', which a label may not hold")
+
+
+def _label_has_no_comma(name: str) -> None:
+    if LABEL_REFUSES_COMMA_SPACE and "," in name:
+        raise ValueError(f"collection label {name!r} holds ',', which a label may not hold")
+
+
+def _label_has_no_edge_whitespace(name: str) -> None:
+    # str.strip()'s set, the one the comma-list readers apply; with Cc, Zl and Zp already refused it is category Zs,
+    # which is what the engine's twin checks.
+    if LABEL_REFUSES_COMMA_SPACE and name and name != name.strip():
+        raise ValueError(f"collection label {name!r} begins or ends with whitespace, which a label may not")
+
+
+def _label_is_not_minted_form(name: str) -> None:
+    if _MINTED_LABEL_RE.fullmatch(name):
+        raise ValueError(
+            f"collection label {name!r} is of the minted form (c followed by digits), which the engine "
+            "reserves for the labels it mints"
+        )
+
+
+#: The label rule's clauses, in the order they are checked, each under the rule name the engine gives it
+#: (``CollectionLabel.SHAPE_CLAUSES``, then ``requireNotMinted``; the name is the import report's ``rule`` on the
+#: wire). The order is the engine's, so a label that breaks two clauses gets the same refusal from both sides
+#: (nexus-pqirj). Adding a clause is one function above, one entry here and one in the engine; the shared case
+#: table ``service/src/test/resources/label-rule-cases.json`` pins the names, the order and the verdicts for both
+#: (nexus-mrmqw).
+_LABEL_CLAUSES: tuple[tuple[str, Callable[[str], None]], ...] = (
+    ("non_empty", _label_not_empty),
+    ("valid_utf8", _label_is_utf8),
+    ("no_control_character", _label_has_no_control_character),
+    ("within_byte_limit", _label_within_byte_limit),
+    ("no_slash", _label_has_no_slash),
+    ("no_comma", _label_has_no_comma),
+    ("no_edge_whitespace", _label_has_no_edge_whitespace),
+    ("not_minted", _label_is_not_minted_form),
+)
+
+#: The rule names of :data:`_LABEL_CLAUSES`, in order.
+LABEL_RULES: tuple[str, ...] = tuple(rule for rule, _ in _LABEL_CLAUSES)
+
+
+def label_breach(name: str) -> tuple[str, str] | None:
+    """The first clause of the label rule *name* breaks, as ``(rule, message)``, or ``None`` when it is a legal label."""
+    for rule, clause in _LABEL_CLAUSES:
+        try:
+            clause(name)
+        except ValueError as exc:
+            return rule, str(exc)
+    return None
+
+
 def validate_collection_name(name: str) -> None:
-    """Raise ValueError if *name* violates ChromaDB collection name constraints.
+    """Raise ValueError if *name* is not an acceptable collection LABEL (RDR-229 item 7, P3.6).
 
-    Enforces two sets of rules:
-    1. Structural (open-source ChromaDB): 3–63 characters, alphanumeric + hyphens/underscores,
-       must start and end with alphanumeric.
-    2. Cloud byte-length limit: name must not exceed 128 bytes when UTF-8 encoded.
-       Relevant if names ever contain multi-byte characters; all current ASCII names
-       are well within this limit since they cap at 63 chars = 63 bytes.
+    The label is what a person types and reads; it is no longer a ChromaDB identifier. The rule: non-empty,
+    valid UTF-8, no control character (Cc, plus the line and paragraph separators), at most 255 UTF-8 bytes,
+    not of the minted form ``c`` followed by ASCII digits (the engine's, so a user cannot claim a label a later
+    mint would produce), no ``/`` while :data:`LABEL_REFUSES_SLASH` holds, and no ``,`` and no whitespace at
+    either end while :data:`LABEL_REFUSES_COMMA_SPACE` holds. The 63-character cap, the
+    3-character minimum, the start/end-alphanumeric rule and the 128-byte cloud limit are gone; so is the
+    overflow hint that went with the cap.
 
-    This is CHARSET legality of the WHOLE name string (start/end
-    alphanumeric, alphanumeric+hyphen+underscore in between) -- it has no
-    concept of segments and is deliberately NOT the owner-segment
-    ambiguity rule (RDR-204 Phase 3 item 7, coordinator grammar decision
-    2026-09-08): that structural check -- an owner admits single
-    underscores only, never a run of two, because "__" is always the
-    segment separator -- lives in :func:`nexus.catalog.rows.legacy_names.is_conformant_collection_name` /
-    :data:`nexus.catalog.rows.legacy_names._OWNER_SEGMENT_RE`. Do not re-derive it here: this function
-    validates names that legitimately contain three literal "__"
-    separators (a full 4-segment conformant name), so a segment-aware
-    rule cannot live in this flat charset check without rejecting every
-    conformant name at creation time.
+    This is the label rule and nothing else. It is deliberately NOT the owner-segment ambiguity rule (RDR-204
+    Phase 3 item 7, coordinator grammar decision 2026-09-08): that structural check lives in
+    :func:`nexus.catalog.rows.legacy_names.is_conformant_collection_name` /
+    :data:`nexus.catalog.rows.legacy_names._OWNER_SEGMENT_RE`, still gates the creation of a NEW collection in
+    ``T3Database.get_or_create_collection``, and is not re-derived here.
+
+    Callers: the rename target in :func:`nexus.collection_rename.rename_collection_data_plane` (the production
+    path, behind ``nx collection rename`` and ``nx catalog rename-collection``) and ``T3Database``. It is not called
+    on a registration, because the client cannot tell a new label from an existing one there and an existing row
+    keeps its label whatever it is; the engine enforces the same rule on a NEW registration, a rename target, a
+    re-embed target and a new imported row (``CollectionLabel``).
     """
-    # Length check fires first for <3 chars; regex rejects other invalid patterns.
-    # Both gates are needed: length for clear error messages, regex for charset/boundary validation.
-    if len(name) > 63:
-        # Overflow: derive an actionable hint.  The canonical remedy is to
-        # rename to the repo-id-conformant name (e.g. ``code__1-36__bge-base-en-v15-768__v1``,
-        # 35 chars) which fits under the cap and preserves vectors (no reindex).
-        # Derive content_type from the name prefix (before the first ``__``) when
-        # present so the hint can be concrete; fall back to a generic flag otherwise.
-        # RDR-204 Phase 3 repoint (nexus-ft04v.26): an oversized *name* is
-        # necessarily NOT a real (registered) collection -- collection_content_type
-        # now reads the catalog row and would raise CollectionNotRegisteredError
-        # here every time. This is a best-effort HINT about a candidate string,
-        # so it uses the string-shape primitive directly, same as
-        # t3_collection_name's own candidate-parsing sites below.
-        # split_candidate_collection_name returns "" for a name with no "__" at
-        # all, which fails the membership test below exactly like the old
-        # "__" in name guard did.
-        _ct_hint = ""
-        _prefix, _ = _legacy.split_candidate_collection_name(name)
-        if _prefix in _CONTENT_TYPES:
-            _ct_hint = f" --content-type {_prefix}"
-        raise ValueError(
-            f"Collection name {name!r} must be 3–63 characters (got {len(name)}). "
-            f"The name is too long for ChromaDB's 63-character cap. "
-            f"To get a conformant name that fits and preserves vectors (no reindex), run:\n"
-            f"  nx catalog collection-name{_ct_hint} --repo <repo-path>"
-        )
-    if len(name) < 3:
-        raise ValueError(
-            f"Collection name {name!r} must be 3–63 characters (got {len(name)})"
-        )
-    if not _COLLECTION_NAME_RE.match(name):
-        raise ValueError(
-            f"Collection name {name!r} must start and end with an alphanumeric character "
-            "and contain only alphanumeric characters, hyphens, or underscores"
-        )
-    # ChromaDB Cloud additional constraint: 128-byte limit (byte length, not char length).
-    name_bytes = len(name.encode())
-    if name_bytes > 128:
-        raise ValueError(
-            f"Collection name {name!r} exceeds ChromaDB Cloud 128-byte limit "
-            f"(encoded as {name_bytes} bytes)"
-        )
+    for _rule, clause in _LABEL_CLAUSES:
+        clause(name)
 
 
 CONTENT_TYPES: tuple[str, ...] = _CONTENT_TYPES
@@ -1163,18 +1225,25 @@ def t3_collection_name(
 
     Inputs land in one of three shapes:
 
-    - ``foo`` (no underscores) becomes
-      ``knowledge__foo__voyage-context-3__v1``.
-    - ``knowledge__foo`` (legacy 2-segment) is auto-promoted to
-      ``knowledge__foo__voyage-context-3__v1``.
-    - ``knowledge__foo__voyage-context-3__v1`` (already 4-segment
-      conformant) passes through untouched.
+    - A bare subject (``foo``, no underscores) or a legacy ``knowledge__foo``
+      is a knowledge subject. With a ``subject_finder`` (or a *t3* with
+      ``find_collection``) the subject's catalog row is read first and its
+      label is the answer, whatever shape that label has. A write that
+      passes a ``subject_finder`` and finds no row registers the subject
+      by attributes (content type, owner, the write model) and returns the
+      label the engine mints, a ``c<id>`` for a new subject. Without a
+      finder it renders ``knowledge__foo__<model>__v1``.
+    - ``docs__foo`` / ``code__foo`` (and ``rdr__foo``) render
+      ``<ct>__foo__<model>__v1``; only these content types still render a
+      four-segment name from the subject.
+    - A conformant four-segment name (``<ct>__<owner>__<model>__v<n>``)
+      passes through untouched.
 
-    Auto-promotion satisfies ``T3Database``'s strict-naming guard
+    The rendered form satisfies ``T3Database``'s strict-naming guard
     (RDR-103 Phase 5) while preserving the operator habit of typing
     short ``--collection`` arguments.
 
-    RDR-229 P2.8: an empty conformant knowledge subject is found by its catalog row
+    RDR-229 P2.8, P3.8: an empty conformant knowledge subject is found by its catalog row
     (:func:`nexus.knowledge_subject.knowledge_subject_label`), a label of any shape included.
 
     nexus-hmxi: when *t3* is supplied, the resolver checks for an
@@ -1248,10 +1317,11 @@ def t3_collection_name(
 
         try:
             # nexus-bc7ps: --corpus resolution is routing; live rows only.
+            # RDR-229 P3.8: a minted knowledge collection is labelled ``c<id>``, so a row's content_type also counts.
             matches = [
                 c["name"]
                 for c in live_collection_rows(t3, routing=True)
-                if c["name"].startswith(f"{user_arg}__")
+                if c["name"].startswith(f"{user_arg}__") or c.get("content_type") == user_arg
             ]
         except Exception:  # noqa: BLE001 — best-effort collection-listing probe; empty match list on any backend failure
             matches = []
@@ -1353,12 +1423,18 @@ def t3_collection_name(
             # grandfathered onto without a live probe, so the identity
             # must be the STRICT one: raises loud if local.embed_model
             # is voyage-shaped with no key configured.
+            if ct == "knowledge" and not allow_placeholder and subject_finder is not None:  # RDR-229 P3.8: a real write (the writers pass a finder; a dry run passes none) registers by attributes, the engine mints the label
+                return mint_knowledge_subject_label(owner_segment)
             return f"{ct}__{owner_segment}__{effective_embedding_model_for_writes(ct)}__v1"
         return promoted
     if user_arg == promoted:
         return promoted
     try:
-        if not t3.collection_exists(promoted):  # type: ignore[attr-defined]
+        # RDR-229 P3.8: the subject's row is its collection (a minted label), so it is read first.
+        if found := knowledge_subject_label(getattr(t3, "find_collection", None), ct, owner_segment, promoted, for_write=for_write):
+            return found
+        promoted_exists = t3.collection_exists(promoted)  # type: ignore[attr-defined]
+        if not promoted_exists:
             # nexus-9n485 observability: collection_exists() alone can't
             # tell "promoted never had any chunks" from "every chunk under
             # promoted belongs to a trashed document" (HttpVectorClient
@@ -1380,9 +1456,6 @@ def t3_collection_name(
                         "queryable."
                     ),
                 )
-            # RDR-229 P2.8: the conformant name holds nothing, so the subject's row is read before the fallbacks.
-            if found := knowledge_subject_label(getattr(t3, "find_collection", None), ct, owner_segment, promoted, for_write=for_write):
-                return found
             if t3.collection_exists(user_arg):  # type: ignore[attr-defined]
                 return user_arg
             # Bare-prefix legacy fallback (#535 / nexus-6mr0): when the
@@ -1469,10 +1542,11 @@ def t3_collection_name(
         if for_write:  # a WRITE must not guess the rendered name when it could not look (RDR-229 P2.8)
             raise CollectionStoreUnreadableError.for_probe(user_arg, promoted, exc) from exc
     if for_write:
-        # Nothing pre-existing to grandfather onto: this IS a brand-new
-        # mint. Recompute strictly — raises loud if local.embed_model is
-        # voyage-shaped with no key configured, never silently falls
-        # back to bge.
+        # Nothing pre-existing to grandfather onto: this IS a brand-new mint. RDR-229 P3.8: a new knowledge
+        # subject registers by attributes and writes to the label the engine mints (strict model, raises loud
+        # when local.embed_model is voyage-shaped with no key configured); a restore keeps its name.
+        if ct == "knowledge" and not allow_placeholder and not promoted_exists:
+            return mint_knowledge_subject_label(owner_segment, registrar=getattr(t3, "_collection_registrar", None))
         return f"{ct}__{owner_segment}__{effective_embedding_model_for_writes(ct)}__v1"
     return promoted
 
@@ -2021,7 +2095,11 @@ def ensure_collection_registered(
 
     A 409 from the register call is treated as already-registered
     (idempotent-upsert semantics, RDR-204 Technical Design step 2) —
-    another process may have won the race to register the same name.
+    another process may have won the race to register the same name —
+    only when the name then reads back as a live row (RDR-229 P3.8: the
+    engine also answers 409 for a refusal, a new row on a live tuple
+    another collection holds, every minted label taken, a sequence behind
+    the data, which is raised).
     Any other failure propagates uncaught: a registration failure here
     means the write that follows would 422/4xx anyway, and failing at
     this boundary names the real cause instead of the write's more
@@ -2190,6 +2268,13 @@ def ensure_collection_registered(
                     writer.register_collection(name, **kwargs)
                 except httpx.HTTPStatusError as exc:
                     if exc.response is None or exc.response.status_code != 409:
+                        raise
+                    # RDR-229 P3.8: a 409 is also a refusal (a new row on a live tuple another collection holds,
+                    # every minted label taken, a sequence behind the data). It is a won race only when the name
+                    # reads back registered; otherwise caching it would turn the refusal into a later 422.
+                    # The ambient writer is write-only, so the row is read the way _row_from_client reads it.
+                    won = _row_from_client(writer, name)
+                    if not isinstance(won, dict) or _superseded_successor(won):
                         raise
                     _log.debug(
                         "collection_already_registered_race",
@@ -2394,7 +2479,21 @@ def write_with_registration_retry(
     catch a collection that sat registered-but-unwritten across an
     intervening restart, never the write this function itself just
     triggered registration for.
+
+    The whole call runs with ``REGISTRATION_RETRY_ACTIVE`` set, so the transport-level retry of
+    :mod:`nexus.registration_retry` (installed in the mutating POST every store shares) passes through
+    here instead of stacking a second retry on this one.
     """
+    token = REGISTRATION_RETRY_ACTIVE.set(True)
+    try:
+        return _write_registering(name, write_fn, registrar)
+    finally:
+        REGISTRATION_RETRY_ACTIVE.reset(token)
+
+
+def _write_registering(
+    name: str, write_fn: "Callable[[], _T]", registrar: "Callable[[], object] | None",
+) -> "_T":
     ensure_collection_registered(name, registrar=registrar)
     try:
         return write_fn()
@@ -2413,38 +2512,7 @@ def write_with_registration_retry(
     except Exception as exc:  # noqa: BLE001 — narrowed immediately below; anything else re-raised unchanged
         if not _looks_like_stale_registration_error(exc):
             raise
-        if _is_quarantine_sibling(name):
-            # The funnel never registers a sibling (see
-            # ensure_collection_registered), so a retry cannot repair
-            # this; name the reason instead of the engine's bare 422.
-            raise QuarantineSiblingNotRegisteredError(
-                f"{name!r} is not registered and the client never registers "
-                "a quarantine sibling: the engine's GC function registers it "
-                "from the origin collection's row when it first quarantines a "
-                "chunk, so a sibling that does not exist has nothing to "
-                "write into. Check the origin collection and `nx t3 gc`."
-            ) from exc
-        # nexus-wwuzp: the re-registration below is an upsert, which clears
-        # ``superseded_by``. A retired name must be refused, never revived by
-        # a retry. A read failure propagates rather than falling open: the
-        # alternative is reviving a tombstone on a guess.
-        successor = _superseded_successor(_read_collection_row(name, registrar))
-        if successor:
-            # Keep the entry, stale, so the next call takes the revalidation
-            # read and is refused again (and an in-flight read cannot re-stamp
-            # it: expire bumps the generation).
-            with _REGISTERED_COLLECTIONS_LOCK:
-                _registration_cache_set(getattr(registrar, "scope", None)).expire(
-                    _registration_cache_key(getattr(registrar, "scope", None), name),
-                )
-            raise SupersededCollectionWriteError(name, successor) from exc
-        _log.info(
-            "collection_registration_stale_after_boot_sweep_retry",
-            name=name,
-        )
-        with _REGISTERED_COLLECTIONS_LOCK:
-            _registration_cache_discard(getattr(registrar, "scope", None), name)
-        ensure_collection_registered(name, registrar=registrar)
+        reregister_after_unregistered(name, exc, registrar)
         return write_fn()
 
 

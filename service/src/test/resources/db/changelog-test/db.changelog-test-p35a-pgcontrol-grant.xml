@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-p2m1x.23 (RDR-229 P3.5a): give EXECUTE back to PUBLIC (the stock-cluster state) on pg_control_system(), pg_control_checkpoint() and pg_postmaster_start_time(), the
+    three CatalogEpoch reads, so CollectionRenameRefusalTest sees a rename on a locked-down cluster omit catalog_epoch. The names
+    are fixed (pg_catalog functions, the fixture's service role); no placeholder. Superuser, runAlways.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-p35a-pgcontrol-grant-1" author="nexus-p2m1x.23" runAlways="true">
+        <sql splitStatements="false">
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_checkpoint() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_postmaster_start_time() TO PUBLIC;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

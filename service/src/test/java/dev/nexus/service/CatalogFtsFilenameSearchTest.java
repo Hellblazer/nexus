@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.nexus.Routines;
@@ -327,6 +328,7 @@ class CatalogFtsFilenameSearchTest {
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, COLLECTION)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION))
                 .set(CHUNKS.CHUNK_TEXT, "stub")

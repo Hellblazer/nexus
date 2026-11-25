@@ -257,7 +257,7 @@ def _stamp_engine_rows(world: World, subspace: str) -> None:
            "SELECT count(*) FROM stamped")
     proc = subprocess.run([str(state["pg_bin"] / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
                            "-U", state["pg_user"], "-d", "nexus_t2_substrate", "-v", "ON_ERROR_STOP=1", "-At", "-c", sql],
-                          capture_output=True, text=True, check=False)
+                          capture_output=True, text=True, encoding="utf-8", check=False)
     assert proc.returncode == 0, f"stamping the engine rows failed: {proc.stderr}"
     assert proc.stdout.strip() == "5", f"expected the seed's 5 engine rows, got {proc.stdout!r}"
 

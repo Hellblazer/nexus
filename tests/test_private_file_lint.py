@@ -51,6 +51,11 @@ NON_CREDENTIAL: dict[tuple[str, str], int] = {
     ("src/nexus/db/t1.py", "_acquire_t1_mint_lock"): 1,  # the T1 mint flock (nexus-g5mir)
     ("src/nexus/upgrade_ladder/rungs/rdr192_manifest_backfill.py", "_cross_process_lock"): 1,
     ("src/nexus/util/upgrade_auto_lock.py", "acquire_auto_lock"): 1,  # the nx upgrade --auto single-instance flock; holds only a pid (nexus-75w5d)
+    # The gc record (install-gc.log): diagnostics whose parent commands are already redacted
+    # (gc_core._redact_command), so 0600 is defence in depth, not a credential's protection. gc_core is
+    # bootstrap-safe (runs with nexus absent) and cannot import nexus._winsec; on Windows the file takes
+    # the user profile directory's ACL. O_CREAT with 0o600, then fchmod of a log an older version made 0644.
+    ("src/nexus/_install/gc_core.py", "__call__"): 2,
     ("src/nexus/commands/ask.py", "live_lock"): 1,  # the flock around a batch record's read-modify-write (nexus-wc4jj.14)
     ("src/nexus/commands/enrich.py", "_validation_file_lock"): 1,  # the sibling flock of the aspect validation files (nexus-z1d0l.1.6)
     # PID files and a restart-timestamp sentinel.

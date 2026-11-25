@@ -5,11 +5,9 @@ package dev.nexus.service.vectors;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.vectors.PciCatalog.Index;
 import dev.nexus.service.vectors.PciCatalog.Leaf;
-import dev.nexus.service.vectors.PciReconcilePlanner.Action;
 import dev.nexus.service.vectors.PciReconcilePlanner.Build;
 import dev.nexus.service.vectors.PciReconcilePlanner.Drop;
 import dev.nexus.service.vectors.PciReconcilePlanner.DropReason;
-import dev.nexus.service.vectors.PciReconcilePlanner.RegistryRow;
 import dev.nexus.service.vectors.PciReconcilePlanner.Reindex;
 import dev.nexus.service.vectors.PciReconcilePlanner.Trigger;
 import dev.nexus.service.vectors.PciReconcilePlanner.SkipCountSuspect;
@@ -27,67 +25,13 @@ import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static dev.nexus.service.vectors.PciPlannerFixtures.*;
 
 /**
  * RDR-227 Step 2 (nexus-43ulx.18): the decision half of the reconciler, one case per rule. No database, no clock,
  * no logging: {@link PciReconcilePlanner#plan} is a function of its arguments.
  */
 class PciReconcilePlannerTest {
-
-    private static final String MODEL = "m";
-    private static final String TENANT = "t";
-    private static final int B = 100;
-
-    private static PciSettings settings(int maxPerLeaf) {
-        return new PciSettings(true, B, 600, maxPerLeaf);
-    }
-
-    private static final PciSettings DEFAULT = settings(16);
-
-    private static String name(String collection) {
-        return PciCatalog.indexName(MODEL, TENANT, collection);
-    }
-
-    private static Index valid(String collection) {
-        return new Index(name(collection), true, collection);
-    }
-
-    private static Index invalid(String collection) {
-        return new Index(name(collection), false, collection);
-    }
-
-    private static Leaf leaf(Index... indexes) {
-        return new Leaf("nexus", "chunks_leaf", MODEL, TENANT, List.of(indexes));
-    }
-
-    private static RegistryRow live(String collection) {
-        return new RegistryRow(collection, "live", "");
-    }
-
-    private static RegistryRow state(String collection, String lifecycleState) {
-        return new RegistryRow(collection, lifecycleState, "");
-    }
-
-    private static RegistryRow superseded(String collection, String by) {
-        return new RegistryRow(collection, "live", by);
-    }
-
-    private static List<Action> plan(Leaf leaf, Map<String, Integer> counts, List<RegistryRow> registry) {
-        return PciReconcilePlanner.plan(leaf, counts, registry, Set.of(), null, DEFAULT);
-    }
-
-    private static List<Action> plan(Leaf leaf, Map<String, Integer> counts, List<RegistryRow> registry,
-                                     PciSettings settings) {
-        return PciReconcilePlanner.plan(leaf, counts, registry, Set.of(), null, settings);
-    }
-
-    private static Build build(String collection) {
-        return new Build(name(collection), collection);
-    }
-
-    private static Drop drop(String collection, DropReason reason) {
-        return new Drop(name(collection), collection, reason);
-    }
 
     // ---- switches ----
 

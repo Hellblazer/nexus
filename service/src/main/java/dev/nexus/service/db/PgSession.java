@@ -1216,6 +1216,11 @@ public final class PgSession {
            .fetch();
     }
 
+    /** The transaction's {@code statement_timeout} as the server reports it ({@code "0"} when none is set); a read, which sets nothing and binds no network timeout. */
+    public static String currentStatementTimeout(DSLContext ctx) {
+        return ctx.fetchValue(DSL.function("current_setting", String.class, DSL.val("statement_timeout")));
+    }
+
     private static void requireAllowed(String guc) {
         if (!ALLOWED_GUCS.contains(guc)) {
             throw new IllegalArgumentException(

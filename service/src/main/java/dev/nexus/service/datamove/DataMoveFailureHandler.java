@@ -38,6 +38,8 @@ public final class DataMoveFailureHandler implements FailureHandler {
     private final String applicationName;
     private final Clock clock;
     private final Duration recorderWait;
+    /** Per move, the run of {@code on_complete} bounds and its latch, as this process has seen them (the row keeps no stage). */
+    private final MoveRetryPolicy.OnCompleteRuns runs = new MoveRetryPolicy.OnCompleteRuns();
 
     public DataMoveFailureHandler(AdminConnection admin, String applicationName, Clock clock) {
         this(admin, applicationName, clock, RECORDER_WAIT);
@@ -108,10 +110,30 @@ public final class DataMoveFailureHandler implements FailureHandler {
     private Disposition transientFailure(Failure f, DataMoveFailureClassifier.Verdict verdict, Instant now) {
         String reason = verdict.reason();
         OptionalInt retries = withAdmin(f, ctx -> MoveFailureRecords.recordTransient(ctx, f.move().label(), now, reason));
-        return retries.isPresent()
-            ? Disposition.blocked(MoveRetryPolicy.blockedReason(retries.getAsInt(), now, reason), verdict.sqlstate(),
-                retries.getAsInt())
-            : Disposition.blocked(reason, verdict.sqlstate(), Disposition.NOT_COUNTED);
+        if (retries.isEmpty()) {
+            return Disposition.blocked(reason, verdict.sqlstate(), Disposition.NOT_COUNTED);
+        }
+        int count = retries.getAsInt();
+        var run = runs.record(f.move().label(), count, MoveRetryPolicy.isOnCompleteBound(f.stage(), verdict.sqlstate()));
+        boolean needs = MoveRetryPolicy.needsOperator(count, run.latched());
+        // exactly one failure enters the state (the count is bumped by one UPDATE and the run by one thread per move); the
+        // worker logs the page on it, through the announce set it shares with the status sampler
+        boolean entered = MoveRetryPolicy.entersNeedsOperator(count - 1, run.latchedBefore(), count, run.latched());
+        // ended by the finisher, at the point it does (terminateOrThrow), not guessed from the stage or the run
+        var page = new PageInfo(needs, entered, MoveRetryPolicy.step(f.stage()),
+            MoveRetryPolicy.boundMs(f.stage(), f.move(), verdict.sqlstate()), f.indexBuildsEnded());
+        return Disposition.blocked(MoveRetryPolicy.blockedReason(count, run.latched(), page.terminatesIndexBuilds(), now,
+            reason), verdict.sqlstate(), count, page);
+    }
+
+    @Override
+    public void forget(String label) {
+        runs.forget(label);
+    }
+
+    @Override
+    public void retainOnly(java.util.Collection<String> openLabels) {
+        runs.retainOnly(openLabels);
     }
 
     /** Runs {@code write} on the pass's admin connection, or on a short one of its own when the pass has none. */

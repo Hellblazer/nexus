@@ -57,6 +57,21 @@ reports not applicable. A managed tenant needs one interactive `nx upgrade` (thr
 If a rung ever asks a question (a billed re-embed, a choice the walk cannot derive), surface it to the user and let
 them choose; never answer on their behalf.
 
+## The RDR-229 stamp moves and the one restart
+
+An engine at 0.1.202 or later does collection-id work in the background after it serves, and
+`nx upgrade` does not drive it. The engine registers one data move per collection-bearing
+table (`rdr229-stamp-<table>`); each fills the collection id on existing rows in resumable batches. They need the `pg_background` extension
+([configuration, background data moves](https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md)), and they show under `boot_work` on `/v1/status`
+and in `nx doctor` (the `RDR-229 completion` row, `Collection ids`, and a `data move needs an
+operator` row if one keeps failing). The chunks move is the long one: about 38 hours on a
+production-size store. Leave `NX_DATA_MOVE_SLEEP_MS` unset.
+
+When every stamp move is complete the engine lists one more `boot_work` entry, `rdr229-restart`
+("restart the engine once"); until it runs, a collection rename is refused (409). That restart is
+the one manual step and nothing is lost by waiting: the user restarts the engine, never you. A rollback starts with the down-step
+([runbook](https://github.com/Hellblazer/nexus/blob/main/docs/runbooks/rdr-229-p31-rollback.md)).
+
 ## The RDR-192 backfill rung and its failure mode
 
 `rdr192-manifest-backfill` censuses every collection for legacy notes that
@@ -123,12 +138,7 @@ there, then upgrade back to current. Three preconditions for the hop at the pin:
   managed`, or a ChromaDB Cloud key with no mode record), which `NX_LOCAL=1`
   overrides. Read from the 6.18.1 source, not run at the pin. Never run
   the pin's `nx guided-upgrade --service-url ...` or aim it at a managed
-  endpoint: that path is unsupported and failed in every case measured
-  (nexus-6g218, local gate jars, not the managed endpoint): against a current
-  engine it stops before writing anything, and on the last build that still had
-  the `/v1/staging` routes a same-model store with no document aspects was
-  reported "Migration VERIFIED" while its 16- and 32-hex pointers were
-  discarded.
+  endpoint: unsupported, and it failed in every case measured (nexus-6g218).
   Do not set `service_url` first "to save a step".
 - **Stop any current-engine local service** a 7.x install left running
   (`nx daemon service stop`) so the pin provisions its own engine.
@@ -138,44 +148,28 @@ there, then upgrade back to current. Three preconditions for the hop at the pin:
 
 If the user wants the managed cloud, that is a second hop with the CURRENT
 client after the upgrade back. It has NOT been rehearsed end to end (nexus-xbqh9)
-and carries less than the old direct path. Not carried: T2 plans, taxonomy
-(topics, assignments, links, centroids), `document_aspects`, the aspect queue and
-`aspect_promotion_log`, `frecency` and `relevance_log` (a note's TTL is not in
-those tables: the `nx store export` file carries each chunk's `ttl_days` and
-`indexed_at` as stored, and the `nx catalog export` recovery bundle gives each
-`store_put` note its own `ttl_days` and restarts its clock at the import, so a note
-already expired but not reaped comes back with a full TTL; a note stored by
-7.87.0 or earlier or brought in by an `.nxexp` import keeps its `ttl_days` only
-when its chunk row is provably its own write, else it comes back permanent and
-the export names it; it keeps its tags and category also when it is the chunk's
-only owner and the row is not another note's), the telemetry stores,
-DEVONthink highlights, curated catalog metadata (author, year, corpus, `meta`, collection
-supersession), and owner tumblers are re-minted. T2 memory is carried only by
-hand (`nx memory list`, `nx memory get --project NAME --title NAME`, then
-`nx memory put` in the cloud), which has to happen BEFORE the switch to the
-cloud and does not scale past tens of entries. Pick by user type:
+and carries less than the old direct path: T2 plans, taxonomy, `document_aspects`,
+the aspect queue, `frecency` and `relevance_log`, the telemetry stores, DEVONthink
+highlights, curated catalog metadata and owner tumblers are re-minted, and T2
+memory moves only by hand (`nx memory list`, `nx memory get`, then `nx memory put`
+in the cloud, BEFORE the switch). The migration runbook
+(https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md), § Getting
+that data into the managed cloud, has the full list. Pick by user type:
 
-- Local-ONNX collections (bge-768): not expected to import into a Voyage cloud.
-  Hop 1 names them bge, so `nx store import` passes its name and dimension
-  checks and sends them to the cloud engine, which may refuse them; what it
-  answers is unverified (nexus-xbqh9). For code, docs and rdr content, re-index
-  from source in the cloud (`nx index repo`, `nx index pdf`); that is cheaper
-  than two hops.
-- Voyage collections from a Voyage-keyed hop 1: `nx store export --all`
-  locally, then `nx store import FILE` in the cloud.
+- Local-ONNX collections (bge-768): not expected to import into a Voyage cloud, and
+  what the cloud engine answers is unverified (nexus-xbqh9). For code, docs and rdr
+  content, re-index from source in the cloud (`nx index repo`, `nx index pdf`).
+- Voyage collections from a Voyage-keyed hop 1: `nx store export --all` locally,
+  then `nx store import FILE` in the cloud.
 - Source-less `store_put` notes: `nx catalog export recovery.jsonl` locally,
-  `nx catalog import` in the cloud (re-embeds; carries links and notes only).
+  `nx catalog import` in the cloud (re-embeds; carries links and notes only; a note's TTL clock restarts at the import).
 
 Order: hand-carry T2 memory and run the exports while the box is still local;
-then `unset NX_LOCAL` and switch with `nx config set service_url ...` (and the
-`service_token` you noted; `NX_LOCAL=1` wins over `service_url` in current
-clients), clear the stranded banner
-(`nx stranded ack`, or move the pre-PG files it names aside), re-index from
-source, `nx store import`, and `nx catalog import` LAST (links resolve by
-`source_uri` against documents already there). The full procedure is
-the migration runbook (https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md), § Getting that data into the managed cloud. With no web access the
-order above is the rule: switch the config, re-index, `nx store import`, `nx catalog import` last. Surface
-the choices to the user rather than making them.
+then `unset NX_LOCAL` (it wins over `service_url`) and switch with `nx config set service_url ...` (and the
+`service_token` you noted), clear the stranded banner (`nx stranded ack`, or move
+the pre-PG files it names aside), re-index from source, `nx store import`, and
+`nx catalog import` LAST (links resolve by `source_uri` against documents already
+there). With no web access that order is the rule. Surface the choices to the user rather than making them.
 
 ## Managed service
 

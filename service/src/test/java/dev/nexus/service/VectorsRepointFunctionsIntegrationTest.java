@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
@@ -210,6 +211,7 @@ class VectorsRepointFunctionsIntegrationTest {
         var ins = ctx.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, TENANT)
             .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             .set(CHUNKS.CHASH, chash)
             .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, collection))
             .set(CHUNKS.CHUNK_TEXT, text)
@@ -222,21 +224,28 @@ class VectorsRepointFunctionsIntegrationTest {
 
     /** One {@code nexus.catalog_documents} row for {@code collection}. */
     private static void insertDocument(DSLContext ctx, String tumbler, String title, String collection) {
-        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS,
-                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-            .values(TENANT, tumbler, title, "code", "code", collection)
+        ctx.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, title)
+            .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "code")
+            .set(CATALOG_DOCUMENTS.CORPUS, "code")
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             .execute();
     }
 
     /** One manifest row ({@code catalog_document_chunks}) tying {@code chash} to {@code doc} at {@code position}. */
     private static void insertManifestRow(DSLContext ctx, String doc, int position, byte[] chash,
                                           String collection) {
-        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-            .values(TENANT, doc, position, chash, collection,
-                PgContainerHelper.collectionModel(ctx, TENANT, collection))
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, collection))
             .execute();
     }
 
@@ -287,15 +296,24 @@ class VectorsRepointFunctionsIntegrationTest {
 
             insertManifestRow(ctx, docTumbler, 0, chash, collection);
 
-            ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                    TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
-                    TAXONOMY_CENTROIDS.EMBEDDING_384, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
-                .values(TENANT, collection, 1L, model, vec(384, 0.02), "alpha", 1)
+            ctx.insertInto(TAXONOMY_CENTROIDS)
+                .set(TAXONOMY_CENTROIDS.TENANT_ID, TENANT)
+                .set(TAXONOMY_CENTROIDS.COLLECTION, collection)
+                .set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
+                .set(TAXONOMY_CENTROIDS.TOPIC_ID, 1L)
+                .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, model)
+                .set(TAXONOMY_CENTROIDS.EMBEDDING_384, vec(384, 0.02))
+                .set(TAXONOMY_CENTROIDS.LABEL, "alpha")
+                .set(TAXONOMY_CENTROIDS.DOC_COUNT, 1)
                 .execute();
 
-            ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
-                    TOPICS.CREATED_AT)
-                .values(TENANT, "alpha", collection, 1, SEED_TS)
+            ctx.insertInto(TOPICS)
+                .set(TOPICS.TENANT_ID, TENANT)
+                .set(TOPICS.LABEL, "alpha")
+                .set(TOPICS.COLLECTION, collection)
+                .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
+                .set(TOPICS.DOC_COUNT, 1)
+                .set(TOPICS.CREATED_AT, SEED_TS)
                 .execute();
 
             // RDR-194 P3c (nexus-tk070.p3c): doc_id is bytea now. The generated field binds the digest's
@@ -307,10 +325,14 @@ class VectorsRepointFunctionsIntegrationTest {
             Long alphaTopicId = ctx.select(TOPICS.ID).from(TOPICS)
                 .where(TOPICS.TENANT_ID.eq(TENANT)).and(TOPICS.LABEL.eq("alpha"))
                 .fetchOne(TOPICS.ID);
-            ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
-                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-                .values(TENANT, chash, alphaTopicId, "centroid", collection, model)
+            ctx.insertInto(TOPIC_ASSIGNMENTS)
+                .set(TOPIC_ASSIGNMENTS.TENANT_ID, TENANT)
+                .set(TOPIC_ASSIGNMENTS.DOC_ID, chash)
+                .set(TOPIC_ASSIGNMENTS.TOPIC_ID, alphaTopicId)
+                .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "centroid")
+                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection)
+                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
+                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, model)
                 .execute();
 
             insertCitesLink(ctx, docTumbler, docTumbler);
@@ -494,6 +516,9 @@ class VectorsRepointFunctionsIntegrationTest {
                         DSL.using(conn, SQLDialect.POSTGRES), "nexus",
                         "search_metadata_scoped_%", "search_topic_scoped_%",
                         "search_graph_hop_%", "search_aspect_scoped_%");
+                    // RDR-229 P3.5b (vectors-077): each facade's id-path twin <name>_by_id is the same facade on the id, not a
+                    // thirteenth verb; Rdr229P35bIdTwinAttributesTest pins the pairs.
+                    names = names.stream().filter(nm -> !nm.endsWith("_by_id")).toList();
                     assertThat(names)
                         .as("the 12 combined-query facades (4 verbs x 3 dims) must "
                             + "number 12 post-RDR-156-Decision-5 — the original 9 "

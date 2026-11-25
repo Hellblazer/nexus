@@ -26,7 +26,7 @@ The catalog is the connective tissue between Nexus's [storage tiers](../storage-
 
 **The [RDR process](../rdr.md) ties it together.** A design decision starts as an RDR, picks up research findings along the way, gets accepted and implemented in code, and closes with a post-mortem. Each stage produces artifacts in different collections, and the RDR lifecycle skills link them as they go. An agent can then start from any piece and walk the graph: RDR → research that informed it → code that implements it → post-mortem that evaluated it.
 
-**Other agents do the same thing.** A research synthesizer `cites` source papers. Debugger and analyst agents `relates` findings to each other. The knowledge tidier `supersedes` duplicates when consolidating. Agents can link at the chunk level when search results provide specific passages, but most links today are document-to-document.
+**Other agents do the same thing.** A research synthesizer `cites` source papers. Debugger and analyst agents `relates` findings to each other. When an `nx_tidy` report finds duplicates, whoever acts on it records the `supersedes` link. Agents can link at the chunk level when search results provide specific passages, but most links today are document-to-document.
 
 **The [query planner](../querying-guide.md) uses the catalog to optimize search.** Instead of searching everything and hoping for relevance, the planner resolves matching documents in the catalog first, by author, content type, document subtree, or link relationships, then searches only their collections. For multi-step analytical queries, it composes graph traversal with search to maximize the quality of retrieved content: following citation chains, crossing collection boundaries, and scoping each step to the documents relevant to the question.
 
@@ -42,7 +42,7 @@ Tumblers are assigned once and never reused. If you delete document `1.2.5` and 
 
 ### Typed links between documents
 
-Nelson envisioned a universal link graph where every connection between documents is typed, bidirectional, and permanent. Nexus ships with seven built-in link types: five that agents create automatically (`cites`, `implements`, `implements-heuristic`, `supersedes`, `relates`) and two for human annotation (`quotes`, `comments`). The link type field is a free-form string at the API level, so custom types can be added without code changes. See the [catalog guide](../catalog.md#link-types) for when to use each type.
+Nelson envisioned a universal link graph where every connection between documents is typed, bidirectional, and permanent. Nexus ships with eight built-in link types. Citations (`cites`) are created automatically from bibliographic metadata, and agents and the RDR lifecycle create `implements`, `supersedes`, `relates` and `formalizes`. `quotes` and `comments` are for human annotation. The eighth, `implements-heuristic`, marks the code-to-RDR links an old path-matching pass guessed; nothing writes it now, existing edges remain, and graph traversal leaves them out by default. The link type field is a free-form string at the API level, so custom types can be added without code changes. See the [catalog guide](../catalog.md#link-types) for when to use each type.
 
 A debugger agent creates `relates` links between a root cause analysis and prior findings. A developer agent creates `implements` links between code and the design document it realizes. Citation links are auto-generated from Semantic Scholar metadata during [enrichment](../cli-reference.md#nx-enrich).
 

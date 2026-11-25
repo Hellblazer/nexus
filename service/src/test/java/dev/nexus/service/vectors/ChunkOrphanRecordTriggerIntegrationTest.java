@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.PgContainerHelper;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
@@ -111,10 +112,14 @@ class ChunkOrphanRecordTriggerIntegrationTest extends ChunkReapableTestBase {
             String model = PgContainerHelper.collectionModel(ctx, t, KNOWLEDGE);
             int position = 0;
             for (String hex : List.of(aged, fresh)) {
-                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                   .values(t, "replace-same", position++, bytes(hex), KNOWLEDGE, model).execute();
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                   .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, t)
+                   .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "replace-same")
+                   .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position++)
+                   .set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(hex))
+                   .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, KNOWLEDGE)
+                   .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(t, KNOWLEDGE))
+                   .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model).execute();
             }
         });
 
@@ -137,10 +142,14 @@ class ChunkOrphanRecordTriggerIntegrationTest extends ChunkReapableTestBase {
         suTxn(ctx -> {
             ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("replace-drop"))).execute();
-            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-               .values(t, "replace-drop", 0, bytes(kept), KNOWLEDGE, PgContainerHelper.collectionModel(ctx, t, KNOWLEDGE))
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+               .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, t)
+               .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "replace-drop")
+               .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+               .set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(kept))
+               .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, KNOWLEDGE)
+               .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(t, KNOWLEDGE))
+               .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, t, KNOWLEDGE))
                .execute();
         });
 
@@ -252,11 +261,13 @@ class ChunkOrphanRecordTriggerIntegrationTest extends ChunkReapableTestBase {
 
         su(ctx -> {
             String model = PgContainerHelper.collectionModel(ctx, t, KNOWLEDGE);
+            Long collectionId = CollectionIds.require(ctx, t, KNOWLEDGE);
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-               .values(t, "upsert-both", 0, 0, bytes(moved), KNOWLEDGE, model)
-               .values(t, "upsert-both", 1, 1, bytes(added), KNOWLEDGE, model)
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+               .values(t, "upsert-both", 0, 0, bytes(moved), KNOWLEDGE, collectionId, model)
+               .values(t, "upsert-both", 1, 1, bytes(added), KNOWLEDGE, collectionId, model)
                .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                .doUpdate().set(CATALOG_DOCUMENT_CHUNKS.CHASH, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.CHASH))
                .execute();

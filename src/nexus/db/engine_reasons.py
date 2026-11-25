@@ -52,6 +52,52 @@ COLLECTION_MODEL_MISMATCH_REASON: str = "collection_model_mismatch"
 #: explicit registration revives a name.
 COLLECTION_SUPERSEDED_REASON: str = "collection_superseded"
 
+#: A collection route was given a ``collection_id`` no row of the tenant has (HTTP 404, RDR-229 P3.5a). Also carries
+#: ``collection_id`` (the id sent). The id of a retired row (a rename's or supersede's tombstone) is the 409
+#: ``collection_superseded`` instead, on every route (linda's D3 ruling). A label with no row keeps the
+#: ``unregistered_collection`` 422; this reason is for id input only.
+UNKNOWN_COLLECTION_ID_REASON: str = "unknown_collection_id"
+
+#: A collection route resolved a ``collection_id`` to a registry row of another id (HTTP 500, RDR-229 P3.5a): a registry
+#: inconsistency, an engine defect. Also carries ``collection_id`` (the id sent) and ``resolved_collection_id``. Not a caller
+#: mistake and not retryable. The same reason answers HTTP 409 when a request sent BOTH an id and a label and, by the time of the
+#: write, the row of the id no longer bears that label: the body then carries ``collection_id``, ``requested_label`` and
+#: ``current_label``. (A request by id alone is never refused for its label: the id is the identity, and a rename that lands between
+#: the route boundary and the write changes nothing about where the write goes.)
+COLLECTION_ID_MISMATCH_REASON: str = "collection_id_mismatch"
+
+#: A catalog rename reached the one-row regime (the gate 3 latch row exists and the rename readiness is complete) with no one-row
+#: rename to run (HTTP 409, RDR-229 P3.5a): the engine refuses rather than rewrite name columns the one-row regime's keys depend
+#: on. Nothing was renamed.
+RENAME_PATH_MISMATCH_REASON: str = "rename_path_mismatch"
+
+#: A catalog rename or a collection supersede could not lock its registry row within 10 s because writers still held it (HTTP 503,
+#: RDR-229 P3.5a), with ``Retry-After`` and ``retry_after_seconds``. Nothing was changed; retry shortly. Also what the unbounded gc routes answer after 25 s when a rename or supersede holds the collection's registry row (quarantine-orphans, restore-rereferenced, expire-quarantine); ingest writers have no such bound.
+RENAME_BUSY_REASON: str = "rename_busy"
+
+#: A per-store ``rename_collection`` route (chash, taxonomy, telemetry, aspects, highlights) in the one-row regime, where it is a
+#: no-op because the registry rename has moved the label, found that the registry did not (HTTP 409, RDR-229 P3.5a): the new
+#: label is not a live registry row, or the old one still is. Rename the collection in the registry first. Nothing was changed.
+RENAME_NOT_IN_REGISTRY_REASON: str = "rename_not_in_registry"
+
+#: ``POST /v1/catalog/collections/delete`` by a label that more than one live row holds (HTTP 409, RDR-229 P3.5a). Also carries
+#: ``collection_ids``; the delete by ``collection_id`` removes one of them.
+COLLECTION_LABEL_AMBIGUOUS_REASON: str = "collection_label_ambiguous"
+
+#: ``POST /v1/vectors/gc/restore-rereferenced`` (bounded or not) or ``POST /v1/vectors/gc/quarantine-restore``, from the collection-id
+#: latch (gate 3), named quarantined chunks tagged with the origin's label whose ``origin_collection_id`` is the JSON null marker: an
+#: origin that had no registry row, or no longer has one, when they were quarantined (HTTP 409, RDR-229 P3.7). Also carries ``label``
+#: (the origin) and ``rows`` (how many chunks carry the marker). The whole call is refused before anything moves, id-matched chunks
+#: of the same call included, and the chunks stay quarantined. Never retryable as sent: restore the other chunks by naming only
+#: them, and re-register the origin or let the quarantine expire for the marked ones.
+RESTORE_ORIGIN_UNREGISTERED_REASON: str = "restore_origin_unregistered"
+
+#: A register or revive (upsert), a supersede successor, a rename target or a single-form per-collection import named a label that is RESERVED: a
+#: collection renamed away from it by the one-row rename still has rows in the name-keyed tables that carry it, until the P4.1
+#: cleanup drops the name columns (HTTP 409, RDR-229 P3.7; the engine's ``HttpUtil.LABEL_RESERVED_REASON``). Also carries ``error`` and ``label``.
+#: Nothing was written. Never retryable: pick another label, or rename the collection that was renamed away back to it.
+LABEL_RESERVED_REASON: str = "label_reserved"
+
 #: A write naming an embedding model registered nowhere (HTTP 422, RDR-225).
 UNREGISTERED_EMBEDDING_MODEL_REASON: str = "unregistered_embedding_model"
 
@@ -67,6 +113,17 @@ TENANT_PARTITION_MISSING_REASON: str = "tenant_partition_missing"
 #: bound and issued nothing (HTTP 503 with ``Retry-After``, RDR-225).
 #: Retryable: the same call may be sent again.
 TENANT_CREATION_BUSY_REASON: str = "tenant_creation_busy"
+
+#: ``POST /v1/catalog/collections/delete`` named a collection a re-embed job in a non-terminal state (planned, running, paused,
+#: cutover or failed) holds as its source or its target (HTTP 409, RDR-229 P3.5a row 14). Also carries ``error``, ``collection``
+#: and ``job_id``. Nothing was removed. Retry once the job is done, or after ``nx collection re-embed --abort JOB``.
+COLLECTION_BUSY_REASON: str = "collection_busy"
+
+#: A collection rename (``POST /v1/catalog/collections/rename`` and the per-store rename routes) while the engine cannot yet
+#: run the one-row rename (HTTP 409, RDR-229 P3.5a). Also carries ``error`` and ``missing``: ``restart`` when the engine must
+#: restart to apply a changeset (renames open after the next restart), else ``name_key_drop_move``, ``p35b_list_missing``,
+#: ``readiness_unreadable``, ``p35c_readers_absent`` or ``latch_row_missing``. Nothing was renamed.
+RENAME_REFUSED_REASON: str = "rename_refused"
 
 
 def error_reason(body: Any) -> str | None:

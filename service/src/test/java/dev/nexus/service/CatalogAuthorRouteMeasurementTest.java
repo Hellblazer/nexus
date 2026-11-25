@@ -60,18 +60,20 @@ class CatalogAuthorRouteMeasurementTest extends Rdr241RouteTestBase {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(seed, TENANT, COLL);   // P3.1: a document names a registered collection, by id
+            Long collId = dev.nexus.service.db.CollectionIds.require(seed, TENANT, COLL);
             OffsetDateTime deletedAt = OffsetDateTime.parse("2026-10-01T12:00:00+00:00");
             int total = CatalogRdr241RouteStatementSpikeTest.Fx.LIVE + CatalogRdr241RouteStatementSpikeTest.Fx.DELETED;
             for (int lo = 0; lo < total; lo += 1000) {
                 var step = seed.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                     CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.CONTENT_TYPE,
                     CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.SOURCE_URI,
-                    CATALOG_DOCUMENTS.METADATA, CATALOG_DOCUMENTS.DELETED_AT);
+                    CATALOG_DOCUMENTS.METADATA, CATALOG_DOCUMENTS.DELETED_AT, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID);
                 for (int i = lo; i < Math.min(total, lo + 1000); i++) {
                     step = step.values(TENANT, CatalogRdr241RouteStatementSpikeTest.Fx.tumbler(i), "Doc " + i,
                         CatalogRdr241RouteStatementSpikeTest.Fx.author(i), CatalogRdr241RouteStatementSpikeTest.Fx.contentType(i),
                         "/fx/" + i + ".md", COLL, "file:///fx/" + i + ".md", JSONB.valueOf("{}"),
-                        CatalogRdr241RouteStatementSpikeTest.Fx.live(i) ? null : deletedAt);
+                        CatalogRdr241RouteStatementSpikeTest.Fx.live(i) ? null : deletedAt, collId);
                 }
                 step.execute();
             }
@@ -122,8 +124,8 @@ class CatalogAuthorRouteMeasurementTest extends Rdr241RouteTestBase {
             double route = routeMedianMs(q, expect);
             var where = CatalogDocReads.authorWhere(TENANT, c.term);
             String tag = stage + " author~'" + c.term + "' offset " + c.offset;
-            double window = statementMedianMs(tag + " page with count(*) OVER ()", ctx -> CatalogDocReads.pageQuery(ctx, where, 1000, c.offset));
-            double rowsOnly = statementMedianMs(tag + " page without the window", ctx -> CatalogDocReads.pageRowsQuery(ctx, where, 1000, c.offset));
+            double window = statementMedianMs(tag + " page with count(*) OVER ()", ctx -> CatalogDocReads.pageQuery(ctx, where, 1000, c.offset, dev.nexus.service.datamove.Gate3.never()));
+            double rowsOnly = statementMedianMs(tag + " page without the window", ctx -> CatalogDocReads.pageRowsQuery(ctx, where, 1000, c.offset, dev.nexus.service.datamove.Gate3.never()));
             double count = statementMedianMs(tag + " count statement", ctx -> CatalogDocReads.countQuery(ctx, where));
             emit(String.format(Locale.ROOT, "RDR241AUTHOR %s | route median %.1f ms | page+window %.1f ms | page only %.1f ms | count %.1f ms | matches %d",
                 tag, route, window, rowsOnly, count, expect));

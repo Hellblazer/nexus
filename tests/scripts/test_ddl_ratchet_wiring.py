@@ -10,7 +10,9 @@ prove each is caught, not merely that today's files are consistent.
   and upload it (both steps ``continue-on-error`` exactly while ``[python_unit] measured_on`` is absent,
   so a missing script, an exception or a failed artifact upload cannot fail the leg and with it
   ``pytest-gate`` before the gate is armed); ``pytest-gate`` downloads every shard's report and runs ``fan-in`` with ``--shards``
-  equal to the matrix length, after the verdict step. A shard's mix is not the run's, so only the fan-in
+  equal to the matrix length, after the verdict step. The fan-in is one step of ``scripts/ci_gate_fan_in.py``
+  that also runs the storage-touch fan-in and the shard-collection check (so one overage cannot hide another
+  behind a skipped step; ``test_ci_gate_fan_in.py`` pins what it runs). A shard's mix is not the run's, so only the fan-in
   gates, and it gates only once armed: the fan-in is ``--advisory`` (and its checkout, download and run
   steps ``continue-on-error``) exactly while ``[python_unit] measured_on`` is absent from
   ``tests/ddl_ceiling.toml``, the same rule as the Java steps below. Until real Linux ceilings exist the
@@ -51,6 +53,12 @@ def _run_steps(doc: dict, job: str, needle: str) -> list[dict]:
 def _armed(ceilings_text: str) -> bool:
     marker = tomllib.loads(ceilings_text).get("python_unit", {}).get("measured_on")
     return isinstance(marker, str) and bool(marker.strip())
+
+
+#: The three whole-run checks, however a step spells the call (`-m tests._x`, `tests/_x.py`, extra spaces).
+_WHOLE_RUN_CHECKS = (r"ddl_ratchet\.py\s+fan-in", r"tests[./]_storage_touch_fan_in", r"tests[./]_shard_collection")
+#: Test-only flags of the gate script: CI must run it against the committed ceilings.
+_TEST_ONLY_FLAGS = ("--ddl-ceilings", "--storage-touch-ceilings")
 
 
 def python_wiring_problems(ci_text: str, ceilings_text: str) -> list[str]:
@@ -95,7 +103,7 @@ def python_wiring_problems(ci_text: str, ceilings_text: str) -> list[str]:
             problems.append(f"test: {where!r} is not continue-on-error while the gate is advisory: "
                             "a missing script, a missing report or a failed upload would red the leg and pytest-gate")
 
-    gate = _run_steps(doc, "pytest-gate", "ddl_ratchet.py fan-in")
+    gate = _run_steps(doc, "pytest-gate", "ci_gate_fan_in.py")
     if len(gate) != 1:
         problems.append(f"pytest-gate: expected one fan-in step, found {len(gate)}")
     else:
@@ -125,8 +133,21 @@ def python_wiring_problems(ci_text: str, ceilings_text: str) -> list[str]:
         elif not m_ba or m_ba.group(1) != m_on.group(1):
             problems.append("pytest-gate: the fan-in's --bytes-advisory condition is not the test job's hosted-runner condition, "
                             "so a hosted run could be gated on WAL measured on the pool (nexus-ekp7w)")
-        if "--suite python_unit" not in run or "ddl-reports/*/nx-ddl-report.json" not in run:
-            problems.append("pytest-gate: the fan-in does not read every downloaded shard report")
+        downloads_ = [s for s in _steps(doc, "pytest-gate") if str(s.get("uses", "")).startswith("actions/download-artifact@")]
+        reports_dir = re.search(r"--reports-dir\s+(\S+)", run)
+        if ("--suite python_unit" not in run or not reports_dir or len(downloads_) != 1
+                or downloads_[0].get("with", {}).get("path") != reports_dir.group(1)):
+            problems.append("pytest-gate: the fan-in does not read every downloaded shard report "
+                            "(--reports-dir must be the directory the download step writes to)")
+        for flag in _TEST_ONLY_FLAGS:
+            if flag in run:
+                problems.append(f"pytest-gate: the fan-in passes {flag}, a test-only flag: CI must judge the committed ceilings")
+        # The three checks live in the gate script alone: a standalone step would run one of them a second
+        # time, and the script's all-checks-evaluated guarantee is moot where a step can still be skipped.
+        for other in _steps(doc, "pytest-gate"):
+            if other is not step and any(re.search(m_, str(other.get("run", ""))) for m_ in _WHOLE_RUN_CHECKS):
+                problems.append(f"pytest-gate: {other.get('name', '?')!r} runs a whole-run check outside the gate script, "
+                                "so a failure before it would hide that check's verdict again")
         verdict = [i for i, s in enumerate(_steps(doc, "pytest-gate")) if 'echo "pytest-gate: PASS"' in str(s.get("run", ""))]
         position = _steps(doc, "pytest-gate").index(step)
         if len(verdict) != 1:
@@ -217,15 +238,16 @@ _CHECK_HEAD = ("- name: DDL/bytes ratchet, this shard (advisory; the gate is the
                "        if: success() && matrix.python-version == '3.12'")
 _UPLOAD_IF = ("- name: Upload this shard's DDL report (read by the fan-in in pytest-gate)\n"
               "        if: success() && matrix.python-version == '3.12'")
-_FAN_IN_IF = "- name: DDL/bytes ratchet over the whole run (fan-in)\n        if: needs.changes.outputs.code == 'true'"
+_GATE_NAME = "Whole-run gate (DDL/bytes fan-in, storage-touch fan-in, shard collection; every one evaluated)"
+_FAN_IN_IF = f"- name: {_GATE_NAME}\n        if: needs.changes.outputs.code == 'true'"
 _DOWNLOAD_IF = "- name: Fetch every shard's DDL report\n        if: needs.changes.outputs.code == 'true'"
 
 
 @pytest.mark.parametrize(
     ("old", "new", "expect"),
     [
-        ("python3 scripts/ddl_ratchet.py fan-in", "python3 scripts/ddl_ratchet.py frobnicate", "expected one fan-in step"),
-        ("--suite python_unit --shards 6 ", "--suite python_unit --shards 5 ", "--shards is 5 but the matrix has 6"),
+        ("python3 scripts/ci_gate_fan_in.py", "python3 scripts/ci_gate_frobnicate.py", "expected one fan-in step"),
+        ("--suite python_unit --shards 6 ${{", "--suite python_unit --shards 5 ${{", "--shards is 5 but the matrix has 6"),
         ('--report "$RUNNER_TEMP/ddl-report/nx-ddl-report.json" --advisory', '--report "$RUNNER_TEMP/ddl-report/nx-ddl-report.json"', "is not --advisory"),
         ('export NX_DDL_REPORT_DIR="$RUNNER_TEMP/ddl-report"', 'echo no-report-dir', "does not export NX_DDL_REPORT_DIR"),
         ("name: ddl-report-shard-${{ matrix.shard }}", "name: ddl-report", "expected one ddl-report-shard-* upload"),
@@ -235,15 +257,25 @@ _DOWNLOAD_IF = "- name: Fetch every shard's DDL report\n        if: needs.change
          "per-shard check is not limited to the 3.12 leg"),
         (_UPLOAD_IF, "- name: Upload this shard's DDL report (read by the fan-in in pytest-gate)\n        if: success()",
          "upload is not limited to the 3.12 leg"),
-        (_FAN_IN_IF, "- name: DDL/bytes ratchet over the whole run (fan-in)\n        if: success()", "is not limited to runs whose shards ran"),
+        (_FAN_IN_IF, f"- name: {_GATE_NAME}\n        if: success()", "is not limited to runs whose shards ran"),
         (_DOWNLOAD_IF, "- name: Fetch every shard's DDL report\n        if: success()", "is not limited to runs whose shards ran"),
-        (_FAN_IN_IF, "- name: DDL/bytes ratchet over the whole run (fan-in)\n        if: always() && needs.changes.outputs.code == 'true'",
+        (_FAN_IN_IF, f"- name: {_GATE_NAME}\n        if: always() && needs.changes.outputs.code == 'true'",
          "can run after a failed verdict"),
         (_FAN_IN_IF, _FAN_IN_IF + "\n        continue-on-error: true", "is continue-on-error but the gate is armed"),
         (_DOWNLOAD_IF, _DOWNLOAD_IF + "\n        continue-on-error: true", "is continue-on-error but the gate is armed"),
         (_CHECK_HEAD, _CHECK_HEAD + "\n        continue-on-error: true", "is continue-on-error but the gate is armed"),
         (_UPLOAD_IF, _UPLOAD_IF + "\n        continue-on-error: true", "is continue-on-error but the gate is armed"),
-        ("--suite python_unit --shards 6 --report", "--suite python_unit --shards 6 --advisory --report", "the gate is switched off"),
+        ("--suite python_unit --shards 6 ${{", "--suite python_unit --shards 6 --advisory ${{", "the gate is switched off"),
+        ("--reports-dir ddl-reports", "--reports-dir elsewhere", "does not read every downloaded shard report"),
+        ("--reports-dir ddl-reports", "--ddl-ceilings tests/ddl_ceiling.toml --reports-dir ddl-reports", "test-only flag"),
+        ("--reports-dir ddl-reports", "--storage-touch-ceilings x.toml --reports-dir ddl-reports", "test-only flag"),
+        ("          path: ddl-reports\n", "          path: downloaded\n", "does not read every downloaded shard report"),
+        (_FAN_IN_IF, "- name: A standalone shard check\n        run: python3 tests/_shard_collection.py ddl-reports --shards 6\n      " + _FAN_IN_IF,
+         "outside the gate script"),
+        (_FAN_IN_IF, "- name: A standalone storage-touch check\n        run: python3 -m tests._storage_touch_fan_in ddl-reports --suite python_unit --shards 6\n      " + _FAN_IN_IF,
+         "outside the gate script"),
+        (_FAN_IN_IF, "- name: A standalone DDL check\n        run: python3 scripts/ddl_ratchet.py   fan-in --suite python_unit --shards 6 --report x.json\n      " + _FAN_IN_IF,
+         "outside the gate script"),
         ("&& '--bytes-advisory' || ''", "&& '' || ''", "--bytes-advisory condition is not the test job's"),
         ("vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '--bytes-advisory'",
          "vars.NX_CI_POOL == 'off') && '--bytes-advisory'", "--bytes-advisory condition is not the test job's"),
@@ -253,6 +285,8 @@ _DOWNLOAD_IF = "- name: Fetch every shard's DDL report\n        if: needs.change
          "fan-in runs on a skipped matrix", "download runs on a skipped matrix", "fan-in runs after a red verdict",
          "armed fan-in swallows a red", "armed download swallows a red",
          "armed shard check swallows a red", "armed report upload swallows a red", "armed fan-in back to advisory",
+         "fan-in reads another directory", "download writes to another directory", "standalone shard-collection step",
+         "standalone storage-touch step", "standalone DDL step", "test-only DDL ceilings flag", "test-only storage ceilings flag",
          "hosted run gated on WAL", "bytes-advisory condition drifts from runs-on"],
 )
 def test_the_python_wiring_lint_catches_each_rot(old: str, new: str, expect: str) -> None:
@@ -297,9 +331,9 @@ def test_the_python_fan_in_is_advisory_exactly_while_the_ceilings_are_unmeasured
     # continue-on-error on any one of them in an unarmed file must be reported by name.
     for name in ("DDL/bytes ratchet, this shard", "Upload this shard's DDL report",
                  "Check out the ratchet and its ceilings", "Fetch every shard's DDL report",
-                 "DDL/bytes ratchet over the whole run (fan-in)"):
+                 _GATE_NAME):
         assert any("is not continue-on-error while the gate is advisory" in p and name in p for p in problems), (name, problems)
-    advisory_ok = _mutate(text, "--shards 6 --report", "--shards 6 --advisory --report")
+    advisory_ok = _mutate(text, "--shards 6 ${{", "--shards 6 --advisory ${{")
     for head in (_CHECK_HEAD, _UPLOAD_IF):
         advisory_ok = _mutate(advisory_ok, head, head + "\n        continue-on-error: true")
     for step in ("- name: Check out the ratchet and its ceilings", _DOWNLOAD_IF.split("\n")[0], _FAN_IN_IF.split("\n")[0]):

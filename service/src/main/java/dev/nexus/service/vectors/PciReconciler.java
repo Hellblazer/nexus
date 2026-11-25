@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.PgSession.PciSettings;
@@ -44,7 +45,6 @@ import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
 import java.util.random.RandomGenerator;
 
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
 
 /**
@@ -287,6 +287,8 @@ public final class PciReconciler {
     private final ToIntFunction<Collection<String>> ringExpiry;
     /** nexus-4lnn1.1.4: when the recall canary runs and what it last found; {@code null} means no canary (tests). */
     private final PciCanarySchedule canary;
+    /** RDR-229 P3.5c: the one latched gate 3 signal; the leaf row counts and the id half's recount read the collection by its id from it. */
+    private final Gate3 readGate;
 
     private final Map<LeafKey, Failure> failures = new ConcurrentHashMap<>();
     /** What the DDL half last read of each index's anchor, and the anchors it writes on what it finds (nexus-4lnn1.1.10). */
@@ -368,10 +370,20 @@ public final class PciReconciler {
                   PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
                   Duration period, RandomGenerator random, ToIntFunction<Collection<String>> ringExpiry,
                   PciCanarySchedule canary) {
+        this(catalog, builder, sweep, settings, clock, tenantBinder, countTimeout, period, random, ringExpiry, canary, Gate3.never());
+    }
+
+    /** As above with the gate 3 signal the counts read the id on (RDR-229 P3.5c); the forms above pass {@link Gate3#never()} (tests). */
+    PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
+                  PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
+                  Duration period, RandomGenerator random, ToIntFunction<Collection<String>> ringExpiry,
+                  PciCanarySchedule canary, Gate3 readGate) {
+        this.readGate = Objects.requireNonNull(readGate, "readGate");
         this.canary = canary;
         this.ledger = new PciAnchorLedger(Objects.requireNonNull(clock, "clock"), reindex::reference,
             name -> reindex.owedAnchors().containsKey(name));
         this.phase = new PciReindexPhase(reindex, canary, clock, this::writeAnchor, ledger::markRedUnfixed);
+        this.phase.idCanaryWhen(idBuilds::gate3Holds);
         this.ringExpiry = Objects.requireNonNull(ringExpiry, "ringExpiry");
         this.random = Objects.requireNonNull(random, "random");
         this.catalog = Objects.requireNonNull(catalog, "catalog");
@@ -414,13 +426,32 @@ public final class PciReconciler {
                                        PciSettings settings, ToIntFunction<Collection<String>> ringExpiry,
                                        PgVectorRepository repository,
                                        dev.nexus.service.db.TenantScope scope) {
-        var ring = new PciQueryRingReader(Objects.requireNonNull(scope, "scope"));
-        var runner = new PciCanary(ring::load, Objects.requireNonNull(repository, "repository").canaryStatements());
-        return new PciReconciler(new PciCatalog(ds)::read,
+        return create(ds, admin, bootNonce, sweep, settings, ringExpiry, repository, scope, Gate3.never());
+    }
+
+    /** As above, reading the collection by its id from {@code gate3}, the one latched signal {@code Main} builds (RDR-229 P3.5c). */
+    public static PciReconciler create(DataSource ds, AdminConnection admin, String bootNonce, PciIndexSweep sweep,
+                                       PciSettings settings, ToIntFunction<Collection<String>> ringExpiry,
+                                       PgVectorRepository repository,
+                                       dev.nexus.service.db.TenantScope scope, Gate3 gate3) {
+        var ring = new PciQueryRingReader(Objects.requireNonNull(scope, "scope"), gate3);
+        // The canary's id statements (and, through Main, the ring's admission) follow the latch this reconciler's retire reads (gate 3 latched,
+        // the id readers present), bound below. The ring reader reads by id on gate 3 itself, as the serving path does (P3.5c).
+        var latch = new PciCanaryLatch();
+        var runner = new PciCanary(ring::load, Objects.requireNonNull(repository, "repository").canaryStatements(latch));
+        var reconciler = new PciReconciler(new PciCatalog(ds)::read,
             new PciBuilderSession(admin.url(), admin.user(), admin.password(), bootNonce, settings), sweep, settings,
             Clock.systemUTC(), SET_LOCAL_TENANT, COUNT_TIMEOUT,
             Duration.ofSeconds(Objects.requireNonNull(settings, "settings").sweepSeconds()),
-            RandomGenerator.getDefault(), ringExpiry, new PciCanarySchedule(runner));
+            RandomGenerator.getDefault(), ringExpiry, new PciCanarySchedule(runner), gate3);
+        latch.follow(reconciler.idBuilds::gate3Holds);
+        reconciler.canaryLatch = latch;
+        return reconciler;
+    }
+
+    /** The latch the canary, its ring reader and the query ring's admission follow: false until this reconciler binds it ({@link #create} with a canary). */
+    public dev.nexus.service.datamove.Gate3 canaryLatch() {
+        return canaryLatch;
     }
 
     /** The canary's latest result for every index it has run on, by index name (empty without a canary). */
@@ -447,7 +478,7 @@ public final class PciReconciler {
             PciCanary.Target t = r.target();
             IndexReading reading = ledger.reading(t.leaf(), t.index());
             java.util.Optional<String> sweepOrigin = reading != null ? java.util.Optional.empty()
-                : sweep.anchor(t.model(), t.tenant(), t.collection()).map(PciCatalog.Anchor::origin);
+                : sweep.anchorOf(t).map(PciCatalog.Anchor::origin);   // the family the target measures: an id target reads the id index's anchor
             entries.add(PciMaintenanceStatus.entry(r, reading, sweepOrigin,
                 reindex.redAfterReindex(t.index(), clock.instant())));
         }
@@ -602,8 +633,72 @@ public final class PciReconciler {
 
     // -- one pass --------------------------------------------------------------------------------------------
 
+    /**
+     * Runs when a pass ends, however it ends (the completion check re-reads then, RDR-229 P3.1). Set once at boot, on the pass's thread; it must
+     * not block, and a throw is logged and goes no further.
+     */
+    private volatile Runnable passEnded = () -> { };
+
+    private final PciIdBuilds idBuilds = new PciIdBuilds();
+    private volatile dev.nexus.service.datamove.Gate3 canaryLatch = new PciCanaryLatch();   // unbound: never holds until bound
+
+    /** RDR-229 P3.4: gate 2 of the completion check, read at the start of each pass; until it holds no id build is planned. */
+    public void idBuildGate(java.util.function.BooleanSupplier gate2) {
+        idBuilds.gate(gate2);
+    }
+
+    /**
+     * RDR-229 P3.4: the PCI clause of gate 3, for {@code CompletionBootWork}. Read from the database ({@link PciGate3Coverage}), so any engine
+     * answers it the same, a standby included; it needs this reconciler only for the catalog, the settings and the clock.
+     */
+    public dev.nexus.service.datamove.CompletionCheck.Gate3Source gate3Source() {
+        return new PciGate3Coverage(catalog, settings, clock, readGate);
+    }
+
+    /**
+     * RDR-229 P3.4 (linda, 2026-11-22): gate 3 as it LATCHED ({@code CompletionBootWork#gate3Latched}, never the live gate 3), read at the start of each
+     * pass. Once it holds, and the id readers are present ({@link IdReaders#PRESENT}), the name family retires: no name index is built, and each
+     * name index whose collection's id index is VALID is dropped ({@code REPLACED_BY_ID}).
+     */
+    public void retireNameIndexesWhen(java.util.function.BooleanSupplier gate3) {
+        idBuilds.gate3(gate3);
+    }
+
+    /**
+     * RDR-229 P3.4 (linda, 2026-11-23): the gate 3 latch row says it latched while {@code NX_SEARCH_PCI} was off ({@code pci_off}), so no id index was
+     * required then. With PCI on now, the id builds go ahead as if gate 2 held; the readers are on the id either way.
+     */
+    public void buildIdIndexesFirstWhen(java.util.function.BooleanSupplier pciOffLatch) {
+        idBuilds.pciOffLatch(pciOffLatch);
+    }
+
+    /**
+     * Whether this engine's readers select by id ({@link IdReaders#PRESENT}, which P3.5c flips; the default). The name family retires only
+     * when this is true as well as the latched gate 3: the retire drops the indexes the name path serves from.
+     */
+    public void idReadersPresent(java.util.function.BooleanSupplier present) {
+        idBuilds.readers(present);
+    }
+
+    /** Sets what runs at the end of each pass; see the field. A null clears it. */
+    public void onPassEnded(Runnable listener) {
+        this.passEnded = listener == null ? () -> { } : listener;
+    }
+
     /** Run one pass now, on the calling thread. Returns what it did. */
     PassReport reconcileOnce() {
+        try {
+            return runPass();
+        } finally {
+            try {
+                passEnded.run();
+            } catch (RuntimeException e) {   // a listener is the engine's, never the pass's failure
+                log.warn("event=pci_pass_ended_listener_failed cause=\"{}\"", e.toString());
+            }
+        }
+    }
+
+    private PassReport runPass() {
         passes.incrementAndGet();
         if (!settings.enabled()) {
             holder = false;
@@ -647,6 +742,8 @@ public final class PciReconciler {
             }
             pass.useSnapshot(snapshot);   // the only leaves VACUUM may touch
             Tally tally = new Tally();
+            tally.gate2 = idBuilds.gate2Holds();
+            tally.gate3 = idBuilds.gate3Holds();
             tally.lastPlannable = lastPlannable(snapshot.leaves());
             for (Leaf leaf : snapshot.leaves()) {
                 if (!pass.live() || Thread.currentThread().isInterrupted()) {
@@ -693,9 +790,10 @@ public final class PciReconciler {
     }
 
     /**
-     * The recall canary (nexus-4lnn1.1.4), after the pass's drops and builds: every valid parsed index the snapshot
-     * lists that the pass did not drop, and every index it built. It runs on the lock holder only, never fails the pass,
-     * and acts on nothing: a result is recorded and logged (RDR-230 Phase 1 has no REINDEX).
+     * The recall canary (nexus-4lnn1.1.4), after the pass's drops and builds: the family the serving statement selects by. Before gate 3 has latched
+     * that is every valid name index the snapshot lists that the pass did not drop, and every name index it built; once it has (and the id readers are
+     * present), the valid id indexes and every id index it built. It runs on the lock holder only and never fails the pass; a result is recorded and
+     * logged, and a red one can start a REINDEX (RDR-230).
      */
     private void runCanaries(PciCatalog.Snapshot snapshot, Tally tally) {
         if (canary == null) {
@@ -708,9 +806,20 @@ public final class PciReconciler {
                     continue;
                 }
                 for (Index index : leaf.indexes()) {
-                    if (index.parsed() && index.valid() && !tally.droppedIndexes.contains(index.name())) {
+                    if (!index.valid() || tally.droppedIndexes.contains(index.name())) {
+                        continue;
+                    }
+                    if (!tally.gate3 && index.parsed()) {
                         targets.put(index.name(), new PciCanary.Target(leafId(leaf), leaf.tenant(), leaf.model(),
                             index.collection(), index.name()));
+                    } else if (tally.gate3 && index.idParsed()) {
+                        // Latched: the name family retires, the serving statement selects by id, so the canary follows it. The label is the
+                        // registry's current one for the id, read by this pass's counting transaction; an id it did not read is not measured.
+                        String label = tally.idLabels.get(PciCatalog.idKey(leaf.model(), leaf.tenant(), index.collectionId()));
+                        if (label != null) {
+                            targets.put(index.name(), new PciCanary.Target(leafId(leaf), leaf.tenant(), leaf.model(), label,
+                                index.name(), index.collectionId()));
+                        }
                     }
                 }
             }
@@ -724,10 +833,10 @@ public final class PciReconciler {
     }
 
     /**
-     * The leaf's statistics, just committed, to the canary's vacuum trigger: the leaf's valid indexes the plan is not
-     * dropping.
+     * The leaf's statistics, just committed, to the canary's vacuum trigger: the leaf's valid indexes of the family the canary measures
+     * ({@link #canaryFamily}) that the plan is not dropping.
      */
-    private void observeForCanary(Leaf leaf, Planned planned) {
+    private void observeForCanary(Leaf leaf, Planned planned, boolean latched) {
         PciAnchorReads.LeafStats stats = planned.anchors().stats();
         if (canary == null || stats == null) {
             return;
@@ -738,9 +847,13 @@ public final class PciReconciler {
                 dropping.add(d.name());
             }
         }
-        List<String> names = leaf.indexes().stream()
-            .filter(i -> i.parsed() && i.valid() && !dropping.contains(i.name())).map(Index::name).toList();
-        canary.observeLeaf(leafId(leaf), names, stats);
+        canary.observeLeaf(leafId(leaf), canaryFamily(leaf, dropping, latched), stats);
+    }
+
+    /** The names of the leaf's valid indexes the canary measures and the plan keeps: the id-predicate ones once the latch holds, the name-predicate ones before. */
+    static List<String> canaryFamily(Leaf leaf, Set<String> dropping, boolean latched) {
+        return leaf.indexes().stream()
+            .filter(i -> (latched ? i.idParsed() : i.parsed()) && i.valid() && !dropping.contains(i.name())).map(Index::name).toList();
     }
 
     /**
@@ -774,6 +887,9 @@ public final class PciReconciler {
 
     static final class Tally {
         int leaves;
+        /** RDR-229 P3.4: gates 2 and 3 of the completion check as read at the start of the pass. */
+        boolean gate2;
+        boolean gate3;
         /**
          * The last leaf of the snapshot that can plan a build (its model and tenant parsed), or null when none can:
          * the {@code boot_work} total is not known before the pass has reached it (nexus-f3yqd.3).
@@ -795,6 +911,8 @@ public final class PciReconciler {
         /** Indexes this pass dropped, and those it built (for the canary, which runs after both). */
         final Set<String> droppedIndexes = new HashSet<>();
         final List<PciCanary.Target> builtTargets = new java.util.ArrayList<>();
+        /** The registry's label of each live, unsuperseded collection with an id, by (model, tenant, id): the id canary's ring key. */
+        final Map<String, String> idLabels = new java.util.HashMap<>();
     }
 
     /** The last leaf with a parsed model and tenant: the one whose plan completes the pass's count of builds. */
@@ -844,7 +962,7 @@ public final class PciReconciler {
         }
         Planned planned;
         try {
-            planned = pass.transaction(tx -> countAndPlan(tx, leaf));
+            planned = pass.transaction(tx -> countAndPlan(tx, leaf, tally.gate2, tally.gate3));
         } catch (DataAccessException e) {
             tally.skippedLeaves++;
             noteLeaf(leaf, tally, 0);
@@ -865,8 +983,9 @@ public final class PciReconciler {
         tally.sumCountMillis += planned.countMillis();
         tally.maxCountMillis = Math.max(tally.maxCountMillis, planned.countMillis());
         ledger.apply(leaf, planned.anchors());
+        planned.idLabels().forEach((id, name) -> tally.idLabels.put(PciCatalog.idKey(leaf.model(), leaf.tenant(), id), name));
         tally.looks.add(new PciReindexState.Look(leaf, planned.dimension(), planned.anchors().readings()));
-        observeForCanary(leaf, planned);
+        observeForCanary(leaf, planned, tally.gate3);
         noteLeaf(leaf, tally, (int) planned.actions().stream().filter(a -> a instanceof Build).count());
         execute(pass, leaf, planned.dimension(), planned.anchors().writes(), planned.actions(), tally);
         return true;
@@ -874,37 +993,15 @@ public final class PciReconciler {
 
     // -- counting and planning, inside the transaction ---------------------------------------------------------
 
-    private record Planned(List<Action> actions, int dimension, long countMillis, PciAnchorLedger.Reads anchors) { }
-
-    /**
-     * The first statements of every counting transaction: the per-statement timeout, a custom plan, the leaf's tenant,
-     * and a read-back of it. False (and logged) when the tenant did not take, and the transaction must do nothing more.
-     */
-    private boolean beginCounting(DSLContext tx, Leaf leaf) {
-        String tenant = leaf.tenant();
-        // setLocal binds the matching network timeout with the statement timeout (nexus-u9zkn); the pass puts the
-        // connection's own, longer one back when the transaction ends.
-        PgSession.setLocal(tx, "statement_timeout", Long.toString(countTimeout.toMillis()));
-        tx.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("plan_cache_mode"),
-            DSL.val("force_custom_plan"), DSL.inline(true))).fetch();
-        tenantBinder.bind(tx, tenant);
-        String bound = tx.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val("nexus.tenant"),
-            DSL.inline(true))).fetchOne(0, String.class);
-        if (!tenant.equals(bound)) {
-            log.error("event=pci_count_tenant_mismatch leaf={} expected_tenant={} actual_tenant={} "
-                + "detail=\"counts under the wrong tenant read other rows or none; the leaf is skipped\"",
-                leafId(leaf), tenant, bound);
-            return false;
-        }
-        return true;
-    }
+    private record Planned(List<Action> actions, int dimension, long countMillis, PciAnchorLedger.Reads anchors,
+                           Map<Long, String> idLabels) { }
 
     /** The body of the counting transaction for one leaf; {@code null} means skip the leaf. */
-    private Planned countAndPlan(DSLContext tx, Leaf leaf) {
+    private Planned countAndPlan(DSLContext tx, Leaf leaf, boolean gate2, boolean gate3) {
         long startedNanos = System.nanoTime();
         String tenant = leaf.tenant();
         String model = leaf.model();
-        if (!beginCounting(tx, leaf)) {
+        if (!PciLeafCounting.begin(tx, leaf, countTimeout, tenantBinder)) {
             return null;
         }
 
@@ -914,22 +1011,8 @@ public final class PciReconciler {
             log.warn("event=pci_reconcile_leaf_skipped leaf={} reason=unknown_model model={}", leafId(leaf), model);
             return null;
         }
-        // The tenant predicate below is REQUIRED, not belt and braces: a superuser or BYPASSRLS admin role is not filtered
-        // by row-level security, and another tenant's live row of the same name would mask this leaf's NOT_IN_REGISTRY drop.
-        List<RegistryRow> registry = tx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
-                CATALOG_COLLECTIONS.SUPERSEDED_BY)
-            .from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
-            .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(model))
-            .fetch(r -> new RegistryRow(r.value1(), r.value2(), r.value3()));
-
-        Set<String> buildable = new HashSet<>();
-        for (RegistryRow row : registry) {
-            if (row.live() && !row.superseded()) {
-                buildable.add(row.name());
-            }
-        }
-        forgetStaleBackoff(leaf, buildable);
+        List<RegistryRow> registry = PciIdBuilds.registry(tx, tenant, model);
+        forgetStaleBackoff(leaf, PciIdBuilds.buildable(registry));
 
         Set<String> indexed = new LinkedHashSet<>();
         for (Index index : leaf.indexes()) {
@@ -940,18 +1023,12 @@ public final class PciReconciler {
                 }
             }
         }
-        Set<String> toCount = new LinkedHashSet<>(indexed);
-        for (RegistryRow row : registry) {
-            // Only a collection that can build counts for anything; a quarantined one without an index decides nothing.
-            if (row.live() && !row.superseded()) {
-                toCount.add(row.name());
-            }
-        }
+        Set<String> toCount = PciIdBuilds.countTargets(leaf, indexed, registry);
 
         int b = settings.buildMinRows();
         Map<String, Integer> counts = new HashMap<>();
         for (String collection : toCount) {
-            counts.put(collection, count(tx, dimension, collection, model, tenant, b));
+            counts.put(collection, PciLeafCounting.count(tx, dimension, collection, model, tenant, b, readGate));
         }
 
         Instant now = clock.instant();
@@ -975,17 +1052,26 @@ public final class PciReconciler {
         if (recounted) {
             int rankCap = Math.multiplyExact(b, RANK_CAP_FACTOR);
             for (String collection : candidates) {
-                counts.put(collection, count(tx, dimension, collection, model, tenant, rankCap));
+                counts.put(collection, PciLeafCounting.count(tx, dimension, collection, model, tenant, rankCap, readGate));
             }
         }
-        List<Action> actions = PciReconcilePlanner.plan(leaf, counts, registry, backedOff, inFlight, settings);
+        // RDR-229 P3.4: the id half. The null-id read runs only once gate 2 holds, for the collections that could build.
+        var plan = PciIdBuilds.plan(tx, leaf, dimension, counts, registry, backedOff, inFlight, settings, gate2, gate3,
+            Math.multiplyExact(b, RANK_CAP_FACTOR), readGate);
+        List<Action> actions = plan.actions();
         PciAnchorLedger.Reads anchors = readAnchors(tx, leaf, dimension, actions, now);
         // One reading, logged and carried: the pass line's sum and max are over exactly these figures. The per-leaf
         // line stays DEBUG (one per leaf per pass is a lot of lines at 20,000 collections); the pass line is INFO.
         long tookMs = (System.nanoTime() - startedNanos) / 1_000_000;
         log.debug("event=pci_count_done leaf={} counted={} recounted={} actions={} took_ms={}", leafId(leaf),
             counts.size(), recounted ? candidates.size() : 0, actions.size(), tookMs);
-        return new Planned(actions, dimension, tookMs, anchors);
+        Map<Long, String> labels = new java.util.HashMap<>();
+        for (RegistryRow row : registry) {
+            if (row.collectionId() != null && row.live() && !row.superseded()) {
+                labels.put(row.collectionId(), row.name());
+            }
+        }
+        return new Planned(actions, dimension, tookMs, anchors, labels);
     }
 
     /** The anchor reads of {@link PciAnchorLedger#read} for the valid parsed indexes the plan does not drop. */
@@ -997,20 +1083,8 @@ public final class PciReconciler {
             }
         }
         List<Index> subjects = leaf.indexes().stream()
-            .filter(i -> i.parsed() && i.valid() && !dropping.contains(i.name())).toList();
+            .filter(i -> (i.parsed() || i.idParsed()) && i.valid() && !dropping.contains(i.name())).toList();
         return subjects.isEmpty() ? PciAnchorLedger.Reads.NONE : ledger.read(tx, leaf, dim, subjects, now);
-    }
-
-    /**
-     * Rows of {@code collection} on the leaf's (model, tenant) key, stopped at {@code cap + 1}. The probe's explicit
-     * {@code tenant_id} predicate is REQUIRED for correctness: the admin role reads every tenant's chunks
-     * ({@code chunks_gate_probe_owner_read}, vectors-029), so without it a same-named collection of another tenant would
-     * be added to the count and a leaf would build an index its own rows do not warrant.
-     */
-    private static int count(DSLContext tx, int dim, String collection, String model, String tenant, int cap) {
-        Integer n = PgVectorRepository.probeSelectedRowsQuery(tx, dim, new String[] {collection}, model, tenant, cap)
-            .fetchOne(0, Integer.class);
-        return n == null ? 0 : n;
     }
 
     // -- execution, in autocommit ------------------------------------------------------------------------------
@@ -1086,11 +1160,12 @@ public final class PciReconciler {
         }
         String next = afterReindex ? "the next pass retries it" : "the next pass adopts it";
         Instant builtAt = clock.instant();
-        Index index = new Index(build.name(), true, build.collection());
+        Index index = build.byId() ? Index.byId(build.name(), true, build.collectionId(), null)
+            : new Index(build.name(), true, build.collection());
         long[] figures;
         try {
             figures = pass.transaction(tx -> {
-                if (!beginCounting(tx, leaf)) {
+                if (!PciLeafCounting.begin(tx, leaf, countTimeout, tenantBinder)) {
                     return null;
                 }
                 PgSession.setLocal(tx, "lock_timeout", SIZE_LOCK_TIMEOUT);
@@ -1099,7 +1174,8 @@ public final class PciReconciler {
                     return null;
                 }
                 return new long[] {
-                    PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), build.collection()),
+                    build.byId() ? PciAnchorReads.countRowsById(tx, leaf.model(), leaf.tenant(), build.collectionId())
+                        : PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), build.collection()),
                     facts.bytes()};
             });
         } catch (DataAccessException e) {
@@ -1317,13 +1393,15 @@ public final class PciReconciler {
     }
 
     private void build(PciBuilderSession.Pass pass, Leaf leaf, int dim, Build build, Tally tally) {
-        LeafKey key = new LeafKey(leafId(leaf), build.collection());
+        LeafKey key = new LeafKey(leafId(leaf),
+            build.byId() ? PciReconcilePlanner.idBackoffKey(build.collectionId()) : build.collection());
         building.set(build.name());
         PciBootWork work = bootWork;
         PciBootWork.Watch watch = work == null ? null : work.watchBuild();
         DdlOutcome outcome;
         try {
-            outcome = pass.build(leaf, dim, build.collection());
+            outcome = build.byId() ? pass.buildById(leaf, dim, build.collectionId())
+                : pass.build(leaf, dim, build.collection());
         } finally {
             building.set(null);
             if (watch != null) {
@@ -1334,10 +1412,11 @@ public final class PciReconciler {
             case DONE -> {
                 tally.builds++;
                 failures.remove(key);
-                if (canary != null) {
+                // The canary measures the family the serving statement selects by: the name indexes before the latch, the id indexes after it.
+                if (canary != null && build.byId() == tally.gate3) {
                     canary.built(build.name());
                     tally.builtTargets.add(new PciCanary.Target(leafId(leaf), leaf.tenant(), leaf.model(),
-                        build.collection(), build.name()));
+                        build.collection(), build.name(), build.byId() ? build.collectionId() : null));
                 }
                 log.info("event=pci_index_built leaf={} index={} collection={}", leafId(leaf), build.name(),
                     build.collection());

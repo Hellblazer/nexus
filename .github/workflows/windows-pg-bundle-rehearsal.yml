@@ -104,6 +104,7 @@ on:
       - tests/test_os_trust_store.py
       - src/nexus/__init__.py
       - tests/test_install_generation_real_windows.py
+      - tests/test_install_lease_windows.py
       - tests/test_session_end_real_windows.py
       - tests/test_mcp_win_stdin_real_windows.py
       - tests/test_mcp_win_stdin.py
@@ -137,6 +138,10 @@ on:
       - src/nexus/_install/generation_core.py
       - src/nexus/_install/layout_core.py
       - src/nexus/_install/gc_core.py
+      # The generation lease: ctypes CreateFileW, the share-delete hold and the reap's link-safe walk
+      # live in lease_core.py and only a native run shows them (tests/test_install_lease_windows.py).
+      - src/nexus/_install/lease_core.py
+      - src/nexus/_install/_nx_lease.py
       - src/nexus/_install/census_core.py
       - src/nexus/db/pg_provision.py
       - src/nexus/db/pg_bundle.py
@@ -179,6 +184,14 @@ on:
       # fix (tuf>=7.0.1, nexus-zw44w) did not rerun this set until dispatched by hand.
       - pyproject.toml
       - uv.lock
+      # RDR-229 P3.6 (nexus-21kr3): the client half of the label path the label-windows job runs.
+      - src/nexus/corpus.py
+      - src/nexus/collection_rename.py
+      # The engine's label rule (the one file, not service/src/**, which would trigger on every engine commit)
+      # and the psql seed helpers on the label test's path, whose UTF-8 pipes are what Windows broke (nexus-niyl5).
+      - service/src/main/java/dev/nexus/service/db/CollectionLabel.java
+      - tests/_chunk_seed.py
+      - tests/_catalog_fixture_ops.py
       - scripts/check_junit_floor.py
       - .github/actions/resolve-windows-python/**
       - .github/actions/windows-engine-leg/**
@@ -428,7 +441,7 @@ jobs:
       # the ceiling of 204 (0 failed, run 44675562916). The gate's plain-Python cases stay in the set and run on Windows.
       - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py --ignore=tests/daemon/test_spawn_lock_hold.py --ignore=tests/daemon/test_storage_service_running.py --ignore=tests/hooks/test_session_facts_posix.py --ignore=tests/daemon/test_legacy_chash_guard_real_pg.py --ignore=tests/daemon/test_storage_stop_invisible.py --ignore=tests/daemon/test_stop_real_processes_posix.py --ignore=tests/hooks/test_compact_outcome_harness_posix.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_install_source.py tests/test_pdf_stack.py tests/test_installer_rebuild.py tests/test_mineru_cmd.py tests/test_mineru_spawn_windows_flags.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
+          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py --ignore=tests/daemon/test_spawn_lock_hold.py --ignore=tests/daemon/test_storage_service_running.py --ignore=tests/hooks/test_session_facts_posix.py --ignore=tests/daemon/test_legacy_chash_guard_real_pg.py --ignore=tests/daemon/test_storage_stop_invisible.py --ignore=tests/daemon/test_stop_real_processes_posix.py --ignore=tests/hooks/test_compact_outcome_harness_posix.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_install_lease_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_install_source.py tests/test_pdf_stack.py tests/test_installer_rebuild.py tests/test_mineru_cmd.py tests/test_mineru_spawn_windows_flags.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
       # A run that skipped itself on Windows would pass having proved nothing. The
       # floor is sized from the measured run above: junit counts an xfail as a skip,
@@ -505,7 +518,88 @@ jobs:
       # real Job Object test must have PASSED (nexus-dmhxw): neither they nor the MinerU source they test
       # trigger this workflow, which has no per-job filter and would rebuild the PG bundle and the engine
       # for a client-only edit (the nexus-3fme8 rule), so an edit to them runs here with the next trigger.
+      # Re-measured 2026-11-24 for the generation lease's native tests joining the set
+      # (tests/test_install_lease_windows.py), by `scripts/windows_hand_test.py --set` on qwent's
+      # Windows side (py3.13, this exact step, NX_TEST_T2_SUBSTRATE=none): 5786 passed, 198 junit
+      # skips (195 skipped, 3 xfailed), 1 failed in 1466 s; the one red was the flock allowlist
+      # gate naming the lease's two modules, fixed in that change. The 4149-pass figure above had
+      # grown by 1637 tests as the set's directories gained files, so the old floor sat far under it.
+      # The floor is about 90% of the passes (5200) and the ceiling the measured skips plus the
+      # margin of 13 (211), under the 6% cap the workflow test holds (5200 * 6 // 100 = 312).
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |
-          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 3730 --max-skipped 204 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_allows_through_uv_and_the_shim --require-passed tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows --require-passed tests.test_off_cwd_resolver_real_windows.TestRealWindows --require-passed tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows --require-passed test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale --require-passed test_help_states_the_autostart_default_and_installs_nothing --require-passed test_the_server_outlives_the_desktop_extensions_job
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 5200 --max-skipped 211 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.test_install_lease_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_allows_through_uv_and_the_shim --require-passed tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows --require-passed tests.test_off_cwd_resolver_real_windows.TestRealWindows --require-passed tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows --require-passed test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale --require-passed test_help_states_the_autostart_default_and_installs_nothing --require-passed test_the_server_outlives_the_desktop_extensions_job
+
+  # RDR-229 P3.6 (nexus-21kr3): the label test against the real engine on native Windows. It cannot ride the
+  # conformance job's pytest step: that step runs NX_TEST_T2_SUBSTRATE=none under the default addopts, which
+  # deselect `integration`, so the file would be collected and deselected without a word. This job gives it what
+  # the substrate needs (a JDK on PATH and the gate jar; the fixture provisions the PG bundle itself) and a floor
+  # that requires the one test to have PASSED. A label holds a space, '%', ':' and a non-ASCII letter, and the
+  # failure it guards is a path, a URL, a temp file or a psql pipe that cannot take one on Windows.
+  label-windows:
+    name: RDR-229 P3.6 label test against the real engine (win-release)
+    needs: [jooq-codegen]
+    if: ${{ github.actor == 'Hellblazer' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
+    runs-on: win-release
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      # The same fixups as the conformance job: LF text, and each tracked symlink as a copy of its target.
+      - name: Checkout fixups (LF, symlinks materialised)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config core.autocrlf false
+          git rm -r -q --cached .
+          git reset -q --hard HEAD
+          $links = @(git ls-files -s | Where-Object { $_ -match '^120000 ' } | ForEach-Object { ($_ -split "`t", 2)[1] })
+          if ($links.Count -eq 0) { throw 'no tracked symlinks found; this step has nothing to do and its premise moved' }
+          foreach ($rel in $links) {
+            $stub = Join-Path $PWD $rel
+            $target = [IO.Path]::GetFullPath((Join-Path (Split-Path $stub) (Get-Content -Raw -LiteralPath $stub).Trim()))
+            if (-not (Test-Path -LiteralPath $target)) { throw "symlink $rel points at $target, which does not exist" }
+            Remove-Item -LiteralPath $stub -Force
+            Copy-Item -LiteralPath $target -Destination $stub -Recurse
+            Write-Host "materialised $rel <- $target"
+          }
+
+      - name: Set up GraalVM 25.0.3
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+
+      # No maven-cache action and no build-gate-jar.sh: both run under `shell: bash`, which on win-release is WSL's
+      # bash.exe with no distribution installed (run 45032556189 failed there in 64 ms). The jar is the plain shaded
+      # package, built as the engine leg builds, from the jOOQ sources the Linux codegen job generated.
+      - name: Download pre-generated jOOQ sources
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: jooq-sources
+          path: service/target/generated-sources/jooq
+
+      - name: Build the gate jar
+        working-directory: service
+        run: |
+          & .\mvnw.cmd -B -ntp -Pprebuilt-jooq package
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path target\nexus-service-1.0-SNAPSHOT.jar)) { throw 'the package build wrote no shaded jar' }
+
+      # The label test (integration) and the psql seed helpers' own tests (not integration), which the conformance
+      # step cannot run either, since they need the engine substrate: 1 + 14 cases, so -m keeps both markers.
+      - name: Label test
+        run: |
+          uv run --python 3.13 --frozen pytest tests/integration/test_rdr229_p36_label_windows.py tests/test_chunk_seed.py -m "not lint and not slow" -p no:cacheprovider -q -rs --junitxml=label-windows-junit.xml
+
+      - name: Non-vacuity floor
+        if: ${{ !cancelled() }}
+        run: |
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py label-windows-junit.xml --min-passed 15 --max-skipped 0 --require-passed test_a_label_with_a_space_percent_colon_and_non_ascii_registers_lists_searches_and_renames
+
+      - name: Stop stray engine and Postgres processes (always)
+        if: always()
+        uses: ./.github/actions/windows-job-cleanup

@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -164,12 +165,14 @@ class ManifestSearchShortPageIntegrationTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, DOC)
                 .set(CATALOG_DOCUMENTS.TITLE, "short-page.md")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///short-page.md")
                 .execute();
             // nexus-6pfgb.41: the aspect-scoped route (b) function joins document_aspects.
             seed.insertInto(DOCUMENT_ASPECTS)
                 .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT)
                 .set(DOCUMENT_ASPECTS.COLLECTION, COLLECTION)
+                .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(DOCUMENT_ASPECTS.SOURCE_PATH, "short-page.md")
                 .set(DOCUMENT_ASPECTS.PROPOSED_METHOD, "gradient descent")
                 .set(DOCUMENT_ASPECTS.CONFIDENCE, 0.9)
@@ -199,14 +202,16 @@ class ManifestSearchShortPageIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            Long collectionId = CollectionIds.require(seed, TENANT, COLLECTION);
             for (int from = 0; from < N; from += 500) {
                 var step = seed.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
-                    CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN);
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN);
                 for (int g = from; g < Math.min(N, from + 500); g++) {
-                    step = step.values(TENANT, DOC, g, HexFormat.of().parseHex(chash(g)), COLLECTION, MODEL,
+                    step = step.values(TENANT, DOC, g, HexFormat.of().parseHex(chash(g)), COLLECTION,
+                        collectionId, MODEL,
                         labelOf(g), true);
                 }
                 step.execute();
@@ -218,16 +223,16 @@ class ManifestSearchShortPageIntegrationTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, DOC_TWIN)
                 .set(CATALOG_DOCUMENTS.TITLE, "short-page-twin.md")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///short-page-twin.md")
                 .execute();
             int position = 0;
             for (int g : List.of(7, TWIN, QUAD, QUAD, QUAD)) {
-                seed.insertInto(CATALOG_DOCUMENT_CHUNKS,
-                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                seed.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                         CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)
-                    .values(TENANT, DOC_TWIN, position++, HexFormat.of().parseHex(chash(g)), COLLECTION, MODEL,
+                    .values(TENANT, DOC_TWIN, position++, HexFormat.of().parseHex(chash(g)), COLLECTION, CollectionIds.require(seed, TENANT, COLLECTION), MODEL,
                         labelOf(g), true)
                     .execute();
             }

@@ -20,6 +20,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+
 
 /**
  * nexus-kl2z6 increment 1 — the orchestration seam T2 {@code
@@ -86,12 +88,21 @@ public final class CombinedWriteService {
     private final TenantScope    tenantScope;
     private final CatalogRepository catalogRepo;
     private final EmbedderRouter docRouter;
+    /** RDR-229 P3.5c: the latched gate 3; from it the existing-text read and the metadata-only UPDATE select the chunk by collection id. */
+    private final dev.nexus.service.datamove.Gate3 gate3;
 
     public CombinedWriteService(TenantScope tenantScope, CatalogRepository catalogRepo,
                                  EmbedderRouter docRouter) {
+        this(tenantScope, catalogRepo, docRouter, dev.nexus.service.datamove.Gate3.never());
+    }
+
+    /** {@link #CombinedWriteService(TenantScope, CatalogRepository, EmbedderRouter)} with the gate-3 signal (RDR-229 P3.5c). */
+    public CombinedWriteService(TenantScope tenantScope, CatalogRepository catalogRepo,
+                                 EmbedderRouter docRouter, dev.nexus.service.datamove.Gate3 gate3) {
         this.tenantScope = tenantScope;
         this.catalogRepo = catalogRepo;
         this.docRouter   = docRouter;
+        this.gate3       = java.util.Objects.requireNonNull(gate3, "gate3");
     }
 
     /**
@@ -344,10 +355,21 @@ public final class CombinedWriteService {
         }
         CollectionRow from = CollectionRegistry.lookup(tenantScope, tenant, source);
         CollectionRow to = CollectionRegistry.lookup(tenantScope, tenant, target);
+        // nexus-afkjy: the owners are read from the rows, not the cache. owner_id can change behind the cache with no
+        // evict (catalog-044's AFTER trigger on catalog_documents re-owns a code/docs/rdr row when a document lands, and
+        // rederiveOwner re-fires it), and a model move is rare, so one read here costs nothing.
+        Map<String, String> owners = tenantScope.withTenant(tenant, ctx -> ctx
+            .select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.OWNER_ID)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+            .and(CATALOG_COLLECTIONS.NAME.in(source, target))
+            .fetchMap(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.OWNER_ID));
+        String fromOwner = owners.get(source);
+        String toOwner = owners.get(target);
         // Null (or blank) content type or owner on either side is no sibling: two nulls are equal to
         // Objects.equals, and a move between collections whose owner nobody knows is not a model move.
-        if (isUnset(from.contentType()) || isUnset(from.ownerId()) || isUnset(to.contentType()) || isUnset(to.ownerId())
-                || !Objects.equals(from.contentType(), to.contentType()) || !Objects.equals(from.ownerId(), to.ownerId())
+        if (isUnset(from.contentType()) || isUnset(fromOwner) || isUnset(to.contentType()) || isUnset(toOwner)
+                || !Objects.equals(from.contentType(), to.contentType()) || !Objects.equals(fromOwner, toOwner)
                 || Objects.equals(from.embeddingModel(), to.embeddingModel())) {
             throw new IllegalArgumentException("a document move goes between model siblings: " + source
                 + " and " + target + " are not the same content type and owner under different models");
@@ -837,7 +859,7 @@ public final class CombinedWriteService {
         // without force never rewrites an existing chash). Logged at debug, not counted.
         List<String> keptDivergent = new ArrayList<>();
         List<Integer> needEmbedIdx = dedupChashes.isEmpty() ? new ArrayList<>()
-            : DeadlockRetry.run(collection + " combined-write metadata refresh", () -> tenantScope.withTenant(tenant, ctx -> {
+            : RenameFollow.run(collection, gate -> DeadlockRetry.run(collection + " combined-write metadata refresh", () -> tenantScope.withTenant(tenant, ctx -> {
                 // nexus-hxrcm residual: SHARED sweep gate first, like every manifest
                 // writer (CatalogRepository.acquireSweepGateShared's writer table). The
                 // UPDATE below touches rows the sweep DELETEs under the EXCLUSIVE half;
@@ -845,9 +867,18 @@ public final class CombinedWriteService {
                 // The wait compounds (sweeps queued ahead times SWEEP_STATEMENT_TIMEOUT_MS,
                 // see that javadoc), not a flat 5 s; the writer side has no lock_timeout
                 // by design, the same trade every manifest writer already makes.
-                CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
+                CatalogRepository.acquireSweepGateShared(ctx, tenant, gate);   // the label this attempt was given (RenameFollow)
+                // RDR-229 P3.5a (linda's option (b)): the registry check of this write transaction, right after the advisory gate
+                // and before any row is read or written (RenameGuard#runRename's lock order). The metadata UPDATE below writes chunks
+                // BY LABEL; without the read, a label freed and re-taken while this transaction waited for the gate would take
+                // the request's metadata into the new row, and the later per-document transactions would answer 404 after it committed.
+                final CollectionRow lockedRow = CollectionRegistry.requireWritable(ctx, tenant, collection);
+                // a rename landed after the gate above: run the attempt again with the row's current label's gate first, never take
+                // that gate after this registry read (RenameFollow)
+                RenameFollow.check(gate, lockedRow);
+                final String coll = lockedRow.label();   // the row's CURRENT label
                 Map<String, String> existingText =
-                    selectExistingText(ctx, ch, tenant, collection, dedupChashes);
+                    selectExistingText(ctx, ch, tenant, coll, dedupChashes, gate3);
                 // RDR-222 Phase 0: reset per DeadlockRetry attempt (a retried attempt
                 // re-runs this whole transaction from scratch — see
                 // PgVectorRepository.upsertChunksInternal's identical racedThisWrite
@@ -894,7 +925,7 @@ public final class CombinedWriteService {
                 if (!existingWithSupplied.isEmpty()) {
                     List<String> hexes = new ArrayList<>(existingWithSupplied.size());
                     for (int i : existingWithSupplied) hexes.add(dedupChashes.get(i));
-                    Map<String, float[]> storedVectors = selectStoredVectors(ctx, ch, tenant, collection, hexes);
+                    Map<String, float[]> storedVectors = selectStoredVectors(ctx, ch, tenant, coll, hexes, gate3);
                     for (int i : existingWithSupplied) {
                         float[] stored = storedVectors.get(dedupChashes.get(i));
                         // A chash whose vector cannot be read back (concurrently deleted) is
@@ -919,11 +950,11 @@ public final class CombinedWriteService {
                     // Merge mode passes the caller's delete keys (non-null list = MERGE in
                     // SQL: (stored - delete_keys) || incoming); replace mode passes null.
                     need.addAll(PgVectorRepository.batchUpdateMetadata(
-                        ctx, ch, collection, dedupChashes, dedupMetas, metadataOnly,
-                        metadataMode.merge() ? metadataMode.deleteKeys() : null));
+                        ctx, ch, tenant, coll, dedupChashes, dedupMetas, metadataOnly,
+                        metadataMode.merge() ? metadataMode.deleteKeys() : null, gate3));
                 }
                 return need;
-            }));
+            })));
 
         if (!keptDivergent.isEmpty() && log.isDebugEnabled()) {
             log.debug("event=supplied_vector_kept_divergent_text collection={} kept={} chashes={}",
@@ -1033,20 +1064,23 @@ public final class CombinedWriteService {
      * of ever writing a row.
      */
     private void ensureCollectionRegistered(String tenant, String collection) {
-        if (CollectionRegistry.isKnown(tenant, collection)) return;
-        tenantScope.withTenant(tenant, ctx -> {
-            CollectionRegistry.requireRegistered(ctx, tenant, collection);
-            return null;
-        });
+        // RDR-229 P3.5a: a lookup, not a write transaction's check. It answers from the cache or one short read and never counts as the
+        // write's read of a named id; the refresh transaction and every per-document transaction below take the FOR KEY SHARE read
+        // (an earlier form ran requireRegistered in its own short transaction, which consumed the id by accident and fired the test
+        // seam before the transaction whose first statement is the one that matters).
+        CollectionRegistry.lookup(tenantScope, tenant, collection);
     }
 
     /** The stored vector of each of {@code chashes} that exists in the collection (RDR-223 P1.5). */
     private static Map<String, float[]> selectStoredVectors(DSLContext ctx, DimTables.ChunkTable ch,
-            String tenant, String collection, List<String> chashes) {
+            String tenant, String collection, List<String> chashes, dev.nexus.service.datamove.Gate3 gate3) {
         Map<String, float[]> out = new HashMap<>();
+        // From gate 3 by the collection id, like selectExistingText: after a one-row rename a chunk's stored name is stale, and a name
+        // match would read no vector, leaving the stored-vector mismatch check blind (RDR-229 P3.5c, census verification B).
         ctx.select(ch.chash(), ch.embedding()).from(ch.table())
            .where(ch.tenantId().eq(tenant)
-                  .and(ch.collection().eq(collection))
+                  .and(dev.nexus.service.vectors.CollectionSelector.collectionIs(gate3, tenant, ch.collection(),
+                                                                                 ch.collectionId(), collection))
                   .and(ch.chash().in(chashes)))
            .fetch()
            .forEach(r -> { if (r.value2() != null) out.put(r.value1(), r.value2().floats()); });
@@ -1054,11 +1088,12 @@ public final class CombinedWriteService {
     }
 
     private static Map<String, String> selectExistingText(DSLContext ctx, DimTables.ChunkTable ch,
-            String tenant, String collection, List<String> chashes) {
+            String tenant, String collection, List<String> chashes, dev.nexus.service.datamove.Gate3 gate3) {
         Map<String, String> out = new HashMap<>();
         ctx.select(ch.chash(), ch.chunkText()).from(ch.table())
            .where(ch.tenantId().eq(tenant)
-                  .and(ch.collection().eq(collection))
+                  .and(dev.nexus.service.vectors.CollectionSelector.collectionIs(gate3, tenant, ch.collection(),
+                                                                                 ch.collectionId(), collection))
                   .and(ch.chash().in(chashes)))
            .fetch()
            .forEach(r -> out.put(r.value1(), r.value2()));

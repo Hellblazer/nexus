@@ -33,6 +33,7 @@ def _iso(delta: timedelta) -> str:
 
 
 def _status(*, state: str = "ok", valid: int = 3, invalid: int = 0, unparsed: int = 0, leftover: int = 0,
+            valid_id: int | None = None, invalid_id: int | None = None,
             building: int | None = 0, failing: int | None = 0,
             last_ddl: timedelta | None = timedelta(minutes=5), expired: bool = False,
             pass_in_progress: bool = False, pass_age: timedelta = timedelta(minutes=2),
@@ -48,6 +49,10 @@ def _status(*, state: str = "ok", valid: int = 3, invalid: int = 0, unparsed: in
         "this_engine": {"builder_state": state, "building": building, "failing": failing,
                         "last_ddl_pass_at": None if last_ddl is None else _iso(last_ddl),
                         "pass_started_at": _iso(pass_age) if in_pass else None, "pass_in_progress": in_pass}}}
+    if valid_id is not None:
+        body["per_collection_indexes"]["valid_id"] = valid_id
+    if invalid_id is not None:
+        body["per_collection_indexes"]["invalid_id"] = invalid_id
     if sweep_seconds is not None:
         body["per_collection_indexes"]["sweep_seconds"] = sweep_seconds
     if process_age is not None:
@@ -387,7 +392,7 @@ def test_the_older_golden_bodies_carry_no_maintenance_key_and_read_as_before() -
 def test_every_golden_case_has_an_expectation_here() -> None:
     """A case added to the fixture must be read by this file; otherwise the shared fixture guards nothing for it."""
     covered = {"holder", "first_pass_in_flight", "standby", "auth_failed", "no_privilege", "expired", "off",
-               *_WITH_MAINTENANCE}
+               "latched_id_only", *_WITH_MAINTENANCE}
     assert set(_GOLDEN) == covered
 
 
@@ -504,3 +509,43 @@ def test_the_golden_holder_body_warns_when_its_pass_is_old_and_a_rotation_check_
     assert r.warn is True and "in flight for" in r.detail
     body = _golden("holder")["per_collection_indexes"]
     assert body["sweep_seconds"] == 600 and body["this_engine"]["pass_in_progress"] is True
+
+
+# ── RDR-229 P3.4: after the latch the id-predicate indexes serve and ``valid`` (the name indexes) reads 0 ────────────────
+
+def test_a_latched_engine_with_only_id_indexes_shows_them_and_passes() -> None:
+    r = _row(_status(valid=0, valid_id=3))
+    assert r.ok is True and r.warn is False
+    assert "0 valid + 3 by id" in r.detail
+
+
+def test_the_golden_latched_body_reads_the_id_count_the_engine_writes() -> None:
+    r = _row(_golden("latched_id_only"))
+    assert r.ok is True and r.warn is False and "0 valid + 3 by id" in r.detail
+
+
+def test_a_failed_id_build_warns_like_an_invalid_name_index() -> None:
+    r = _row(_status(valid=0, valid_id=2, invalid_id=1, building=0, pass_in_progress=False))
+    assert r.warn is True and "1 invalid" in r.detail and "2 by id" in r.detail
+
+
+def test_an_invalid_id_index_during_a_build_is_not_a_warning() -> None:
+    r = _row(_status(valid=0, valid_id=2, invalid_id=1, building=1))
+    assert r.warn is False and "build in progress" in r.detail
+
+
+def test_an_older_engine_without_the_id_keys_reads_zero_and_shows_nothing_extra() -> None:
+    r = _row(_status(valid=3))
+    assert "by id" not in r.detail and "3 valid, 0 invalid" in r.detail
+
+
+def test_a_standby_engine_with_a_fresh_read_passes_an_invalid_id_count_with_the_peer_note() -> None:
+    # Same rule as the name family: the invalid id index may be the peer's build in flight, so a standby with a fresh read passes it.
+    r = _row(_status(state="standby", valid=0, valid_id=2, invalid_id=1, building=None, failing=None))
+    assert r.warn is False and r.ok is True
+    assert "1 by id" in r.detail and "peer's build in flight" in r.detail
+
+
+def test_a_standby_engine_still_warns_on_an_invalid_id_index_when_its_read_is_expired() -> None:
+    r = _row(_status(state="standby", valid=0, valid_id=2, invalid_id=1, building=None, failing=None, expired=True))
+    assert r.warn is True

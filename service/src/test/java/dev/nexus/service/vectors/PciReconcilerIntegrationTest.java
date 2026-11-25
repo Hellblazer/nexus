@@ -12,6 +12,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.db.SchemaMigrator;
@@ -156,10 +157,39 @@ class PciReconcilerIntegrationTest {
         PgSession.resetSearchExactMaxRowsForTests();
     }
 
+    /**
+     * Drops the tenant's leaves, rerunning the drop while it gives up on a lock (55P03), for up to {@link #DROP_RETRY_FOR}.
+     * The holder is usually an autovacuum of a table around the leaves or of the tenant's own leaf, started by the test's
+     * own seeding (pg_locks, nexus-p2m1x.25: an autovacuum worker held SHARE UPDATE EXCLUSIVE on catalog_document_chunks and
+     * then on the tenant's chunks leaf). The function's per-attempt budget is half of deadlock_timeout, so it never waits
+     * long enough for PostgreSQL to cancel an autovacuum, and gives up after about 4.5 s. Each call is one transaction on
+     * an autocommit connection, so a call that gives up changes nothing, and the function is idempotent.
+     */
     @SuppressWarnings("deprecation")
     static void dropLeaves(DSLContext ctx, String tenant) {
-        dev.nexus.service.jooq.nexus.Routines.dropTenantPartitions(ctx.configuration(), tenant);
+        long deadline = System.nanoTime() + DROP_RETRY_FOR.toNanos();
+        for (int attempt = 1; ; attempt++) {
+            try {
+                dev.nexus.service.jooq.nexus.Routines.dropTenantPartitions(ctx.configuration(), tenant);
+                return;
+            } catch (org.jooq.exception.DataAccessException e) {
+                if (!"55P03".equals(e.sqlState()) || System.nanoTime() > deadline) {
+                    throw e;
+                }
+                LoggerFactory.getLogger(PciReconcilerIntegrationTest.class)
+                    .warn("event=test_tenant_drop_retry tenant={} attempt={} cause=lock_not_available", tenant, attempt);
+                try {
+                    Thread.sleep(DROP_RETRY_PAUSE.toMillis());
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
+        }
     }
+
+    static final Duration DROP_RETRY_FOR = Duration.ofSeconds(30);
+    static final Duration DROP_RETRY_PAUSE = Duration.ofMillis(500);
 
     List<String> logs() {
         return appender.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
@@ -167,6 +197,22 @@ class PciReconcilerIntegrationTest {
 
     long logged(String needle) {
         return logs().stream().filter(l -> l.contains(needle)).count();
+    }
+
+    /**
+     * The events {@code events} holds that this test's own thread logged. reconcileOnce runs on the caller's thread; a reconciler another
+     * test started runs its passes on its scheduler thread, and stop() does not wait for a pass in flight
+     * ({@link #theScheduleRunsPassesOnAThreadOfItsOwn_stopEndsItWithoutWaiting}), so that pass's lines can land in a later test's
+     * appender (row 17: a second event=pci_reconcile_pass, 1 run in 4 on chas). A count of this test's pass reads only these.
+     */
+    static List<ILoggingEvent> onThisThread(List<ILoggingEvent> events) {
+        String me = Thread.currentThread().getName();
+        return events.stream().filter(e -> me.equals(e.getThreadName())).toList();
+    }
+
+    /** {@link #logged} for the lines this test's own thread logged. */
+    long loggedHere(String needle) {
+        return onThisThread(appender.list).stream().filter(e -> e.getFormattedMessage().contains(needle)).count();
     }
 
     // -- fixtures ----------------------------------------------------------------------------------------
@@ -255,15 +301,16 @@ class PciReconcilerIntegrationTest {
         int gen = ++generation;
         return asSuperuser(su -> {
             su.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(collection)).execute();
+            Long cid = CollectionIds.require(su, tenant, collection);
             List<String> hex = new ArrayList<>();
             for (int from = 0; from < rows; from += 250) {
                 var step = su.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
+                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID);
                 for (int i = from; i < Math.min(rows, from + 250); i++) {
                     String h = Chash.ofText(tenant + "/" + collection + "/" + gen + "/" + i).toHex();
                     hex.add(h);
                     step = step.values(tenant, collection, Chash.fromHex(h).toBytes(), M384, "row " + i,
-                        vector(i), JSONB.jsonb("{}"));
+                        vector(i), JSONB.jsonb("{}"), cid);
                 }
                 step.onConflictDoNothing().execute();
             }
@@ -314,17 +361,17 @@ class PciReconcilerIntegrationTest {
 
         HeldWrite(String tenant) throws Exception {
             String held = name("held-" + tenant);
-            asSuperuser(su -> {
+            Long heldId = asSuperuser(su -> {
                 PgContainerHelper.insertCollection(su, tenant, held, M384);
-                return null;
+                return CollectionIds.require(su, tenant, held);
             });
             conn = pg.createConnection("");
             conn.setAutoCommit(false);
             DSL.using(conn, SQLDialect.POSTGRES)
                 .insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA)
+                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID)
                 .values(tenant, held, Chash.fromHex(Chash.ofText("held/" + tenant).toHex()).toBytes(), M384, "held",
-                    vector(1), JSONB.jsonb("{}"))
+                    vector(1), JSONB.jsonb("{}"), heldId)
                 .execute();
         }
 
@@ -505,6 +552,8 @@ class PciReconcilerIntegrationTest {
             asSuperuser(su -> su.insertInto(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING)
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.TENANT_ID, tenant)
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION, coll)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION_ID,
+                    CollectionIds.require(su, tenant, coll))
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_MODEL, M384)
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_384, Vector.of(v))
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.VECTOR_DIGEST, PciQueryRing.digest(v))
@@ -543,6 +592,8 @@ class PciReconcilerIntegrationTest {
             asSuperuser(su -> su.insertInto(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING)
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.TENANT_ID, tenant)
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION, coll)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION_ID,
+                    CollectionIds.require(su, tenant, coll))
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_MODEL, M384)
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_384, Vector.of(v))
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.VECTOR_DIGEST, PciQueryRing.digest(v))
@@ -678,8 +729,7 @@ class PciReconcilerIntegrationTest {
         });
         // Canonical rename of "sup": the rows are re-homed under the new name and the old one is superseded.
         collection(tenant, name("sup-new"), 300);
-        asSuperuser(su -> su.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, name("sup-new"))
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name("sup"))).execute());
+        asSuperuser(su -> { dev.nexus.service.CollectionIdSeeds.supersede(su, tenant, name("sup"), name("sup-new")); return null; });
         // COPY rename of "copy-src": the old collection stays live with its rows, the copy has its own.
         collection(tenant, name("copy-dst"), 300);
 
@@ -734,7 +784,7 @@ class PciReconcilerIntegrationTest {
 
         r.reconcileOnce();
 
-        var events = appender.list.subList(mark, appender.list.size());
+        var events = onThisThread(appender.list.subList(mark, appender.list.size()));
         var leafLines = events.stream().filter(e -> e.getFormattedMessage().contains("event=pci_count_done ")).toList();
         assertThat(leafLines).as("one per processed leaf").isNotEmpty()
             .allSatisfy(e -> assertThat(e.getLevel()).as("per-leaf lines stay DEBUG").isEqualTo(Level.DEBUG));
@@ -1256,11 +1306,34 @@ class PciReconcilerIntegrationTest {
             && l.contains("index=" + ghostIndex));
         assertThat(logs()).anyMatch(l -> l.contains("event=pci_index_drop_stale") && l.contains("index=" + ghostIndex));
         assertThat(logged("event=pci_index_dropped")).isZero();
-        assertThat(logged("event=pci_reconcile_pass ")).isEqualTo(1);
-        assertThat(logs()).anyMatch(l -> l.contains("event=pci_reconcile_pass ") && l.contains("drops=0"));
+        assertThat(loggedHere("event=pci_reconcile_pass ")).as("this test's one pass (a pass another test's scheduler had in flight is not it)")
+            .isEqualTo(1);
+        assertThat(onThisThread(appender.list)).anyMatch(e -> e.getFormattedMessage().contains("event=pci_reconcile_pass ")
+            && e.getFormattedMessage().contains("drops=0"));
         assertThat(sweepReads.get()).as("a stale drop refreshes nothing").isZero();
         assertThat(leaf(tenant).indexes()).as("the now-valid index is still there")
             .anyMatch(i -> i.name().equals(ghostIndex) && i.valid());
+    }
+
+    /**
+     * Row 17: the stray line the flake was. A pass line another thread logs while a test runs (a scheduler whose pass outlived its test's
+     * stop) is in the appender, so the class-wide count sees two where the test ran one; the count of this thread's lines sees its own.
+     */
+    @Test
+    void aPassLineAnotherThreadLogsInTheWindow_isNotCountedAsThisTestsPass() throws Exception {
+        String tenant = newTenant("strayline");
+        String ghostIndex = invalidGhostLeftover(tenant);
+        String schema = leaf(tenant).schema();
+        Thread stray = new Thread(() -> LoggerFactory.getLogger(PciReconciler.class)
+            .info("event=pci_reconcile_pass ran_to_end=true leaves=0 processed_leaves=0 drops=0 builds=0 (a stray pass)"),
+            PciReconciler.THREAD_NAME);
+        stray.start();
+        stray.join();
+
+        staleLeftoverPass(tenant, ghostIndex, new AtomicInteger(), su -> PgContainerHelper.markIndexValid(su, schema, ghostIndex));
+
+        assertThat(logged("event=pci_reconcile_pass ")).as("non-vacuity: the appender holds the stray line and this test's").isEqualTo(2);
+        assertThat(loggedHere("event=pci_reconcile_pass ")).as("this test's own pass only").isEqualTo(1);
     }
 
     @Test
@@ -1604,9 +1677,7 @@ class PciReconcilerIntegrationTest {
     void aFailureEntry_isClearedWhenTheCollectionIsSuperseded() throws Exception {
         assertThatAFailureEntryClearsWhen("super", (tenant, collection) -> {
             collection(tenant, name("elsewhere"), 0);
-            asSuperuser(su -> su.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, name("elsewhere"))
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(collection))
-                .execute());
+            asSuperuser(su -> { dev.nexus.service.CollectionIdSeeds.supersede(su, tenant, collection, name("elsewhere")); return null; });
         });
     }
 
@@ -2287,12 +2358,13 @@ class PciReconcilerIntegrationTest {
     void addRows(String tenant, String collection, int rows) throws Exception {
         int gen = ++generation;
         asSuperuser(su -> {
+            Long cid = CollectionIds.require(su, tenant, collection);
             var step = su.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
+                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID);
             for (int i = 0; i < rows; i++) {
                 step = step.values(tenant, collection,
                     Chash.fromHex(Chash.ofText(tenant + "/" + collection + "/add/" + gen + "/" + i).toHex()).toBytes(),
-                    M384, "added " + i, vector(i), JSONB.jsonb("{}"));
+                    M384, "added " + i, vector(i), JSONB.jsonb("{}"), cid);
             }
             step.onConflictDoNothing().execute();
             return null;

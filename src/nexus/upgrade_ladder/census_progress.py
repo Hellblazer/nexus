@@ -71,6 +71,7 @@ correctness.
 """
 from __future__ import annotations
 
+import shlex
 import contextlib
 import json
 from collections.abc import Callable, Iterator, Mapping
@@ -254,7 +255,7 @@ class Stall:
         return (
             f"census stalled at {name} for {self.count} sessions since {_safe_text(self.since)} "
             f"(last {_safe_text(self.last)}): the engine's census call for it failed each time; "
-            f"`nx t3 census-manifest-less --collection {name}` shows why"
+            f"`nx t3 census-manifest-less --collection {shlex.quote(name)}` shows why"
         )
 
 

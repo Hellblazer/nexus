@@ -51,6 +51,7 @@ from nexus import indexer
 from nexus.catalog import link_generator, reconcile_run
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.repo_identity import _repo_identity
+from tests._catalog_fixture_ops import register_seed_collections
 from tests._engine_substrate import ensure_engine
 from tests._tenant_pool import psql
 
@@ -334,6 +335,8 @@ def _run_hook(c: Copy, offered: list[F], *, head: str, complete: bool, keep: lis
     unreg: dict[Path, str] = {}
     wanted: set[Path] = set()
     confirmed: set[Path] = set()
+    # RDR-229 P3.1: the collections are registered first, as ``_run_index`` does before it calls the hook.
+    register_seed_collections(*COLLECTIONS.values())
     file_to_doc = indexer._catalog_hook(
         repo=c.repo, repo_name=c.name, repo_hash=c.hash, head_hash=head,
         indexed_files=[(c.path(f.rel), f.ctype, COLLECTIONS[f.ctype]) for f in offered],
@@ -382,6 +385,7 @@ class Snapshot:
                                                     "minted": {}, "structures": {}}
         self.key_of: dict[str, str] = {}
         self.case_of_tumbler: dict[str, str] = {}
+        self.unstamped: list[str] = []  # documents in a collection whose registry id the row does not carry
         docs = [d for d in dump["docs"] if self._owns(d["tumbler"])]
         docs.sort(key=lambda d: (self.prefix[d["tumbler"].rpartition(".")[0]], int(d["tumbler"].rpartition(".")[2])))
         ordinal: Counter = Counter()
@@ -399,6 +403,12 @@ class Snapshot:
             cols: dict[str, Any] = {}
             for col, v in d.items():
                 if col == "tumbler":
+                    continue
+                if col == "physical_collection_id":
+                    # RDR-229 P3.1: the registry's id of ``physical_collection``, a per-tenant serial the golden cannot
+                    # hold (the name is compared, in ``physical_collection``). It must be stamped wherever the name is.
+                    if d.get("physical_collection") and v is None:
+                        self.unstamped.append(t)
                     continue
                 if col == "alias_of":
                     v = self.key_of.get(v, v) if v else v
@@ -530,6 +540,9 @@ class Scenario:
     # -- the state both copies are put in between the seed and the run ---------------------------------------
     def prepare(self, c: Copy) -> None:
         cat, t, sql = self.cat, lambda rel: self.t(c, rel), lambda rel, clause: _update_doc(self.tenant, self.t(c, rel), clause)
+        # RDR-229 P3.1: a document sits only in a registered collection (the engine refuses it, and the physical_collection
+        # check refuses a raw update to a name with no registry row).
+        register_seed_collections("docs__rdr193foreign", STALE_COLLECTION)
         # Rename
         cat.link(t("ren_link_between/a.txt"), t("ren_link_between/b.txt"), "cites", "parity",
                  from_span="1-3", to_span="4-9", note="the link's metadata is not carried")
@@ -574,7 +587,12 @@ class Scenario:
         cat.register(c.other, "foreign holder", content_type="prose", file_path="id_foreign/x.txt",
                      physical_collection="docs__rdr193foreign", source_uri=f"file://{c.root}/id_foreign/x.txt")
         stale_t = t("id_same_owner/x.txt")
-        _update_doc(self.tenant, stale_t, f"file_path = 'id_same_owner/old-name.txt', physical_collection = '{STALE_COLLECTION}'")
+        # RDR-229 P3.1/P3.5b: a document homed in another collection carries that collection's id beside its name, as every writer
+        # since the expand stamps it; a stale name with the current collection's id is the shape a one-row rename leaves, which
+        # reconcile rightly does not re-home (P3.5b compares ids where both rows carry one).
+        _update_doc(self.tenant, stale_t, f"file_path = 'id_same_owner/old-name.txt', physical_collection = '{STALE_COLLECTION}', "
+                    f"physical_collection_id = (SELECT cc.collection_id FROM nexus.catalog_collections cc "
+                    f"WHERE cc.tenant_id = d.tenant_id AND cc.name = '{STALE_COLLECTION}')")
         sql("id_legacy/unchanged.txt", "source_uri = ''")
         sql("id_legacy/changed.txt", "source_uri = ''")
         twin = str(cat.register(c.owner, "dup twin", content_type="prose",
@@ -686,6 +704,7 @@ def test_the_hook_leaves_what_the_client_path_left(tmp_path: Path, t2_tenant: st
                      f"structures {len(now['structures'])}, skipped 0")
         print("\n".join(lines))  # noqa: T201 — the verdict table is the first-run record; read it with -s
         assert len(now["links"]) >= 5 and len(now["documents"]) >= 60, "the fixture is vacuous"
+        assert not snap.unstamped, f"documents in a registered collection without its registry id: {snap.unstamped}"
         assert not diffs, "\n".join(lines) + "\n\n" + "\n".join(_fmt(d) for d in diffs)
     finally:
         sc.close()

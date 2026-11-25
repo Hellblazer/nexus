@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
@@ -393,6 +394,7 @@ class AspectTaskRefsRenameTest {
         String b = coll("b");
         String jobTarget = coll("jobtarget");
         register(tenant, a);
+        register(tenant, jobTarget);   // RDR-229 P3.1: a job row carries both ends' registry ids, so its target is registered first
         Seeded s = seedThree(tenant, a, "1.13");
         new ReembedJobRepository(scope).start(tenant, a, jobTarget, null, false, false);
 
@@ -437,8 +439,7 @@ class AspectTaskRefsRenameTest {
         String retired = coll("retired");
         register(tenant, a);
         register(tenant, retired);
-        su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "elsewhere")
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(retired)).execute());
+        su(ctx -> { dev.nexus.service.CollectionIdSeeds.supersede(ctx, tenant, retired, "elsewhere"); return null; });
         outTask(tenant, retired, "1.6.1");
 
         assertThatThrownBy(() -> catalog.renameCollection(tenant, a, retired))
@@ -594,8 +595,8 @@ class AspectTaskRefsRenameTest {
         seedDocument(tenant, a, "1.8.1");
         su(ctx -> ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                 DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
-            .values(tenant, a, "p/1.8.1.md", OffsetDateTime.now(), "v1", "docling", "1.8.1", "file:///p/1.8.1.md")
+                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
+            .values(tenant, a, "p/1.8.1.md", OffsetDateTime.now(), "v1", "docling", "1.8.1", "file:///p/1.8.1.md", CollectionIds.require(ctx, tenant, a))
             .execute());
         outTask(tenant, a, "1.8.1");
         var claimed = tuples.inp(tenant, "aspects", Map.of("queue", "aspects"), WORKER, 600L).orElseThrow();
@@ -776,5 +777,113 @@ class AspectTaskRefsRenameTest {
         var response = moveSvc.moveDocsCombined(tenant, src, tgt, chunks,
             List.of(Map.of("doc_id", docId, "rows", rows)), Map.of(docId, order)).response();
         assertThat((List<?>) response.get("failed_doc_ids")).as("move of " + docId).isEmpty();
+    }
+
+    /**
+     * A delete by id against a claim-fenced aspect write of the same collection, the writer in the order {@code AspectRepository.upsertAspect}
+     * really takes (RDR-229 P3.5a row 14, B1; the canonical order, registry row before tuple rows): the collection's registry row
+     * {@code FOR KEY SHARE} first, then the claim's task row {@code FOR NO KEY UPDATE}. The delete takes the origin's row {@code FOR UPDATE}
+     * and waits for the writer's key share holding nothing, so the writer reaches its task row and both finish. A delete that held the task rows
+     * before it asked for the registry row (the aspect task lock this class once pinned, {@code AspectTaskRefs.lockOnly}) would hold what the
+     * writer wants while it waits for what the writer holds: 40P01, which the deadlock retry turns into a clean answer, so the retry listener
+     * is what shows none happened.
+     */
+    @Test
+    void aDeleteById_againstAClaimFencedAspectWriteInItsRealOrder_registryRowThenTheClaimRow_neitherDeadlocks() throws Exception {
+        String tenant = freshTenant("delete-real-order");
+        String a = coll("rlo");
+        register(tenant, a);
+        long id = su(ctx -> CollectionIds.require(ctx, tenant, a));
+        outTask(tenant, a, "1.9.1");
+        var claimed = tuples.inp(tenant, "aspects", Map.of("queue", "aspects"), WORKER, 600L).orElseThrow();
+
+        List<String> retries = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DeadlockRetry.setRetryListenerForTests(retries::add);
+        CountDownLatch keyShared = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CompletableFuture<Object> writer = CompletableFuture.supplyAsync(() -> DeadlockRetry.run("aspect.upsert fenced", () -> scope.withTenant(tenant, ctx -> {
+                ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).forKeyShare().fetch();
+                keyShared.countDown();
+                try {
+                    assertThat(release.await(30, TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException e) {
+                    throw new IllegalStateException(e);
+                }
+                ctx.select(TUPLES.ID).from(TUPLES)
+                    .where(TUPLES.TENANT_ID.eq(tenant)).and(TUPLES.CLAIM_ID.eq(claimed.claimId())).forNoKeyUpdate().fetch();
+                return (Object) "ok";
+            })), pool);
+            assertThat(keyShared.await(30, TimeUnit.SECONDS)).as("the writer holds the registry row").isTrue();
+
+            CompletableFuture<Map<String, Integer>> delete =
+                CompletableFuture.supplyAsync(() -> catalog.deleteCollectionById(tenant, a, id, false), pool);
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%"))
+                .as("the delete is parked on the registry row FOR UPDATE").isTrue();
+            release.countDown();
+
+            writer.get(60, TimeUnit.SECONDS);
+            Map<String, Integer> counts = delete.get(60, TimeUnit.SECONDS);
+            assertThat(counts).as("the delete answered").isNotNull();
+            int tasks = su(ctx -> ctx.fetchCount(TUPLES, TUPLES.TENANT_ID.eq(tenant).and(TUPLES.SUBSPACE.eq("aspects"))));
+            assertThat(tasks).as("the collection's task went with it").isZero();
+            assertThat(retries).as("no 40P01 for the writer or the delete").isEmpty();
+        } finally {
+            DeadlockRetry.setRetryListenerForTests(null);
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * A delete by id against a one-row rename in its order (registry row {@code FOR UPDATE}, then the tuple rows the rename rewrites, as
+     * {@code CollectionOneRowRename} and {@code renameAspectCollection} do): the rename holds the origin's row and wants the task rows; the
+     * delete waits for the origin's row holding nothing, the rename takes the task rows and commits, and the delete goes on. A delete that
+     * held the task rows first would cycle with it (40P01, absorbed by the deadlock retry: the listener shows none).
+     */
+    @Test
+    void aDeleteById_againstAOneRowRenamesOrder_registryRowThenTheTaskRows_neitherDeadlocks() throws Exception {
+        String tenant = freshTenant("delete-vs-rename");
+        String a = coll("dvr");
+        register(tenant, a);
+        long id = su(ctx -> CollectionIds.require(ctx, tenant, a));
+        outTask(tenant, a, "1.9.2");
+
+        List<String> retries = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DeadlockRetry.setRetryListenerForTests(retries::add);
+        CountDownLatch holding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CompletableFuture<Object> rename = CompletableFuture.supplyAsync(() -> DeadlockRetry.run("one-row rename", () -> scope.withTenant(tenant, ctx -> {
+                ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).forUpdate().fetch();
+                holding.countDown();
+                try {
+                    assertThat(release.await(30, TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException e) {
+                    throw new IllegalStateException(e);
+                }
+                ctx.select(TUPLES.ID).from(TUPLES)
+                    .where(TUPLES.TENANT_ID.eq(tenant)).and(TUPLES.SUBSPACE.eq("aspects")).forNoKeyUpdate().fetch();
+                return (Object) "ok";
+            })), pool);
+            assertThat(holding.await(30, TimeUnit.SECONDS)).as("the rename holds the registry row").isTrue();
+
+            CompletableFuture<Map<String, Integer>> delete =
+                CompletableFuture.supplyAsync(() -> catalog.deleteCollectionById(tenant, a, id, false), pool);
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%"))
+                .as("the delete is parked on the registry row FOR UPDATE").isTrue();
+            release.countDown();
+
+            rename.get(60, TimeUnit.SECONDS);
+            Map<String, Integer> counts = delete.get(60, TimeUnit.SECONDS);
+            assertThat(counts).as("the delete answered").isNotNull();
+            assertThat(retries).as("no 40P01 for the rename or the delete").isEmpty();
+        } finally {
+            DeadlockRetry.setRetryListenerForTests(null);
+            pool.shutdownNow();
+        }
     }
 }

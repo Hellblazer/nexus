@@ -116,7 +116,7 @@ class _Box:
         return subprocess.run(
             [str(self.bins.psql), "-X", "-w", "-h", "127.0.0.1", "-p", str(self.port), "-U", "nexus_admin",
              "-d", "nexus", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql],
-            capture_output=True, text=True, env=env, timeout=60,
+            capture_output=True, text=True, encoding="utf-8", env=env, timeout=60,
         )
 
     def snapshot(self) -> str:

@@ -9,6 +9,7 @@ import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record2;
+import org.jooq.Record3;
 import org.jooq.Result;
 import org.jooq.Select;
 import org.jooq.Table;
@@ -19,6 +20,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 
@@ -161,11 +163,11 @@ public final class ManifestFill {
             var end = window.get(window.size() - 1);
             Cursor last = new Cursor(end.value1(), end.value2());
             // one read: the fillable rows of the window per collection, whose sum is the pick and whose keys are the gates
-            var perCollection = fillableByCollection(ctx, tenant, kind, after, last).fetch();
+            var perCollection = fillableByCollection(ctx, tenant, kind, after, last, repo.gate3()).fetch();
             int picked = 0;
-            for (var r : perCollection) picked += r.value2();
+            for (var r : perCollection) picked += r.value3();
             int filled = dryRun || picked == 0 ? 0
-                : apply(ctx, tenant, kind, after, last, perCollection.getValues(0, String.class), skipLocked);
+                : apply(ctx, tenant, kind, after, last, gateLabels(ctx, tenant, perCollection), skipLocked, repo.gate3());
             return new Batch(window.size(), picked, filled, last);
         }));
     }
@@ -256,17 +258,39 @@ public final class ManifestFill {
      * ones the batch gates (a collection with no fillable row in the window is never waited for). Public so a
      * plan-shape test can explain the exact statement.
      */
-    public static Select<Record2<String, Integer>> fillableByCollection(DSLContext ctx, String tenant, Kind kind,
-                                                                        Cursor after, Cursor last) {
+    public static Select<Record3<String, Long, Integer>> fillableByCollection(DSLContext ctx, String tenant, Kind kind,
+                                                                              Cursor after, Cursor last,
+                                                                              dev.nexus.service.datamove.Gate3 gate3) {
         var row = CATALOG_DOCUMENT_CHUNKS;
         var doc = CATALOG_DOCUMENTS;
-        return ctx.select(row.COLLECTION, DSL.count())
-            .from(ManifestFillableCount.joined(row, doc))
+        return ctx.select(row.COLLECTION, row.COLLECTION_ID, DSL.count())
+            .from(ManifestFillableCount.joined(row, doc, gate3))
             .where(ManifestFillableCount.candidates(ctx, tenant, kind, row, doc)
                 .and(ManifestFillableCount.strict(kind, doc))
                 .and(after(row, after)).and(through(row, last)))
-            .groupBy(row.COLLECTION)
-            .orderBy(row.COLLECTION);
+            .groupBy(row.COLLECTION, row.COLLECTION_ID)
+            .orderBy(row.COLLECTION, row.COLLECTION_ID);
+    }
+
+    /**
+     * The labels whose sweep gates a batch takes (RDR-229 P3.5a, linda's sweep-gate audit): a taker's key is the label its
+     * collection answers to NOW, which after a one-row rename is not the name its rows store, so a row's collection is
+     * keyed by the registry label of its {@code collection_id}, else (no id, or no registry row for it) by the stored name.
+     * Distinct and in label order, as every taker's acquisition order is.
+     */
+    private static List<String> gateLabels(DSLContext ctx, String tenant, Result<Record3<String, Long, Integer>> perCollection) {
+        java.util.Set<Long> ids = new java.util.HashSet<>();
+        for (var r : perCollection) if (r.value2() != null) ids.add(r.value2());
+        java.util.Map<Long, String> labelOf = ids.isEmpty() ? java.util.Map.of()
+            : ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.in(ids))
+                .fetchMap(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.NAME);
+        java.util.TreeSet<String> labels = new java.util.TreeSet<>();
+        for (var r : perCollection) {
+            String live = r.value2() == null ? null : labelOf.get(r.value2());
+            labels.add(live != null ? live : r.value1());
+        }
+        return List.copyOf(labels);
     }
 
     /** The rows strictly after {@code after} in key order; no condition for the start. */
@@ -285,19 +309,23 @@ public final class ManifestFill {
      * ({@link #updateStatement}) under the lock timeout.
      */
     private static int apply(DSLContext ctx, String tenant, Kind kind, Cursor after, Cursor last,
-                             List<String> collections, boolean skipLocked) {
+                             List<String> collections, boolean skipLocked, dev.nexus.service.datamove.Gate3 gate3) {
         // Every manifest writer holds the sweep gate SHARED for each collection it writes, before its row locks (the
         // retire-orphans sweep takes it EXCLUSIVE; ManifestInsertGateTest). This UPDATE re-points and re-homes nothing, but
         // it joins the rule instead of arguing an exemption. The collections are those of the rows the pick found, in
         // name order; shared holders never wait on each other. A row re-homed after that read is written under the gate
         // of its old collection: the UPDATE adds no key and writes no collection, so it cannot interleave with the
         // sweep's retirement of either.
+        // RDR-229 P3.5a, exempt from the registry lock: this UPDATE names no collection in a write and reads no registry row; its gates are
+        // taken first (acquireSweepGateShared fails when this transaction already holds a registry row, in the census), and a re-home or rename
+        // that lands between the pick and the write changes the collection of a row this statement leaves as it is.
         for (String collection : collections) {
             CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
         }
+        WriteRegistryMemo.exempt(ctx, "manifest fill: names no collection in its write, reads no registry row");
         // After the gates, so a gate wait keeps the statement timeout; 0 turns the limit off in skip mode, which waits on no row.
         PgSession.setLocal(ctx, "lock_timeout", Long.toString(skipLocked ? 0L : lockTimeoutMs()));
-        return updateStatement(ctx, tenant, kind, after, last, skipLocked).execute();
+        return updateStatement(ctx, tenant, kind, after, last, skipLocked, gate3).execute();
     }
 
     /**
@@ -307,7 +335,7 @@ public final class ManifestFill {
      * out of {@code b} and not written. Public so a measurement can explain the exact statement.
      */
     public static Update<?> updateStatement(DSLContext ctx, String tenant, Kind kind, Cursor after, Cursor last,
-                                            boolean skipLocked) {
+                                            boolean skipLocked, dev.nexus.service.datamove.Gate3 gate3) {
         var cand = CATALOG_DOCUMENT_CHUNKS.as("cand");
         CatalogDocuments candDoc = CATALOG_DOCUMENTS.as("cand_doc");
         var t = CATALOG_DOCUMENT_CHUNKS;
@@ -317,7 +345,7 @@ public final class ManifestFill {
         Condition inRange = after(cand, after).and(through(cand, last));
         Condition fillable = ManifestFillableCount.candidates(ctx, tenant, kind, cand, candDoc)
             .and(ManifestFillableCount.strict(kind, candDoc)).and(inRange);
-        Table<?> from = ManifestFillableCount.joined(cand, candDoc);
+        Table<?> from = ManifestFillableCount.joined(cand, candDoc, gate3);
         return kind == Kind.LABELS
             ? applyLabels(ctx, tenant, t, from, fillable, cand, skipLocked, bDoc, bPos, bChash)
             : applySpans(ctx, tenant, t, from, fillable, cand, skipLocked, bDoc, bPos, bChash);
@@ -356,6 +384,8 @@ public final class ManifestFill {
             .set(t.SECTION_TYPE, b.field(type))
             .set(t.PAGE_NUMBER, b.field(page))
             .set(t.LABELS_WRITTEN, true)
+            // RDR-229 P3.1: a row the stamp has not reached is stamped by the write that touches it.
+            .set(t.COLLECTION_ID, CatalogIdStamps.keep(t.COLLECTION_ID, t.TENANT_ID, t.COLLECTION))
             .from(b)
             // the target row's own guard: a row a concurrent writer already labelled is not written over
             .where(sameRow(t, tenant, b, bDoc, bPos, bChash).and(t.LABELS_WRITTEN.isFalse()));
@@ -381,6 +411,7 @@ public final class ManifestFill {
             .set(t.LINE_END, DSL.coalesce(t.LINE_END, rle))
             .set(t.CHAR_START, DSL.coalesce(t.CHAR_START, rcs))
             .set(t.CHAR_END, DSL.coalesce(t.CHAR_END, rce))
+            .set(t.COLLECTION_ID, CatalogIdStamps.keep(t.COLLECTION_ID, t.TENANT_ID, t.COLLECTION))
             .from(b)
             // the target row's own guard: a NULL column the chunk records and no column it contradicts, now
             .where(sameRow(t, tenant, b, bDoc, bPos, bChash)

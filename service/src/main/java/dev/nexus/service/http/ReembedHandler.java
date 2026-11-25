@@ -219,12 +219,21 @@ public final class ReembedHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, error(e.getMessage()));
         } catch (JobLockHeld e) {
             HttpUtil.send(exchange, 409, held(e.getMessage(), e.existingJobId(), e.existingState()));
+        } catch (ReembedJobRepository.EndRefused e) {
+            HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(orderedMap(
+                "error", e.getMessage(), "job_id", e.jobId().toString())));
         } catch (LockContention e) {
             exchange.getResponseHeaders().set("Retry-After", "1");
             HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(orderedMap(
                 "error", e.getMessage(), "retryable", true)));
         } catch (CatalogRepository.EmbeddingProfileConflictException e) {
-            HttpUtil.send(exchange, 422, error(e.getMessage()));
+            // RDR-229 P3.1 (nexus-p2m1x.17): a typed reason beside the message when the refusal carries one.
+            HttpUtil.send(exchange, 422, e.reason() == null ? error(e.getMessage())
+                : MAPPER.writeValueAsString(orderedMap("error", e.getMessage(), "reason", e.reason())));
+        } catch (dev.nexus.service.db.CollectionMint.LiveTupleConflict e) {
+            // RDR-229 P3.8: registering or reviving the target would give its tuple a second live collection; the message
+            // names both, and nothing was written.
+            HttpUtil.send(exchange, 409, error(e.getMessage()));
         } catch (Exception e) {
             if (!HttpUtil.sendTypedDbError(exchange, e, log, "reembed_handler", "op=" + op + " tenant=" + tenant)) {
                 log.error("event=reembed_handler_error op={} tenant={} error={}", op, tenant, e.getMessage(), e);
@@ -367,10 +376,18 @@ public final class ReembedHandler implements HttpHandler {
         String owner = String.valueOf(srcRow.get("owner_id"));
         String successor = String.valueOf(srcRow.get("superseded_by"));
         if (!successor.isEmpty()) {
+            // RDR-229 R7: the successor is found by id and named by its CURRENT label. The text of a tombstone whose successor was
+            // deleted is its own dead label, which is no successor: that source is refused as retired, naming none.
+            Optional<String> live = reader.liveSuccessorLabel(tenant, srcRow);
+            if (live.isEmpty()) {
+                throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
+                    "error", TargetSelection.retiredWithNoSuccessor(source) + "; a retired collection is not re-embedded",
+                    "collection", source)));
+            }
             throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
-                "error", "source collection " + source + " is already superseded by " + successor
+                "error", "source collection " + source + " is already superseded by " + live.get()
                     + "; a superseded collection is not re-embedded",
-                "collection", source, "superseded_by", successor)));
+                "collection", source, "superseded_by", live.get())));
         }
         String profileModel = profileModel(tenant, contentType);
         if (profileModel == null) {
@@ -408,7 +425,8 @@ public final class ReembedHandler implements HttpHandler {
             : Optional.ofNullable(firstMatch(locked, j -> j.sourceCollection().equals(candidate)))
                 .map(j -> new LockHolder(j.jobId(), j.state())).orElse(null);
 
-        TargetSelection.Decision decision = TargetSelection.decide(found, source, holder);
+        TargetSelection.Decision decision = TargetSelection.decide(found, source, holder,
+            id -> reader.liveSuccessorLabel(tenant, id));
         if (decision instanceof Refuse r) {
             Map<String, Object> refusal = orderedMap("error", r.reason(), "collection", candidate);
             if (holder != null) {
@@ -538,14 +556,14 @@ public final class ReembedHandler implements HttpHandler {
             action = "registered";
         }
 
-        // The earlier job is marked before the start, and also on the live branch: the revive is the upsert that
-        // cleared the supersession, so the mark follows it, not the start. A start that then loses (a lock, a crash)
-        // leaves the target live and the earlier job marked; a failure of the mark itself leaves it unmarked, and
-        // the retry arrives here as a live target. markRevived is idempotent. A registered target is new, so no
-        // earlier job went target to source.
-        Optional<Job> earlier = "registered".equals(action)
-            ? Optional.empty() : jobs.markRevived(tenant, target, source);
-        Job job = jobs.start(tenant, source, target, tokenCap, keepSource, forceDelete);
+        // The earlier job is marked in the start's own transaction (RDR-229 P3.5a row 14), on the live branch as on the revived one: the
+        // revive is the upsert that cleared the supersession, so the mark follows it. A start that then loses (a lock, a crash) leaves the
+        // target live and the earlier job unmarked; the retry arrives here as a live target and marks it (idempotent). A registered target
+        // is new, so no earlier job went target to source.
+        ReembedJobRepository.Started started = jobs.startMarking(tenant, source, target, tokenCap, keepSource, forceDelete,
+            !"registered".equals(action));
+        Job job = started.job();
+        Optional<Job> earlier = started.revived();
         log.info("event=reembed_job_started tenant={} job={} source={} target={} target_action={} token_cap={} "
                 + "keep_source={} force_delete={} earlier_job_revived={}", tenant, job.jobId(), source, target,
             action, tokenCap, keepSource, forceDelete, earlier.map(j -> j.jobId().toString()).orElse("none"));
@@ -598,7 +616,9 @@ public final class ReembedHandler implements HttpHandler {
             throw new Reply(409, jsonOf(orderedMap(
                 "error", "job " + earlier.jobId() + " kept " + source + " superseded by " + earlier.targetCollection()
                     + ", which is "
-                    + (targetRow == null ? "no longer registered" : "itself superseded by " + targetRow.get("superseded_by"))
+                    + (targetRow == null ? "no longer registered"
+                        : reader.liveSuccessorLabel(tenant, targetRow).map(l -> "itself superseded by " + l)
+                            .orElse("itself retired and has no successor"))
                     + "; the source is not re-entered",
                 "job_id", earlier.jobId().toString(), "state", earlier.state())));
         }
@@ -712,6 +732,8 @@ public final class ReembedHandler implements HttpHandler {
             throw new IllegalArgumentException("no registered collection has " + need
                 + "; send target_collection to register one");
         }
+        // RDR-229 P3.6: a NUL cannot be bound into the lookups below (a database error, not a 400).
+        dev.nexus.service.db.CollectionLabel.requireStorable(requested);
         if (dev.nexus.service.db.CollectionRegistration.versionOfConformantName(requested) == null) {
             // The version of a new row is read off the target's minted name (D1), so a name to register must have one.
             // This applies only when a NEW row would be registered: an existing live target is used as-is.
@@ -736,6 +758,10 @@ public final class ReembedHandler implements HttpHandler {
                     + existing.get("embedding_model") + ", which is not a live collection of " + need,
                 "collection", requested)));
         }
+        // RDR-229 P3.6: the target is a NEW label the engine registers on the user's say-so, so the label rule applies.
+        // After the existing-row lookup: a row that exists keeps its label whatever it is (a live one is used as-is
+        // and never reaches here; a retired one is refused above for what it is).
+        dev.nexus.service.db.CollectionLabel.validateUserLabel(requested);
     }
 
     /**

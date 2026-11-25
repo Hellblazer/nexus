@@ -45,11 +45,13 @@ def enrich(title: str) -> dict[str, Any]:
 
     for attempt in range(_MAX_RETRIES + 1):
         try:
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
             resp = httpx.get(
                 _BASE_URL,
                 params={"query": title, "fields": _FIELDS, "limit": _SEARCH_CANDIDATES},
                 headers=_s2_headers(),
                 timeout=_TIMEOUT,
+                verify=get_shared_ssl_context(),
             )
             if resp.status_code == 429 and attempt < _MAX_RETRIES:
                 wait = _BACKOFF_BASE * (2 ** attempt)

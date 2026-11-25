@@ -19,6 +19,7 @@ import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
@@ -97,6 +98,8 @@ public final class CatalogMoves {
     /** Bounded like {@code CatalogRepository.MAX_ALIAS_HOPS}. */
     private static final int MAX_ALIAS_HOPS = 16;
 
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(CatalogMoves.class);
+
     private final CatalogRepository repo;
 
     public CatalogMoves(CatalogRepository repo) {
@@ -170,15 +173,24 @@ public final class CatalogMoves {
         // The holder of the new URI, read before the locks and re-read after them: a concurrent move or registration
         // that changed it between the two is refused, not guessed at.
         String candidate = liveHolderOf(ctx, tenant, newUri);
+        // gate 3 is read once for the whole move (RDR-229 P3.5c): from the latch the collections of the documents are found, locked and matched
+        // by their registry ids, never by the stored label a one-row rename leaves stale
+        final CollectionKey ck = CollectionKey.of(repo.gate3());
+        // RDR-229 P3.5a lock order: the registry rows of the collections these documents are in come BEFORE any document row is locked
+        // (a retiring verb holds the registry row and then wants child rows; a child row first and the registry row after it can close
+        // a cycle with it). rekeyHighlights below needs the row of S's collection; it is read here, unlocked-then-locked, and checked
+        // again once the document rows are held.
+        lockCollectionsOfDocuments(ctx, tenant, ck, CATALOG_DOCUMENTS.TUMBLER.in(candidate == null ? List.of(s) : List.of(s, candidate)));
         CatalogRepository.lockDocumentRowsSorted(ctx, tenant, true, s, candidate);
         String t = liveHolderOf(ctx, tenant, newUri);
         if (!java.util.Objects.equals(candidate, t)) {
             throw refuse("the holder of " + newUri + " changed while the move was starting (" + candidate + " then " + t
                 + "); run it again");
         }
+        requireCollectionsHeld(ctx, tenant, ck, CATALOG_DOCUMENTS.TUMBLER.in(t == null ? List.of(s) : List.of(s, t)));
 
         var sRow = ctx.select(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.ALIAS_OF,
-                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
             .from(CATALOG_DOCUMENTS)
             .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(s))
                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
@@ -194,6 +206,7 @@ public final class CatalogMoves {
                 + "): a repository file's path is relative to its owner's root, so move the owner (owners/move) instead");
         }
         String collection = sRow.value4() == null ? "" : sRow.value4();
+        Long collectionId = sRow.value5();
         String sAlias = sRow.value3() == null ? "" : sRow.value3();
         if (!sAlias.isBlank() && !sAlias.equals(t)) {
             throw refuse(s + " is an alias of " + sAlias + ": a document that points at another is not given a live URI of its "
@@ -214,10 +227,10 @@ public final class CatalogMoves {
                 .fetchOne(CATALOG_DOCUMENTS.SENSITIVE);
             absorb(ctx, tenant, c, s, t, new AbsorbFacts(true, Boolean.TRUE.equals(tSensitive), true, t.equals(sAlias)));
             trashAbsorbed(ctx, tenant, List.of(t));
-            moveAspects(ctx, tenant, c, s, t, collection, newUri, newPath);
-            rekeyHighlights(ctx, tenant, c, s, t, sRow.value4(), newUri);
+            moveAspects(ctx, tenant, ck, c, s, t, collection, collectionId, newUri, newPath);
+            rekeyHighlights(ctx, tenant, ck, c, s, t, sRow.value4(), collectionId, newUri);
         } else {
-            moveAspects(ctx, tenant, c, s, null, collection, newUri, newPath);
+            moveAspects(ctx, tenant, ck, c, s, null, collection, collectionId, newUri, newPath);
         }
 
         // Step 2: S itself. T's source_uri was cleared by the absorb, so the live-URI index lets S take it.
@@ -225,6 +238,7 @@ public final class CatalogMoves {
             ctx.update(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, newUri)
                 .set(CATALOG_DOCUMENTS.FILE_PATH, newPath)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CatalogIdStamps.keepDocumentId())
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(s))
                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                 .execute();
@@ -233,6 +247,7 @@ public final class CatalogMoves {
         // Step 4's last part: S's highlights row names the new URI.
         c.highlightRowsRewritten += ctx.update(DOCUMENT_HIGHLIGHTS)
             .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, newUri)
+            .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CatalogIdStamps.keepHighlightId())
             .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(s))
                    .and(DOCUMENT_HIGHLIGHTS.SOURCE_URI.ne(newUri)))
             .execute();
@@ -246,6 +261,129 @@ public final class CatalogMoves {
     private static void afterWritesHook() {
         Runnable h = afterWritesHookForTests;
         if (h != null) h.run();
+    }
+
+    /**
+     * The registry rows (FOR KEY SHARE, one statement, id order) of the collections the documents matching {@code docCond} are filed in,
+     * read BEFORE the document rows are locked. The document read here is unlocked, so a document that moves collection before its row is
+     * locked is caught by {@link #rekeyHighlights}. A label with no registry row is left to the check that follows (the 422 as before).
+     */
+    private static void lockCollectionsOfDocuments(DSLContext ctx, String tenant, CollectionKey ck, org.jooq.Condition docCond) {
+        var docs = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+            .from(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(docCond)).fetch();
+        List<String> matched = docs.stream().map(r -> r.value1()).toList();
+        if (ck.byId()) {
+            // From gate 3 by collection ids, ALL of them in ONE id-ordered statement (a retiring verb's order, before any document row is locked):
+            // the documents' own collections, and the collections of the rows the move writes besides: the documents' aspect and highlight
+            // rows (each carries its own collection) and the documents that name a matched one as alias_of. A lock that cannot be taken fails
+            // the move, before any write: an id no registry row holds is UnknownCollectionIdException, a retired row CollectionRetiredIdException
+            // (nothing is skipped; linda 2026-11-23). The ids are read first, unlocked, then locked at once; requireCollectionsHeld checks them
+            // again once the document rows are held.
+            CollectionRegistry.requireIdsAndLabelsForWrite(ctx, tenant, collectionIdsOf(ctx, tenant, docs, matched), List.of());
+            return;
+        }
+        // Before the latch, by label, the same set the by-id branch locks: the documents' own labels and those of the rows the move writes besides
+        // (the documents' aspect and highlight rows, and the documents that name a matched one as alias_of), all in the one call (RDR-229 P3.5a row 14)
+        List<String> labels = labelsOf(ctx, tenant, docs, matched);
+        if (labels.isEmpty()) {
+            return;
+        }
+        // a label with no registry row is no lock to take (see below): the lock skips it, it never raises for one
+        CollectionRegistry.requireAllForWrite(ctx, tenant, labels);
+        // Before the latch, labels are exact, so an unregistered physical_collection has no registry row: there is no lock to take, and no
+        // verb can race the move (every verb needs the row). After the latch, an unresolved label is a stale label for a row that exists,
+        // so skipping its lock would misdirect the move: refuse (the by-id branch above has no such skip) (linda 2026-11-23). The rekey that
+        // needs the row answers as it always did. A single unregistered label is skipped quietly by the lock (a multi-label call raises), so
+        // the documents are named here either way: an unregistered collection is a data problem.
+        java.util.Set<String> registered = new java.util.HashSet<>(ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(labels)).fetch(CATALOG_COLLECTIONS.NAME));
+        for (var d : docs) {
+            if (d.value2() != null && !d.value2().isEmpty() && !registered.contains(d.value2())) {
+                LOG.warn("event=catalog_move_unregistered_collection tenant={} doc_id={} collection={}: the move goes ahead without a registry lock",
+                    tenant, d.value1(), d.value2());
+            }
+        }
+    }
+
+    /** {@link #collectionIdsOf} by label, for the move before the latch: the distinct non-empty labels, in the order they are first met. */
+    private static List<String> labelsOf(DSLContext ctx, String tenant,
+            org.jooq.Result<? extends org.jooq.Record3<String, String, Long>> docs, List<String> matched) {
+        java.util.Set<String> labels = new java.util.LinkedHashSet<>();
+        docs.forEach(r -> labels.add(r.value2()));
+        for (List<String> chunk : chunks(matched)) {
+            labels.addAll(ctx.selectDistinct(DOCUMENT_ASPECTS.COLLECTION).from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.DOC_ID.in(chunk))).fetch(DOCUMENT_ASPECTS.COLLECTION));
+            labels.addAll(ctx.selectDistinct(DOCUMENT_HIGHLIGHTS.COLLECTION).from(DOCUMENT_HIGHLIGHTS)
+                .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.in(chunk))).fetch(DOCUMENT_HIGHLIGHTS.COLLECTION));
+            labels.addAll(ctx.selectDistinct(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.ALIAS_OF.in(chunk))).fetch(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION));
+        }
+        return labels.stream().filter(l -> l != null && !l.isEmpty()).toList();
+    }
+
+    /**
+     * The collection ids a move on {@code matched} (the documents of {@code docs}) writes in: those documents' own, and those of their aspect and
+     * highlight rows and of the documents whose alias_of names one of them (any owner, any collection).
+     */
+    private static java.util.SortedSet<Long> collectionIdsOf(DSLContext ctx, String tenant,
+            org.jooq.Result<? extends org.jooq.Record3<String, String, Long>> docs, List<String> matched) {
+        java.util.SortedSet<Long> ids = new java.util.TreeSet<>();
+        docs.forEach(r -> { if (r.value3() != null) ids.add(r.value3()); });
+        for (List<String> chunk : chunks(matched)) {
+            ids.addAll(ctx.selectDistinct(DOCUMENT_ASPECTS.COLLECTION_ID).from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.DOC_ID.in(chunk)).and(DOCUMENT_ASPECTS.COLLECTION_ID.isNotNull()))
+                .fetch(DOCUMENT_ASPECTS.COLLECTION_ID));
+            ids.addAll(ctx.selectDistinct(DOCUMENT_HIGHLIGHTS.COLLECTION_ID).from(DOCUMENT_HIGHLIGHTS)
+                .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.in(chunk)).and(DOCUMENT_HIGHLIGHTS.COLLECTION_ID.isNotNull()))
+                .fetch(DOCUMENT_HIGHLIGHTS.COLLECTION_ID));
+            ids.addAll(ctx.selectDistinct(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.ALIAS_OF.in(chunk)).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID.isNotNull()))
+                .fetch(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID));
+        }
+        return ids;
+    }
+
+    /**
+     * Once the document rows are held: every collection the move writes in must be one whose registry row this transaction already holds (taken
+     * by {@link #lockCollectionsOfDocuments} before any document row). A document re-homed, or an aspect, highlight or alias row filed under a
+     * collection that arrived between that read and the document locks, names one it does not hold; the move is refused (run it again), never
+     * carried on under a lock it does not have, and nothing was written (linda 2026-11-23, CM-FIX). Before gate 3 the same check runs by label,
+     * for the labels that have a live registry row.
+     */
+    private static void requireCollectionsHeld(DSLContext ctx, String tenant, CollectionKey ck, org.jooq.Condition docCond) {
+        var docs = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+            .from(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(docCond)).fetch();
+        if (!ck.byId()) {
+            // Before the latch the same recheck by label (RDR-229 P3.5a row 14): a label the rows of these documents are filed under now that has a
+            // LIVE registry row and whose row this transaction does not hold arrived between lockCollectionsOfDocuments' unlocked read and the
+            // document locks; the move is refused (run it again), as by id. A label with no live row (unregistered, or only a tombstone) has no
+            // row to hold, as before.
+            List<String> labels = labelsOf(ctx, tenant, docs, docs.stream().map(r -> r.value1()).toList());
+            if (labels.isEmpty()) {
+                return;
+            }
+            java.util.Set<String> live = new java.util.HashSet<>(ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(labels))
+                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")).fetch(CATALOG_COLLECTIONS.NAME));
+            for (String label : labels) {
+                if (live.contains(label) && !CollectionRegistry.holdsRow(ctx, tenant, label)) {
+                    throw refuse("a collection the move writes in (" + label + ") changed while the move was starting and its registry row is not held; run it again");
+                }
+            }
+            return;
+        }
+        java.util.SortedSet<Long> ids = collectionIdsOf(ctx, tenant, docs, docs.stream().map(r -> r.value1()).toList());
+        if (ids.isEmpty()) {
+            return;
+        }
+        var names = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.in(ids))).fetchMap(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.NAME);
+        for (long id : ids) {
+            String label = names.get(id);
+            if (label == null || !(WriteRegistryMemo.get(ctx, tenant, "#" + id) != null || CollectionRegistry.holdsRow(ctx, tenant, label))) {
+                throw refuse("a collection the move writes in (id " + id + ") changed while the move was starting and its registry row is not held; run it again");
+            }
+        }
     }
 
     /** The tumbler of the LIVE document holding {@code sourceUri}, or null. */
@@ -313,12 +451,14 @@ public final class CatalogMoves {
         }
         if (facts.aliased()) {
             ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, s)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CatalogIdStamps.keepDocumentId())
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.ALIAS_OF.eq(t))
                        .and(CATALOG_DOCUMENTS.TUMBLER.ne(s)))
                 .execute();
         }
         if (facts.selfAliased()) {
             ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, "")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CatalogIdStamps.keepDocumentId())
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(s))
                        .and(CATALOG_DOCUMENTS.ALIAS_OF.eq(t)))
                 .execute();
@@ -333,6 +473,7 @@ public final class CatalogMoves {
             ctx.update(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "")
                 .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CatalogIdStamps.keepDocumentId())
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.in(chunk))
                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                 .execute();
@@ -354,21 +495,24 @@ public final class CatalogMoves {
      * (tenant, collection, source_path) never holds two rows. Every other aspect row of T is deleted. Then S's rows are
      * pointed at the new path; another document's row already there is a refusal (written nowhere).
      */
-    private void moveAspects(DSLContext ctx, String tenant, Counts c, String s, String t, String collection,
-                             String newUri, String newPath) {
+    private void moveAspects(DSLContext ctx, String tenant, CollectionKey ck, Counts c, String s, String t, String collection,
+                             Long collectionId, String newUri, String newPath) {
+        // S's collection: the stored label before gate 3, the collection id from it (the label a one-row rename leaves stale matches no row)
+        org.jooq.Condition inS = ck.byId() ? DOCUMENT_ASPECTS.COLLECTION_ID.eq(collectionId) : DOCUMENT_ASPECTS.COLLECTION.eq(collection);
         if (t != null) {
             boolean tHasNewer = ctx.fetchExists(DOCUMENT_ASPECTS,
                 DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.DOC_ID.eq(t))
-                    .and(DOCUMENT_ASPECTS.COLLECTION.eq(collection)).and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(newPath)));
+                    .and(inS).and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(newPath)));
             if (tHasNewer) {
                 c.aspectRowsDeleted += ctx.deleteFrom(DOCUMENT_ASPECTS)
                     .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.DOC_ID.eq(s))
-                           .and(DOCUMENT_ASPECTS.COLLECTION.eq(collection)).and(DOCUMENT_ASPECTS.SOURCE_PATH.ne(newPath)))
+                           .and(inS).and(DOCUMENT_ASPECTS.SOURCE_PATH.ne(newPath)))
                     .execute();
                 c.aspectRowsRewritten += ctx.update(DOCUMENT_ASPECTS)
                     .set(DOCUMENT_ASPECTS.DOC_ID, s).set(DOCUMENT_ASPECTS.SOURCE_URI, newUri)
+                    .set(DOCUMENT_ASPECTS.COLLECTION_ID, CatalogIdStamps.keepAspectId())
                     .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.DOC_ID.eq(t))
-                           .and(DOCUMENT_ASPECTS.COLLECTION.eq(collection)).and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(newPath)))
+                           .and(inS).and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(newPath)))
                     .execute();
             }
             c.aspectRowsDeleted += ctx.deleteFrom(DOCUMENT_ASPECTS)
@@ -376,14 +520,15 @@ public final class CatalogMoves {
                 .execute();
         }
         var sRows = ctx.select(DOCUMENT_ASPECTS.ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
-                DOCUMENT_ASPECTS.SOURCE_URI)
+                DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
             .from(DOCUMENT_ASPECTS)
             .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.DOC_ID.eq(s)))
             .fetch();
         for (var r : sRows) {
             if (newPath.equals(r.value3()) && newUri.equals(r.value4())) continue;
             var other = ctx.select(DOCUMENT_ASPECTS.ID, DOCUMENT_ASPECTS.DOC_ID).from(DOCUMENT_ASPECTS)
-                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.COLLECTION.eq(r.value2()))
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant)
+                       .and(ck.byId() ? DOCUMENT_ASPECTS.COLLECTION_ID.eq(r.value5()) : DOCUMENT_ASPECTS.COLLECTION.eq(r.value2()))
                        .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(newPath)).and(DOCUMENT_ASPECTS.ID.ne(r.value1())))
                 .fetchOne();
             if (other != null) {
@@ -402,6 +547,7 @@ public final class CatalogMoves {
             }
             c.aspectRowsRewritten += ctx.update(DOCUMENT_ASPECTS)
                 .set(DOCUMENT_ASPECTS.SOURCE_PATH, newPath).set(DOCUMENT_ASPECTS.SOURCE_URI, newUri)
+                .set(DOCUMENT_ASPECTS.COLLECTION_ID, CatalogIdStamps.keepAspectId())
                 .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.ID.eq(r.value1())))
                 .execute();
         }
@@ -415,8 +561,30 @@ public final class CatalogMoves {
      * Step 4 of the Document move (and of the owner fold): T's highlights row is re-keyed to S, in S's collection and
      * under {@code rowUri} (S's URI after the move), when S has none; otherwise it is deleted.
      */
-    private void rekeyHighlights(DSLContext ctx, String tenant, Counts c, String s, String t, String collection,
-                                 String rowUri) {
+    private void rekeyHighlights(DSLContext ctx, String tenant, CollectionKey ck, Counts c, String s, String t, String collection,
+                                 Long collectionId, String rowUri) {
+        // From gate 3 the row of S's collection is the one its id names, and the label it is written under is that row's CURRENT label
+        // (the locked row's, never the stale name S carries); before it, the stored label
+        String label = collection;
+        if (ck.byId() && collectionId != null) {
+            label = ctx.select(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME)
+                .from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId)))
+                .fetchOne(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME);
+            if (label == null) {
+                throw refuse("the collection of " + s + " (id " + collectionId + ") has no registry row; nothing was written for it");
+            }
+        }
+        boolean hasCollection = ck.byId() ? collectionId != null : collection != null && !collection.isBlank();
+        if (hasCollection && !CollectionRegistry.holdsRow(ctx, tenant, label)
+                && (ck.byId() || ctx.fetchExists(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
+                    dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                        .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(label))))) {
+            // the document's collection changed between the read before the locks and the read under them: the registry row of the new
+            // one cannot be taken now, after the document rows, without inverting the order. Nothing was written for it yet.
+            throw refuse("the collection of " + s + " changed while the move was starting (now " + label + "); run it again");
+        }
         boolean sHas = ctx.fetchExists(DOCUMENT_HIGHLIGHTS,
             DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(s)));
         if (!sHas) {
@@ -424,7 +592,13 @@ public final class CatalogMoves {
             // (the column is NOT NULL, and an empty string would name no collection).
             var q = ctx.update(DOCUMENT_HIGHLIGHTS)
                 .set(DOCUMENT_HIGHLIGHTS.DOC_ID, s).set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, rowUri);
-            var set = collection == null || collection.isBlank() ? q : q.set(DOCUMENT_HIGHLIGHTS.COLLECTION, collection);
+            // RDR-229 P3.1: the id follows the name; with no collection to move to the row keeps its own.
+            var set = !hasCollection
+                ? q.set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CatalogIdStamps.keepHighlightId())
+                : ck.byId()
+                    ? q.set(DOCUMENT_HIGHLIGHTS.COLLECTION, label).set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, collectionId)   // the row locked above, by its id
+                    : q.set(DOCUMENT_HIGHLIGHTS.COLLECTION, collection)
+                        .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CollectionIds.require(ctx, tenant, collection));   // P3.5a: read FOR KEY SHARE, not an unlocked name lookup
             c.highlightRowsRewritten += set
                 .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(t)))
                 .execute();
@@ -441,7 +615,7 @@ public final class CatalogMoves {
 
     /** One catalog document row as the owner move reads it, once, under its lock. */
     private record DocRow(String tumbler, String sourceUri, String filePath, String aliasOf, boolean live,
-                          boolean sensitive, String collection) {}
+                          boolean sensitive, String collection, Long collectionId) {}
 
     /** A planned rewrite of one root-derived row of A. */
     private record Rewrite(String tumbler, String oldUri, String newUri, boolean live) {}
@@ -506,23 +680,27 @@ public final class CatalogMoves {
         // two writers of the same rows in different orders can deadlock).
         org.jooq.Condition cond = CATALOG_DOCUMENTS.TUMBLER.like(a + ".%");
         if (b != null) cond = cond.or(CATALOG_DOCUMENTS.TUMBLER.like(b + ".%"));
+        // RDR-229 P3.5a lock order: the registry rows of the collections these documents are in, before their rows are locked (see documentMove)
+        final CollectionKey ck = CollectionKey.of(repo.gate3());   // read once for the whole move (RDR-229 P3.5c)
+        lockCollectionsOfDocuments(ctx, tenant, ck, cond);
         List<DocRow> aDocs = new ArrayList<>();
         List<DocRow> bDocs = new ArrayList<>();
         List<String> lockOrder = new ArrayList<>();
         for (var r : ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.FILE_PATH,
                     CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.DELETED_AT, CATALOG_DOCUMENTS.SENSITIVE,
-                    CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                    CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
                 .from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(cond))
                 .orderBy(CATALOG_DOCUMENTS.TUMBLER.collate(DSL.name("C")))
                 .forUpdate().fetch()) {
             var d = new DocRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5() == null,
-                Boolean.TRUE.equals(r.value6()), r.value7() == null ? "" : r.value7());
+                Boolean.TRUE.equals(r.value6()), r.value7() == null ? "" : r.value7(), r.value8());
             (ownerPrefixOf(d.tumbler()).equals(a) ? aDocs : bDocs).add(d);
             lockOrder.add(d.tumbler());
         }
         var hook = lockOrderHookForTests;
         if (hook != null) hook.accept(List.copyOf(lockOrder));
+        requireCollectionsHeld(ctx, tenant, ck, cond);
 
         // The plan: what step 3 rewrites, and the refusal for a URI another live row holds. Both are decided before the
         // first write, so a refusal (and its dry run) leaves nothing behind.
@@ -538,7 +716,7 @@ public final class CatalogMoves {
 
         FoldPlan foldPlan = b == null ? null : planFold(ctx, tenant, aDocs, bDocs);   // refuses an alias cycle: still no write
         if (b != null) {
-            fold(ctx, tenant, c, foldPlan, plan);
+            fold(ctx, tenant, ck, c, foldPlan, plan);
             ctx.update(CATALOG_OWNERS)
                 .set(CATALOG_OWNERS.DEACTIVATED_AT,
                     DSL.coalesce(CATALOG_OWNERS.DEACTIVATED_AT, DSL.currentOffsetDateTime()))
@@ -662,7 +840,7 @@ public final class CatalogMoves {
      * deleted (they sit in B's collection, never in A's); B's highlights row moves to A's row only when A's has none;
      * B's orphans are trashed.
      */
-    private void fold(DSLContext ctx, String tenant, Counts c, FoldPlan fp, List<Rewrite> plan) {
+    private void fold(DSLContext ctx, String tenant, CollectionKey ck, Counts c, FoldPlan fp, List<Rewrite> plan) {
         Map<String, String> newUriOf = new HashMap<>();
         plan.forEach(r -> newUriOf.put(r.tumbler(), r.newUri()));
         List<DocRow> pairsT = fp.pairsT();
@@ -675,7 +853,7 @@ public final class CatalogMoves {
                 new AbsorbFacts(fp.linked().contains(t.tumbler()), t.sensitive(), fp.aliased().contains(t.tumbler()),
                     t.tumbler().equals(s.aliasOf())));
             if (fp.withHighlights().contains(t.tumbler())) {
-                rekeyHighlights(ctx, tenant, c, s.tumbler(), t.tumbler(), s.collection(),
+                rekeyHighlights(ctx, tenant, ck, c, s.tumbler(), t.tumbler(), s.collection(), s.collectionId(),
                     newUriOf.getOrDefault(s.tumbler(), s.sourceUri()));
             }
         }
@@ -687,6 +865,7 @@ public final class CatalogMoves {
         trashAbsorbed(ctx, tenant, ts);
         for (List<String> chunk : chunks(fp.orphans())) {
             ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CatalogIdStamps.keepDocumentId())
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.in(chunk))
                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                 .execute();
@@ -737,12 +916,16 @@ public final class CatalogMoves {
      */
     private static void rewrite(DSLContext ctx, String tenant, Counts c, List<Rewrite> plan) {
         if (plan.isEmpty()) return;
+        // The id expressions carry no bind parameter (CatalogIdStamps), so the bind order of the templates is unchanged.
         var docs = ctx.batch(ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, "")
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CatalogIdStamps.keepDocumentId())
             .where(CATALOG_DOCUMENTS.TENANT_ID.eq("").and(CATALOG_DOCUMENTS.TUMBLER.eq(""))));
         var asp = ctx.batch(ctx.update(DOCUMENT_ASPECTS).set(DOCUMENT_ASPECTS.SOURCE_URI, "")
+            .set(DOCUMENT_ASPECTS.COLLECTION_ID, CatalogIdStamps.keepAspectId())
             .where(DOCUMENT_ASPECTS.TENANT_ID.eq("").and(DOCUMENT_ASPECTS.DOC_ID.eq(""))
                    .and(DOCUMENT_ASPECTS.SOURCE_URI.eq(""))));
         var hl = ctx.batch(ctx.update(DOCUMENT_HIGHLIGHTS).set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, "")
+            .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CatalogIdStamps.keepHighlightId())
             .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq("").and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(""))
                    .and(DOCUMENT_HIGHLIGHTS.SOURCE_URI.eq(""))));
         for (Rewrite r : plan) {

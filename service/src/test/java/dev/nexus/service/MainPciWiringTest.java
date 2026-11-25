@@ -23,13 +23,37 @@ class MainPciWiringTest {
         return Files.readString(Path.of("src/main/java/dev/nexus/service/Main.java"));
     }
 
+    /**
+     * linda's census of 19d19081dc, item 1: production builds the rename readiness on {@code IdReaders.present()} and nothing else. The only way to replace the
+     * id-readers signal is {@code CompletionBootWork#idReadersPresent(BooleanSupplier)}, which is package-private and used by test support only: no main source
+     * calls it, so an injected {@code () -> true} can never reach production; and Main builds the check through the one factory that has no such parameter.
+     */
+    @Test
+    void productionBuildsTheReadinessOnIdReadersPresentAlone_noMainSourceCallsTheInjectingSeam() throws Exception {
+        // the seam is package-private, so the compiler already confines its callers to this package; PciReconciler has a public method of the same name
+        // that is its own (the reconciler's signal), so the scan is of the package that can reach the check's
+        try (var files = Files.walk(Path.of("src/main/java/dev/nexus/service/datamove"))) {
+            for (Path f : (Iterable<Path>) files.filter(p -> p.toString().endsWith(".java"))::iterator) {
+                if (f.endsWith("CompletionBootWork.java")) {
+                    continue;
+                }
+                assertThat(code(Files.readString(f))).as(f + " does not call the test-only id-readers seam").doesNotContain("idReadersPresent(");
+            }
+        }
+        String own = code(Files.readString(Path.of("src/main/java/dev/nexus/service/datamove/CompletionBootWork.java")));
+        assertThat(own).as("the default is IdReaders::present").contains("BooleanSupplier idReadersPresent = dev.nexus.service.vectors.IdReaders::present;");
+        assertThat(own).as("the seam is package-private").contains("\n    void idReadersPresent(java.util.function.BooleanSupplier present)");
+        assertThat(own).as("and only the field and that seam assign it").containsPattern("this\\.idReadersPresent = Objects\\.requireNonNull\\(present");
+        assertThat(code(main())).as("Main starts the check through atBoot, which has no id-readers parameter").contains("CompletionBootWork.atBoot(");
+    }
+
     @Test
     void theProductionRepositoryIsHandedTheRealSweep_notNone() throws Exception {
         String src = code(main());   // code only: the right text in a trailing comment must not satisfy the pin
         assertThat(src).as("the sweep is built from the pool and the validated settings")
             .contains("PciIndexSweep.create(ds, dev.nexus.service.db.PgSession.startupPciSettings())");
-        assertThat(src).as("the repository takes the sweep as its index set")
-            .containsPattern("new PgVectorRepository\\(tenantScope,\\s*docEmbedRouter,\\s*qryEmbedRouter,\\s*pciSweep\\)");
+        assertThat(src).as("the repository takes the sweep as its index set, and the one gate 3 signal (RDR-229 P3.5c)")
+            .containsPattern("new PgVectorRepository\\(tenantScope,\\s*docEmbedRouter,\\s*qryEmbedRouter,\\s*pciSweep,\\s*gate3\\)");
         assertThat(src).as("Main never names the empty set").doesNotContain("PciIndexSet.NONE");
     }
 
@@ -502,6 +526,180 @@ class MainPciWiringTest {
             }
         }
         return out.toString();
+    }
+
+    /**
+     * RDR-229 P3.4 (nexus-p2m1x.22): the completion check reads gate 3 from the PCI reconciler ({@code gate3Source()}), and the
+     * reconciler starts no id build until the check's LATEST read says gate 2 holds (a null read holds nothing).
+     */
+    @Test
+    void theCompletionCheckReadsGate3FromTheReconciler_andTheReconcilersIdBuildsWaitForGate2() throws Exception {
+        String src = code(main());
+
+        assertThat(src).as("gate 3's source is the reconciler's, not NOT_INSTALLED")
+            .contains("startCompletionBootWork(bootWork, adminConnection, pciReconciler.gate3Source(), gate3Latch)");
+        // linda 2026-11-23: the latch is read synchronously BEFORE the listener binds, and a read that cannot answer ends the boot.
+        int latchRead = src.indexOf("Gate3Latch.readAtBoot(adminConnection)");
+        int listener = src.indexOf("service.start();");
+        assertThat(latchRead).as("the latch is read at boot").isPositive();
+        assertThat(latchRead).as("before the listener binds").isLessThan(listener);
+        String failure = src.substring(latchRead, listener);
+        assertThat(failure).contains("rdr229_gate3_latch_boot_read_failed").contains("System.exit(1)");
+        assertThat(src).as("a latch the check never read is never guessed: the reporter is handed the one read at boot")
+            .contains("CompletionCheck.Gate3LatchWriter.IMMEDIATE, gate3Latch");
+        assertThat(src).as("the query ring admits on the id index once the reconciler's latch holds: the ring follows it, bound before the reconciler starts")
+            .contains("pciQueryRing.followLatch(pciReconciler.canaryLatch());");
+        assertThat(src.indexOf("pciQueryRing.followLatch(")).isLessThan(src.indexOf("pciReconciler.start();"));
+        assertThat(src).as("a latch written while PCI was off makes the reconciler build the id indexes first")
+            .contains("pciReconciler.buildIdIndexesFirstWhen(() -> gate3Latch.pciOff() || completionCheck != null && completionCheck.gate3LatchedPciOff())");
+        int gate = src.indexOf("pciReconciler.idBuildGate(");
+        assertThat(gate).as("the id-build gate is wired").isPositive();
+        assertThat(src.indexOf("var completionCheck = startCompletionBootWork(")).isLessThan(gate);
+        String lambda = src.substring(gate, src.indexOf("});", gate));
+        assertThat(lambda).contains("completionCheck.latest()").contains("latest != null").contains("latest.gate2()");
+        assertThat(src.indexOf("pciReconciler.idBuildGate(", gate + 1)).as("wired once").isNegative();
+        int retire = src.indexOf("pciReconciler.retireNameIndexesWhen(");
+        assertThat(retire).as("the name family retires on the latched gate 3").isPositive();
+        String retireLambda = src.substring(retire, src.indexOf(");", retire) + 2);   // the one-line call, not the next block
+        assertThat(retireLambda.length()).as("bounded to the call").isLessThan(200);
+        assertThat(retireLambda).as("the LATCHED value, never the live gate 3").contains("completionCheck.gate3Latched()")
+            .doesNotContain(".gate3()");
+        assertThat(retireLambda).as("and the latch read at boot answers before the check exists (or when it never started)")
+            .contains("gate3Latch.latched() ||");
+        assertThat(retireLambda).as("and only an engine that took the singleton lock retires: with NX_ENGINE_SINGLETON_LOCK=off or a pooler a peer may serve names")
+            .contains("singletonLock != null &&");
+    }
+
+    /**
+     * RDR-229 P3.5a (nexus-p2m1x.23), review SB1 (linda 2026-11-23): the ONE {@code Gate3} Main hands the service, which hands it on to
+     * the rename guard, the route boundary and the repositories, is the LATCHED signal: the boot latch (read before the service is
+     * built, so the signal has no unset state) until the completion check exists, then the check's {@code gate3Latched()}, which never
+     * returns to false. It is never the live {@code gate3()}, and there is no second lambda. The registry takes no {@code Gate3}.
+     */
+    @Test
+    void theRoutesGate3IsTheLatchedAccessor_oneInstance_neverTheLiveGate3() throws Exception {
+        String src = code(main());
+
+        assertThat(src).as("the signal: the check's latched value once it exists, the boot latch before; elsinore's a46a1bf70e text")
+            .containsPattern("dev\\.nexus\\.service\\.datamove\\.Gate3\\s+gate3\\s*=\\s*\\(\\)\\s*->\\s*\\{\\s*var\\s+c\\s*=\\s*completionRef\\.get\\(\\);"
+                + "\\s*return\\s+c\\s*!=\\s*null\\s*\\?\\s*c\\.gate3Latched\\(\\)\\s*:\\s*bootLatch\\.latched\\(\\);\\s*\\};");
+        assertThat(src.split("Gate3\\s+gate3\\s*=", -1).length - 1).as("one Gate3 instance, no second lambda").isEqualTo(1);
+        assertThat(src).as("never the live gate 3, never a never-latched signal").doesNotContain(".gate3()").doesNotContain("Gate3.never()");
+
+        int latchRead = src.indexOf("Gate3Latch.readAtBoot(adminConnection)");
+        int bootLatch = src.indexOf("final var bootLatch = gate3Latch;");
+        int signal = src.indexOf("Gate3 gate3 =");
+        int service = src.indexOf("new NexusService(port, token, ds,");
+        int start = src.indexOf("service.start();");
+        assertThat(latchRead).as("the boot latch is read").isPositive();
+        assertThat(bootLatch).as("the signal closes over it").isGreaterThan(latchRead);
+        assertThat(signal).isGreaterThan(bootLatch);
+        assertThat(service).as("the latch is read before the service is built: no unset state").isGreaterThan(signal);
+        assertThat(start).isGreaterThan(service);
+        assertThat(src.substring(service, src.indexOf(";", service)))
+            .as("the service takes the one signal and the readiness").containsPattern("gate3,\\s*renameReadiness\\)");
+
+        int check = src.indexOf("var completionCheck = startCompletionBootWork(");
+        int handOver = src.indexOf("completionRef.set(completionCheck);");
+        assertThat(handOver).as("the signal moves to the check's latch as soon as the check is built").isGreaterThan(check);
+
+        assertThat(src).as("an unset readiness fails closed: the drop move is missing")
+            .containsPattern("c\\s*==\\s*null\\s*\\?\\s*dev\\.nexus\\.service\\.datamove\\.RenameReadiness\\.Missing\\.NAME_KEY_DROP_MOVE");
+
+        String service2 = code(Files.readString(Path.of("src/main/java/dev/nexus/service/NexusService.java")));
+        assertThat(service2).as("one guard, built once, over the readiness and the fail-closed one-row catalog rename (P3.7 replaces it here)")
+            .containsOnlyOnce("new dev.nexus.service.db.RenameGuard(")
+            .contains("new dev.nexus.service.db.RenameGuard(renameReadiness, new dev.nexus.service.db.CollectionOneRowRename(gate3))")
+            .contains("new CatalogRepository(tenantScope, gate3, renameGuard)")
+            .as("the registry takes no Gate3").contains("CollectionRegistry.shared()").doesNotContain("CollectionRegistry.shared(gate3)");
+    }
+
+    /**
+     * RDR-229 P3.7 (linda 2026-11-23, stage-2 item 1): production refuses a rename before completion. The engine {@code Main} builds hands the rename
+     * readiness to the {@code NexusService} as a lambda over the completion check, and until the check exists that lambda answers the drop move is missing,
+     * so a rename on a latched install is refused (fails closed); once it exists it answers the check's own readiness.
+     */
+    @Test
+    void productionMainBuildsTheServiceWithTheCompletionChecksReadiness_andRefusesARenameBeforeCompletion() throws Exception {
+        String src = code(main());
+        assertThat(src).as("the readiness is the check's, read per call").contains("c.renameReadiness().missing()");
+        assertThat(src).as("and unset it says the drop move is missing: a rename on a latched install is refused")
+            .contains("c == null ? dev.nexus.service.datamove.RenameReadiness.Missing.NAME_KEY_DROP_MOVE");
+        assertThat(src).as("the service is built with the one signal and the readiness").containsPattern("gate3,\\s*renameReadiness\\)");
+    }
+
+    /**
+     * RDR-229 P3.7 (nexus-p2m1x.27): the name-key drop move's registration pass starts once, at main's top level, after the completion check it
+     * reads, handed that check's latest read, and closes in the shutdown steps; its method returns null without a completion check.
+     */
+    @Test
+    void theNameKeyDropPassStartsAfterTheCompletionCheck_readsItsLatest_closesInTheShutdownSteps_andNeedsACompletionCheck() throws Exception {
+        String src = code(main());
+        int check = src.indexOf("var completionCheck = startCompletionBootWork(");
+        int start = src.indexOf("var nameKeyDropPass = startNameKeyDropPass(");
+        int hook = shutdownSteps(src);
+        int close = src.indexOf("nameKeyDropPass.close();", hook);
+
+        assertThat(check).isPositive();
+        assertThat(start).as("started after the completion check it reads").isGreaterThan(check);
+        assertThat(src.indexOf("var nameKeyDropPass = startNameKeyDropPass(", start + 1)).as("started once").isNegative();
+        int mainDepth = depthAt(src, src.indexOf("var ds = new HikariDataSource(hikari);"));
+        assertThat(depthAt(src, start)).as("a top-level statement of main").isEqualTo(mainDepth);
+        assertThat(src).as("handed the check the engine built").contains("startNameKeyDropPass(adminConnection, completionCheck)");
+        assertThat(close).as("closed in the shared shutdown steps").isGreaterThan(hook);
+        assertThat(src.substring(src.lastIndexOf("if (nameKeyDropPass != null)", close), close)).doesNotContain("else");
+
+        int method = src.indexOf("static dev.nexus.service.datamove.NameKeyDropPass startNameKeyDropPass(");
+        assertThat(method).isPositive();
+        int body = src.indexOf('{', src.indexOf(')', src.indexOf("completionCheck)", method)));
+        String text = src.substring(body, matchingClose(src, body));
+        int noCheck = text.indexOf("if (completionCheck == null) {");
+        assertThat(noCheck).as("no completion check, no pass: and said so").isNotNegative();
+        assertThat(text.substring(noCheck, text.indexOf('}', noCheck))).contains("name_key_drop_pass_not_started").contains("return null;");
+        assertThat(text.indexOf("new dev.nexus.service.datamove.NameKeyDropPass(")).as("the pass is built after the guard").isGreaterThan(noCheck);
+        assertThat(text).as("reads the check's latest read, not a snapshot held here").contains("completionCheck::latest");
+    }
+
+    /**
+     * RDR-229 P3.3b (nexus-p2m1x.20): the per-leaf id unique-index pass is started once, at main's top level, after the completion check
+     * it reads, handed that check's LATEST read of gate 1 (a null read holds nothing), and closed in the shutdown steps; and its method
+     * returns null without a completion check, before it builds the pass. P3.3c (nexus-p2m1x.21) deleted the placeholder constant and its
+     * guard: the pass starts under its other conditions only, and {@code MainLeafIndexPassGuardTest} holds that.
+     */
+    @Test
+    void theLeafIndexPassStartsAfterTheCompletionCheck_readsItsLatestGate1_closesInTheShutdownSteps_andNeedsACompletionCheck() throws Exception {
+        String src = code(main());
+        int check = src.indexOf("var completionCheck = startCompletionBootWork(");
+        int start = src.indexOf("var leafIndexPass = startLeafIndexPass(");
+        int hook = shutdownSteps(src);
+        int close = src.indexOf("leafIndexPass.close();", hook);
+        int reaper = src.indexOf("BackendReaper.terminateAtShutdown(", hook);
+
+        assertThat(check).isPositive();
+        assertThat(start).as("started after the completion check it reads").isGreaterThan(check);
+        assertThat(src.indexOf("var leafIndexPass = startLeafIndexPass(", start + 1)).as("started once").isNegative();
+        int mainDepth = depthAt(src, src.indexOf("var ds = new HikariDataSource(hikari);"));
+        assertThat(depthAt(src, start)).as("a top-level statement of main, whatever NX_SEARCH_PCI says").isEqualTo(mainDepth);
+        assertThat(precedingToken(src, start)).isIn(";", "}");
+        assertThat(src).as("handed the check the engine built").contains("startLeafIndexPass(bootWork, adminConnection, completionCheck)");
+        assertThat(close).as("closed in the shared shutdown steps").isGreaterThan(hook);
+        assertThat(close).as("before the reaper").isLessThan(reaper);
+        assertThat(depthAt(src, close)).as("a statement of the null guard inside the steps")
+            .isEqualTo(depthAt(src, src.indexOf("service.stop();", hook)) + 1);
+        assertThat(src.substring(src.lastIndexOf("if (leafIndexPass != null)", close), close)).doesNotContain("else");
+
+        int method = src.indexOf("static dev.nexus.service.vectors.LeafIndexPass startLeafIndexPass(");
+        assertThat(method).isPositive();
+        int body = src.indexOf('{', src.indexOf(')', src.indexOf("completionCheck)", method)));
+        String text = src.substring(body, matchingClose(src, body));
+        int noCheck = text.indexOf("if (completionCheck == null) {");
+        int build = text.indexOf("new dev.nexus.service.vectors.LeafIndexPass(");
+        assertThat(text).as("no placeholder guard: P3.3c deleted it").doesNotContain("PLACEHOLDER");
+        assertThat(noCheck).as("no completion check, no pass: and said so").isNotNegative();
+        assertThat(text.substring(noCheck, text.indexOf('}', noCheck))).contains("leaf_index_pass_not_started").contains("return null;");
+        assertThat(build).as("the pass is built after the guard").isGreaterThan(noCheck);
+        assertThat(text).as("the gate is the check's latest read; null holds nothing")
+            .contains("completionCheck.latest()").contains("latest != null && latest.gate1()");
     }
 
     /** Index just past the string or char literal that opens at {@code start}. */

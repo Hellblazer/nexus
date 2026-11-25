@@ -3,6 +3,7 @@
 package dev.nexus.service.vectors;
 
 import dev.nexus.service.db.PgSession;
+import dev.nexus.service.db.SqlConstraints;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.Routines;
@@ -79,6 +80,8 @@ public final class PciQueryRing {
     private final AtomicLong seen = new AtomicLong();
     private final Object flushLock = new Object();
     private final Object lifecycle = new Object();
+    /** The reconciler's latch (gate 3 latched, id readers present), bound by Main once the reconciler exists, read at each admission. */
+    private volatile dev.nexus.service.datamove.Gate3 gate3 = new PciCanaryLatch();   // unbound: never holds until Main binds the reconciler's
     private volatile Thread writer;       // set once by start()
     private volatile boolean stopped;
 
@@ -100,6 +103,15 @@ public final class PciQueryRing {
         this.queue = new ArrayBlockingQueue<>(capacity);
         this.flushAt = flushAt;
         this.flushEveryNanos = flushEvery.toNanos();
+    }
+
+    /**
+     * Follow {@code latch} for admission: once it holds the id indexes are valid (gate 2 builds them before the latch) and the serving path and the
+     * canary select by id, so a query is admitted on the collection's valid id index; the name indexes retire on the next pass after the latch, and
+     * until then an id index is the one that counts. Before the latch, on the name index, as ever. The latch is read at each admission, never cached.
+     */
+    public void followLatch(dev.nexus.service.datamove.Gate3 latch) {
+        this.gate3 = Objects.requireNonNull(latch, "latch");
     }
 
     // -- admission, on the request thread, after the response is sent ---------------------------------------------
@@ -127,7 +139,7 @@ public final class PciQueryRing {
         if (query == null || query.collection() == null || query.vector() == null || tenant == null || stopped) {
             return;
         }
-        if (!validIndexes.hasValidIndex(query.model(), tenant, query.collection())) {
+        if (!hasValidIndex(tenant, query)) {
             return;
         }
         Entry entry = new Entry(tenant, query.collection(), query.model(), query.vector().clone());
@@ -141,6 +153,18 @@ public final class PciQueryRing {
                 LockSupport.unpark(w);
             }
         }
+    }
+
+    /** Whether the query's collection has a valid per-collection index of the family the serving path now uses (the id's once latched). */
+    private boolean hasValidIndex(String tenant, QueryVector query) {
+        dev.nexus.service.datamove.Gate3 latch = gate3;
+        if (!latch.holds()) {
+            return validIndexes.hasValidIndex(query.model(), tenant, query.collection());
+        }
+        // The serving path's own pattern: resolve the label to the registry's id through the selector, then ask for that id's index.
+        CollectionSelector sel = CollectionSelector.of(latch, scope, tenant, query.collection());
+        Long id = sel.byId() ? sel.idOf(query.collection()) : null;
+        return id != null && validIndexes.hasValidIdIndex(query.model(), tenant, id);
     }
 
     /** Entries waiting for the writer. */
@@ -235,31 +259,65 @@ public final class PciQueryRing {
         }
     }
 
-    /** @return entries written, or -1 when the call failed (logged, batch dropped) */
+    /**
+     * @return entries written, or -1 when the call failed (logged, batch dropped). The function raises SQLSTATE 23503 for an
+     * entry whose collection does not resolve (RDR-229 P3.1), which rolls the whole call back; the batch is then retried entry
+     * by entry so the entries that do resolve are still written, and each one that does not is logged as a structured warning
+     * and counted as skipped. A ring failure is never a search failure: this runs on the writer thread, after the response.
+     */
     private int writeTenant(String tenant, List<Entry> entries) {
         try {
-            int n = entries.size();
-            String[] collections = new String[n];
-            String[] models = new String[n];
-            String[] vectors = new String[n];
-            byte[][] digests = new byte[n][];
-            for (int i = 0; i < n; i++) {
-                Entry e = entries.get(i);
-                collections[i] = e.collection();
-                models[i] = e.model();
-                vectors[i] = Vector.of(e.vector()).toString();
-                digests[i] = digest(e.vector());
-            }
-            Integer written = scope.withTenant(tenant, ctx -> {
-                PgSession.setLocal(ctx, "statement_timeout", Long.toString(writeTimeout.toMillis()));
-                return Routines.canaryQueryRingUpsert(ctx.configuration(), tenant, collections, models, vectors, digests);
-            });
-            return written == null ? 0 : written;
+            return upsert(tenant, entries);
         } catch (RuntimeException e) {
-            log.warn("event=pci_ring_write_failed tenant={} entries={} error=\"{}\"", tenant, entries.size(),
-                sanitize(e));
-            return -1;
+            if (!SqlConstraints.isForeignKeyViolation(e)) {
+                log.warn("event=pci_ring_write_failed tenant={} entries={} error=\"{}\"", tenant, entries.size(), sanitize(e));
+                return -1;
+            }
+            if (entries.size() == 1) {
+                logUnregistered(tenant, entries.get(0), e);
+                return 0;
+            }
         }
+        int written = 0;
+        for (Entry entry : entries) {
+            try {
+                written += upsert(tenant, List.of(entry));
+            } catch (RuntimeException e) {
+                if (SqlConstraints.isForeignKeyViolation(e)) {
+                    logUnregistered(tenant, entry, e);
+                } else {
+                    log.warn("event=pci_ring_write_failed tenant={} entries=1 collection={} error=\"{}\"", tenant,
+                        entry.collection(), sanitize(e));
+                }
+            }
+        }
+        return written;
+    }
+
+    private void logUnregistered(String tenant, Entry entry, RuntimeException e) {
+        log.warn("event=pci_ring_entry_unregistered tenant={} collection={} model={} error=\"{}\"", tenant,
+            entry.collection(), entry.model(), sanitize(e));
+    }
+
+    /** One call of the function for {@code entries} of one tenant; the entries written. */
+    private int upsert(String tenant, List<Entry> entries) {
+        int n = entries.size();
+        String[] collections = new String[n];
+        String[] models = new String[n];
+        String[] vectors = new String[n];
+        byte[][] digests = new byte[n][];
+        for (int i = 0; i < n; i++) {
+            Entry e = entries.get(i);
+            collections[i] = e.collection();
+            models[i] = e.model();
+            vectors[i] = Vector.of(e.vector()).toString();
+            digests[i] = digest(e.vector());
+        }
+        Integer written = scope.withTenant(tenant, ctx -> {
+            PgSession.setLocal(ctx, "statement_timeout", Long.toString(writeTimeout.toMillis()));
+            return Routines.canaryQueryRingUpsert(ctx.configuration(), tenant, collections, models, vectors, digests);
+        });
+        return written == null ? 0 : written;
     }
 
     // -- digest and log text --------------------------------------------------------------------------------------

@@ -9,6 +9,18 @@ The engine's move worker reports each open or failed data move as a ``/v1/status
   waits for the install and an engine restart and nothing is wrong with the data, so it is a warning until the engine's
   retry cap (about four hours), when the engine drops the class and the row is red. The class is the engine's field,
   never read from the words; an engine that predates it sends none, and its blocked move stays red.
+* A ``blocked:`` entry whose ``reason_class`` is ``waiting_for_builds`` (the name-key drop move, RDR-229 P3.7 row 23): its
+  completion waits for an index build in flight and ends none. Nothing failed and nothing is counted or paged, and the move
+  continues by itself once no build runs, so it is a note (``ok``), and its hint says to wait and offers no retry reset, which
+  would do nothing. ``waiting_for_builds_overdue`` is the same wait past six hours: a warning that carries the engine's text
+  (the age, the running count and the builders' pids) and says to look at the build; still nothing to reset. Both classes are
+  the engine's field, never read from the words.
+* A move listed in the status's ``data_moves_need_operator_moves`` (its worker has failed it transiently 20 times in a row,
+  or hit a lock or statement timeout at ``on_complete`` 3 times in a row, which then stays latched until the move completes
+  or its count resets; the engine decides, ``MoveRetryPolicy``) is a red
+  row whatever state its entry shows, naming the label, the step and bound it missed (a bound only for a lock or statement
+  timeout), its last attempt and its next retry (or that a retry is running now). The move keeps retrying; the row says a person should look. An engine without the field shows such a move as the plain
+  ``blocked:`` row it always did.
 * ``stalled:``: a CALL that has completed no chunk for a long time; a warning, since a slow chunk looks the same.
 * ``paused:``: an operator holds the move; a note, never red.
 * ``working:``, ``queued:``, ``runs complete:``: no row of their own; the summary row counts them.
@@ -53,6 +65,10 @@ _ENGINE_STATE_ROWS: dict[str, tuple[str, str, str]] = {
 }
 
 SUMMARY_LABEL = "Data moves"
+#: ``reason_class`` of a ``blocked:`` entry whose move waits for an in-flight index build (``MoveReasons.WAITING_FOR_BUILDS``).
+WAITING_FOR_BUILDS = "waiting_for_builds"
+#: The same wait once it has gone on past six hours (``MoveReasons.WAITING_FOR_BUILDS_OVERDUE``).
+WAITING_FOR_BUILDS_OVERDUE = "waiting_for_builds_overdue"
 #: ``reason_class`` of a ``blocked:`` entry whose move waits for the pg_background extension to be installed (``MoveReasons.MISSING_PREREQUISITE``).
 MISSING_PREREQUISITE = "missing_prerequisite"
 
@@ -86,6 +102,79 @@ def _entries(status: dict[str, Any]) -> list[dict[str, Any]] | None:
         if isinstance(e, dict) and isinstance(e.get("id"), str)
         and (e["id"].startswith(ID_PREFIX) or e["id"] in _ENGINE_STATE_ROWS)
     ]
+
+
+def _needs_operator(status: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The moves ``/v1/status`` lists as needing an operator, by label; empty when the engine predates the field."""
+    listed = status.get("data_moves_need_operator_moves")
+    if not isinstance(listed, list):
+        return {}
+    return {
+        m["label"]: m for m in listed
+        if isinstance(m, dict) and isinstance(m.get("label"), str) and m["label"]
+    }
+
+
+#: SQLSTATEs that mean a bound was missed: a lock timeout and a statement timeout. Any other SQLSTATE names no bound.
+_TIMEOUT_SQLSTATES = ("55P03", "57014")
+
+
+def _int(value: object) -> int | None:
+    """``value`` when it is an int (a bool is not one), else ``None``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _needs_operator_row(label: str, info: dict[str, Any], entry: dict[str, Any]) -> HealthResult:
+    """The red row for a move in the needs-an-operator state: the label, the step and bound it missed, when it last ran and
+    when it runs next (or that a retry is running now)."""
+    retries, bound = _int(info.get("retries")), _int(info.get("bound_ms"))
+    sqlstate = info.get("sqlstate") if isinstance(info.get("sqlstate"), str) else None
+    step = info.get("step") if isinstance(info.get("step"), str) and info.get("step") else None
+    builds = info.get("terminates_index_builds") is True
+    parts = [f"needs an operator: {label} has failed {retries if retries is not None else 'many'} times in a row"]
+    if step and sqlstate in _TIMEOUT_SQLSTATES and bound is not None:
+        parts.append(f"step {step} missed its {bound} ms bound (SQLSTATE {sqlstate})")
+    elif step and sqlstate:
+        parts.append(f"step {step} failed with SQLSTATE {sqlstate}")
+    elif step:
+        parts.append(f"step {step} failed")
+    elif sqlstate:
+        parts.append(f"SQLSTATE {sqlstate}")
+    last, nxt = info.get("last_attempt_at"), info.get("next_retry_at")
+    parts.append(f"last attempt {last if isinstance(last, str) else 'unknown'}")
+    if info.get("retry_in_progress") is True:
+        parts.append("a retry is in progress now")
+    else:
+        parts.append(f"next retry {nxt if isinstance(nxt, str) else 'unknown'}")
+    # With no step, this engine has not seen the move fail since it started: the flag is the move's definition (it reaches
+    # PciBuilders.terminateOrThrow when its on_complete runs), not an observed attempt, so the row says "may".
+    seen = step is not None
+    if builds:
+        parts.append("each attempt ends in-flight index builds" if seen
+                     else "an attempt may end in-flight index builds (this engine has not seen the move fail yet)")
+    reset = _RETRY_NOW.format(label=label)
+    return HealthResult(
+        label=f"Data move {label}", ok=False, detail="; ".join(parts) + _counts(entry),
+        fix_suggestions=[
+            "The engine keeps retrying this move by itself, and nothing committed is lost, but the retries are not "
+            "getting anywhere. "
+            + (
+                ("Each attempt re-runs the warm-up and ends the in-flight index builds (PCI, leaf, id-unique), so "
+                 "waiting costs those builds. " if seen else
+                 "An attempt that reaches the move's on_complete ends the in-flight index builds (PCI, leaf, "
+                 "id-unique); this engine has not seen the move fail since it started, so whether its attempts get "
+                 "that far is not known yet. ") if builds else ""
+            )
+            + "The engine log has the page: event=data_move_needs_operator (label, step, SQLSTATE and the bound that "
+            "step missed), and event=data_move_blocked has the full reason of each retry. Fix what it names (a lock "
+            "holder, a bound too short for the table); the next retry time above says whether to wait or act",
+            (
+                "Resetting the retry count starts another attempt at once, and that attempt can end the in-flight "
+                "index builds again, so fix the cause first (raise the bound, or let the builds finish); then: " + reset
+                if builds else reset
+            ),
+        ],
+    )
 
 
 def _state(what: str) -> str:
@@ -136,6 +225,10 @@ def check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Healt
         return [HealthResult(
             label=SUMMARY_LABEL, ok=True, detail="not applicable: this engine does not report its work (boot_work)",
         )]
+    paged = _needs_operator(status)
+    listed = {e["id"][len(ID_PREFIX):] for e in moves}
+    # a listed move whose entry is gone (it finished between the engine's two reads) is still the engine's page
+    moves = moves + [{"id": ID_PREFIX + lbl, "what": "blocked: needs an operator"} for lbl in paged if lbl not in listed]
     rows: list[HealthResult] = []
     for entry in entries or []:
         if entry["id"] in _ENGINE_STATE_ROWS:
@@ -156,7 +249,30 @@ def check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Healt
         tally[state or "unknown"] = tally.get(state or "unknown", 0) + 1
         text = _after_state(what)
         row_label = f"Data move {label}"
-        if state == "blocked" and entry.get("reason_class") == MISSING_PREREQUISITE:
+        if label in paged and state != "failed":
+            rows.append(_needs_operator_row(label, paged[label], entry))
+        elif state == "blocked" and entry.get("reason_class") == WAITING_FOR_BUILDS:
+            rows.append(HealthResult(
+                label=row_label, ok=True, detail=f"waiting: {text}{_counts(entry)}",
+                fix_suggestions=[
+                    "Nothing failed. The move's completion waits for an index build that is running and ends none; it "
+                    "tries again by itself about every 30 seconds and completes once no build runs. Wait. No failure is "
+                    "counted and no page is raised, so there is no retry count to reset",
+                ],
+            ))
+        elif state == "blocked" and entry.get("reason_class") == WAITING_FOR_BUILDS_OVERDUE:
+            rows.append(HealthResult(
+                label=row_label, ok=False, warn=True, detail=f"waiting: {text}{_counts(entry)}",
+                fix_suggestions=[
+                    "Nothing failed and nothing was ended: the move still waits for an index build and continues by itself "
+                    "once none runs. It has waited longer than six hours, so look at the build the row names (its "
+                    "backend pids) rather than at the move: a very large build takes that long; a build that no longer "
+                    "advances is for an operator to judge, and the engine ends none. No failure is counted and no page "
+                    "is raised, so there is no retry count to reset. The engine log has event=data_move_completion_overdue "
+                    "on each attempt",
+                ],
+            ))
+        elif state == "blocked" and entry.get("reason_class") == MISSING_PREREQUISITE:
             rows.append(HealthResult(
                 label=row_label, ok=False, warn=True, detail=f"blocked: {text}{_counts(entry)}",
                 fix_suggestions=[

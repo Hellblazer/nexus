@@ -19,6 +19,7 @@ from nexus.catalog.note_write import STORED, put_note as _put_note
 from nexus.catalog.store_hook import NOTE_META_KEYS
 from nexus.catalog.recovery_bundle import export_bundle, import_bundle, read_bundle
 from nexus.corpus import t3_collection_name
+from nexus.knowledge_subject import catalog_subject_finder
 from nexus.db.http_vector_client import HttpVectorClient
 from tests._legacy_note_rows import stamp_legacy_note_rows
 from nexus.mcp.core import store_put
@@ -49,7 +50,9 @@ def test_two_notes_sharing_a_chunk_export_and_import_their_own_keys(t2_service_e
                   category="design", ttl="7d", agent="agent-a")
         store_put(content=body, collection=subject, title="keys-B", tags="beta,two",
                   category="finding", agent="agent-b")
-    collection = t3_collection_name(subject, t3=client)
+    # RDR-229 P3.8: the subject's notes went to its minted c<id> label; a read resolves it by attributes, through the
+    # catalog finder (a client built for an explicit tenant does not answer the subject lookup).
+    collection = t3_collection_name(subject, subject_finder=catalog_subject_finder())
 
     reader = make_catalog_reader()
     assert reader is not None

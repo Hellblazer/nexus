@@ -1031,6 +1031,11 @@ def _unexplained_tmpdir_message(unexplained: dict[str, int]) -> str:
 #: reason; an entry that no longer matches a site is a failure too, so the list cannot rot.
 _TMPDIR_OVERRIDE_EXEMPT: dict[str, str] = {
     "tests/e2e/lib/setup_journey.py::sandbox_env": _FROM_SCRATCH,
+    # nexus-igea9: the push-gate tests run scripts/git-push-develop.sh over a fixture repository; the gate's stub pytest runs in a
+    # fixture tree with no tests/conftest.py, so neither imports tests.* (the only readers of NX_TEST_TMP_ORIG).
+    "tests/scripts/test_git_push_develop_sh_checks.py::_push": _NOT_NEXUS_TEST_CODE + " (git-push-develop.sh over a fixture repo)",
+    "tests/scripts/test_git_push_develop_sh_checks.py::test_a_temp_directory_that_cannot_be_made_is_a_gate_error":
+        _NOT_NEXUS_TEST_CODE + " (a deliberately unusable TMPDIR for the push script's mktemp; no child runs nexus test code)",
     "tests/prose_edit/conftest.py::prose": _NOT_NEXUS_TEST_CODE + " (prose-edit scripts and the nx CLI)",
     # nexus-scmcs.3: the child is the bash acceptance runner (run-scenario.sh) or local_engine.bash's env -i
     # wrapper, with a stub claude and nx; neither imports tests.* nor runs tests/conftest.py.

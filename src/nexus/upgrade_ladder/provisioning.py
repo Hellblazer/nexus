@@ -109,7 +109,8 @@ def verify_service_version(
         def _get(url: str, timeout: float) -> Any:
             import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
-            return httpx.get(url, timeout=timeout)
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+            return httpx.get(url, timeout=timeout, verify=get_shared_ssl_context())
 
     url = service_url.rstrip("/") + "/version"
     try:
@@ -190,7 +191,8 @@ def verify_voyage_capability(
         def _get(url: str, timeout: float) -> Any:
             import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
-            return httpx.get(url, timeout=timeout)
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+            return httpx.get(url, timeout=timeout, verify=get_shared_ssl_context())
 
     url = service_url.rstrip("/") + "/version"
     try:
@@ -523,7 +525,8 @@ def wait_for_service_health(
             import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
             headers = {"Authorization": f"Bearer {token}"} if token else {}
-            return httpx.get(url, timeout=timeout, headers=headers)
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+            return httpx.get(url, timeout=timeout, headers=headers, verify=get_shared_ssl_context())
 
     url = service_url.rstrip("/") + "/health"
     req_timeout = max(0.1, min(interval_s, 5.0)) if interval_s > 0 else 1.0

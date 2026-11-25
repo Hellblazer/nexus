@@ -59,7 +59,10 @@ class AckDeadlineTimerTest {
         OwnerFixture f = openRed();
         f.now(EPISODE.plus(Duration.ofMinutes(19)));
 
-        assertThat(f.onDeadline().post()).isNull();
+        OwnerDecision.Post post = f.onDeadline().post();
+
+        // Past half the deadline next up is nudged once (OwnerDecisionAuditTest); no hand-off or escalation row yet.
+        assertThat(post == null || "nudge".equals(post.kind())).as("no owner row before the deadline").isTrue();
     }
 
     @Test
@@ -71,7 +74,8 @@ class AckDeadlineTimerTest {
 
         assertThat(f.decide().deadline()).isEqualTo(EPISODE.plus(Duration.ofMinutes(45)));
         f.now(EPISODE.plus(Duration.ofMinutes(30)));
-        assertThat(f.onDeadline().post()).as("past the default, before the override").isNull();
+        OwnerDecision.Post before = f.onDeadline().post();
+        assertThat(before == null || "nudge".equals(before.kind())).as("past the default, before the override").isTrue();
         f.now(EPISODE.plus(Duration.ofMinutes(45)));
         assertThat(f.onDeadline().post()).isNotNull();
     }
@@ -84,10 +88,12 @@ class AckDeadlineTimerTest {
         OwnerDecision.Decision refresh = f.decide();
         assertThat(OwnerFixture.bodyOf(refresh.post())).containsEntry("refresh", true);
         f.recordNow(refresh);
-        f.now(EPISODE.plus(Duration.ofHours(2)));
+        f.now(EPISODE.plus(Duration.ofMinutes(50)));
 
         assertThat(f.onDeadline().post()).as("A acknowledged Y, a red tip since the last green").isNull();
-        assertThat(f.decide().deadline()).as("no deadline runs").isNull();
+        assertThat(f.decide().deadline())
+            .as("the hand-off deadline gives way to the stall deadline, counted from the owner's latest sign: its push Z")
+            .isEqualTo(f.pushes.getLast().createdAt().plus(Duration.ofMinutes(60)));
     }
 
     @Test
@@ -126,7 +132,7 @@ class AckDeadlineTimerTest {
         f.stamps.put("s-after-clear", "A");
         // The ack's own stamp is the new session id.
         f.owners.set(f.owners.size() - 1, new BoardRow("a-new", f.clock.plusSeconds(1), f.owners.getLast().dims(), "{}", "s-after-clear"));
-        f.now(EPISODE.plus(Duration.ofHours(3)));
+        f.now(EPISODE.plus(Duration.ofMinutes(50)));
 
         assertThat(f.onDeadline().post()).as("the owner A acknowledged under its new session id").isNull();
     }

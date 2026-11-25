@@ -175,6 +175,20 @@ _DOCUMENTED_EXCLUSIONS: dict[tuple[str, str], str] = {
         "historical fact about a completed migration, not a live pointer. See "
         "nexus-4nll0 (ruling) and nexus-lgef3 (the accepted rename-detach consequence)."
     ),
+    # RDR-229 P3.1 (nexus-p2m1x.17): the id twins. Each excluded name column above gained a NULL-able ``*_collection_id``
+    # column beside it (vectors-068), so the predicate meets the twin too, and a twin has its name column's disposition:
+    # what makes the name column not a re-homed or counted collection-scoped column makes its id the same.
+    ("pdf_pipeline", "collection_id"): "The id twin of ('pdf_pipeline', 'collection') above: same table, same disposition.",
+    ("chash_remap", "source_collection_id"): "The id twin of ('chash_remap', 'source_collection') above: same ledger, same ruling (nexus-4nll0).",
+    ("chash_remap", "target_collection_id"): "The id twin of ('chash_remap', 'target_collection') above: same ledger, same ruling (nexus-4nll0).",
+    ("chunk_orphaned_at", "collection_id"): "The id twin of ('chunk_orphaned_at', 'collection') above: same table, carried by nexus.chunks, which is registered.",
+    ("reembed_jobs", "source_collection_id"): "The id twin of ('reembed_jobs', 'source_collection') above: same record, same disposition (LEAVE).",
+    ("reembed_jobs", "target_collection_id"): "The id twin of ('reembed_jobs', 'target_collection') above: same record, same disposition (LEAVE).",
+    ("catalog_collections", "collection_id"): (
+        "The registry row's own identity (RDR-229 item 6, vectors-068-1: a generated identity column on the registry table "
+        "itself), not a denormalized copy of a collection name in another table. Nothing is re-homed or counted for it: a "
+        "rename inserts a new registry row, which draws a new id."
+    ),
     # ("migration_jobs", "collections"/"collections_key"/"per_collection_counts")
     # REMOVED (nexus-tk070.p5b, reworked 2026-08-20): the table itself was
     # DROPPED (migration-002-tenant-pk.xml) — dead code, zero producers/
@@ -193,7 +207,10 @@ _ENTRY_RE = re.compile(
     r"new\s+CollectionScopedTable\(\s*"
     r'"(?P<key>[^"]+)"\s*,\s*'
     r"(?P<table>[A-Z0-9_]+)\s*,\s*"
-    r"[A-Z0-9_]+\.(?P<column>[A-Z0-9_]+)\s*\)"
+    r"[A-Z0-9_]+\.(?P<column>[A-Z0-9_]+)\s*"
+    # RDR-229 P3.1: an entry names the column's id twin as a fourth argument (``X.COLLECTION_ID``), which the rename
+    # and re-home statements set beside the name.
+    r"(?:,\s*[A-Z0-9_]+\.(?P<id_column>[A-Z0-9_]+)\s*)?\)"
 )
 
 #: Floor for the parsed-entry count. Not a magic number: the list held 18 entries when
@@ -229,8 +246,10 @@ def _parse_java_list() -> set[tuple[str, str]]:
         f"renamed or restructured, update this gate — do not delete it."
     )
     return {
-        (m.group("table").lower(), m.group("column").lower())
+        (m.group("table").lower(), column.lower())
         for m in _ENTRY_RE.finditer(source)
+        for column in (m.group("column"), m.group("id_column"))
+        if column
     }
 
 
@@ -255,7 +274,7 @@ def _psql(state: dict, sql: str) -> list[str]:
             "-d", state["pg_dbname"],
             "-tAc", sql,
         ],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, (
         f"psql failed ({proc.returncode}) running:\n{sql}\n"

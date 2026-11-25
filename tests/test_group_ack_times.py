@@ -515,3 +515,89 @@ def test_a_sender_stamp_that_is_no_uuid_is_unresolved_and_noted_not_silently_nob
     result = _run(_with_lookups(_env(wire, tuples=_Tuples(rows)), sessions), "ack-times", "push-train", "--json")
     assert json.loads(result.stdout)["reds"][0]["acked_at"] is None and sessions.asked == []
     assert "1 ack could not be resolved" in result.stderr
+
+
+# ── a disclaim on the current red (RDR-252 audit S1, nexus-igea9): shown, never counted as an ack ──────────────────
+
+
+def _disclaim(at: str, sha: str, who: str, note: str = "") -> Any:
+    """A ``kind=disclaim`` row as ``nx ci ack --not-mine`` posts it: the note, when there is one, is the plain body."""
+    return SimpleNamespace(id=f"disclaim{at}{who}", created_at=at, dims={"from": who, "kind": "disclaim", "sha": sha},
+                           body=note or None, sender_session=SESSIONS[who])
+
+
+def test_a_disclaim_is_shown_on_the_red_it_falls_in_and_is_not_an_ack() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _disclaim("2026-11-19T10:03:00Z", SHA1, "i4", "marginalia is fixing it"),
+        _row("clear", "2026-11-19T10:30:00Z", SHA1),
+        _row("owner", "2026-11-19T12:00:05Z", SHA2, **{**_RED, "episode_at": "2026-11-19T12:00:00Z"}),
+    ]
+    first, second = _times(rows, _index())
+    assert first["disclaims"] == [{"at": "2026-11-19T10:03:00Z", "from": "i4", "sha": SHA1, "note": "marginalia is fixing it", "counted": True}]
+    assert second["disclaims"] == [], "a disclaim belongs to the red it was posted in"
+    assert first["acked_at"] is None, "a disclaim is not an ack: the owner's `not mine` never reads as `seen`"
+
+
+def test_a_disclaim_with_no_note_has_a_null_note_and_is_named_in_the_text_form() -> None:
+    rows = [_row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED), _disclaim("2026-11-19T10:03:00Z", SHA1, "i4")]
+    [red] = _times(rows, _index())
+    assert red["disclaims"][0]["note"] is None
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    text = _run(_stamped(_env(wire, tuples=_Tuples(rows))), "ack-times", "push-train").output
+    assert "disclaimed by i4 at 2026-11-19T10:03:00Z" in text and "no ack" in text
+
+
+def _disclaim_by(label: str, session: str | None, at: str = "2026-11-19T10:03:00Z") -> Any:
+    """A disclaim whose `from` label is *label* and whose sender-session stamp is *session* (None: no stamp)."""
+    return SimpleNamespace(id=f"disclaim{at}{label}{session}", created_at=at, dims={"from": label, "kind": "disclaim", "sha": SHA1},
+                           body=None, sender_session=session)
+
+
+def _text(rows: list[Any], lookups: Any) -> str:
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    return _run(_with_lookups(_env(wire, tuples=_Tuples(rows)), lookups), "ack-times", "push-train").output
+
+
+@pytest.mark.parametrize(("label", "session", "counted"), [
+    ("i4", SESS_OWNER, True),             # the owner, by stamp
+    ("i5", SESS_OTHER, False),            # someone else, by stamp
+    ("i4", SESS_OTHER, False),            # the owner's NAME on someone else's stamp: `from` is never read
+    ("i4", None, False),                  # no stamp at all
+    ("i4", SESS_UNKNOWN, False),          # a stamp no identity holds
+], ids=["owner", "stranger", "forged-label", "no-stamp", "unknown-stamp"])
+def test_a_disclaim_counts_only_from_the_owners_stamped_session(label: str, session: str | None, counted: bool) -> None:
+    """Review r1: the engine acts only on a disclaim from the current owner's stamped session; ack-times says so."""
+    lookup = _Lookup({**{sid: who for who, sid in SESSIONS.items()}, SESS_UNKNOWN: _api_error(404, "unknown_session")})
+    rows = [_row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED), _disclaim_by(label, session)]
+    [red] = _times(rows, lookup)
+    assert [d["counted"] for d in red["disclaims"]] == [counted]
+    text = _text(rows, lookup)
+    assert (f"disclaimed by {label}" in text) and (("(ignored: not the owner)" in text) is (not counted)), text
+
+
+def test_a_disclaim_the_resolver_could_not_check_is_not_called_ignored() -> None:
+    lookup = _Lookup({SESS_OTHER: RuntimeError("identity service down")})
+    rows = [_row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED), _disclaim_by("i4", SESS_OTHER)]
+    [red] = _times(rows, lookup)
+    assert red["disclaims"][0]["counted"] is None
+    text = _text(rows, lookup)
+    assert "(ignored: not the owner)" not in text and "(not verified" in text, text
+
+
+def test_a_disclaim_is_judged_against_the_owner_at_its_own_time() -> None:
+    """After a hand-off the new owner's disclaim counts and the old owner's no longer does."""
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("owner", "2026-11-19T10:20:05Z", SHA1, owner="i5", next=None, reason="handoff", episode_at="2026-11-19T10:20:00Z", refresh=False, handoffs=1),
+        _disclaim_by("i4", SESS_OWNER, "2026-11-19T10:25:00Z"),
+        _disclaim_by("i5", SESS_OTHER, "2026-11-19T10:26:00Z"),
+    ]
+    [red] = _times(rows, _index())
+    assert [(d["from"], d["counted"]) for d in red["disclaims"]] == [("i4", False), ("i5", True)]
+
+
+def test_a_disclaim_outside_any_red_is_dropped() -> None:
+    rows = [_disclaim("2026-11-19T09:00:00Z", SHA1, "i4"), _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED)]
+    [red] = _times(rows, _index())
+    assert red["disclaims"] == []

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-p2m1x.21 (RDR-229 P3.3c, linda's rulings 2026-11-22): idx_chunk_orphaned_at_tenant_chash, an index on nexus.chunk_orphaned_at (tenant_id, chash).
+
+    WHY. The chunks swap adds chunk_orphaned_at_chunk_id_fk, a foreign key from chunk_orphaned_at (tenant_id, collection_id, chash, embedding_model) to the
+    chunks id key with ON DELETE CASCADE ON UPDATE CASCADE. Every delete or update of a chunk row then looks up the child rows by that key, and the only index
+    chunk_orphaned_at has is its name primary key (tenant_id, collection, chash), which cannot seek past collection_id: a chunk delete would read every
+    orphan-clock row of the tenant. The other two children already carry an index the lookup can use (catalog_document_chunks: idx_catalog_chunks_chash
+    (tenant_id, chash), catalog-001; topic_assignments: idx_ta_tenant_doc_id_fk (tenant_id, doc_id), fk-001); Rdr229SwapMovesAfterTheSwapIntegrationTest
+    shows the lookup of all three on its index. The chunks swap's verification waits for this index (Rdr229SwapMove), so the swap does not complete before a boot
+    has built it.
+
+    A BOOT MUST NEVER HANG OR HALT, AND A KILLED BUILD HEALS ON THE NEXT BOOT. One changeset, vectors-075-1, shaped like collections-001-2 (the repo's self-retrying
+    changeset), with runInTransaction="false" because CREATE INDEX CONCURRENTLY cannot run inside a transaction:
+      - preConditions onFail="CONTINUE" onError="CONTINUE", one sqlCheck: no VALID index of this name exists. While it holds, the changeset runs; when a VALID
+        index exists (a manual pre-build) it is skipped, unrecorded, and retried at every boot, a visible member of the walk's retrying set
+        (skipped_retrying_changesets) for as long as that index stands. Never HALT (a boot-time halt crash-loops an install, the no-wedge directive) and never
+        MARK_RAN (that would record the changeset as run and stop it healing).
+      - failOnError="false": a body that fails (the lock wait below ends, the build is cancelled or killed) is logged, the walk goes on, no DATABASECHANGELOG row
+        is written (MarkChangeSetRanGenerator refuses a FAILED changeset), and the next boot retries it, exactly as a precondition skip.
+      - THE HEAL. The check guarantees that whatever index of this name exists is INVALID (a build that died leaves one; IF NOT EXISTS would skip it and the
+        changeset would be recorded with an index no query can use), so the body drops it first, DROP INDEX CONCURRENTLY IF EXISTS, and then builds. The drop is
+        therefore never of a valid index: pg_index.indisvalid is read by the precondition, which is the only way to condition a CONCURRENTLY statement (it cannot run in
+        a DO block). The two statements run one after the other, each on its own in autocommit, in the one changeset: a failure of either leaves nothing recorded.
+      - THE BOUND. CREATE INDEX CONCURRENTLY and DROP INDEX CONCURRENTLY wait on older transactions as a lock wait, so SET lock_timeout = '30s' ends the wait. The
+        setting is the migration session's and is reset after the build; a failing body leaves it on for the rest of that walk (the grants blocks that follow take
+        no lock they could wait on for 30 s). A wait that ends is a skipped boot, not a failed one.
+    The changeset is a CONTINUE changeset, so SchemaMigrator does not count it as schema work (it would otherwise end every running per-collection index build at the
+    first boot that carries it): its body takes SHARE UPDATE EXCLUSIVE on nexus.chunk_orphaned_at and nothing on nexus.chunks or a chunk leaf, and a CREATE INDEX
+    CONCURRENTLY on a leaf holds no lock on chunk_orphaned_at. tests/test_changelog_continue_precondition_chunks_lint.py bars a CONTINUE body from naming a table that
+    holds a foreign key into chunks, because a DROP or ALTER of one takes ACCESS EXCLUSIVE on every chunk leaf; it now lets the one statement shape that takes no such lock
+    through (CREATE INDEX CONCURRENTLY on that table) and the changeset is on its allowlist with this argument.
+
+    DATA EFFECT: none. The index is built over existing rows and changes no row; its maintenance cost on writes is one more btree entry per orphan-clock row.
+    nexus.chunk_orphaned_at holds one row per chunk that lost its last owner, so the build is short. The number follows vectors-073 and is provisional until the
+    final rebase. After vectors-073, before the grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-075-1" author="nexus-p2m1x.21" runInTransaction="false" failOnError="false">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' AND c.relname = 'idx_chunk_orphaned_at_tenant_chash' AND i.indisvalid</sqlCheck>
+        </preConditions>
+        <comment>nexus.chunk_orphaned_at (tenant_id, chash): the child-side lookup of the chunk's id key, chunk_orphaned_at_chunk_id_fk (RDR-229 P3.3c). Self-retrying (onFail CONTINUE, failOnError false): drops an INVALID leftover of the index (a DO block that runs a plain DROP INDEX under lock_timeout 5 s only when pg_index holds an INVALID index of that name, so a boot with nothing to heal executes no DDL), then builds it CONCURRENTLY, outside a transaction, under lock_timeout 30 s. DATA EFFECT: none. The rollback drops the index.</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $heal$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'nexus' AND c.relname = 'idx_chunk_orphaned_at_tenant_chash' AND NOT i.indisvalid) THEN
+        PERFORM set_config('lock_timeout', '5s', true);
+        DROP INDEX nexus.idx_chunk_orphaned_at_tenant_chash;
+    END IF;
+END
+$heal$;
+        </sql>
+        <sql splitStatements="true" stripComments="false">
+SET lock_timeout = '30s';
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_chunk_orphaned_at_tenant_chash
+    ON nexus.chunk_orphaned_at (tenant_id, chash);
+RESET lock_timeout;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+DROP INDEX CONCURRENTLY IF EXISTS nexus.idx_chunk_orphaned_at_tenant_chash;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

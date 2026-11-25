@@ -63,9 +63,39 @@ final class ImportTestEnv implements AutoCloseable {
 
     /** As above, with the engine's own embedder router (null: none), which is where the open reads the models it serves. */
     static ImportTestEnv start(dev.nexus.service.vectors.EmbedderRouter router) throws Exception {
+        return start(router, false);
+    }
+
+    /**
+     * An engine in the state RDR-229 P3.7 leaves an install in once gate 3 is latched, the name-key drop move has run and every P3.5b changeset has
+     * applied: the name foreign keys the drop move's {@code on_complete} drops are dropped (here as the superuser, typed, from {@code NameKeyDropMove.NAME_KEYS}), and the
+     * rename guard's readiness says latched with nothing missing, so the engine's rename route is the one-row rename. The completion check, the worker and
+     * the latch are not run (the engine's own harness, {@code Rdr229RenameEngine}, runs them); only the state they leave is stood in for.
+     */
+    static ImportTestEnv startOneRow() throws Exception {
+        return start(null, true);
+    }
+
+    private static ImportTestEnv start(dev.nexus.service.vectors.EmbedderRouter router, boolean oneRow) throws Exception {
         PostgreSQLContainer<?> pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
+        }
+        if (oneRow) {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                DSLContext dsl = DSL.using(su, SQLDialect.POSTGRES);
+                // what the move's on_complete does, typed: every name key it drops, IF EXISTS (the queue's table may be retired)
+                var keys = new ArrayList<>(dev.nexus.service.datamove.NameKeyDropMove.NAME_KEYS);
+                keys.add(dev.nexus.service.datamove.NameKeyDropMove.QUEUE_KEY);
+                for (var k : keys) {
+                    dsl.alterTableIfExists(DSL.table(DSL.name("nexus", k.table()))).dropConstraintIfExists(DSL.name(k.constraint())).execute();
+                }
+                // readiness NONE implies the latch row exists (linda 2026-11-23, ruling a): the row is written, and asserted, before the readiness says NONE
+                dev.nexus.service.datamove.CompletionCheck.insertLatch(dsl, dev.nexus.service.datamove.CompletionCheck.GATE3, "one-row-env", false);
+                assertThat(dev.nexus.service.datamove.CompletionCheck.readLatch(dsl, dev.nexus.service.datamove.CompletionCheck.GATE3))
+                    .as("the latch row exists whenever the readiness says NONE").isPresent();
+            }
         }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -80,10 +110,17 @@ final class ImportTestEnv implements AutoCloseable {
         cfg.setMaximumPoolSize(14);
         cfg.setAutoCommit(true);
         HikariDataSource ds = new HikariDataSource(cfg);
-        NexusService service = router == null ? new NexusService(0, ROOT, ds) : new NexusService(0, ROOT, ds, router);
+        NexusService service = oneRow ? oneRowService(ds)
+            : router == null ? new NexusService(0, ROOT, ds) : new NexusService(0, ROOT, ds, router);
         service.importWiring().declareSingletonLockHeld(true);
         service.start();
         return new ImportTestEnv(pg, ds, service);
+    }
+
+    private static NexusService oneRowService(HikariDataSource ds) throws java.io.IOException {
+        dev.nexus.service.datamove.RenameReadiness readiness = dev.nexus.service.datamove.RenameReadiness.ready();
+        return new NexusService(0, ROOT, ds, null, null, null, null, null, null, System::getenv,
+            () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled(), null, null, () -> true, readiness);
     }
 
     @Override
@@ -258,11 +295,26 @@ final class ImportTestEnv implements AutoCloseable {
         }
     }
 
+    /** A step a test runs between two reads of one export session. */
+    @FunctionalInterface
+    interface Step {
+        void run() throws Exception;
+    }
+
     /** Exports {@code token}'s tenant over the export routes into a file (every table, every page). */
     BackupFile export(String token) throws Exception {
+        return export(token, () -> { });
+    }
+
+    /**
+     * As {@link #export(String)}, with {@code afterHeader} run once the session is open and its header read, before the first
+     * page: a write there lands after the session's snapshot, so a consistent export must not show it.
+     */
+    BackupFile export(String token, Step afterHeader) throws Exception {
         HttpResponse<String> open = call("POST", "/v1/tenant/export", token);
         assertThat(open.statusCode()).as(open.body()).isEqualTo(200);
         ObjectNode header = (ObjectNode) json(open);
+        afterHeader.run();
         String id = header.get("session_id").asText();
         for (String drop : List.of("session_id", "created_at", "expires_at", "idle_timeout_seconds", "total_timeout_seconds")) {
             header.remove(drop);
@@ -359,7 +411,7 @@ final class ImportTestEnv implements AutoCloseable {
                                                              List<dev.nexus.service.db.TenantExport.Retired> retired,
                                                              java.util.function.Supplier<Long> engineChangesets) {
         var sessions = new dev.nexus.service.db.TenantImportSessions(service::exportSessions, ds, config,
-            dev.nexus.service.db.CollectionRegistry::evictTenant, service.importWiring()::singletonLockHeld, engineChangesets, retired);
+            dev.nexus.service.db.CollectionRegistry.shared()::evictTenant, service.importWiring()::singletonLockHeld, engineChangesets, retired);
         service.importWiring().sessions(sessions);
         return sessions;
     }

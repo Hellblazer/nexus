@@ -217,7 +217,7 @@ nx catalog list --json \
   | jq '.[] | select(.source_uri | startswith("x-devonthink-item://"))'
 
 # Remove them by tumbler (one at a time, or pipe through xargs).
-nx catalog remove <tumbler>
+nx catalog delete <tumbler> -y
 ```
 
 DT-side fixtures (databases, tags, groups, smart groups) are

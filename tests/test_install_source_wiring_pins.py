@@ -80,8 +80,7 @@ def test_the_install_facades_stay_pure_re_exports() -> None:
 
 
 def test_doctor_holders_row_asks_for_the_legacy_tree() -> None:
-    text = _text("src/nexus/health.py")
-    body = text[text.index("def _check_generation_holders"):text.index("def _check_process_skew")]
+    body = _text("src/nexus/install_holders_row.py")
     assert "legacy_tree_candidates" in body
 
 

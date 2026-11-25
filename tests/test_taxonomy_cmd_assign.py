@@ -20,7 +20,7 @@ from click.testing import CliRunner
 import nexus.mcp_infra as _mi
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.db.t2 import T2Database
-
+from tests._chunk_seed import collection_id_sql
 from tests.conftest import next_import_seed_id
 
 
@@ -55,8 +55,9 @@ def _seed_chunk(tenant: str, collection: str, chash_hex: str, *, dim: int = 768)
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
-        f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector, '{model_for_dim}') "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model, collection_id) "
+        f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector, '{model_for_dim}', "
+        f"{collection_id_sql(tenant, collection)}) "
         "ON CONFLICT DO NOTHING;"
     )
     psql = Path(state["pg_bin"]) / "psql"
@@ -66,7 +67,7 @@ def _seed_chunk(tenant: str, collection: str, chash_hex: str, *, dim: int = 768)
             "-U", state["pg_user"], "-d", state["pg_dbname"],
             "-v", "ON_ERROR_STOP=1", "-1", "-f", "-",
         ],
-        input=sql, capture_output=True, text=True, timeout=30,
+        input=sql, capture_output=True, text=True, encoding="utf-8", timeout=30,
     )
     assert proc.returncode == 0, f"_seed_chunk failed: {proc.stdout}\n{proc.stderr}"
 

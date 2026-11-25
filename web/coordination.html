@@ -404,7 +404,7 @@ This session is <b>nexus-4a</b> [102a61] — the name other sessions use to mess
 <tr><td>The other side</td><td>Must be live, or an agent that can resume from its transcript.</td><td>Need not exist yet. A message to a session id or agent id waits in the engine, and a reader can wait for a tuple that nobody has written.</td></tr>
 <tr><td>Who takes part</td><td>Agents and sessions that <code>ListAgents</code> shows, on this machine, on other machines, and in the cloud.</td><td>Sessions, agents, hooks, and scripts that use the engine.</td></tr>
 <tr><td>Confirmation</td><td>The send result reports arrival. A session can hold or refuse a message, and a remote session reports nothing back.</td><td>The reader acks. An unacked message returns, and a message that keeps failing becomes a dead letter.</td></tr>
-<tr><td>Reply</td><td>A new message to the sender. A cloud session cannot reply yet.</td><td>The reply goes in the ack, with the same correlation id.</td></tr>
+<tr><td>Reply</td><td>A new message to the sender. A cloud-managing session cannot reply yet.</td><td>The reply goes in the ack, with the same correlation id.</td></tr>
 </table></div>
 </div></details>
 </section>

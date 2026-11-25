@@ -18,7 +18,9 @@ informational (ok=True); above it, the identical absence is a loud WARN.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -422,7 +424,7 @@ class TestCheckTupleTableBloat:
         missing = tmp_path / "pg_credentials"
         with patch("nexus.config.is_local_mode", return_value=False):
             r = h._check_tuple_table_bloat(creds_path=missing)[0]
-        assert r.ok is False and r.warn is True
+        assert (r.ok, r.skipped, r.warn) == (True, True, False)
         assert r.detail.startswith("managed deployment")
         assert "store operator" in r.detail
 
@@ -742,7 +744,7 @@ class TestCheckTupleSweepFreshnessRealPostgres:
         proc = _subprocess.run(
             [str(psql_bin), "-h", "127.0.0.1", "-p", str(pg_port), "-U", pg_user,
              "-d", dbname, "-v", "ON_ERROR_STOP=1", "-c", insert_sql],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
         )
         assert proc.returncode == 0, f"seeding nexus.tuple_tenants failed: {proc.stderr}"
 
@@ -1709,6 +1711,9 @@ def test_new_channel_delivery_row_absent_from_fresh_install_mvv_allowlist() -> N
 # connection.
 
 
+_MCP_LOG_EPOCH = time.time()  # one clock for every stamped mtime, so two logs of one name tie exactly
+
+
 def _mcp_log(
     root: Path, project_dir: str, server_dir: str, name: str, *lines: str, session: str | None = None,
 ) -> Path:
@@ -1722,6 +1727,11 @@ def _mcp_log(
         "".join(json.dumps({"debug": line, **entry}) + "\n" for line in lines),
         encoding="utf-8",
     )
+    # The row ranks logs by mtime: stamp it from the name (a day ago plus the name's clock time), so the file
+    # names in these tests still say which log is newer and two logs of one name tie.
+    started = datetime.strptime(name[:19], "%Y-%m-%dT%H-%M-%S").replace(tzinfo=UTC)
+    when = _MCP_LOG_EPOCH - 86400 + (started - datetime(2026, 11, 4, tzinfo=UTC)).total_seconds()
+    os.utime(f, (when, when))
     return f
 
 

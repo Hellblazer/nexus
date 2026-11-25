@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """F34: MinerU's pipeline weights are fetched before any page budget starts, as a step the user sees.
 
+F35 moved the default model's fetch to nexus's own release assets (tests/test_f35_mineru_self_host_weights.py);
+this module drives the Hugging Face fetch that stays for ``MINERU_FORMULA_CH_SUPPORT`` (its fixture turns that on).
+
 Sam 2026-11-21 (T2 ``nexus/sam-ruling-f34-mineru-weights-8.5.5-2026-11-21``): on a fresh install the first
 ``nx index pdf --extractor mineru`` downloaded the weights inside the 180 s per-page budget, the server was
 killed mid-download, and pages came out ``mineru+degraded``. ``pdf_stack.ensure_or_exit`` now fetches them
@@ -82,6 +85,10 @@ def hub(tmp_path, monkeypatch):
     monkeypatch.setattr(config_reader, "get_local_models_dir", lambda: None)
     for name in (mineru_weights.SKIP_ENV, "MINERU_MODEL_SOURCE", "MINERU_FORMULA_CH_SUPPORT", "HF_HUB_OFFLINE"):
         monkeypatch.delenv(name, raising=False)
+    # F35: the Hugging Face fetch F34 wrote is what runs for the formula model the self-hosted manifest does not
+    # carry (the Chinese-formula opt-in); the default model's path is tests/test_f35_mineru_self_host_weights.py.
+    monkeypatch.setenv("MINERU_FORMULA_CH_SUPPORT", "1")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(mineru_weights, "_remote_server_configured", lambda: False)
     return _FakeHub(cache)
 

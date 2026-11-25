@@ -1,0 +1,18 @@
+{
+  "data_moves_need_operator": true,
+  "data_moves_need_operator_labels": ["rdr229-swap-chunks"],
+  "data_moves_need_operator_moves": [
+    {
+      "label": "rdr229-swap-chunks",
+      "retries": 3,
+      "last_attempt_at": "2026-11-23T10:00:00Z",
+      "next_retry_at": "2026-11-23T10:02:00Z",
+      "sqlstate": "55P03",
+      "statement_timeout_ms": 1400,
+      "terminates_index_builds": true,
+      "step": "on_complete",
+      "bound_ms": 700,
+      "retry_in_progress": false
+    }
+  ]
+}

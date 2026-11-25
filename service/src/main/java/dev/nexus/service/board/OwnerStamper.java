@@ -34,6 +34,7 @@ public final class OwnerStamper implements OwnerOutHook {
     private static final Logger log = LoggerFactory.getLogger(OwnerStamper.class);
     private static final String PREFIX = "board/ci/";
     private static final String DONE = "--done";
+    private static final String OWNER = "--owner";
 
     private final TenantScope scope;
     private final TupleRepository tuples;
@@ -98,6 +99,13 @@ public final class OwnerStamper implements OwnerOutHook {
     @Override
     public void afterOut(String tenant, String subspace, Map<String, String> dims, String body) {
         try {
+            String ownerBase = ownerBase(subspace);
+            if (ownerBase != null) {
+                if ("disclaim".equals(dims.get("kind"))) {
+                    onDisclaim(tenant, ownerBase);
+                }
+                return;
+            }
             String base = doneBase(subspace);
             if (base == null) {
                 return;
@@ -114,7 +122,7 @@ public final class OwnerStamper implements OwnerOutHook {
                 return;
             }
             try {
-                evaluate(tenant, base, OwnerDecision.Trigger.DONE);
+                evaluate(tenant, base, OwnerDecision.Trigger.DONE, v);
             } catch (Throwable t) {
                 log.warn("event=board_owner_stamper_failed tenant={} base={} error={}", tenant, base, t.getMessage(), t);
                 if (DoneVerdict.RED.equals(v.outcome())) {
@@ -124,6 +132,58 @@ public final class OwnerStamper implements OwnerOutHook {
         } catch (Throwable t) {
             log.warn("event=board_owner_stamper_hook_failed error={}", t.getMessage(), t);
         }
+    }
+
+    /**
+     * A {@code disclaim} row on the owner subspace (RDR-252 audit S1b): re-evaluates the topic at once, so the owner's
+     * "not mine" is handed on without waiting for the deadline. The decision, not this hook, judges whose disclaim it
+     * is. A failed evaluation is logged and left to the deadline, which hands the red on anyway.
+     */
+    private void onDisclaim(String tenant, String base) {
+        try {
+            if (!disclaimerIsOwner(tenant, base)) {
+                log.info("event=board_owner_disclaim tenant={} base={} outcome=dropped_not_owner", tenant, base);
+                return;
+            }
+            evaluate(tenant, base, OwnerDecision.Trigger.DONE, null);
+            log.info("event=board_owner_disclaim tenant={} base={} outcome=evaluated", tenant, base);
+        } catch (Throwable t) {
+            log.warn("event=board_owner_disclaim tenant={} base={} outcome=failed error={}", tenant, base, t.getMessage(), t);
+        }
+    }
+
+    /**
+     * Whether any {@code disclaim} row posted since the current owner's ownership began was sent by the identity the
+     * current owner row names, so a stranger's later disclaim cannot mask the owner's. Read outside the topic lock, so a
+     * client that loops on disclaims it has no right to make costs reads and never the lock the {@code --done} writes
+     * and the deadline need (each distinct sender session is looked up once). The decision still judges the disclaim
+     * under the lock.
+     */
+    private boolean disclaimerIsOwner(String tenant, String base) {
+        List<BoardRow> owners = scope.withTenant(tenant, ctx -> BoardReads.rows(ctx, tenant, base, "owner"));
+        String owner = OwnerDecision.currentOwner(owners);
+        if (owner == null) {
+            return false;
+        }
+        Instant since = OwnerDecision.ownershipStart(owners);
+        Map<String, Boolean> byStamp = new java.util.HashMap<>();
+        for (BoardRow r : owners) {
+            if ("disclaim".equals(r.kind()) && (since == null || !r.createdAt().isBefore(since))
+                && byStamp.computeIfAbsent(String.valueOf(r.senderSession()),
+                    k -> owner.equals(Identities.countedIdentity(identities, tenant, r.senderSession())))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The base topic of {@code board/ci/<base>--owner}, or null for any other subspace. */
+    static String ownerBase(String subspace) {
+        if (subspace == null || !subspace.startsWith(PREFIX) || !subspace.endsWith(OWNER)) {
+            return null;
+        }
+        String base = subspace.substring(PREFIX.length(), subspace.length() - OWNER.length());
+        return base.isEmpty() || base.contains("--") ? null : base;
     }
 
     /** The base topic of {@code board/ci/<base>--done}, or null for any other subspace. */
@@ -190,12 +250,13 @@ public final class OwnerStamper implements OwnerOutHook {
     }
 
     /**
-     * The row {@link OwnerDecision#failSafe} names, posted and armed under the topic lock. Who is live, and whose ack
-     * an ack row is, come from the identity read, which is made only when an escalation is owed. If that read fails and
-     * the owner's stamped ack sits on the row's own tip ({@link OwnerDecision#ackOnTip}), the red may be acknowledged and cannot be matched without the read, so this
-     * throws and the timer retries; escalating then would wake every member over an acknowledged red. If no such ack
-     * row exists, nobody acknowledged, so the escalation is posted at once with no one named, the row the RDR gives
-     * for nobody live.
+     * The row {@link OwnerDecision#failSafe} names, posted and armed under the topic lock. The deadline is read from the
+     * owner rows and the group alone ({@link OwnerDecision#failSafeDue}): the acknowledgement deadline, or, for a red
+     * the owner's stamped ack holds, the stall deadline. Who is live comes from the identity read, made only once an
+     * escalation is owed. A failure of that read does not throw: the escalation is posted with no one named (the row the
+     * RDR gives for nobody live), a false wake and never a suppression. What does throw is a fail-safe that cannot run at
+     * all (the owner rows or the group cannot be read, the post fails): {@link #onDeadline} rethrows it with the
+     * evaluation's fault suppressed, and the timer retries after its delay.
      */
     private void failSafe(String tenant, String base) {
         scope.withTenant(tenant, ctx -> {
@@ -203,17 +264,16 @@ public final class OwnerStamper implements OwnerOutHook {
             List<BoardRow> owners = BoardReads.rows(ctx, tenant, base, "owner");
             GroupView group = BoardReads.group(groups, identities, tenant, base);
             Instant now = clock.instant();
-            Instant due = OwnerDecision.rowDeadline(group, base, owners);
+            // The deadline from the rows alone: the acknowledgement deadline, or, for a red the owner's stamped ack
+            // holds, the stall deadline. The identity read is made only once it is due.
+            Instant due = OwnerDecision.failSafeDue(group, null, base, owners);
             Identities ids = new Identities(Map.of(), Map.of());
             if (due != null && !now.isBefore(due)) {
                 try {
                     ids = liveness.read(identities, tenant, List.of(), owners, group);
                 } catch (Throwable t) {
-                    if (OwnerDecision.ackOnTip(owners)) {
-                        throw t;
-                    }
-                    log.warn("event=board_owner_failsafe_liveness_failed tenant={} base={} error={}; no ack row on the tip, "
-                        + "escalating with no owner", tenant, base, t.getMessage());
+                    log.warn("event=board_owner_failsafe_liveness_failed tenant={} base={} error={}; escalating with no owner",
+                        tenant, base, t.getMessage());
                 }
             }
             OwnerDecision.Decision d = OwnerDecision.failSafe(group, ids, owners, base, now);
@@ -231,10 +291,25 @@ public final class OwnerStamper implements OwnerOutHook {
     // ── one evaluation ───────────────────────────────────────────────────────
 
     private void evaluate(String tenant, String base, OwnerDecision.Trigger trigger) {
+        evaluate(tenant, base, trigger, null);
+    }
+
+    /** {@code done}: the verdict of the {@code --done} write that triggered this evaluation, or null. */
+    private void evaluate(String tenant, String base, OwnerDecision.Trigger trigger, DoneVerdict.Verdict done) {
         scope.withTenant(tenant, ctx -> {
             BoardTopicLock.lock(ctx, tenant, base);
             List<BoardRow> pushes = BoardReads.rows(ctx, tenant, base, "push");
             List<BoardRow> dones = BoardReads.rows(ctx, tenant, base, "done");
+            if (done != null && DoneVerdict.RED.equals(done.outcome()) && pushes.stream().noneMatch(p -> done.sha().equals(p.sha()))
+                && dones.stream().filter(d -> DoneVerdict.of(d).filter(v -> v.counts() && done.sha().equals(v.sha())).isPresent())
+                    .count() == 1) {
+                // RDR-252 audit S3: a red tip with no push record has no pusher, so an earliest suspect among them hands
+                // the red to the leader as no_record. The push script's failure is silent; this line is the durable trace
+                // (the group read's unrecorded_tips only counts what the live rows still hold). Logged once per sha, on
+                // the first --done row it has: a rerun's row, and a tip that went green, add no line.
+                log.warn("event=board_done_tip_unrecorded tenant={} base={} sha={} unrecorded_tips={}", tenant, base, done.sha(),
+                    UnrecordedTips.missing(pushes, dones, clock.instant()).size());
+            }
             List<BoardRow> owners = BoardReads.rows(ctx, tenant, base, "owner");
             GroupView group = BoardReads.group(groups, identities, tenant, base);
             Identities ids = group == null && owners.isEmpty()
@@ -248,7 +323,7 @@ public final class OwnerStamper implements OwnerOutHook {
             }
             // Armed under the lock, so an older evaluation cannot overwrite a newer one's deadline.
             if (timer != null) {
-                timer.arm(tenant, base, decision.deadline());
+                timer.arm(tenant, base, decision.wakeAt());
             }
             return decision;
         });

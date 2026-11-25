@@ -128,8 +128,8 @@ class SqlStringLiteralGateTest {
 
     /** SQL the tests never send to a database, per file, frozen. Each entry says what the text is for. */
     private static final Map<String, Integer> TEXT = Map.ofEntries(
-        // input to the changelog bulk-grant scanner under test
-        Map.entry("dev/nexus/service/ChangelogBulkGrantConformanceTest.java", 4),
+        // input to the changelog bulk-grant scanner under test (7 since it reads <sqlFile> targets: three more synthetic targets, RDR-229 P3.1)
+        Map.entry("dev/nexus/service/ChangelogBulkGrantConformanceTest.java", 7),
         // input to the collection-name SQL live-body gate's scanner under test: changelog fragments it parses for
         // last definers, overloads, DROP argument lists and name-parse literals; never sent to a database
         // (RDR-229 P1.3, nexus-p2m1x.3)
@@ -138,6 +138,9 @@ class SqlStringLiteralGateTest {
         Map.entry("dev/nexus/service/CatalogDocumentWriterCensusTest.java", 4),
         // input to DdlLogParser under test
         Map.entry("dev/nexus/service/DdlLogParserTest.java", 28),
+        // input to the twin-key upsert coverage census's scanner under test: the planted-violation fixture's raw ON CONFLICT
+        // statement, scanned for its conflict target and never executed (RDR-229 #7, nexus-p2m1x.20)
+        Map.entry("dev/nexus/service/db/TwinKeyUpsertCoverageCensusTest.java", 1),
         // input to the extension-bootstrap site scanner under test
         Map.entry("dev/nexus/service/ExtensionBootstrapSiteConformanceTest.java", 6),
         // an expected message substring
@@ -169,7 +172,7 @@ class SqlStringLiteralGateTest {
         // an expected substring of the gc function body
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 1));
 
-    private static final int TEXT_TOTAL = 101;
+    private static final int TEXT_TOTAL = 105;
 
     /** JDBC calls that take SQL text, per file, exact. Each entry says what the SQL is. */
     private static final Map<String, Integer> JDBC_ENTRY = Map.ofEntries(

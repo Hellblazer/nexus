@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
@@ -338,6 +339,8 @@ class HybridSearchFunctionParityIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // RDR-229 P3.1: a row naming a collection carries the registry id beside it (the *_collection_id_check CHECKs).
+            Long mainId = CollectionIds.require(ctx, TENANT_A, COL_MAIN);
             for (String id : ids) {
                 boolean tombstoned = id.equals(TOMB_TUMBLER);
                 ctx.insertInto(CATALOG_DOCUMENTS)
@@ -347,6 +350,7 @@ class HybridSearchFunctionParityIntegrationTest {
                     .set(CATALOG_DOCUMENTS.AUTHOR, "ada")
                     .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL_MAIN)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, mainId)
                     .set(CATALOG_DOCUMENTS.DELETED_AT, tombstoned ? DSL.currentOffsetDateTime() : null)
                     .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                     .doNothing()
@@ -354,9 +358,10 @@ class HybridSearchFunctionParityIntegrationTest {
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
                     .values(TENANT_A, id, 0, HexFormat.of().parseHex(corpusChash.get(id)), COL_MAIN,
-                        PgContainerHelper.collectionModel(ctx, TENANT_A, COL_MAIN))
+                        PgContainerHelper.collectionModel(ctx, TENANT_A, COL_MAIN), mainId)
                     .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION)
                     .doNothing()
@@ -415,11 +420,13 @@ class HybridSearchFunctionParityIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            Long collId = CollectionIds.require(ctx, tenant, collection);
             ctx.insertInto(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
                 .set(CATALOG_DOCUMENTS.TUMBLER, docId)
                 .set(CATALOG_DOCUMENTS.TITLE, "Owner")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, collId)
                 .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                 .doNothing()
                 .execute();
@@ -427,9 +434,10 @@ class HybridSearchFunctionParityIntegrationTest {
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
                     .values(tenant, docId, i, HexFormat.of().parseHex(chashes.get(i)), collection,
-                        PgContainerHelper.collectionModel(ctx, tenant, collection))
+                        PgContainerHelper.collectionModel(ctx, tenant, collection), collId)
                     .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION)
                     .doNothing()
@@ -469,11 +477,14 @@ class HybridSearchFunctionParityIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            Long crossAId = CollectionIds.require(ctx, TENANT_CROSS, COL_CROSS_A);
+            Long crossBId = CollectionIds.require(ctx, TENANT_CROSS, COL_CROSS_B);
             ctx.insertInto(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_CROSS)
                 .set(CATALOG_DOCUMENTS.TUMBLER, DOC_CROSS_DEAD)
                 .set(CATALOG_DOCUMENTS.TITLE, "Cross Dead")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL_CROSS_A)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, crossAId)
                 .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
                 .execute();
             ctx.insertInto(CATALOG_DOCUMENTS)
@@ -481,22 +492,25 @@ class HybridSearchFunctionParityIntegrationTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, DOC_CROSS_LIVE)
                 .set(CATALOG_DOCUMENTS.TITLE, "Cross Live")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL_CROSS_B)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, crossBId)
                 .execute();
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
                 .values(TENANT_CROSS, DOC_CROSS_DEAD, 0,
                     HexFormat.of().parseHex(CHASH_CROSS_768), COL_CROSS_A,
-                    PgContainerHelper.collectionModel(ctx, TENANT_CROSS, COL_CROSS_A))
+                    PgContainerHelper.collectionModel(ctx, TENANT_CROSS, COL_CROSS_A), crossAId)
                 .execute();
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
                 .values(TENANT_CROSS, DOC_CROSS_LIVE, 0,
                     HexFormat.of().parseHex(CHASH_CROSS_768), COL_CROSS_B,
-                    PgContainerHelper.collectionModel(ctx, TENANT_CROSS, COL_CROSS_B))
+                    PgContainerHelper.collectionModel(ctx, TENANT_CROSS, COL_CROSS_B), crossBId)
                 .execute();
         }
     }

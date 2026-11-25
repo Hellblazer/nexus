@@ -381,6 +381,35 @@ public final class HttpUtil {
      *       Also {@code POST /v1/catalog/collections/rename} (nexus-ucagi) when the request's optional
      *       {@code embedding_model} (the token the client read off the new name) differs from the source
      *       row's: {@code target_collection} is then the new name and {@code target_model} the token.</li>
+     *   <li>{@code rename_refused} (409): a collection rename (the catalog's, or a per-store {@code rename_collection} route)
+     *       while gate 3 holds and the one-row rename cannot run yet, RDR-229 P3.5a ({@link #RENAME_REFUSED_REASON}). The body
+     *       carries {@code missing}: {@code name_key_drop_move} while the name-key drop move has no {@code completed_at},
+     *       {@code p35b_list_missing} when this build ships no P3.5b changeset list, {@code readiness_unreadable} when what the rename waits for cannot
+     *       be read, {@code p35c_readers_absent} while this engine's readers still select by name,
+     *       else {@code restart} (a P3.5b changeset has not applied), or {@code latch_row_missing} when the readiness says the
+     *       move is complete but the install has no gate 3 latch row (an inconsistency, as after a partial restore; never the
+     *       name path). Nothing was renamed. The collection routes also answer
+     *       404 {@code unknown_collection_id} ({@link #UNKNOWN_COLLECTION_ID_REASON}, naming {@code collection_id}) for an id
+     *       no row has, and 409 {@code collection_superseded} for the id of a retired row (the body also carries {@code collection_id}
+     *       and, when a live row bears the successor's label, {@code successor_collection_id}), and 500
+     *       {@code collection_id_mismatch} ({@link #COLLECTION_ID_MISMATCH_REASON}) for a registry row of another id, all from
+     *       {@code CollectionSelectorFilter}; the delete answers 409
+     *       {@code collection_label_ambiguous} ({@link #COLLECTION_LABEL_AMBIGUOUS_REASON}, listing {@code collection_ids}).</li>
+     *   <li>{@code rename_busy} (503, with {@code Retry-After} and {@code retry_after_seconds}): a catalog rename or a collection
+     *       supersede could not lock its registry row within 10 s because writers still held it ({@link #RENAME_BUSY_REASON},
+     *       RDR-229 P3.5a), or a write that follows a rename gave up after the collection was renamed repeatedly while it waited
+     *       ({@code RenameFollow}). Nothing was changed; retry.</li>
+     *   <li>{@code rename_path_mismatch} (409): a catalog rename reached the one-row regime with no one-row rename to run
+     *       ({@link #RENAME_PATH_MISMATCH_REASON}, RDR-229 P3.5a). Nothing was renamed.</li>
+     *   <li>{@code rename_not_in_registry} (409): a per-store rename in the one-row regime, where it is a no-op because the
+     *       registry rename moved the label, found the registry did not ({@link #RENAME_NOT_IN_REGISTRY_REASON}): the new label
+     *       is not a live row, or the old one still is. Nothing was changed.</li>
+     *   <li>{@code label_reserved} (409): a label a collection was renamed away from, which stays reserved until P4.1 drops the name columns
+     *       ({@link #LABEL_RESERVED_REASON}, RDR-229 P3.7); the body carries {@code label}. Nothing was written.</li>
+     *   <li>{@code restore_origin_unregistered} (409): a restore ({@code restore-rereferenced}, bounded or not, or {@code quarantine-restore}) from
+     *       gate 3 named quarantined chunks tagged with the origin's label whose {@code origin_collection_id} is the JSON null marker, an origin
+     *       that had no registry row when they were quarantined ({@link #RESTORE_ORIGIN_UNREGISTERED_REASON}, RDR-229 P3.7); the body carries
+     *       {@code label} and {@code rows} (how many). The whole call is refused before anything moves; the chunks stay quarantined.</li>
      *   <li>{@code collection_superseded} (409): a chunk write (upsert-chunks, or the combined
      *       write_many / append / append_many) named a collection whose row carries {@code superseded_by}
      *       ({@link #COLLECTION_SUPERSEDED_REASON}, nexus-mp8ys). {@code error} carries the same value; the body
@@ -574,6 +603,109 @@ public final class HttpUtil {
                 + ",\"message\":" + jsonString(collectionSuperseded.getMessage())
                 + ",\"collection\":" + jsonString(collectionSuperseded.collection())
                 + ",\"superseded_by\":" + jsonString(collectionSuperseded.supersededBy())
+                + "}");
+            return true;
+        }
+        // RDR-229 P3.5a: a request that named a collection by collection_id, read by that id inside the handler's transaction
+        // (ExpectedCollectionIds): no row is the typed 404, a retired row the typed 409 naming its successor by
+        // superseded_by_id (the body the route boundary sends for the same id), and a registry row of another id a typed 500.
+        var unknownId = causeOf(e, dev.nexus.service.db.UnknownCollectionIdException.class);
+        if (unknownId != null) {
+            log.warn("event={}_unknown_collection_id {} tenant={} collection_id={}", event, context, unknownId.tenant(),
+                unknownId.collectionId());
+            send(exchange, 404, CollectionSelectorFilter.unknownBody(unknownId.collectionId()));
+            return true;
+        }
+        var retiredId = causeOf(e, dev.nexus.service.db.CollectionRetiredIdException.class);
+        if (retiredId != null) {
+            log.warn("event={}_collection_superseded {} tenant={} collection_id={}", event, context, retiredId.tenant(),
+                retiredId.collectionId());
+            send(exchange, 409, CollectionSupersededBody.of(retiredId.collectionId(), retiredId.label(), retiredId.successor()));
+            return true;
+        }
+        var idMismatch = causeOf(e, dev.nexus.service.db.CollectionIdMismatchException.class);
+        if (idMismatch != null && idMismatch.labelDisagreement()) {
+            // the request sent an id AND a label, and by the time of the write they no longer named one collection: the client's own
+            // statement contradicts itself, a 409 that names both and writes nothing
+            log.warn("event={}_collection_id_mismatch_label {} tenant={} collection_id={} requested_label={} current_label={}", event, context,
+                RequestContext.tenant(), idMismatch.requested(), LogText.escapeControl(idMismatch.requestedLabel()),
+                LogText.escapeControl(idMismatch.currentLabel()));
+            send(exchange, 409, "{\"error\":" + jsonString(idMismatch.getMessage())
+                + ",\"reason\":\"" + COLLECTION_ID_MISMATCH_REASON + "\""
+                + ",\"collection_id\":" + idMismatch.requested()
+                + ",\"requested_label\":" + jsonString(idMismatch.requestedLabel())
+                + ",\"current_label\":" + jsonString(idMismatch.currentLabel()) + "}");
+            return true;
+        }
+        if (idMismatch != null) {
+            log.error("event={}_collection_id_mismatch {} requested={} resolved={}", event, context, idMismatch.requested(),
+                idMismatch.resolved());
+            send(exchange, 500, CollectionSelectorFilter.mismatchBody(idMismatch.requested(), idMismatch.resolved(), idMismatch.getMessage()));
+            return true;
+        }
+        // RDR-229 P3.5a: a rename (the catalog's or one of the per-store rename_collection routes) from gate 3 until the
+        // one-row rename can run. Raised by the shared rename primitive before anything is written; 409 naming the
+        // missing condition, the name-key drop move or the restart that applies P3.5b's changesets.
+        var renameRefused = renameRefused(e);
+        if (renameRefused != null) {
+            log.warn("event={}_rename_refused {} missing={}", event, context, renameRefused.wireValue());
+            send(exchange, 409,
+                "{\"error\":" + jsonString(renameRefused.getMessage())
+                + ",\"reason\":\"" + RENAME_REFUSED_REASON + "\""
+                + ",\"missing\":" + jsonString(renameRefused.wireValue())
+                + "}");
+            return true;
+        }
+        // RDR-229 P3.5a (linda Q3): a rename or supersede could not lock its registry row within its bound; nothing changed. Retryable.
+        if (renameBusy(e) != null) {
+            log.warn("event={}_rename_busy {}", event, context);
+            exchange.getResponseHeaders().set("Retry-After", Long.toString(dev.nexus.service.db.RenameBusyException.RETRY_AFTER_SECONDS));
+            send(exchange, 503,
+                "{\"error\":" + jsonString(renameBusy(e).getMessage())
+                + ",\"reason\":\"" + RENAME_BUSY_REASON + "\""
+                + ",\"retry_after_seconds\":" + dev.nexus.service.db.RenameBusyException.RETRY_AFTER_SECONDS + "}");
+            return true;
+        }
+        // RDR-229 P3.5a (linda Q-A): a per-store rename in the one-row regime whose label pair does not match the registry.
+        if (renameNotInRegistry(e) != null) {
+            log.warn("event={}_rename_not_in_registry {}", event, context);
+            send(exchange, 409,
+                "{\"error\":" + jsonString(renameNotInRegistry(e).getMessage())
+                + ",\"reason\":\"" + RENAME_NOT_IN_REGISTRY_REASON + "\"}");
+            return true;
+        }
+        // RDR-229 P3.5a (linda R-A): a catalog rename reached the one-row regime with no one-row rename to run
+        // (OneRowRename.failClosed, until P3.7 supplies one). Raised in the rename's transaction before any write; 409.
+        var renamePathMismatch = renamePathMismatch(e);
+        if (renamePathMismatch != null) {
+            log.warn("event={}_rename_path_mismatch {}", event, context);
+            send(exchange, 409,
+                "{\"error\":" + jsonString(renamePathMismatch.getMessage())
+                + ",\"reason\":\"" + RENAME_PATH_MISMATCH_REASON + "\"}");
+            return true;
+        }
+        // RDR-229 P3.7 (linda 2026-11-23, addendum 8): a label a collection was renamed away from is reserved until P4.1 drops the name
+        // columns; refused before anything is written, a 409 naming the label.
+        var labelReserved = labelReserved(e);
+        if (labelReserved != null) {
+            log.warn("event={}_label_reserved {} label={}", event, context, labelReserved.label());
+            send(exchange, 409,
+                "{\"error\":" + jsonString(labelReserved.getMessage())
+                + ",\"reason\":\"" + LABEL_RESERVED_REASON + "\""
+                + ",\"label\":" + jsonString(labelReserved.label())
+                + "}");
+            return true;
+        }
+        // RDR-229 P3.7 (linda 2026-11-23): a restore named quarantined chunks whose origin tag is the null marker (the origin had no registry
+        // row when they were quarantined); from gate 3 they are not restorable by id. Refused before anything moves; 409 naming the label.
+        var restoreOrigin = restoreOriginUnregistered(e);
+        if (restoreOrigin != null) {
+            log.warn("event={}_restore_origin_unregistered {} label={} rows={}", event, context, restoreOrigin.label(), restoreOrigin.rows());
+            send(exchange, 409,
+                "{\"error\":" + jsonString(restoreOrigin.getMessage())
+                + ",\"reason\":\"" + RESTORE_ORIGIN_UNREGISTERED_REASON + "\""
+                + ",\"label\":" + jsonString(restoreOrigin.label())
+                + ",\"rows\":" + restoreOrigin.rows()
                 + "}");
             return true;
         }
@@ -828,6 +960,114 @@ public final class HttpUtil {
         for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof dev.nexus.service.db.CollectionSupersededException s) {
                 return s;
+            }
+        }
+        return null;
+    }
+
+    /** The first {@code type} in {@code t}'s cause chain, or null. */
+    private static <T extends Throwable> T causeOf(Throwable t, Class<T> type) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (type.isInstance(c)) {
+                return type.cast(c);
+            }
+        }
+        return null;
+    }
+
+    /** {@code reason} of the 404 for a {@code collection_id} no row of the tenant has (RDR-229 P3.5a). Wire contract. */
+    static final String UNKNOWN_COLLECTION_ID_REASON = "unknown_collection_id";
+
+    /**
+     * {@code reason} of the 500 for a registry row that is not the row of the {@code collection_id} asked for (RDR-229 P3.5a):
+     * a registry inconsistency, an engine defect and never a caller mistake. Wire contract. It is also the {@code reason} of the 409 for a
+     * request that sent both an id and a label which no longer name one collection (the 409 body names {@code requested_label} and
+     * {@code current_label}; a request by id alone follows a rename and is never refused for its label).
+     */
+    static final String COLLECTION_ID_MISMATCH_REASON = "collection_id_mismatch";
+
+    /** {@code reason} of the 409 for a rename refused from gate 3 until the one-row rename can run (RDR-229 P3.5a). Wire contract. */
+    static final String RENAME_REFUSED_REASON = "rename_refused";
+
+    /** {@code reason} of the 409 for a delete by a label that more than one live row holds (RDR-229 P3.5a). Wire contract. */
+    static final String COLLECTION_LABEL_AMBIGUOUS_REASON = "collection_label_ambiguous";
+
+    /**
+     * {@code reason} on the 409 for a collection delete refused while a re-embed job in a non-terminal state holds the collection as its source
+     * or target (RDR-229 P3.5a row 14); the body also carries {@code collection} and {@code job_id}. Nothing was removed. Wire contract.
+     */
+    static final String COLLECTION_BUSY_REASON = "collection_busy";
+
+    /** {@code reason} on the 409 for a rename that reached the one-row regime with no one-row rename to run. Wire contract. */
+    static final String RENAME_PATH_MISMATCH_REASON = "rename_path_mismatch";
+
+    /** {@code reason} on the 503 for a rename or supersede that could not lock its registry row within its bound. Wire contract. */
+    static final String RENAME_BUSY_REASON = "rename_busy";
+
+    /** The {@link dev.nexus.service.db.RenameBusyException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.RenameBusyException renameBusy(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.RenameBusyException r) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    /** {@code reason} on the 409 for a per-store rename whose label pair does not match the registry in the one-row regime. Wire contract. */
+    static final String RENAME_NOT_IN_REGISTRY_REASON = "rename_not_in_registry";
+
+    /** The {@link dev.nexus.service.db.RenameNotInRegistryException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.RenameNotInRegistryException renameNotInRegistry(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.RenameNotInRegistryException r) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    /** The {@link dev.nexus.service.db.RenamePathMismatchException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.RenamePathMismatchException renamePathMismatch(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.RenamePathMismatchException r) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    /** {@code reason} of the 409 for a restore whose named chunks carry the null origin marker (RDR-229 P3.7). Wire contract. */
+    static final String RESTORE_ORIGIN_UNREGISTERED_REASON = "restore_origin_unregistered";
+
+    /** The {@link dev.nexus.service.db.RestoreOriginUnregisteredException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.RestoreOriginUnregisteredException restoreOriginUnregistered(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.RestoreOriginUnregisteredException r) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    /** {@code reason} of the 409 for a label that is reserved until P4.1 (RDR-229 P3.7). Wire contract. */
+    static final String LABEL_RESERVED_REASON = "label_reserved";
+
+    /** The {@link dev.nexus.service.db.LabelReservedException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.LabelReservedException labelReserved(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.LabelReservedException r) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    /** The {@link dev.nexus.service.db.RenameRefusedException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.RenameRefusedException renameRefused(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.RenameRefusedException r) {
+                return r;
             }
         }
         return null;

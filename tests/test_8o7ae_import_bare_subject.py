@@ -19,7 +19,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.aspect_readers import uri_for
-from nexus.catalog.factory import make_catalog_writer
+from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.cli import main
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
@@ -30,7 +30,13 @@ pytestmark = pytest.mark.integration
 
 
 def test_import_into_bare_subject_lands_where_other_verbs_read(t2_service_env, tmp_path):
-    client = HttpVectorClient(tenant=t2_service_env)
+    # RDR-229 P3.8: a new subject lands in a minted label (c<id>), which only its registry row ties to the
+    # subject. The import gate and every read by subject find that row through the process client, as the CLI
+    # does; a client built under the minted tenant's own name answers no row (nexus-fryrd). The engine binds the
+    # tenant to the bearer, so the process client is this test's tenant.
+    from nexus.db.http_vector_client import get_http_vector_client
+
+    client = get_http_vector_client()
     writer = make_catalog_writer()
     owner = writer.register_owner("knowledge", "curator")
 
@@ -38,12 +44,17 @@ def test_import_into_bare_subject_lands_where_other_verbs_read(t2_service_env, t
     # this install, so the model gate passes only if -c is resolved.
     subject = "o7ae-imported"
     resolved = t3_collection_name(subject, t3=client, for_write=True)
-    model_token = resolved.split("__")[2]
+    # RDR-229 P3.8: the subject resolves to a label the engine minted (``c<id>``); the model is its registry row's.
+    model_token = make_catalog_reader().get_collection(resolved)["embedding_model"]
     src = f"knowledge__o7ae-src__{model_token}__v1"
 
     title, body = "o7ae note", "o7ae note body for the bare subject import"
     source_uri = uri_for(src, title)
     assert source_uri is not None
+    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422).
+    from tests._catalog_fixture_ops import register_seed_collections
+
+    register_seed_collections(src)
     tumbler = str(writer.register(
         owner=owner, title=title, content_type="knowledge",
         physical_collection=src, source_uri=source_uri,

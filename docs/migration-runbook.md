@@ -1,7 +1,8 @@
 # Upgrading nexus
 
-`nx upgrade` is the upgrade. There is no order of operations to hold, no
-window to schedule, and nothing to drive by hand.
+`nx upgrade` is the upgrade. There is no order of operations to hold and no
+window to schedule. One release asks for a patient wait and, on a managed or
+self-run engine, one restart: [8.5.5 to 8.5.6](#upgrading-from-855-to-856-rdr-229-collection-ids).
 
 This file used to be the operator's manual for the one-time SQLite/Chroma to
 Postgres migration (RDR-152/153/155). That migration cannot be performed by
@@ -28,6 +29,7 @@ It converges a set of PRECONDITIONS and then walks the data ladder.
 | `package` | the installed `conexus` distribution |
 | `engine` | the engine binary to `REQUIRED_ENGINE_VERSION` |
 | `provisioning` | the PG roles, schema, and grants the service needs |
+| `pg-bundle` | a local install's extracted PostgreSQL bundle, replaced when it lacks `pg_background` (so data moves are not blocked) |
 | `process` | the running service, restarted onto the new binary |
 | `plugin-lockstep` | the Claude Code plugin against the installed package |
 | `plan-library` | the builtin plan templates, reconciled against disk |
@@ -223,7 +225,7 @@ without a gate and nineteen walked the cloud catalog at once).
 - **One at a time per config dir.** An unattended `nx upgrade` takes an OS lock on
   `<config dir>/upgrade-auto.lock` before anything else runs (before the finish pass
   and before any rung's `detect()`). A second `--auto` exits 0 at once and silently; a
-  plain unattended `nx upgrade` (the lockstep child) waits up to 10 minutes and then exits
+  plain unattended `nx upgrade` (the lockstep child) waits up to 20 minutes and then exits
   75, so its starter retries it next session. The hook checks the same lock before it
   forks. A holder that dies frees the lock, so a stale pid in the file blocks nothing. An
   interactive `nx upgrade` takes no lock and is not blocked by one.
@@ -467,6 +469,16 @@ retire-keys` has the verb). Four things an operator running it should know:
 `nx t3 quarantine restore` brings back chunks the engine reaper moved to a `quarantine-` collection, by chash, `gc_audit` id or date window, and with `--reattach` (the default) makes them visible again when their own metadata names a live document.
 The whole procedure, including what to do about a chunk that comes back hidden (a file collection's chunks need the file re-indexed, not a re-put), is [Getting a chunk back](operations/engine-reaper.md#getting-a-chunk-back) in the reaper runbook.
 The flags and exit codes are in the [CLI reference](cli-reference.md#nx-t3-quarantine-restore).
+
+## Upgrading from 8.5.5 to 8.5.6: RDR-229 collection ids
+
+Client 8.5.6 pairs with engine-service 0.1.203. RDR-229 gives every collection a stable `collection_id` and every table that names a collection a second column for it; the upgrade itself is the usual `nx self install`, then `nx upgrade` (never `uv tool upgrade conexus`, which takes the `nx` shims back on a generation install). What differs is what happens after the engine boots, and none of it needs you to drive it:
+
+1. **Stamp moves.** The engine registers one background data move per table (`rdr229-stamp-<table>`, sixteen at most) that fills the new id column in batches and resumes from the last committed batch after a restart. The upgrade boot registers them and writes no row. They need the `pg_background` extension, which is why a local install's `nx upgrade` also replaces an old PostgreSQL bundle (`pg-bundle`). The chunks move is the long one: about 38 hours on a production-size store at its throttle. Leave `NX_DATA_MOVE_SLEEP_MS` unset, since it overrides every move's pause. Search, store and indexing keep working while they run. Watch them in `nx doctor` (the `Data move` rows, "Collection ids", and the "RDR-229 completion" row, which reports `N of 3 gates hold`; see [Doctor rows](cli-reference.md#doctor-rows)). A move that keeps failing turns its row red as "needs an operator" and names the step; a move blocked only for want of `pg_background` is a warning until its retry cap.
+2. **One engine restart.** When every stamp move is complete (gate 1) and the engine still has changesets to apply, `/v1/status` `boot_work` lists `rdr229-restart`, "restart the engine once". The notice can appear before the latch below. Nothing is lost by waiting, and the restart is the step that applies them. On a local install `nx daemon service stop` then `nx daemon service start` does it. On a managed or cloud engine the operator restarts it. A client before 8.5.6 counts that entry as work in `nx upgrade`'s idle check and defers the bundle swap, which is itself the restart that clears it; client 8.5.6 does not count it. The restart matters for renames only once the latch has been written (next step).
+3. **The latch, and renames.** Once the id indexes are valid, gate 3 latches and the engine's readers select by id. Until it latches, `nx collection rename` and `nx catalog rename-collection` run as before (the name path, which rewrites the tables and gives the collection a new id) and are not refused, and the doctor row "RDR-229 collection rename" does not show. From the latch, a rename is refused with 409 `rename_refused` and nothing written: first with `missing=name_key_drop_move`, until the `rdr229-name-key-drop` move (registered when the latch is written) has finished, then with `missing=restart`, until the engine has been restarted once. Only after both does the one-row rename run: it rewrites one registry row and keeps the collection's id, and the label a collection was renamed away from stays reserved (409 `label_reserved`) until a later release. Everything other than renames is unaffected throughout.
+
+A cloud engine that was rolled back after the id columns went in cannot simply be re-tagged forward: follow [rdr-229-p31-rollback.md](runbooks/rdr-229-p31-rollback.md) for the down-step and the re-add.
 
 ## Verifying
 
@@ -850,10 +862,9 @@ reads back, then remove it by hand.
 ## If the RDR-231 note-URI backfill halts startup
 
 **Upgrade the client first.** The `nx daemon service note-uri-pairs` verb that the
-local steps below use ships in the first client release after 7.97.0 (it is in
-CHANGELOG's `[Unreleased]` section until that release is cut). Client releases
+local steps below use shipped in client 7.98.0. Client releases
 7.88.0 through 7.97.0 carry the backfill without it. A halted engine does not
-block `uv tool upgrade conexus`, so upgrade the client before step 1. If you
+block `nx self install`, so upgrade the client that way before step 1. If you
 cannot, step 1 has a short POSIX fallback for an older client; there is none for
 Windows.
 
@@ -1050,7 +1061,7 @@ nx daemon service start                                  # the backfill passes; 
 ```
 
 **How the halt first shows up.** On a local install you usually meet it in the
-output of the upgrade itself. The first `nx` command after `uv tool upgrade` runs
+output of the upgrade itself. The first `nx` command after `nx self install` runs
 the upgrade-finish pass, which installs the pinned engine and starts it; a halted
 engine never answers. What `nx daemon service start` prints in that case
 (the lines are a rehearsal's; the first is stderr noise from a box with no

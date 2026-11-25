@@ -89,6 +89,7 @@ timeout could fire on its own.
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import hashlib
 import json
@@ -96,7 +97,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -175,6 +176,18 @@ _HEADER_TOKEN_RE: re.Pattern[str] = re.compile(r"[\x21-\x7e]+")
 _drop_session_header: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "nexus_tuple_drop_session_header", default=False,
 )
+
+
+@contextlib.contextmanager
+def without_session_header() -> Iterator[None]:
+    """Send every tuple request made inside the block without the session header, so the engine stamps no sender session:
+    the same flag the single headerless retry sets. For a caller that wants an UNSTAMPED write on purpose (``nx ci
+    record-push``'s fallback record, RDR-252)."""
+    reset = _drop_session_header.set(True)
+    try:
+        yield
+    finally:
+        _drop_session_header.reset(reset)
 
 
 #: How long a rejected session token stays unsent (nexus-z1xox). After it, the
@@ -758,14 +771,50 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         headers = super()._auth_headers()
         if _drop_session_header.get():
             return headers
-        token = os.environ.get(_SESSION_ENV, "").strip()
-        if (
-            token
-            and _HEADER_TOKEN_RE.fullmatch(token)
-            and _token_hash(token) != self._current_rejected_hash()
-        ):
+        token = self._session_token()
+        if token:
             headers[_HEADER_T1_SESSION] = token
         return headers
+
+    def _session_token(self) -> str:
+        """The ``NX_T1_SESSION`` token a request would send now: set, printable ASCII without whitespace, and not the token the
+        engine last rejected; "" otherwise."""
+        token = os.environ.get(_SESSION_ENV, "").strip()
+        if token and _HEADER_TOKEN_RE.fullmatch(token) and _token_hash(token) != self._current_rejected_hash():
+            return token
+        return ""
+
+    #: How many requests this store resent without the session header after a 401 (see :meth:`_request_once`). A caller that
+    #: writes a row it wants stamped compares it before and after the write to learn whether the stamp was lost on the way.
+    headerless_retries: int = 0
+
+    @property
+    def identity_dropped_resends(self) -> int:
+        """How many sends this process resent without their RDR-253 identity token after a 401 (``token_header``'s resend,
+        process-wide, not per store). Read before and after a write, like :attr:`headerless_retries`."""
+        from nexus.identity import token_header  # noqa: PLC0415 -- deferred: leaf import cost
+
+        return token_header.dropped_resends()
+
+    def session_stamps(self) -> bool:
+        """Whether a write made now would carry a usable ``NX_T1_SESSION`` token as the session header."""
+        return bool(self._session_token())
+
+    def would_stamp(self) -> bool:
+        """Whether a write made now carries something the engine stamps a sender session from: a usable ``NX_T1_SESSION``
+        token, or the RDR-253 identity token. A hint from what the client would send; the write's response does not say what
+        the engine stamped."""
+        return self.session_stamps() or self.identity_stamps()
+
+    def identity_stamps(self) -> bool:
+        """Whether an RDR-253 identity token rides this process's requests (so a write is stamped with that identity's session
+        even when the session header is dropped)."""
+        from nexus.identity import token_header  # noqa: PLC0415 -- deferred: leaf import cost
+
+        try:
+            return bool(token_header.identity_headers())
+        except Exception:  # noqa: BLE001 -- a hint about the stamp never fails a caller
+            return False
 
     def _rejected_memo_key(self) -> tuple[str, str]:
         """The memo's scope: this store's endpoint and a hash of its data token."""
@@ -800,6 +849,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 result = super()._request_once(method, path, **kwargs)
             finally:
                 _drop_session_header.reset(reset)
+            self.headerless_retries += 1
             # The retry proves the session token was the culprit only if it went
             # out under the same data token as the failed request: a concurrent
             # re-mint between the two would make a live session token look

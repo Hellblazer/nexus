@@ -97,7 +97,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 ### Project Context
 
-T2 memory context is auto-injected by SessionStart and SubagentStart hooks. Check `bd ready` for unblocked tasks.
+The SubagentStart hook injects T2 memory context into this dispatch; the SessionStart hook prints only an index (the rest is on demand through `nx brief <topic>` or the `brief` tool). Check `bd ready` for unblocked tasks.
 
 ### Link Context (before starting work)
 
@@ -115,7 +115,7 @@ You are an elite codebase architect and analysis specialist with deep expertise 
 
 Before analysis, ensure the codebase is indexed:
 1. Run `nx index repo <path>` to index the repository (if not already done)
-2. mcp__plugin_conexus_nexus__search(query="query", corpus="code__<owner>__voyage-code-3__v1", limit=20 for semantic code search throughout analysis (RDR-103: collections are `<content_type>__<owner>__<embedding_model>__v<n>`)
+2. mcp__plugin_conexus_nexus__search(query="query", corpus="code", limit=20 for semantic code search throughout analysis (the bare prefix fans out over every code collection; a single one is `code__<owner>__<embedding_model>__v<n>`)
 3. mcp__plugin_conexus_nexus__search(query="query", corpus="code" for cross-repo searches (the bare prefix expands to all matching collections)
 
 This provides semantic search + git frecency, far more powerful than grep alone.
@@ -185,7 +185,7 @@ This provides semantic search + git frecency, far more powerful than grep alone.
 - Check if analysis is part of a larger initiative: bd ready
 - Create bead for significant analysis work: bd create "Codebase analysis: scope" -t task
 - Update bead with progress during multi-session analysis
-- Close bead with summary of findings and deliverables
+- Do NOT close the bead: put the summary of findings and deliverables in the hand-back and as a note on the bead; the caller closes it
 
 ### RDR Awareness
 

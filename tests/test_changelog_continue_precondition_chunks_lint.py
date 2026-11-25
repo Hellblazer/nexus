@@ -13,6 +13,13 @@ was told to keep. This lint is the other half of that exemption.
 
 Scanned: the preconditions and the body. Not scanned: ``<comment>`` (prose) and ``<rollback>`` (never runs at boot).
 
+ONE EXEMPTION (RDR-229 P3.3c, nexus-p2m1x.21). ``CREATE INDEX CONCURRENTLY [IF NOT EXISTS] <name> ON <table with a foreign key into
+nexus.chunks> (...)`` is not a violation of the foreign-key-table name rule, and only of that rule. The rule exists because a DROP or
+ALTER of such a table takes ACCESS EXCLUSIVE on every chunk leaf (the foreign-key triggers go with it); CREATE INDEX CONCURRENTLY takes
+SHARE UPDATE EXCLUSIVE on the one table it indexes and nothing on nexus.chunks or a leaf, and a CREATE INDEX CONCURRENTLY on a leaf
+holds no lock on that table. The statement shape is matched exactly (``_EXEMPT_INDEX_BUILD``); any other mention of the table, in the
+same changeset or in the statement's own columns, and the same statement on nexus.chunks itself, still fail.
+
 THREE GUARDS, none of them a snapshot of today's corpus:
 
 1. NAMES. The executable text is normalised (double quotes dropped, whitespace around dots collapsed, lowercased)
@@ -61,7 +68,85 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # DROP TABLE nexus.aspect_extraction_queue (AEL on it and, for its two FKs, on catalog_documents and
     # catalog_collections) and DROP FUNCTION of its counting helper: no chunk table, leaf or builder object.
     ("aspects-005-retire-aspect-queue-table.xml", "aspects-005-2"): "aspect queue retirement",
+    # ADD COLUMN and a NOT VALID CHECK on nexus.aspect_extraction_queue (AEL on that table only), inside a DO block
+    # that does nothing when the table is absent; skipped while the migration role does not own a kept table. The
+    # body names no chunk table, leaf or builder object (RDR-229 P3.1, residual R3).
+    ("vectors-068-collection-id-expand.xml", "vectors-068-18"): "aspect queue id column",
+    # A NOT VALID CHECK on nexus.catalog_collections (AEL on that one table), skipped while a tombstone with a blank
+    # model_version and no superseded_by_id exists, so D2's repair UPDATE cannot meet it (RDR-229 P3.1, item e). The
+    # precondition is a read of catalog_collections; the body names no chunk table, leaf or builder object.
+    ("vectors-068-collection-id-expand.xml", "vectors-068-19"): "superseded_by CHECK waits on D2 data",
+    # One INSERT into nexus.data_moves (ROW EXCLUSIVE on that registry table only), inside a DO block that does nothing
+    # when nexus.aspect_extraction_queue is absent; the precondition and the block read pg_class and pg_attribute for the
+    # queue and take no lock on it. The body names no chunk table, leaf or builder object (RDR-229 P3.1, residual R3).
+    ("vectors-070-collection-id-stamp-moves.xml", "vectors-070-30"): "aspect queue stamp move registration",
+    # SET LOCAL lock_timeout = '5s', then DROP POLICY IF EXISTS and CREATE POLICY on nexus.aspect_extraction_queue only
+    # (ACCESS EXCLUSIVE on that one table, bounded by the 5 s lock_timeout), inside a DO block that does nothing when the
+    # table is absent; the rest is reads of pg_roles, pg_policy and pg_class. The body names no chunk table, leaf or
+    # builder object (RDR-229 P3.1, residual R3).
+    ("vectors-070-collection-id-stamp-moves.xml", "vectors-070-31"): "aspect queue owner-read policy",
+    # SET LOCAL lock_timeout = '5s', then ALTER TABLE nexus.aspect_extraction_queue ADD CONSTRAINT ... FOREIGN KEY ... NOT VALID
+    # (SHARE ROW EXCLUSIVE on that table and on nexus.catalog_collections for an instant, bounded by the 5 s lock_timeout),
+    # inside a DO block that does nothing when the table is absent or has no collection_id column; the CONTINUE
+    # precondition is a read of pg_class and pg_attribute. The body names no chunk table, leaf or builder object, and
+    # the registry is not a chunk-family table, so the lock cannot wait behind or hold up a builder (RDR-229 P3.3a, residual R3).
+    ("vectors-072-collection-id-fk-twins.xml", "vectors-072-7"): "aspect queue id twin foreign key",
+    # One INSERT into nexus.data_moves (ROW EXCLUSIVE on that registry table only), inside a DO block that does nothing
+    # when nexus.aspect_extraction_queue or its twin is absent; the precondition and the block read pg_class and
+    # pg_constraint and take no lock on the queue. The body names no chunk table, leaf or builder object (RDR-229 P3.3a, residual R3).
+    ("vectors-072-collection-id-fk-twins.xml", "vectors-072-17"): "aspect queue twin validation move registration",
+    # CREATE UNIQUE INDEX on nexus.catalog_collections (SHARE on it for one build of a registry of hundreds of rows) and,
+    # in its guard, the counter's ALTER TABLE on that table (ACCESS EXCLUSIVE for one count) plus a read of
+    # nexus.data_moves. No chunk table, leaf or builder object is named, and a CREATE INDEX CONCURRENTLY on a leaf holds
+    # no lock on the registry, so the build cannot be what either statement waits behind.
+    ("collections-001-tuple-unique-index.xml", "collections-001-2"): "gated live-tuple unique index (RDR-229 P3.8)",
+    # CREATE UNIQUE INDEX on nexus.catalog_collections (tenant_id, name) under SET LOCAL lock_timeout = '5s' (SHARE on
+    # that one table for one build of a registry of hundreds of rows), failOnError="false" so a build that cannot get
+    # its lock is retried at the next boot; the guard reads pg_class through to_regclass and takes no lock. No chunk
+    # table, leaf or builder object is named, and a CREATE INDEX CONCURRENTLY on a leaf holds no lock on the registry.
+    ("catalog-053-live-label-unique.xml", "catalog-053-1"): "live-label unique index (RDR-229 P3.6)",
+    # SET lock_timeout = '30s', DROP INDEX CONCURRENTLY IF EXISTS and CREATE INDEX CONCURRENTLY IF NOT EXISTS on nexus.chunk_orphaned_at
+    # (tenant_id, chash): SHARE UPDATE EXCLUSIVE on that one table, which holds a foreign key into nexus.chunks but is not locked by a
+    # chunk leaf's build, and nothing on nexus.chunks or a leaf; the wait for older transactions ends at the 30 s lock_timeout and the
+    # changeset is skipped (failOnError false), not failed. The one table name in the body is the exempt statement shape
+    # (_EXEMPT_INDEX_BUILD). No chunk table, leaf, partition helper or builder object is named (RDR-229 P3.3c, nexus-p2m1x.21).
+    ("vectors-075-chunk-orphaned-at-chash-index.xml", "vectors-075-1"): "child index of the chunk id key",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.catalog_documents and nexus.catalog_collections, which no CREATE INDEX CONCURRENTLY on a chunk leaf conflicts with; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-1"): "owner derivation by id",
+    # CREATE OR REPLACE FUNCTION of a plpgsql trigger function takes no table lock and its body is not analysed at CREATE; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-2"): "owner trigger function (registry) by id",
+    # CREATE OR REPLACE FUNCTION of a plpgsql trigger function takes no table lock and its body is not analysed at CREATE; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-3"): "owner trigger function (documents) by id",
+    # SET LOCAL lock_timeout = '5s', then DROP TRIGGER (ACCESS EXCLUSIVE) and CREATE TRIGGER (SHARE ROW EXCLUSIVE) on nexus.catalog_documents only, failOnError="false" so a lock it cannot get skips the changeset unrecorded; catalog_documents is not a chunk table and a CREATE INDEX CONCURRENTLY on a chunk leaf holds no lock on it; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-4"): "owner trigger on the document id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-7"): "live-tuple duplicate counter by id",
+    # CREATE OR REPLACE FUNCTION of a plpgsql function takes no table lock and its body is not analysed at CREATE; the table it writes is nexus.canary_query_ring (no foreign key into nexus.chunks); the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-8"): "canary ring upsert by id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.taxonomy_centroids and nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-9"): "taxonomy_ann_query_384 by id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.taxonomy_centroids and nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-10"): "taxonomy_ann_query_768 by id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.taxonomy_centroids and nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-11"): "taxonomy_ann_query_1024 by id",
+    # CREATE OR REPLACE VIEW takes ACCESS EXCLUSIVE on that one view and ACCESS SHARE on nexus.catalog_documents and nexus.catalog_collections for the parse; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-13"): "collection_doc_counts by id",
+    # CREATE OR REPLACE VIEW takes ACCESS EXCLUSIVE on that one view and ACCESS SHARE on nexus.catalog_documents, nexus.catalog_links and nexus.catalog_collections for the parse; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-14"): "collection_health_meta by id",
+    # CREATE OR REPLACE VIEW takes ACCESS EXCLUSIVE on that one view and ACCESS SHARE on nexus.topics and nexus.catalog_collections for the parse; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-15"): "topics_with_counts by id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.taxonomy_centroids and nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24/.25, the by-id overload).
+    ("vectors-084-rdr229-ann-query-by-id.xml", "vectors-084-1"): "taxonomy_ann_query_384 by collection id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.taxonomy_centroids and nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24/.25, the by-id overload).
+    ("vectors-084-rdr229-ann-query-by-id.xml", "vectors-084-2"): "taxonomy_ann_query_768 by collection id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.taxonomy_centroids and nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24/.25, the by-id overload).
+    ("vectors-084-rdr229-ann-query-by-id.xml", "vectors-084-3"): "taxonomy_ann_query_1024 by collection id",
 }
+
+# The one statement shape exempt from the foreign-key-table rule (see the module docstring), matched on the NORMALISED text.
+_EXEMPT_INDEX_BUILD = re.compile(
+    r"create\s+index\s+concurrently\s+(?:if\s+not\s+exists\s+)?\w+\s+on\s+(?:nexus\.)?(?:" + "|".join(_FK_TABLES) + r")\s*\([\w\s,]*\)"
+)
 
 # Elements the lint cannot read into: what they run is not in the changelog text.
 _OPAQUE = ("sqlFile", "customChange", "executeCommand")
@@ -120,8 +205,13 @@ def _violations(cs: ET.Element) -> list[str]:
         )
         out += [f"{cid}: onFail=CONTINUE changeset uses <{tag}>, which this lint cannot read into" for tag in opaque]
         text = _normalise(_executable_text(cs))
+        fk_label = "table with a foreign key into nexus.chunks"
+        # The exempt statement is removed for the foreign-key-table rule ONLY; every other rule reads the whole text.
+        text_without_exempt = _EXEMPT_INDEX_BUILD.sub("create index concurrently <exempt>", text)
         out += [
-            f"{cid}: onFail=CONTINUE body names {label}" for label, pat in _FORBIDDEN.items() if pat.search(text)
+            f"{cid}: onFail=CONTINUE body names {label}"
+            for label, pat in _FORBIDDEN.items()
+            if pat.search(text_without_exempt if label == fk_label else text)
         ]
     elif _can_stay_unrecorded(cs):
         # Unrecorded when it skips or fails, yet RetryingChangesets does not see it, so it would end every build.
@@ -350,3 +440,29 @@ def test_a_changeset_that_can_stay_unrecorded_must_say_on_fail_continue() -> Non
     assert _violations(ok) == []
     # An ordinary changeset is none of these.
     assert _violations(_cs('<changeSet id="h" author="t"><sql>SELECT 1</sql></changeSet>')) == []
+
+
+def test_a_concurrent_index_build_on_a_foreign_key_table_is_the_one_exempt_shape() -> None:
+    """P3.3c's exemption: CREATE INDEX CONCURRENTLY on a table with a foreign key into chunks passes the foreign-key-table rule."""
+    for body in (
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_x ON nexus.chunk_orphaned_at (tenant_id, chash)",
+        "create index concurrently idx_x on chunk_orphaned_at(tenant_id, chash)",
+        'CREATE INDEX CONCURRENTLY idx_x ON "nexus"."topic_assignments" (tenant_id, doc_id)',
+    ):
+        assert _violations(_continue_cs(body)) == [], body
+
+
+def test_the_exemption_is_only_that_statement_shape_on_a_foreign_key_table() -> None:
+    """Falsification: the same table under any other statement, the same shape on chunks itself, and extra mentions all still fail."""
+    fk = "table with a foreign key into nexus.chunks"
+    for body in (
+        "ALTER TABLE nexus.chunk_orphaned_at ADD COLUMN x int",
+        "DROP TABLE nexus.catalog_document_chunks",
+        "CREATE INDEX idx_x ON nexus.chunk_orphaned_at (tenant_id, chash)",   # not CONCURRENTLY: a SHARE lock on the table
+        "CREATE INDEX CONCURRENTLY idx_x ON nexus.chunk_orphaned_at (tenant_id, chash); ALTER TABLE nexus.chunk_orphaned_at DROP COLUMN y",
+        "CREATE INDEX CONCURRENTLY idx_x ON nexus.chunk_orphaned_at (tenant_id, chash) WHERE chash IN (SELECT chash FROM nexus.topic_assignments)",
+    ):
+        assert any(fk in v for v in _violations(_continue_cs(body))), body
+    # on nexus.chunks itself the exemption does not apply: that is the chunks rule
+    assert any("nexus.chunks" in v for v in _violations(_continue_cs("CREATE INDEX CONCURRENTLY idx_x ON nexus.chunks (id)")))
+    assert any("chunk leaf" in v for v in _violations(_continue_cs("CREATE INDEX CONCURRENTLY idx_x ON nexus.chunks_m1024_t1 (id)")))

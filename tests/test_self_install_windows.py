@@ -22,6 +22,7 @@ import click
 import pytest
 
 from nexus import install_layout
+from nexus._install import gc_core
 from nexus._install import generation_core as gen_core
 from nexus.commands import self_cmd
 from tests._module_seam import setattr_in
@@ -95,6 +96,9 @@ def win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # test_self_install_target_installer.py (nexus-2k66t.4.3).
     monkeypatch.setenv("NX_INSTALL_RUNNING_INSTALLER", "1")
     monkeypatch.setattr(self_cmd, "_is_windows", lambda platform=None: True)
+    # The Windows process table cannot be read off Windows, and an empty one is a failed census that
+    # reaps nothing: give the reap a table that names no generation.
+    monkeypatch.setattr(gc_core._census(), "ps_snapshot", lambda **_k: f"{os.getpid()} python gc_core.py\n999 C:/Windows/notepad.exe\n")
     setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s, **_kw: s)
     monkeypatch.setattr(
         gen_core.LinkOps, "create",

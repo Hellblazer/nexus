@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import shlex
 import fnmatch
 import re
 import sys
@@ -9,6 +10,7 @@ from typing import Any
 import click
 import structlog
 
+from nexus.collection_errors import LabelReservedError, label_reserved_error_from_body
 from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.commands.store import _t3
 from nexus.config import DEFAULT_EXTRACTOR
@@ -87,6 +89,7 @@ def collection() -> None:
 
 
 _LIST_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("ID", "collection_id"),  # RDR-229 P3.12 (nexus-p2m1x.32): the registry's identity; None (not yet stamped) prints "-"
     ("CONTENT_TYPE", "content_type"),
     ("OWNER", "owner_id"),
     ("MODEL", "embedding_model"),
@@ -99,6 +102,7 @@ def _catalog_collection_rows() -> tuple[dict[str, dict], str]:
     """The catalog's collection rows keyed by name, and an error text
     ("" on success). The rows are the columns of record (RDR-204); the
     vectors stats join carries four of the five but not ``dimension``."""
+    # Keyed by name until P4.1 moves the registry's key to the id; then this rekeys by id (nexus-p2m1x.35).
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -113,11 +117,14 @@ def _catalog_collection_rows() -> tuple[dict[str, dict], str]:
 @collection.command("list")
 @click.option(
     "--all", "show_all", is_flag=True,
-    help="Also list retired names (a rename's old name) that hold no chunks.",
+    help="Also list retired collections that hold no chunks: a source a re-embed job superseded (and, on an engine "
+         "older than 0.1.202, a rename's old name).",
 )
 def list_cmd(show_all: bool) -> None:
     """List T3 collections: live and stored chunk counts, and the catalog's
-    columns (content type, owner, embedding model, dimension, lifecycle state).
+    columns (ID, content type, owner, embedding model, dimension, lifecycle
+    state). ID is the registry's ``collection_id`` (RDR-229 P3.12), ``-`` on a
+    row no stamp has given one yet.
 
     RDR-204 Day 2 (nexus-ft04v.32): every column is read from the
     collection's catalog row, never derived from its name, so a row whose
@@ -125,10 +132,13 @@ def list_cmd(show_all: bool) -> None:
     consistent-looking name. A collection with no catalog row prints ``-``
     in every column; a catalog row with no chunks prints 0.
 
-    nexus-sis0m.3: a rename keeps the old name's catalog row as a retired
-    tombstone (superseded_by names the new one). An empty tombstone is not a
-    collection and is left out unless ``--all``; one still holding chunks is
-    listed, with STATE ``superseded-><new name>``.
+    nexus-sis0m.3: a collection retired by a re-embed job keeps its catalog
+    row as a tombstone (superseded_by names the successor). An empty tombstone
+    is not a collection and is left out unless ``--all``; one still holding
+    chunks is listed, with STATE ``superseded-><successor>``. A rename on
+    engine 0.1.202 or later rewrites the collection's one registry row in
+    place and keeps its id, so the old name leaves no row; only an older
+    engine leaves a tombstone for a rename's old name.
     """
     # nexus-sis0m.1: strict, so a service error is reported rather than read
     # as "No collections found." at exit 0.
@@ -271,14 +281,17 @@ def info_cmd(name: str) -> None:
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
-        # nexus-sis0m.3: a renamed collection's old name keeps a retired
-        # catalog row naming its successor; say where it went.
+        # nexus-sis0m.3: a collection retired by a re-entry job, or renamed on an engine older than 0.1.202, keeps
+        # a retired catalog row naming its successor; say where it went. A one-row rename leaves no row.
         successor = str(_catalog_collection_rows()[0].get(name, {}).get("superseded_by") or "")
         if successor:
             raise click.ClickException(
-                f"collection {name!r} was renamed to {successor} — use: nx collection info {successor}"
+                f"collection {name!r} was renamed to {successor} — use: nx collection info {shlex.quote(successor)}"
             )
-        raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
+        raise click.ClickException(
+            f"collection not found: {name!r} — use: nx collection list "
+            "(a collection renamed on engine 0.1.202 or later leaves no row under its old name)"
+        )
 
     # nexus-sis0m F8: the collection's own catalog row names its model. The
     # local branch used to print the local embedder's name (MiniLM) for
@@ -548,6 +561,32 @@ def _aspects_from_config(*, dry_run: bool, yes: bool = False) -> None:
     )
 
 
+def _collection_busy_message(busy: dict[str, str], retry: str) -> str:
+    """What to tell a person whose delete the engine refused with 409 ``collection_busy`` (engine 0.1.202).
+
+    One wording for ``delete``, ``prune`` and ``reindex``. The fence holds the collection while a job is planned,
+    running, paused, cutover or failed, and the way out depends on which: a running or cutover job ends on its own,
+    a paused one needs ``--resume`` or ``--abort``, a failed one ``--abort`` (``--resume`` retries it). The engine
+    names the state in its text, not in a field; when it is not one the fence holds, the engine's own message goes
+    beside the generic advice. *retry* is the command to run again once the job has ended."""
+    name, job, state, said = busy["collection"], busy.get("job_id", ""), busy.get("state", ""), busy.get("message", "")
+    job_arg = shlex.quote(job) if job else "JOB"
+    status, abort, resume = (f"`nx collection re-embed --{v} {job_arg}`" for v in ("status", "abort", "resume"))
+    head = (f"re-embed job {job or '(unnamed)'}{f' ({state})' if state else ''} holds collection '{name}' as its source "
+            f"or its target, so nothing was deleted.")
+    advice = {
+        "running": f"Wait for it to finish ({status}), or cancel it ({abort}; documents already moved stay moved)",
+        "cutover": f"Wait for it to finish ({status}), or cancel it ({abort}; documents already moved stay moved)",
+        "planned": f"Wait for it to start and finish ({status}), or cancel it ({abort})",
+        "paused": f"Resume it and let it finish ({resume}), or cancel it ({abort}; documents already moved stay moved)",
+        "failed": f"Cancel it ({abort}; documents already moved stay moved); {resume} retries it",
+    }.get(state)
+    if advice is None:
+        advice = (f"The engine said: {said or 'no detail'}. Check the job ({status}); wait for it to finish, or cancel it "
+                  f"({abort}; documents already moved stay moved)")
+    return f"{head} {advice}, then run `{retry}` again."
+
+
 @collection.command("delete")
 @click.argument("name")
 @click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
@@ -558,6 +597,10 @@ def delete_cmd(name: str, yes: bool) -> None:
     (one gc_audit row per sibling). Deleting a ``quarantine-*`` collection
     itself is the audited manual route for quarantined rows whose origin is
     gone (gc_audit: quarantine_collection_delete).
+
+    The engine refuses (409 ``collection_busy``, nothing removed) while a
+    re-embed job holds the collection as its source or target; the message
+    says whether to wait, resume or abort the job.
     """
     if not yes:
         click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
@@ -576,6 +619,9 @@ def delete_cmd(name: str, yes: bool) -> None:
             f"note: T3 collection '{name}' already absent — running cascade anyway",
             err=True,
         )
+    if cascade.collection_busy is not None:
+        # RDR-229 P3.5a row 14 (engine 0.1.202): the engine refused with 409 collection_busy; nothing was removed.
+        raise click.ClickException(_collection_busy_message(cascade.collection_busy, f"nx collection delete {shlex.quote(name)}"))
     # Surface any cascade-step failure to the user (orphan rows may remain).
     for failure in cascade.failures:
         click.echo(f"warn: {failure}", err=True)
@@ -585,7 +631,7 @@ def delete_cmd(name: str, yes: bool) -> None:
         # claim "Deleted:".
         raise click.ClickException(
             f"delete of '{name}' is unconfirmed: the service cascade failed. "
-            f"Re-run `nx collection delete {name}`."
+            f"Re-run `nx collection delete {shlex.quote(name)}`."
         )
 
     taxonomy_counts = cascade.taxonomy
@@ -832,7 +878,8 @@ def prune_cmd(yes: bool, dry_run: bool) -> None:
     listed collections (cascade-purges taxonomy/chash/pipeline/catalog
     state the same way ``nx collection delete`` does). --dry-run is an
     explicit, always-safe alias for the default and takes precedence over
-    --yes if both are passed.
+    --yes if both are passed. A collection a re-embed job holds is refused by
+    the engine (409 ``collection_busy``) and named, not deleted.
     """
     t3 = _t3()
     mismatches, skipped, active_label = _find_dimension_mismatched_collections(t3)
@@ -883,20 +930,27 @@ def prune_cmd(yes: bool, dry_run: bool) -> None:
     from nexus.db.collection_purge import purge_collection_cascade  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     unconfirmed: list[str] = []
+    busy: list[dict[str, str]] = []
     for m in mismatches:
         cascade = purge_collection_cascade(t3, m["name"])
+        if cascade.collection_busy is not None:
+            busy.append(cascade.collection_busy)  # a refusal, not a failure: the engine removed nothing
+            continue
         for failure in cascade.failures:
             click.echo(f"warn: {failure}", err=True)
         if cascade.service_delete_failed:
             unconfirmed.append(m["name"])
-    deleted_count = len(mismatches) - len(unconfirmed)
+    deleted_count = len(mismatches) - len(unconfirmed) - len(busy)
     click.echo(f"\nDeleted {deleted_count} collection(s).")
+    problems = [_collection_busy_message(b, "nx collection prune --yes") for b in busy]
     if unconfirmed:
         # nexus-oq5gd: see delete_cmd — a failed service cascade is unconfirmed.
-        raise click.ClickException(
+        problems.append(
             f"{len(unconfirmed)} delete(s) unconfirmed (service cascade failed): "
             f"{', '.join(unconfirmed)}. Re-run `nx collection prune --yes`."
         )
+    if problems:
+        raise click.ClickException("\n".join(problems))
 
 
 # nexus-8g79.10 (V5): rename_collection_data_plane extracted to
@@ -952,9 +1006,19 @@ def rename_collection_data_plane(
 def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     """Rename a collection in-place via the engine's native rename.
 
-    O(1) metadata update — no embedding re-upload, no Voyage cost.
-    Cascades the new name through T2 taxonomy, chash_index, and the
-    catalog.
+    O(1) metadata update — no embedding re-upload, no Voyage cost. On engine
+    0.1.202 or later, once its completion step has run, it rewrites the
+    collection's one registry row in place and keeps its id, so no chunk,
+    taxonomy, chash or catalog row is rewritten (they follow the id) and the
+    old name leaves no row; an older engine cascades the new name through
+    those stores and leaves a retired row for the old name.
+
+    The engine refuses a new name it reserves (409 ``label_reserved``: a
+    collection renamed away from that label still has rows that carry it
+    until a later release relabels them), and refuses every rename (409
+    ``rename_refused``, ``missing: restart``) until it restarts after an
+    upgrade whose completion step has not run; the restart is the
+    operator's to order.
 
     Cross-prefix renames (e.g. ``code__`` ↔ ``docs__``) change the
     embedding-model space and are rejected unless ``--force-prefix-change``
@@ -976,6 +1040,15 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
 
     old_prefix = split_candidate_collection_name(old)[0]
     new_prefix = split_candidate_collection_name(new)[0]
+    if not old_prefix:
+        # RDR-229 P3.8: a label the engine minted (c<id>), or any prefix-free label, names no content type; its
+        # row holds it, so renaming such a collection to a conformant name of its own type is not a prefix change.
+        try:
+            from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+            old_prefix = (get_collection_row(old) or {}).get("content_type") or ""
+        except Exception:  # noqa: BLE001 — an unreadable row keeps the name-only comparison, as before
+            old_prefix = ""
     if old_prefix != new_prefix and not force_prefix_change:
         raise click.ClickException(
             f"prefix mismatch: {old_prefix!r} → {new_prefix!r} would change "
@@ -1081,7 +1154,11 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
          "text off this machine. Without it, a Voyage collection (or one whose embedder cannot be told) that holds a "
          "flagged document refuses before anything is deleted.")
 def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> None:
-    """Delete and re-index a collection from its source files."""
+    """Delete and re-index a collection from its source files.
+
+    Refused before anything is removed while a re-embed job holds the
+    collection (engine 409 ``collection_busy``); the message names the job.
+    """
     from pathlib import Path  # noqa: PLC0415 — stdlib import kept branch-local
 
     # RDR-204 Phase 3 (nexus-ft04v.26), class (a): this command deletes
@@ -1279,7 +1356,7 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
             f"live catalog document owns them). There is no source to re-index "
             f"from — this would destroy every chunk with no recovery path.\n\n"
             f"  • If you want to delete the collection, run:\n"
-            f"      nx collection delete {name}\n"
+            f"      nx collection delete {shlex.quote(name)}\n"
             f"  • In-place re-embedding (preserve content, swap embedding "
             f"model) is not yet supported. Track at GitHub #367.\n\n"
             f"--force does not bypass this check — there is nothing to force."
@@ -1291,7 +1368,7 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
             f"belongs to a deleted catalog document, so there is nothing to "
             f"rebuild and the verb would purge the collection and leave it empty. "
             f"Restore a document (`nx catalog restore`), or run "
-            f"`nx collection delete {name}` if the collection should go."
+            f"`nx collection delete {shlex.quote(name)}` if the collection should go."
         )
 
     if sourceless and not force:
@@ -1301,7 +1378,7 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
             f"sourceless entries cannot be re-indexed and will be LOST. They "
             f"are manual store_put entries and/or hidden chunks: chunks with no "
             f"live catalog document, which a plain listing does not show "
-            f"(`nx collection info {name}` reports live and stored counts; the "
+            f"(`nx collection info {shlex.quote(name)}` reports live and stored counts; the "
             f"difference is the hidden chunks). "
             f"Use --force to proceed and accept that loss."
         )
@@ -1348,6 +1425,12 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
     # quarantine- siblings stay restorable instead of being deleted with the old registration
     # (nexus-wbfpw.71; `nx collection delete` takes them, this does not).
     cascade = purge_collection_cascade(db, name, keep_quarantine=True)
+    if cascade.collection_busy is not None:
+        # RDR-229 P3.5a row 14 (engine 0.1.202): refused before anything was removed, so the collection is intact.
+        raise click.ClickException(
+            f"reindex of '{name}' stopped: "
+            + _collection_busy_message(cascade.collection_busy, f"nx collection reindex {shlex.quote(name)}")
+        )
     for failure in cascade.failures:
         click.echo(f"warn: {failure}", err=True)
     if cascade.service_delete_failed:
@@ -1357,10 +1440,10 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
         # re-run of reindex can dead-end on "not found": say how to tell the two cases apart.
         raise click.ClickException(
             f"reindex of '{name}' stopped: the delete is unconfirmed (the service cascade failed), so "
-            f"the collection may or may not have been deleted. Run `nx collection info {name}`: if it "
-            f"still lists chunks, re-run `nx collection reindex {name}`; if it reports not found, the "
+            f"the collection may or may not have been deleted. Run `nx collection info {shlex.quote(name)}`: if it "
+            f"still lists chunks, re-run `nx collection reindex {shlex.quote(name)}`; if it reports not found, the "
             f"delete committed: re-index from the original sources (`nx index repo` for code, "
-            f"`nx index md` or `nx index pdf` for documents), and `nx collection delete {name}` "
+            f"`nx index md` or `nx index pdf` for documents), and `nx collection delete {shlex.quote(name)}` "
             f"then clears any pipeline rows the unconfirmed delete left."
         )
 
@@ -1419,6 +1502,14 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
             )
         else:
             ensure_collection_registered(name)
+    except LabelReservedError as reserved:
+        # The delete above already ran, so this is not "nothing was written": say what is gone and what to run next.
+        raise click.ClickException(
+            f"reindex of '{name}' stopped after the delete: collection '{name}' was deleted, and it cannot be registered "
+            f"again because {reserved.explanation} Rename that collection back to {name!r} "
+            f"(`nx collection rename <its current name> {shlex.quote(name)}`), then re-index from the original sources "
+            f"(`nx index md <path>` or `nx index pdf <path>` for documents)."
+        ) from reserved
     except Exception as reg_exc:  # noqa: BLE001 — projection write is best-effort; the re-index below must proceed
         click.echo(
             f"WARNING: could not re-register catalog_collections row for "
@@ -1460,7 +1551,7 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
             except Exception as exc:  # noqa: BLE001 — boundary catch surfacing re-index failure to user via click.echo + Exit
                 click.echo(
                     f"Re-indexing failed: {exc}\n"
-                    f"Collection '{name}' was deleted. Re-run 'nx collection reindex {name}' "
+                    f"Collection '{name}' was deleted. Re-run `nx collection reindex {shlex.quote(name)}` "
                     f"after resolving the error, or re-index manually.",
                     err=True,
                 )
@@ -1493,7 +1584,7 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
                 # and the exit status must say so (nexus-2fyb: never silent).
                 click.echo(
                     f"Re-indexing failed: {exc}\n"
-                    f"Collection '{name}' was deleted. Re-run 'nx collection reindex {name}' "
+                    f"Collection '{name}' was deleted. Re-run `nx collection reindex {shlex.quote(name)}` "
                     f"after resolving the error, or re-index manually.",
                     err=True,
                 )
@@ -1983,6 +2074,9 @@ def _reembed_job_error(exc: Exception) -> click.ClickException:
     """
     code = getattr(exc, "code", None)
     body = getattr(exc, "engine_body", None)
+    reserved = label_reserved_error_from_body(code, body, user_chooses_label=False)  # RDR-229 P3.7: the job's target label is reserved
+    if reserved is not None:
+        return click.ClickException(str(reserved))
     text = str(body.get("error")) if isinstance(body, dict) and body.get("error") else str(exc)
     if code == 404 and not _ENGINE_404_MESSAGES.match(text):
         return click.ClickException(
@@ -1994,6 +2088,22 @@ def _reembed_job_error(exc: Exception) -> click.ClickException:
     if isinstance(body, dict) and body.get("job_id"):
         return click.ClickException(f"{text} (job {body['job_id']}, {body.get('state', '?')})")
     return click.ClickException(text)
+
+
+def _end_refused_reason(exc: Exception) -> str | None:
+    """The reason in the engine's 409 ``EndRefused`` answer to a re-entry (engine 0.1.202), else None.
+
+    The body is ``{error, job_id}`` with no ``reason`` and no ``state`` (the lock-held 409 carries a ``state``):
+    ``error`` reads ``job J cannot be re-entered: <why>; the source is not re-entered``. The engine refuses it when
+    the job's target is retired or has no registry row."""
+    body = getattr(exc, "engine_body", None)
+    if getattr(exc, "code", None) != 409 or not isinstance(body, dict) or not body.get("job_id") or "state" in body:
+        return None
+    text = str(body.get("error") or "")
+    marker = "cannot be re-entered: "
+    if marker not in text:
+        return None
+    return text.split(marker, 1)[1].removesuffix("; the source is not re-entered")
 
 
 def _require_local_engine(db: object) -> None:
@@ -2371,6 +2481,10 @@ def _reembed_jobs(
         try:
             job = db.reembed_reenter(name)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 — boundary: one source's refusal must not stop the others
+            if (why := _end_refused_reason(exc)) is not None:
+                # The race: the target was retired after the client read it. A skip, as the one before the send.
+                click.echo(f"{name}: not re-entered: {why}")
+                continue
             failures += 1
             click.echo(f"{name}: not re-entered: {_reembed_job_error(exc).message}", err=True)
             continue
@@ -2404,7 +2518,7 @@ def _reembed_all(
     (stale, held by a job, or a re-entry) is an error.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    from nexus.reembed_job import candidates, profile_models  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.reembed_job import candidates, keep_live_documents_advice, profile_models  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     _require_local_engine(db)
     reader = make_catalog_reader()
@@ -2435,6 +2549,7 @@ def _reembed_all(
             {str(r.get("name")) for r in found.stale}
             | {str(row.get("name")) for row, _job in found.held}
             | {str(r.source_row.get("name")) for r in found.reentries}
+            | {str(r.source_row.get("name")) for r, _why in found.skipped_reentries}
         )
         unknown = [n for n in skipped if n not in known]
         if unknown:
@@ -2443,6 +2558,16 @@ def _reembed_all(
                 f"job, or a re-entry); they are: "
                 f"{', '.join(known) or '(none)'}."
             )
+    for r, why in found.skipped_reentries:
+        # Engine 0.1.202 refuses this re-entry (409 EndRefused): its target is retired or gone. Said, not sent.
+        if str(r.source_row.get("name")) not in skipped:
+            src = str(r.source_row.get("name"))
+            remedy = (
+                f"it holds no document now; `nx collection delete {shlex.quote(src)}` finishes what the job would have done"
+                if r.kind == "cutover" else
+                f"a document is live in it again, and {keep_live_documents_advice(shlex.quote(src))}"
+            )
+            click.echo(f"{src}: not re-entered: {why}; {remedy}")
     _reembed_jobs(
         db, [r for r in found.stale if str(r.get("name")) not in skipped], profile=profile,
         held=[(row, j) for row, j in found.held if str(row.get("name")) not in skipped],
@@ -2594,7 +2719,9 @@ def reembed_cmd(
     The source is deleted only when it holds no document row and the engine's
     checks pass. It is kept, superseded, when a tombstoned document still
     holds it (kept_tombstoned: --all re-enters the job once the trash is
-    purged or a document restored), with --keep-source, or when rows naming
+    purged or a document restored; engine 0.1.202 refuses the re-entry when
+    the job's target is retired or has no registry row, and --all then skips
+    that source and names the remedy), with --keep-source, or when rows naming
     it match no document the job moved (kept_residue; --force-delete deletes
     them with it). A source the parity check refuses (failed, parity_mismatch)
     is deleted by nothing: --resume re-runs the check, --abort leaves it
@@ -2732,7 +2859,7 @@ def reembed_cmd(
             f"{stored - processed} of {stored} stored chunk(s) were not "
             f"re-embedded and keep their old vectors: the skipped rows above, "
             f"and chunks with no live catalog document (`nx collection info "
-            f"{name}` shows live and stored counts)."
+            f"{shlex.quote(name)}` shows live and stored counts)."
         )
 
 
@@ -2755,7 +2882,7 @@ def rewrite_metadata_cmd(
     Operationalises the nexus-40t metadata schema rationalisation on
     already-indexed corpora. Chunks ingested before 4.3.1 keep their
     pre-canonical metadata (cargo keys, flat git_*, oversized records)
-    until this command is run; ``nx index --force`` is a silent no-op
+    until this command is run; ``nx index repo --force`` is a silent no-op
     when the pipeline-state DB still has the content_hash on file.
 
     \\b

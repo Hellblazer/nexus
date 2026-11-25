@@ -79,7 +79,8 @@ _ENV_DISABLE = ("0", "false", "no", "off")
 
 def _healthy(url: str) -> bool:
     try:
-        return httpx.get(f"{url}/health", timeout=2).status_code == 200
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+        return httpx.get(f"{url}/health", timeout=2, verify=get_shared_ssl_context()).status_code == 200
     except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError):
         return False
 

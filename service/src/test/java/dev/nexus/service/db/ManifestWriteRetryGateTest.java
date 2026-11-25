@@ -98,9 +98,20 @@ class ManifestWriteRetryGateTest {
     private static final Map<String, String> READ_ONLY_REFERENCES = new TreeMap<>(Map.ofEntries(
         Map.entry("PgVectorRepository", "ownership, manifest and source_uri lookups (SELECT ... FROM catalog_document_chunks) and prose;"
             + " it writes chunks, never manifest rows"),
+        Map.entry("CollectionIdReads", "RDR-229 P3.5c: the catalog readers' name-or-id clauses and label expressions over the manifest's"
+            + " collection columns (conditions and select fields); it executes no statement and writes no row"),
+        Map.entry("IdUniqueIndexPass", "RDR-229 P3.4: names catalog_document_chunks only as the table of a supporting index it builds"
+            + " (CREATE INDEX CONCURRENTLY idx_catalog_chunks_collection_id); reads the catalog, writes no row"),
         Map.entry("LegacyChunkSurvey", "nexus-f3yqd: reads manifest rows to find a chunk's owners and to classify a manifest row by its chunk;"
             + " writes nothing"),
+        Map.entry("CollectionRenameChecks", "RDR-229 P3.7: names catalog_document_chunks only in prose (the rename's sweep-gate comment);"
+            + " the refusals read the registry and the blocking tables, and write no row"),
+        Map.entry("RestoreOriginMarker", "RDR-229 P3.7: the restore refusal's marker check reads the manifest (an EXISTS over the origin's"
+            + " manifest rows); it executes reads only and writes no row"),
         Map.entry("SchemaMigrator", "names the table in the chash-length constraint map: DDL bookkeeping, no DML"),
+        Map.entry("Rdr229SwapMove", "nexus-p2m1x.21: the text of the chunks swap's on_complete: ADD CONSTRAINT ... NOT VALID of the manifest's"
+            + " id key (DDL) and the registering INSERTs of the move that validates it, whose template is the data-move worker's"
+            + " re-stamp (retried by the worker); it changes no manifest row itself"),
         Map.entry("ChunkFamily", "nexus-f3yqd.2.14: the data-move worker's list of chunk-family table names (a name match on"
             + " an on_complete text); it reads no table"),
         Map.entry("ValidateConstraintsJobs", "nexus-f3yqd: names nexus.catalog_document_chunks as a table its refusal reports on; no DML"),
@@ -108,6 +119,8 @@ class ManifestWriteRetryGateTest {
             + " it holds no DML"),
         Map.entry("ChashConstraintValidator", "nexus-f3yqd: VALIDATE CONSTRAINT of the chash width CHECK on the table (DDL, "
             + "and a SELECT count of its non-conformant rows); it changes no row"),
+        Map.entry("StrictWriterCensus", "nexus-p2m1x.23: the strict writer census (a test seam over the jOOQ write call) names the table as one"
+            + " of the collection-scoped tables whose writes it judges; it executes no DML of its own"),
         Map.entry("ManifestCheck", "nexus-6pfgb.42: names the constraints and builds the predicates of the two manifest CHECKs"
             + " (jOOQ conditions over unqualified column names); it writes nothing"),
         Map.entry("ManifestCheckAdmin", "nexus-6pfgb.42: the operator step's census (a jOOQ SELECT count grouped by tenant) and"
@@ -117,6 +130,9 @@ class ManifestWriteRetryGateTest {
             + " second line) and prose; no DML"),
         Map.entry("ValidateConstraintsHandler", "javadoc naming the table whose CHECK the job validates; no DML"),
         Map.entry("TaxonomyRepository", "a comment naming the idiom; no code reference"),
+        Map.entry("TrashPurgeRegistryReads", "nexus-p2m1x.23: a jOOQ SELECT DISTINCT of the collections of the manifest rows of aged tombstones,"
+            + " to read their registry rows FOR KEY SHARE before purge_trash runs; it writes nothing (purge_trash, the manifest writer,"
+            + " is called from CatalogRepository)"),
         Map.entry("TenantScope", "a table-name list for the VACUUM allowlist; VACUUM ANALYZE is not manifest DML"),
         Map.entry("DeadlockRetry", "class javadoc naming the manifest writers it guards; the belt itself touches no table"),
         Map.entry("CatalogHandler", "comments only"),
@@ -142,6 +158,9 @@ class ManifestWriteRetryGateTest {
         Map.entry("ManifestFillablePredicates", "nexus-f3yqd: jOOQ conditions over the manifest, its documents and chunk rows (the"
             + " guards the two rung counts share, with a NOT EXISTS over the other holders of a chash); it builds"
             + " conditions and writes nothing"),
+        Map.entry("CollectionPurgeScope", "RDR-229 P3.5a (nexus-p2m1x.23): builds the jOOQ conditions that scope a collection delete's"
+            + " DELETEs by name or by id (the manifest's two columns among them); it builds conditions and writes nothing, the"
+            + " statements are deleteCollectionTxn's, which is retried"),
         Map.entry("ChunkKeySweep", "nexus-6pfgb.43: SELECT subqueries over the manifest joined to its live document (the"
             + " precondition counts of the retire-keys dry run: legacy-label rows, NULL-span rows, rows whose TTL no owner"
             + " records) and an UPDATE of nexus.chunks metadata; it writes no manifest row"),

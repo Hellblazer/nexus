@@ -53,8 +53,9 @@ import java.util.stream.Stream;
  *       who calls a method that takes an {@code AdminConnection} parameter (the rule trusts the parameter);</li>
  *   <li>the URL sources at the {@code DriverManager.getConnection} sites (PciBuilderSession, AspectQueueDrain's
  *       {@code admin.url()}, DrivingTableIsolationCheck's {@code admin.url()}, EngineSingletonLock's {@code jdbcUrl} parameter, BackendReaper, AdminDdlSession,
- *       PoolerModeCheck):
- *       they are counted and pinned, and their arguments are not read;</li>
+ *       PoolerModeCheck, LeafIndexPass, IdUniqueIndexPass, NameKeyDropPass, CallConnection):
+ *       they are counted and pinned, and their arguments are not read, so a reason on the allowlist that says where such a site's URL
+ *       comes from ("its url from AdminConnection.url()") is a reviewed reason, not a checked one;</li>
  *   <li>the Hikari forms the URL rule does not read: {@code new HikariConfig(Properties)} or
  *       {@code (String)}, {@code addDataSourceProperty}, {@code setDataSourceClassName}, {@code setDataSource},
  *       a {@code cfg::setJdbcUrl} method reference (the first is counted as a pool site; none is read for its URL),
@@ -186,6 +187,18 @@ final class EgressGuardCensus {
                 + " (nexus-6pfgb.43 chunk CHECKs, nexus-6pfgb.44 catalog TTL CHECK, nexus-f3yqd chash VALIDATE job), which"
                 + " adds and validates them, and a short-lived second connection that pg_cancel_backend's that session's"
                 + " own backend (pid and backend_start both matched) when a cancel's deadline passes."));
+        m.put("dev/nexus/service/vectors/LeafIndexPass.java", Allow.pinned(JDBC_SITE,
+            "JDBC to the engine's own database (NX_DB_ADMIN_*): the RDR-229 P3.3b per-leaf unique-index pass's dedicated autocommit"
+                + " connection (nexus-p2m1x.20). CREATE UNIQUE INDEX CONCURRENTLY cannot run in a pool's transaction or in a function."));
+        m.put("dev/nexus/service/datamove/IdUniqueIndexPass.java", Allow.pinned(JDBC_SITE,
+            "JDBC to the engine's own database (NX_DB_ADMIN_*): the RDR-229 P3.4 id-keyed index pass's dedicated autocommit"
+                + " connection (nexus-p2m1x.22), its url from AdminConnection.url() as LeafIndexPass's is. CREATE INDEX"
+                + " CONCURRENTLY cannot run in a pool's transaction or in a function."));
+        m.put("dev/nexus/service/datamove/NameKeyDropPass.java", Allow.pinned(JDBC_SITE,
+            "JDBC to the engine's own database (NX_DB_ADMIN_*): the RDR-229 P3.7 name-key drop pass's autocommit connection"
+                + " (nexus-p2m1x.27), its url from AdminConnection.url() as IdUniqueIndexPass's is (reviewed, not checked: the census does not read the URL"
+                + " at a getConnection site, see \"Not checked\"). It reads the migration advisory lock's"
+                + " holder and inserts the one nexus.data_moves row, a global registry only the migrating role can write."));
         m.put("dev/nexus/service/datamove/CallConnection.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_ADMIN_*): the data-move worker's dedicated autocommit connection"
                 + " (nexus-f3yqd.2.13), on which one run's CALL of dml_utils' committing entry point runs under a tenant"

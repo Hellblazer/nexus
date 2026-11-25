@@ -290,7 +290,7 @@ STUB_METADATA_TIMED_OUT = object()
 STUB_METADATA_TIMEOUT_S = 28.0
 from nexus.catalog.engine_reads.by_scheme import read_docs_by_scheme
 from nexus.catalog.engine_reads import by_author as _by_author, by_meta as _by_meta, sensitive_locators as _locators, uri_segments as _uri_segments
-from nexus.catalog.engine_writes import move as _move
+from nexus.catalog.engine_writes import move as _move, repo_owner_name as _owner_name
 # engine_writes/floors.py owns the hand-kept CATALOG_*_MIN_ENGINE_VERSION constants: a copy re-exported here would
 # be a second place to edit by mistake, so only the error and the require_* function are re-exported.
 from nexus.catalog.engine_writes.floors import (  # noqa: F401 — re-exported: callers import them here
@@ -512,6 +512,28 @@ def _coerce_legacy_grandfathered(d: dict) -> dict:
     d = dict(d)
     if "legacy_grandfathered" in d:
         d["legacy_grandfathered"] = bool(d["legacy_grandfathered"])
+    return d
+
+
+def _coerce_collection_id(d: dict) -> dict:
+    """A collection row's ``collection_id`` as ``int`` or ``None``, the key always present (RDR-229 P3.5a, nexus-p2m1x.23).
+
+    An engine with the column always sends a number (identity NOT NULL, vectors-068-1); an older engine sends no key,
+    read as ``None``, as is ``null``. Any other value (bool, string, float, list) reads as ``None`` with a warning, the
+    rule ``CollectionAttributes.from_for_tuple`` applies. The id is not stable across a rename until P3.7's name-key
+    drop and R6's ``ids_stable`` signal: do not cache by it before then.
+    """
+    d = dict(d)
+    cid = d.get("collection_id")
+    if isinstance(cid, int) and not isinstance(cid, bool):
+        d["collection_id"] = cid
+        return d
+    if cid is not None:
+        _log.warning(
+            "collection_row_collection_id_malformed",
+            collection=d.get("name"), value_type=type(cid).__name__,
+        )
+    d["collection_id"] = None
     return d
 
 
@@ -873,13 +895,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415 — circular-dep avoidance (nexus.repo_identity)
 
         derived_name, repo_hash, main_repo = _repo_identity_with_main(Path(repo))
-        # repo_name (canonical param) takes precedence, then name (benign extra), then derived
-        effective_name = repo_name or name or derived_name
-        # Idempotent fast path: an owner already exists for this repo
-        # (owner_for_repo returns None on 404).
+        effective_name = repo_name or name or derived_name  # repo_name (canonical) first, then name, then derived
+        # Idempotent fast path: an owner already exists for this repo (owner_for_repo returns None on 404).
         if owner_type == "repo" and repo_hash and (row := self._owner_row_for_repo(repo_hash)) and row.get("tumbler_prefix"):
             backfill_owner_root(self, row, repo_hash, main_repo)  # RDR-229: an owner registered without a root gets this call's
             return Tumbler.parse(row["tumbler_prefix"])
+        if owner_type == "repo" and not tumbler_prefix:  # RDR-254 Gap 4: a second live clone of this folder name gets its own owner
+            effective_name = _owner_name.repo_owner_name(self, name=effective_name, repo_hash=repo_hash, repo_root=main_repo)
         payload: dict = {
             "name": effective_name,
             "owner_type": owner_type,
@@ -2336,9 +2358,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         window.
         """
         return self._post(
-            "/purge-trash",
-            {"older_than_days": older_than_days, "dry_run": dry_run},
-            idempotent=False,
+            "/purge-trash", {"older_than_days": older_than_days, "dry_run": dry_run}, idempotent=False,
+            mutates=dry_run is not True,  # the engine's dry run is a read-only preview; only a literal True is one
         ) or {}
 
     def repair_stale_note_uris(
@@ -2421,7 +2442,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # one attempt: a blind resend after a read timeout reports the
         # post-sweep population (``ghosts_deleted`` ~ 0), not what the first
         # attempt did.
-        return self._post("/ghost-sweep", {"dry_run": dry_run}, idempotent=dry_run) or {}
+        # mutates: a dry run is a read to the dev-checkout write guard (only a literal True is one).
+        return self._post("/ghost-sweep", {"dry_run": dry_run}, idempotent=dry_run, mutates=dry_run is not True) or {}
 
     def gc_audit_list(
         self,
@@ -3564,6 +3586,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         version = flags.get("release_version") or flags.get("app_version") or ""
         return flags.get("catalog_move_supported") is True, str(version) if flags else ""
 
+    def engine_release_version(self) -> str:
+        """The engine's ``release_version`` from the cached ``GET /version`` read; ``""`` when null (a tree-built engine) or unread."""
+        value = self._version_flags().get("release_version")
+        return value if isinstance(value, str) else ""
+
     def _traverse(self, payload: dict) -> dict:
         """POST /v1/catalog/traverse and convert wire dicts to typed objects.
 
@@ -3689,75 +3716,42 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
     def register_collection(
         self,
-        name: str,
+        name: str | None = None,
         *,
-        content_type: str = "",
-        owner_id: str = "",
-        embedding_model: str = "",
-        model_version: str = "v1",
+        content_type: str,
+        owner_id: str,
+        embedding_model: str,
+        model_version: str,
         display_name: str = "",
-        legacy_grandfathered: bool | None = None,
-    ) -> None:
-        """Register (upsert) a collection row.
+    ) -> "CollectionAttributes":
+        """Register (upsert) a collection by its attributes and answer the row (RDR-229 P3.8).
 
-        ``legacy_grandfathered`` DEFAULTS TO DERIVED, not to False (nexus-cecqy,
-        scope-corrected 2026-07-29). The retired local catalog derived the flag
-        by regex; the engine infers nothing (``upsertCollection`` binds the
-        caller's value verbatim) and this client used to default the kwarg
-        ``False`` — so every *bare* ``register_collection(name)`` call site left
-        non-conformant names UN-flagged. Those bare calls are BY CONSTRUCTION
-        the non-conformant branch of an ``if is_conformant_collection_name(...)``
-        fork, which is exactly where the flag has to be True:
-
-            src/nexus/indexer.py:784                         (post-rename registration)
-            src/nexus/commands/catalog_cmds/collections.py:138 (backfill loop)
-            src/nexus/commands/catalog_cmds/collections.py:349 (rename --allow-legacy)
-
-        The defect was invisible on the conformant branch because a conformant
-        name wants False and the old default WAS False — correct by accident,
-        which is what made this read as an ``--allow-legacy``-only bug when it
-        reached the ordinary ``nx index`` and backfill paths too.
-
-        Deriving here rather than at the call sites puts the inference on the
-        same side of the boundary as the implementation it replaced, and covers
-        callers that do not yet exist. Pass the kwarg explicitly to force it.
-
-        RDR-204 Phase 1 follow-up (nexus-f5wwx): ``content_type``/``owner_id``/
-        ``embedding_model`` get the SAME same-side-of-the-boundary derivation,
-        for the same reason. The engine now refuses a registration with an
-        empty ``content_type`` outright (bead nexus-ft04v.7's stub-insert
-        retirement widened the constraint from NOT-NULL-with-empty-string-
-        allowed to actually-non-empty), so every *bare* ``register_collection
-        (name)`` call site — production (the same three listed above) and
-        test-fixture (``tests._catalog_fixture_ops.ActiveCatalog``'s pass-
-        through) alike — started 422ing on a two-plus-segment name it used to
-        register fine with a blank content_type. Deriving the three fields
-        here via :func:`nexus.corpus.collection_registration_kwargs` — the
-        SAME derivation :func:`nexus.corpus.ensure_collection_registered`
-        already uses for the RDR-204 write-time registration paths — covers
-        every existing bare caller plus any that do not yet exist, instead of
-        hand-fixing each call site. An explicitly-passed non-empty value is
-        never overridden.
+        The four attributes are required, never derived from a name (a blank one raises ``ValueError`` before anything
+        is sent). With no *name* the engine mints ``collection_id`` and the label ``c<id>`` and answers the registered
+        row or the tuple's live one; an engine below ``COLLECTION_MINT_MIN_ENGINE_VERSION`` answers 409, raised as
+        ``CollectionMintUnsupportedError``. With a *name* (a re-registration of a label) the answer is what was asked.
         """
-        from nexus.corpus import collection_registration_kwargs  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
-        from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
+        from nexus.catalog.collection_name import CollectionAttributes  # noqa: PLC0415 — deferred: module-load cycle
 
-        if legacy_grandfathered is None:
-            legacy_grandfathered = not is_conformant_collection_name(name)
-        if not content_type or not owner_id or not embedding_model:
-            derived = collection_registration_kwargs(name)
-            content_type = content_type or derived["content_type"]
-            owner_id = owner_id or derived["owner_id"]
-            embedding_model = embedding_model or derived["embedding_model"]
-        self._post("/collections/upsert", {
-            "name": name,
-            "content_type": content_type,
-            "owner_id": owner_id,
-            "embedding_model": embedding_model,
-            "model_version": model_version,
-            "display_name": display_name,
-            "legacy_grandfathered": legacy_grandfathered,
-        })
+        attrs = {"content_type": content_type, "owner_id": owner_id, "embedding_model": embedding_model, "model_version": model_version}
+        if blank := [k for k, v in attrs.items() if not v]:
+            raise ValueError(f"register_collection: {', '.join(blank)} required, never derived from a name")
+        body: dict = {**attrs, "display_name": display_name}
+        tuple_of = {k: attrs[k] for k in ("content_type", "owner_id", "embedding_model")}
+        if not name:
+            try:
+                answer = self._post("/collections/upsert", body)
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code == 409:
+                    from nexus.catalog.engine_writes.floors import explain_mint_refusal  # noqa: PLC0415 — deferred: engine_writes imports back into catalog
+                    explain_mint_refusal(self, exc)  # an engine older than the mint names itself; any other 409 stands
+                raise
+            return CollectionAttributes.from_for_tuple(answer or {}, **tuple_of)
+        self._post("/collections/upsert", {"name": name, **body})
+        digits = model_version[1:] if model_version[:1] == "v" else ""
+        return CollectionAttributes(  # what was asked: the engine answered no row
+            collection_id=None, label=name, **tuple_of, dimension=None, lifecycle_state=None,
+            model_version=int(digits) if digits.isascii() and digits.isdigit() and int(digits) >= 1 else None)
 
     def delete_collection_projection(self, name: str, *, reason: str = "") -> bool:
         # No hard-delete route in initial service; guard+track for bead nexus-gmiaf.24
@@ -3789,11 +3783,16 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "/collections/list", lifecycle_state=lifecycle_state, content_type=content_type,
         )
         return [
-            _coerce_legacy_grandfathered(c)
+            _coerce_collection_id(_coerce_legacy_grandfathered(c))
             for c in (result.get("collections", []) if result else [])
         ]
 
     def get_collection(self, name: str) -> dict | None:
+        """One registry row via ``GET /v1/catalog/collections/get``, or ``None`` when unregistered.
+
+        The row's ``collection_id`` is an ``int`` on an engine that has the column, ``None`` on an
+        older engine (RDR-229 P3.5a); the key is always present.
+        """
         try:
             result = self._get("/collections/get", name=name)
         except httpx.HTTPStatusError as exc:
@@ -3802,7 +3801,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             raise
         if not result or not result.get("name"):
             return None
-        return _coerce_legacy_grandfathered(result)
+        return _coerce_collection_id(_coerce_legacy_grandfathered(result))
 
     def is_legacy_collection(self, name: str) -> bool:
         coll = self.get_collection(name)
@@ -4253,8 +4252,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if chunk_payload is None:
             result = self._post("/manifest/append", body)
         else:
-            from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
-            ensure_collection_registered(collection, registrar=self._catalog_registrar)
+            from nexus.registration_retry import register_collection_for_write  # noqa: PLC0415 — deferred: the one seam every registration before a document shares
+            register_collection_for_write(collection, self._catalog_registrar)
             body["chunks"] = chunk_payload
             if force_re_embed:
                 body["force_re_embed"] = True
@@ -4389,8 +4388,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             if chunks is None:
                 result = self._post("/manifest/append_many", body)
             else:
-                from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
-                ensure_collection_registered(collection, registrar=self._catalog_registrar)
+                from nexus.registration_retry import register_collection_for_write  # noqa: PLC0415 — deferred: the one seam every registration before a document shares
+                register_collection_for_write(collection, self._catalog_registrar)
                 body["chunks"] = chunks
                 if force_re_embed:
                     body["force_re_embed"] = True
@@ -5093,11 +5092,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # the whole write_fn, and here that would re-send an
         # already-uploaded page's chunks on a stale-registration retry —
         # a correctness risk, not just a wasted call.
-        from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+        from nexus.registration_retry import register_collection_for_write  # noqa: PLC0415 — deferred: the one seam every registration before a document shares
         # This client's own endpoint, never the ambient catalog writer
         # (nexus-dvgsf): a client pinned to a second engine must register
         # the collection where it is about to write it.
-        ensure_collection_registered(collection, registrar=self._catalog_registrar)
+        register_collection_for_write(collection, self._catalog_registrar)
         _check_supplied_vectors("write_manifest_many", chunks, embedding_model)
         merge_fields = _metadata_mode_fields(
             "write_manifest_many", metadata_merge, metadata_delete_keys)

@@ -52,10 +52,31 @@ public interface PciIndexSet {
     }
 
     /**
+     * RDR-229 P3.5c: whether a valid id-predicate per-collection index ({@code WHERE collection_id = <id>}, built by P3.4) exists for
+     * exactly this (model, tenant, collection id). A reader that selects by id from gate 3 asks this where it asked
+     * {@link #hasValidIndex} by name. The default knows none, as {@link #NONE} and a test double do.
+     */
+    default boolean hasValidIdIndex(String model, String tenant, long collectionId) {
+        return false;
+    }
+
+    /** The id-predicate index {@link #hasValidIdIndex} would answer true for, with its name (the builder's name shape). */
+    default Optional<ValidIndex> validIdIndex(String model, String tenant, long collectionId) {
+        return hasValidIdIndex(model, tenant, collectionId)
+            ? Optional.of(new ValidIndex(PciCatalog.indexNameById(model, tenant, collectionId), Instant.EPOCH))
+            : Optional.empty();
+    }
+
+    /**
      * The anchor (RDR-230) on the valid per-collection index for this key, or empty when the set holds none or the
      * index has no parseable anchor yet. The default knows none, as a test double does.
      */
     default Optional<PciCatalog.Anchor> anchor(String model, String tenant, String collection) {
+        return Optional.empty();
+    }
+
+    /** {@link #anchor} of the valid id-predicate index of this collection id (RDR-229 P3.4); the default knows none. */
+    default Optional<PciCatalog.Anchor> anchorById(String model, String tenant, long collectionId) {
         return Optional.empty();
     }
 }

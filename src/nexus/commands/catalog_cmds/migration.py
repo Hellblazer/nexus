@@ -17,9 +17,11 @@ it to the module-routed form the other carved families use.)
 """
 from __future__ import annotations
 
+import shlex
 import click
 
 from nexus.catalog.membership import refuse_if_collection_unknown
+from nexus.collection_errors import LabelReservedError
 
 
 @click.command("migrate-fallback")
@@ -268,6 +270,15 @@ def migrate_fallback_cmd(
             writer.supersede_collection(
                 source, only_target, reason="migrate-fallback",
             )
+        except LabelReservedError as reserved:
+            # RDR-229 P3.7 (engine 0.1.202): the target's label is reserved. The documents already moved.
+            click.echo(
+                f"\nMigrated {len(proposals)} doc(s) to {only_target!r}, but "
+                f"source {source!r} was NOT marked superseded: {reserved.explanation}\n"
+                f"The documents moved and stay moved; only the supersession pointer is missing. It cannot be set while "
+                f"{only_target!r} is reserved: rename the collection that was renamed away from it back to "
+                f"{only_target!r}, or wait for the engine release that relabels its rows."
+            )
         except ValueError as exc:
             click.echo(
                 f"\nMigrated {len(proposals)} doc(s) to {only_target!r}, but "
@@ -303,7 +314,7 @@ def migrate_fallback_cmd(
         f"will return empty for these docs until you run:\n"
         f"  nx index repo .   # re-populate the target with new chunks\n"
         f"After re-index completes, the old chunks become orphans and "
-        f"'nx t3 gc -c {source} --no-dry-run --yes' will sweep them.",
+        f"`nx t3 gc -c {shlex.quote(source)} --no-dry-run --yes` will sweep them.",
         err=True,
     )
 

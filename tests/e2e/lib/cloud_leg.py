@@ -175,7 +175,7 @@ def item_title_from_json(text: str) -> str:
 def check_target(*, service_url: str, token: str, mint_tenant: str, item_title: str,
                  ambient_environ: dict[str, str], ambient_config: Path | None) -> str:
     """Refuse unless the credential is the test tenant's, on the pinned public https edge. Raises Refusal.
-    *item_title* is the 1Password item's own title as the vault returned it. Returns the edge host."""
+    *item_title* is the 1Password item's own title as the vault returned it. Returns the edge host, as the allowlist (or the override) spells it."""
     if not service_url.startswith("https://"):
         raise Refusal("service_url is not the public https edge (https:// required)")
     rest = service_url[len("https://"):].split("/", 1)[0]
@@ -202,7 +202,7 @@ def check_target(*, service_url: str, token: str, mint_tenant: str, item_title: 
     if ambient.get("mint_tenant") and ambient["mint_tenant"] != REQUIRED_TENANT and ambient.get("mint_token") \
             and _sha(normalize_secret(ambient["mint_token"])) == th:
         raise Refusal("the test credential is bound to the operator's own tenant")
-    return host
+    return next(h for h in sorted(ALLOWED_EDGE_HOSTS | {override}) if h == host)  # the pinned entry, not the credential's own text
 
 
 # ── the step plan ───────────────────────────────────────────────────────────
@@ -336,11 +336,30 @@ ROUTE_MAP: dict[str, Step] = {
                                     expect_route="/v1/tuples/registry"),
     "GET /v1/catalog/uri_segment_census": Step("route-uri-segment-census", "py", ["-c", _routes.URI_SEGMENTS],
                                                expect_route="/v1/catalog/uri_segment_census"),
+    "GET /v1/catalog/rdr229_completion_counts": Step("route-rdr229-completion-counts", "py", ["-c", _routes.COMPLETION_COUNTS],
+                                                     expect_route="/v1/catalog/rdr229_completion_counts"),
     "POST /v1/catalog/collections/upsert": Step("route-collections-upsert", "py", ["-c", _routes.COLLECTION_UPSERT],
                                                 expect_route="/v1/catalog/collections/upsert"),
+    # RDR-229 P3.1 (nexus-p2m1x.17): the completion check's report, and the typed 422 of the dual write.
+    # RDR-229 P3.11 (nexus-p2m1x.31): the restore marker's relabel keys.
+    "GET /v1/tenant/import-marker": Step("route-tenant-import-marker", "py", ["-c", _routes.IMPORT_MARKER],
+                                         expect_route="/v1/tenant/import-marker"),
+    "GET /v1/status": Step("route-engine-status", "py", ["-c", _routes.ENGINE_STATUS], expect_route="/v1/status"),
+    "POST /v1/catalog/doc/register": Step("route-doc-register-unregistered", "py", ["-c", _routes.DOC_REGISTER_UNREGISTERED],
+                                          expect_route="/v1/catalog/doc/register",
+                                          expect_stdout="refused the unregistered collection with 422"),
+    "GET /v1/catalog/collections/list": Step("route-collections-list", "py", ["-c", _routes.COLLECTIONS_LIST],
+                                             expect_route="/v1/catalog/collections/list"),
+    "GET /v1/catalog/collections/get": Step("route-collections-get", "py", ["-c", _routes.COLLECTIONS_GET],
+                                            expect_route="/v1/catalog/collections/get"),
+    "POST /v1/catalog/import/collection": Step("route-import-collection", "py", ["-c", _routes.IMPORT_COLLECTION_REFUSES_AN_ID],
+                                               expect_route="/v1/catalog/import/collection",
+                                               expect_stdout="collection_id refused 400"),
     "POST /v1/taxonomy/assignments/prune_projection": Step("route-prune-projection", "py", ["-c", _routes.PRUNE_PROJECTION],
                                                            expect_route="/v1/taxonomy/assignments/prune_projection",
                                                            expect_stdout="match=bogus refused 400"),
+    **{route: Step(name, "py", ["-c", code], expect_route=route.split(" ", 1)[1], expect_stdout=stdout)
+       for route, (name, code, stdout) in {**_routes.LABEL_RULE_RENAME_PROBES, **_routes.GC_PROBES, **_routes.RETIRING_BY_ID_PROBES, **_routes.MOVE_ROUTE_PROBES, **_routes.ROW14_PROBES, **_routes.REEMBED_PROBES}.items()},  # nexus-n3hhc, its class; P3.5a gc; rows 15-16 by id; P3.5c moves; row 14
 }
 
 _ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[A-Za-z0-9_\-/.{}]+)")

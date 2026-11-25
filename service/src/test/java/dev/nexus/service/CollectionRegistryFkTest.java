@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
 import org.jooq.Table;
@@ -374,9 +375,9 @@ class CollectionRegistryFkTest {
             // to catalog_documents).
             ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
                 .values(TENANT_A, hexChashAscii("casc-doc-1"), 8001L, "hdbscan", "casc__old", OffsetDateTime.now(),
-                    PgContainerHelper.collectionModel(ctx, TENANT_A, "casc__old"))
+                    PgContainerHelper.collectionModel(ctx, TENANT_A, "casc__old"), CollectionIds.require(ctx, TENANT_A, "casc__old"))
                 .execute();
 
             // Rename collection: 'casc__old' -> 'casc__new'
@@ -448,9 +449,9 @@ class CollectionRegistryFkTest {
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                         TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                        TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                        TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
                     .values(TENANT_A, hexChashAscii("unreg-src-doc"), 8003L, "hdbscan", "truly-unreg-src-col",
-                        OffsetDateTime.now(), BGE_768)
+                        OffsetDateTime.now(), BGE_768, UNISSUED_ID)
                     .execute()
             );
             assertThat(ex.getMessage())
@@ -717,8 +718,8 @@ class CollectionRegistryFkTest {
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                    .values(TENANT_A, "chk-manifest-doc", 0, chashOfLenBytes(31), "chk-manifest-coll", MINILM_384)
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                    .values(TENANT_A, "chk-manifest-doc", 0, chashOfLenBytes(31), "chk-manifest-coll", MINILM_384, CollectionIds.require(ctx, TENANT_A, "chk-manifest-coll"))
                     .execute()
             );
             assertThat(ex.getMessage())
@@ -738,8 +739,8 @@ class CollectionRegistryFkTest {
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                    .values(TENANT_A, "chk-manifest-doc", 1, chashOfLenBytes(33), "chk-manifest-coll", MINILM_384)
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                    .values(TENANT_A, "chk-manifest-doc", 1, chashOfLenBytes(33), "chk-manifest-coll", MINILM_384, CollectionIds.require(ctx, TENANT_A, "chk-manifest-coll"))
                     .execute()
             );
             assertThat(ex.getMessage())
@@ -760,14 +761,14 @@ class CollectionRegistryFkTest {
             // a matching nexus.chunks row for this CONTROL insert to succeed.
             byte[] ch = chashAscii("manifestok");
             ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-                .values(TENANT_A, "chk-manifest-coll", ch, MINILM_384, "text", vector(384))
+                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.COLLECTION_ID)
+                .values(TENANT_A, "chk-manifest-coll", ch, MINILM_384, "text", vector(384), CollectionIds.require(ctx, TENANT_A, "chk-manifest-coll"))
                 .onConflictDoNothing()
                 .execute();
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                .values(TENANT_A, "chk-manifest-doc", 2, ch, "chk-manifest-coll", MINILM_384)
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                .values(TENANT_A, "chk-manifest-doc", 2, ch, "chk-manifest-coll", MINILM_384, CollectionIds.require(ctx, TENANT_A, "chk-manifest-coll"))
                 .execute();
             int count = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
                 .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(ch))
@@ -787,8 +788,8 @@ class CollectionRegistryFkTest {
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                    .values(TENANT_A, "pos-chk-doc", -1, chashAscii("pos-neg"), "pos-chk-coll", MINILM_384)
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                    .values(TENANT_A, "pos-chk-doc", -1, chashAscii("pos-neg"), "pos-chk-coll", MINILM_384, CollectionIds.require(ctx, TENANT_A, "pos-chk-coll"))
                     .execute()
             );
             assertThat(ex.getMessage())
@@ -809,14 +810,14 @@ class CollectionRegistryFkTest {
             // a matching nexus.chunks row for this CONTROL insert to succeed.
             byte[] ch = chashAscii("pos-zero");
             ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-                .values(TENANT_A, "pos-chk-coll", ch, MINILM_384, "text", vector(384))
+                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.COLLECTION_ID)
+                .values(TENANT_A, "pos-chk-coll", ch, MINILM_384, "text", vector(384), CollectionIds.require(ctx, TENANT_A, "pos-chk-coll"))
                 .onConflictDoNothing()
                 .execute();
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                .values(TENANT_A, "pos-chk-doc", 0, ch, "pos-chk-coll", MINILM_384)
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                .values(TENANT_A, "pos-chk-doc", 0, ch, "pos-chk-coll", MINILM_384, CollectionIds.require(ctx, TENANT_A, "pos-chk-coll"))
                 .onConflictDoNothing()
                 .execute();
             int count = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
@@ -1316,8 +1317,8 @@ class CollectionRegistryFkTest {
                 "ON UPDATE CASCADE ON DELETE RESTRICT", T, COL,
                 () -> ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                         TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                        TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-                    .values(T, hexChashAscii("p03-ta-doc"), 90301L, "hdbscan", COL, OffsetDateTime.now(), BGE_768)
+                        TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
+                    .values(T, hexChashAscii("p03-ta-doc"), 90301L, "hdbscan", COL, OffsetDateTime.now(), BGE_768, UNISSUED_ID)
                     .execute(),
                 () -> runCollectionBackfillStub(ctx, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                     TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
@@ -1355,6 +1356,7 @@ class CollectionRegistryFkTest {
             String tenant, String orphanCol, Runnable orphanInsert, Runnable reconcileInsert) throws Exception {
         // FK absent; seed an orphan row while it is absent.
         ctx.alterTable(table).dropConstraintIfExists(fkName).execute();
+        P33aTwinFixtures.dropTwin(ctx, table.getName());   // RDR-229 P3.3a: the id twin enforces the unissued id the orphan row carries
         orphanInsert.run();
         assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(orphanCol))
@@ -1424,10 +1426,25 @@ class CollectionRegistryFkTest {
             default -> throw new IllegalArgumentException("no embedding column of width " + dim);
         };
         ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                       CHUNKS.CHUNK_TEXT, col)
-           .values(tenant, collection, chash, model, "text", vector(dim))
+                       CHUNKS.CHUNK_TEXT, col, CHUNKS.COLLECTION_ID)
+           .values(tenant, collection, chash, model, "text", vector(dim), idNamedOrUnissued(ctx, collection))
            .execute();
     }
+
+    /**
+     * RDR-229 P3.1: a row that names a collection carries an id beside the name (a CHECK). These seeds name a
+     * collection {@code tenant} has not registered, so the id is the one another tenant's row of that name holds (the
+     * cross-tenant cases) or, when no tenant registered the name, one the registry never issued: either way the
+     * CHECK passes and the foreign key on (tenant_id, collection, embedding_model) stays the constraint under test.
+     */
+    private static Long idNamedOrUnissued(DSLContext ctx, String collection) {
+        Long other = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.NAME.eq(collection)).limit(1).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
+        return other != null ? other : UNISSUED_ID;
+    }
+
+    /** An id the registry never issued, for a seed that names a collection no registry row backs. */
+    private static final Long UNISSUED_ID = Long.MAX_VALUE;
 
     /** {@link #insertChunkOfModel} for a gap-window orphan: the tenant has no collection registered yet. */
     private static void insertOrphanChunk(DSLContext ctx, String tenant, String collection, String model,
@@ -1482,8 +1499,8 @@ class CollectionRegistryFkTest {
         // Register the topic's collection first so the fixture satisfies the NOT VALID FK.
         PgContainerHelper.insertCollection(ctx, tenantId, collection);
         ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
-                TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
-            .values(id, tenantId, label, collection, 0, OffsetDateTime.now(), "pending")
+                TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.COLLECTION_ID)
+            .values(id, tenantId, label, collection, 0, OffsetDateTime.now(), "pending", CollectionIds.require(ctx, tenantId, collection))
             .onConflictDoNothing()
             .execute();
     }

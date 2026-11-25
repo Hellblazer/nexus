@@ -4,7 +4,7 @@
 # shrinks the file (`python3 scripts/file_size_ratchet.py update-exceptions`); raising one or adding
 # a file needs `--allow-raise` and a reason in the commit message. Before adding to a file over its
 # cap, move the area you touch into its own module first.
-service/src/main/java/dev/nexus/service/NexusService.java 2269
+service/src/main/java/dev/nexus/service/NexusService.java 2235
 service/src/main/java/dev/nexus/service/db/AspectRepository.java 1669
 service/src/main/java/dev/nexus/service/db/CatalogRepository.java 15274
 service/src/main/java/dev/nexus/service/db/SchemaMigrator.java 1630
@@ -101,7 +101,7 @@ src/nexus/db/t2/http_tuple_store.py 1614
 src/nexus/db/t3.py 2072
 src/nexus/doc_indexer.py 4776
 src/nexus/exporter.py 2308
-src/nexus/health.py 13887
+src/nexus/health.py 13603
 src/nexus/indexer.py 7806
 src/nexus/indexer_utils.py 1935
 src/nexus/mcp/channel.py 1793

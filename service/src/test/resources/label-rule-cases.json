@@ -1,0 +1,345 @@
+{
+ "_comment": "RDR-229 item 7, the collection label rule (nexus-mrmqw, nexus-pqirj). One case table for both halves: tests/test_rdr229_label_rule.py (nexus.corpus.label_breach) and CollectionLabelTest (shapeBreach, then the minted form). rules is the clause order both check in; rule is the first clause a label breaks, or null for a legal label. A case is a label, or parts: [text, times] pairs joined in order.",
+ "rules": [
+  "non_empty",
+  "valid_utf8",
+  "no_control_character",
+  "within_byte_limit",
+  "no_slash",
+  "no_comma",
+  "no_edge_whitespace",
+  "not_minted"
+ ],
+ "cases": [
+  {
+   "label": "My Notes",
+   "rule": null
+  },
+  {
+   "label": "notes 50%: caf\u00e9",
+   "rule": null
+  },
+  {
+   "label": "\u65e5\u672c\u8a9e\u306e\u30ce\u30fc\u30c8",
+   "rule": null
+  },
+  {
+   "label": "ab",
+   "rule": null
+  },
+  {
+   "label": "a",
+   "rule": null
+  },
+  {
+   "label": "-leading-hyphen",
+   "rule": null
+  },
+  {
+   "label": "trailing_",
+   "rule": null
+  },
+  {
+   "label": "a.b",
+   "rule": null
+  },
+  {
+   "label": "code__myrepo",
+   "rule": null
+  },
+  {
+   "label": "docs__1-1__voyage-context-3__v1",
+   "rule": null
+  },
+  {
+   "label": "c",
+   "rule": null
+  },
+  {
+   "label": "C1",
+   "rule": null
+  },
+  {
+   "label": "c1a",
+   "rule": null
+  },
+  {
+   "label": "cc1",
+   "rule": null
+  },
+  {
+   "label": "c-1",
+   "rule": null
+  },
+  {
+   "label": "ac1",
+   "rule": null
+  },
+  {
+   "label": "c\u0661",
+   "rule": null
+  },
+  {
+   "label": "x\u200dy",
+   "rule": null
+  },
+  {
+   "label": "a b",
+   "rule": null
+  },
+  {
+   "label": "inner space",
+   "rule": null
+  },
+  {
+   "label": "a\ud83d\ude00b",
+   "rule": null
+  },
+  {
+   "label": "a\u00a0b",
+   "rule": null
+  },
+  {
+   "label": "notes\u200d",
+   "rule": null
+  },
+  {
+   "label": "knowledge",
+   "rule": null
+  },
+  {
+   "label": "1c",
+   "rule": null
+  },
+  {
+   "label": "c\uff11",
+   "rule": null
+  },
+  {
+   "parts": [
+    [
+     "a",
+     100
+    ]
+   ],
+   "rule": null,
+   "note": "100 characters"
+  },
+  {
+   "parts": [
+    [
+     "\u00e9",
+     127
+    ]
+   ],
+   "rule": null,
+   "note": "254 bytes"
+  },
+  {
+   "parts": [
+    [
+     "\u00e9",
+     127
+    ],
+    [
+     "a",
+     1
+    ]
+   ],
+   "rule": null,
+   "note": "exactly 255 bytes"
+  },
+  {
+   "parts": [
+    [
+     "a",
+     255
+    ]
+   ],
+   "rule": null,
+   "note": "255 bytes"
+  },
+  {
+   "label": "",
+   "rule": "non_empty"
+  },
+  {
+   "label": "a\u0000b",
+   "rule": "no_control_character"
+  },
+  {
+   "label": "a\nb",
+   "rule": "no_control_character"
+  },
+  {
+   "label": "a\tb",
+   "rule": "no_control_character"
+  },
+  {
+   "label": "a\u001fb",
+   "rule": "no_control_character"
+  },
+  {
+   "label": "a\u007fb",
+   "rule": "no_control_character"
+  },
+  {
+   "label": "a\u0085b",
+   "rule": "no_control_character"
+  },
+  {
+   "label": "a\u2028b",
+   "rule": "no_control_character"
+  },
+  {
+   "label": "a\u2029b",
+   "rule": "no_control_character"
+  },
+  {
+   "label": "a\ud800b",
+   "rule": "valid_utf8"
+  },
+  {
+   "label": "a\udc00b",
+   "rule": "valid_utf8"
+  },
+  {
+   "label": "c1",
+   "rule": "not_minted"
+  },
+  {
+   "label": "c0",
+   "rule": "not_minted"
+  },
+  {
+   "label": "c42",
+   "rule": "not_minted"
+  },
+  {
+   "label": "c007",
+   "rule": "not_minted"
+  },
+  {
+   "label": "c1234567890123456789",
+   "rule": "not_minted"
+  },
+  {
+   "label": "a/b",
+   "rule": "no_slash"
+  },
+  {
+   "label": "/",
+   "rule": "no_slash"
+  },
+  {
+   "label": "a,b",
+   "rule": "no_comma"
+  },
+  {
+   "label": ",",
+   "rule": "no_comma"
+  },
+  {
+   "label": " notes",
+   "rule": "no_edge_whitespace"
+  },
+  {
+   "label": "notes ",
+   "rule": "no_edge_whitespace"
+  },
+  {
+   "label": " ",
+   "rule": "no_edge_whitespace"
+  },
+  {
+   "label": "\u00a0notes",
+   "rule": "no_edge_whitespace"
+  },
+  {
+   "label": "notes\u3000",
+   "rule": "no_edge_whitespace"
+  },
+  {
+   "label": "\u2003",
+   "rule": "no_edge_whitespace"
+  },
+  {
+   "label": "a/b,c",
+   "rule": "no_slash"
+  },
+  {
+   "label": " a,b",
+   "rule": "no_comma"
+  },
+  {
+   "label": "c1 ",
+   "rule": "no_edge_whitespace"
+  },
+  {
+   "label": "a\ud800\nb",
+   "rule": "valid_utf8"
+  },
+  {
+   "parts": [
+    [
+     "a",
+     256
+    ]
+   ],
+   "rule": "within_byte_limit",
+   "note": "256 bytes"
+  },
+  {
+   "parts": [
+    [
+     "\u00e9",
+     128
+    ]
+   ],
+   "rule": "within_byte_limit",
+   "note": "256 bytes in 128 characters"
+  },
+  {
+   "parts": [
+    [
+     "\u00e9",
+     127
+    ],
+    [
+     "ab",
+     1
+    ]
+   ],
+   "rule": "within_byte_limit",
+   "note": "256 bytes"
+  },
+  {
+   "parts": [
+    [
+     "\n",
+     1
+    ],
+    [
+     "a",
+     256
+    ]
+   ],
+   "rule": "no_control_character",
+   "note": "a control character and 257 bytes: control is checked first"
+  },
+  {
+   "parts": [
+    [
+     "a",
+     255
+    ],
+    [
+     "/",
+     1
+    ]
+   ],
+   "rule": "within_byte_limit",
+   "note": "256 bytes and a slash: the byte limit is checked first"
+  }
+ ]
+}

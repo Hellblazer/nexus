@@ -1,5 +1,7 @@
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
@@ -13,12 +15,14 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import static dev.nexus.service.db.JsonbSupport.jsonbRequired;
+import static dev.nexus.service.db.TaxonomyBatchRows.*;
 import static dev.nexus.service.jooq.nexus.Tables.*;
 import static org.jooq.impl.DSL.*;
 
@@ -57,10 +61,63 @@ public final class TaxonomyRepository {
                              .withZone(ZoneOffset.UTC);
 
     private final TenantScope tenantScope;
+    private final Gate3 gate3;
+    /** RDR-229 P3.5a: the rename refusal this repository's rename consults first ({@link RenameGuard#open()} never refuses). */
+    private final RenameGuard renameGuard;
+    private final TaxonomyAnalytics analytics;
 
     public TaxonomyRepository(TenantScope tenantScope) {
-        this.tenantScope = tenantScope;
+        this(tenantScope, Gate3.never(), RenameGuard.open());
     }
+
+    public TaxonomyRepository(TenantScope tenantScope, RenameGuard renameGuard) {
+        this(tenantScope, Gate3.never(), renameGuard);
+    }
+
+    /** RDR-229 P3.5c: from gate 3 on the install the readers name a collection by its id column ({@link CollectionKey}). */
+    public TaxonomyRepository(TenantScope tenantScope, Gate3 gate3) {
+        this(tenantScope, gate3, RenameGuard.open());
+    }
+
+    /** The production constructor: the one gate-3 signal and the one rename guard ({@code NexusService} passes both). */
+    public TaxonomyRepository(TenantScope tenantScope, Gate3 gate3, RenameGuard renameGuard) {
+        this.tenantScope = tenantScope;
+        this.analytics = new TaxonomyAnalytics(tenantScope, gate3);
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+        this.renameGuard = java.util.Objects.requireNonNull(renameGuard, "renameGuard");
+    }
+
+    private CollectionKey ck() {
+        return CollectionKey.of(gate3);
+    }
+
+    private Condition topicsOf(String tenant, String c) {
+        return ck().eq(tenant, TOPICS.COLLECTION, TOPICS.COLLECTION_ID, c);
+    }
+
+    private Condition assignedFrom(String tenant, String c) {
+        return ck().eq(tenant, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, c);
+    }
+
+    /** The column that identifies a projection's source collection in a count or a grouping: its id from gate 3, its name before. */
+    private Field<?> srcKey() {
+        return ck().key(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID);
+    }
+
+    private Condition metaOf(String tenant, String c) {
+        return ck().eq(tenant, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID, c);
+    }
+
+    /** A topic row's columns for {@link #buildTopicMap}; the collection is its label, current from gate 3 on. */
+    private List<Field<?>> topicFields(String tenant) {
+        return List.of(TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID,
+            ck().label(tenant, TOPICS.COLLECTION, TOPICS.COLLECTION_ID).as("collection"),
+            TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS);
+    }
+
+    // the conflict keys are ArbiterTwins' name and id columns for the table, not retyped here
+    private static final Field<?>[] META_NAME_KEY = CollectionKey.fields(TAXONOMY_META, TwinKeyUpsert.pair("taxonomy_meta").orElseThrow().nameKey());
+    private static final Field<?>[] META_ID_KEY = CollectionKey.fields(TAXONOMY_META, TwinKeyUpsert.pair("taxonomy_meta").orElseThrow().idKey());
 
     // ── doc_id hex/bytes boundary (RDR-194 P3c, nexus-tk070.p3c) ────────────────
 
@@ -119,11 +176,37 @@ public final class TaxonomyRepository {
      * missing row with blank content_type/owner_id/embedding_model. A no-op for a
      * null/blank collection (unchanged from the stub-insert era).
      */
-    private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
-        if (collection == null || collection.isBlank()) return;
+    /** The CURRENT label of the registry row {@code collection} names in this write transaction, else {@code collection} as given. */
+    /** The registry row of {@code label}, read without a lock for a READER; empty for a label with no row (its name columns are all there is). */
+    private static java.util.Optional<CollectionRow> rowOfLabel(DSLContext ctx, String tenant, String label) {
+        try {
+            return java.util.Optional.of(CollectionRegistry.shared().resolveLabel(ctx, tenant, label));
+        } catch (UnregisteredCollectionException none) {
+            return java.util.Optional.empty();
+        }
+    }
+
+    /**
+     * The {@code topics} rows of the collection whose registry row the transaction holds: those stamped with its id, and those the stamp has
+     * not reached that bear its current label. A collection renamed in place keeps the old label in its children's name columns, so a
+     * match by the current label alone misses the collection's own rows.
+     */
+    private static org.jooq.Condition ownTopics(CollectionRow row, String currentLabel) {
+        return row == null ? TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(currentLabel))   // no row holds the label: only rows the id stamp has not reached
+            : CollectionOwnedRows.of(java.util.Optional.of(row), TOPICS.COLLECTION_ID, TOPICS.COLLECTION, currentLabel);
+    }
+
+    private static String labelNow(DSLContext ctx, String tenant, String collection) {
+        if (collection == null || collection.isBlank()) return collection;
+        return CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection).map(CollectionRow::label).orElse(collection);
+    }
+
+    private static String ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
+        if (collection == null || collection.isBlank()) return collection;
         // nexus-i15oc: a taxonomy row filed under a retired (superseded) name strands exactly as a chunk
-        // does (nexus-mp8ys), so every live writer refuses it 409 naming the successor.
-        CollectionRegistry.requireWritable(ctx, tenant, collection);
+        // does (nexus-mp8ys), so every live writer refuses it 409 naming the successor. The row is written under its CURRENT label
+        // (the id is the identity: a one-row rename after the route boundary changes nothing about where an id-only write goes).
+        return CollectionRegistry.requireWritable(ctx, tenant, collection).label();
     }
 
     /**
@@ -137,7 +220,7 @@ public final class TaxonomyRepository {
     private static void ensureCollectionRegisteredAllowingSuperseded(DSLContext ctx, String tenant,
                                                                      String collection) {
         if (collection == null || collection.isBlank()) return;
-        CollectionRegistry.requireRegistered(ctx, tenant, collection);
+        CollectionRegistry.requireForWrite(ctx, tenant, collection);   // RDR-229 P3.5a: a write's check takes the key share, a tombstone allowed
     }
 
     /**
@@ -150,7 +233,7 @@ public final class TaxonomyRepository {
      */
     private static String modelOf(DSLContext ctx, String tenant, String collection) {
         if (collection == null || collection.isBlank()) return null;
-        return CollectionRegistry.require(ctx, tenant, collection).embeddingModel();
+        return CollectionRegistry.requireForWrite(ctx, tenant, collection).embeddingModel();
     }
 
     /**
@@ -164,38 +247,59 @@ public final class TaxonomyRepository {
     }
 
     /**
-     * Serialize taxonomy persist operations per (tenant, collection) within the
-     * CURRENT transaction (nexus-n2ls1).
-     *
-     * <p>The persist paths' existing-topics guard is a plain unlocked SELECT
-     * COUNT: two concurrent persists for the same (tenant, collection) both
-     * counted 0 under READ COMMITTED, both inserted the same root label, and
-     * the loser hit the taxonomy-004 partial unique index (SQLSTATE 23505 →
-     * HTTP 409, observed live 2026-07-07). {@code pg_advisory_xact_lock}
-     * blocks the second persist until the first commits, so the loser then
-     * sees the winner's committed rows and takes the guard-skip (discover) or
-     * a fresh replace (rebuild). Released automatically at commit/rollback.
-     * A {@code hashtext} collision between two different keys merely
-     * over-serializes — never a correctness issue.
+     * RDR-229 P3.1 stage 2b (nexus-p2m1x.17): the registry id of the updated {@code topics} row's OWN collection, for
+     * an UPDATE that names no collection column (a label or review change, the conflict arm of an import). The NOT
+     * VALID {@code topics_collection_id_check} is evaluated on every updated row version, so a topic the P3.1 stamp
+     * has not reached (collection set, {@code collection_id} NULL) is refused (23514) by any UPDATE that leaves the id
+     * alone. The row KEEPS the id it carries (nexus-p2m1x.23): an id is the collection's identity, and a name column can be stale (a
+     * one-row rename leaves it at the old label, which no row holds or another row now holds), so re-deriving the id from the name
+     * would give NULL (23514) or another collection's id. Only a row with no id yet takes the id its own name resolves to; NULL for
+     * {@code ''}, as the CHECK wants.
      */
-    private static void lockTaxonomyCollection(DSLContext ctx, String tenant, String collection) {
-        // Bounded wait FIRST (critique, nexus-n2ls1): without a lock_timeout a
-        // stuck holder turns the fast retryable 409 this fix removes into an
-        // indefinite in-transaction wait surfacing as an edge 504 — worse
-        // observability than the original bug. set_config(..., true) is
-        // SET LOCAL (txn-scoped, auto-reverts at commit/rollback); a timed-out
-        // acquire raises SQLSTATE 55P03, a clean retryable error. The timeout
-        // also bounds this txn's subsequent row-lock waits — acceptable, these
-        // persist txns are short writes.
-        ctx.select(function("set_config", String.class,
-                   val("lock_timeout"), val("5000"), val(true)))
-           .fetch();
-        // Typed-DSL function composition (house rule: no raw string-SQL —
-        // RawSqlGateTest): SELECT pg_advisory_xact_lock(hashtext(:key)).
-        // hashtext returns int4, implicitly widened to the bigint overload.
-        ctx.select(function("pg_advisory_xact_lock", Object.class,
-                   function("hashtext", Integer.class, val(tenant + "/" + collection))))
-           .fetch();
+    private static Field<Long> topicRowCollectionId() {
+        return coalesce(TOPICS.COLLECTION_ID, CollectionIds.idOf(TOPICS.TENANT_ID, TOPICS.COLLECTION));
+    }
+
+    /**
+     * RDR-229 P3.1 stage 2b: SET {@code source_collection_id} alongside a conflict arm that re-points
+     * {@code source_collection}, the id of whichever name wins, in the same statement and under the same condition as
+     * the name (the twin of {@link #modelFollowing}). Resolved from the winning NAME rather than copied from
+     * {@code EXCLUDED}, so a losing write that leaves an unstamped row's name alone still stamps its id: the NOT VALID
+     * CHECK refuses every row version whose id and name disagree.
+     *
+     * <p>nexus-p2m1x.23: the winning row KEEPS the id it carries (the incoming row's, or the existing row's). Only a row with no id falls
+     * back to its name. Re-resolving a stamped row's id from its name gives NULL when the name lost its registry row (the CHECK then
+     * refuses the update, 23514) and another collection's id when the old name was taken by a new row.
+     */
+    private Field<Long> sourceIdFollowing(org.jooq.Condition incomingWins) {
+        if (ck().byId()) {
+            return when(incomingWins, org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID))
+                .otherwise(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID);
+        }
+        Field<String> winner = when(incomingWins, org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
+            .otherwise(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION);
+        Field<Long> winnerId = when(incomingWins, org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID))
+            .otherwise(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID);
+        return coalesce(winnerId, CollectionIds.idOf(TOPIC_ASSIGNMENTS.TENANT_ID, winner));
+    }
+
+    /**
+     * nexus-p2m1x.23: the CURRENT label of the registry row {@code id} names, for a statement that writes a {@code topic_assignments} name
+     * column beside a kept id (a one-row rename leaves a row's name column at the old label); {@code fallback} for a row with no id (the
+     * unstamped) or whose id no row holds. Correlated on the row's own tenant.
+     */
+    private static Field<String> currentNameOf(Field<Long> id, Field<String> fallback) {
+        var c = CATALOG_COLLECTIONS.as("curname");
+        return coalesce(field(select(c.NAME).from(c).where(c.TENANT_ID.eq(TOPIC_ASSIGNMENTS.TENANT_ID).and(c.COLLECTION_ID.eq(id)))), fallback);
+    }
+
+    /** The registry id of each distinct name, read in this transaction ({@code null} for none), for a batch INSERT. */
+    private static Map<String, Long> idsOf(DSLContext ctx, String tenant, java.util.Collection<String> names) {
+        Map<String, Long> ids = new HashMap<>();
+        for (String n : names) {
+            ids.put(n, CollectionIds.require(ctx, tenant, n));
+        }
+        return ids;
     }
 
     // ⚠ DRIFT RISK (RDR-164 review S4): several ON CONFLICT DO UPDATE sites below
@@ -212,7 +316,7 @@ public final class TaxonomyRepository {
         m.put("id",            r.get(TOPICS.ID));
         m.put("label",         r.get(TOPICS.LABEL));
         m.put("parent_id",     r.get(TOPICS.PARENT_ID));
-        m.put("collection",    r.get(TOPICS.COLLECTION));
+        m.put("collection",    r.get("collection", String.class));
         m.put("centroid_hash", r.get(TOPICS.CENTROID_HASH));
         m.put("doc_count",     r.get(TOPICS.DOC_COUNT));
         Object ca = r.get(TOPICS.CREATED_AT);
@@ -227,10 +331,7 @@ public final class TaxonomyRepository {
     /** Return root topics (parent_id IS NULL), ordered by doc_count DESC. */
     public List<Map<String, Object>> getRootTopics(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(
-                    TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID, TOPICS.COLLECTION,
-                    TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
-                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+            ctx.select(topicFields(tenant))
                .from(TOPICS)
                .where(TOPICS.PARENT_ID.isNull())
                .orderBy(TOPICS.DOC_COUNT.desc())
@@ -241,10 +342,7 @@ public final class TaxonomyRepository {
     /** Return children of a topic, ordered by doc_count DESC. */
     public List<Map<String, Object>> getChildTopics(String tenant, long parentId) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(
-                    TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID, TOPICS.COLLECTION,
-                    TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
-                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+            ctx.select(topicFields(tenant))
                .from(TOPICS)
                .where(TOPICS.PARENT_ID.eq(parentId))
                .orderBy(TOPICS.DOC_COUNT.desc())
@@ -255,13 +353,10 @@ public final class TaxonomyRepository {
     /** Return all topics, optionally filtered by collection, ordered by doc_count DESC. */
     public List<Map<String, Object>> getAllTopics(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var q = ctx.select(
-                    TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID, TOPICS.COLLECTION,
-                    TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
-                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+            var q = ctx.select(topicFields(tenant))
                .from(TOPICS);
             if (collection != null && !collection.isBlank())
-                return q.where(TOPICS.COLLECTION.eq(collection))
+                return q.where(topicsOf(tenant, collection))
                         .orderBy(TOPICS.DOC_COUNT.desc())
                         .fetch()
                         .map(TaxonomyRepository::buildTopicMap);
@@ -274,13 +369,10 @@ public final class TaxonomyRepository {
     /** Return topics with review_status='pending', ordered by doc_count DESC. */
     public List<Map<String, Object>> getUnreviewedTopics(String tenant, String collection, int limit) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var q = ctx.select(
-                    TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID, TOPICS.COLLECTION,
-                    TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
-                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+            var q = ctx.select(topicFields(tenant))
                .from(TOPICS)
                .where(collection != null && !collection.isBlank()
-                   ? TOPICS.REVIEW_STATUS.eq("pending").and(TOPICS.COLLECTION.eq(collection))
+                   ? TOPICS.REVIEW_STATUS.eq("pending").and(topicsOf(tenant, collection))
                    : TOPICS.REVIEW_STATUS.eq("pending"))
                .orderBy(TOPICS.DOC_COUNT.desc())
                .limit(limit);
@@ -291,10 +383,7 @@ public final class TaxonomyRepository {
     /** Return a single topic by id, or empty. */
     public Optional<Map<String, Object>> getTopicById(String tenant, long id) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(
-                    TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID, TOPICS.COLLECTION,
-                    TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
-                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+            ctx.select(topicFields(tenant))
                .from(TOPICS)
                .where(TOPICS.ID.eq(id))
                .fetch()
@@ -316,10 +405,7 @@ public final class TaxonomyRepository {
     public List<Map<String, Object>> getTopicsByIds(String tenant, List<Long> ids) {
         if (ids.isEmpty()) return List.of();
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(
-                    TOPICS.ID, TOPICS.LABEL, TOPICS.PARENT_ID, TOPICS.COLLECTION,
-                    TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
-                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+            ctx.select(topicFields(tenant))
                .from(TOPICS)
                .where(TOPICS.ID.in(ids))
                .fetch()
@@ -332,7 +418,7 @@ public final class TaxonomyRepository {
             var q = ctx.select(TOPICS.ID)
                 .from(TOPICS)
                 .where(collection != null && !collection.isBlank()
-                    ? TOPICS.LABEL.eq(label).and(TOPICS.COLLECTION.eq(collection))
+                    ? TOPICS.LABEL.eq(label).and(topicsOf(tenant, collection))
                     : TOPICS.LABEL.eq(label))
                 .limit(1);
             return q.fetch().stream().findFirst().map(r -> r.get(TOPICS.ID));
@@ -341,12 +427,11 @@ public final class TaxonomyRepository {
 
     /** Return distinct collection names that have at least one topic. */
     public List<String> getDistinctCollections(String tenant) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.selectDistinct(TOPICS.COLLECTION)
-               .from(TOPICS)
-               .orderBy(TOPICS.COLLECTION)
-               .fetch()
-               .map(r -> r.get(TOPICS.COLLECTION)));
+        return tenantScope.withTenant(tenant, ctx -> {
+            var raw = ck().label(tenant, TOPICS.COLLECTION, TOPICS.COLLECTION_ID);
+            var lbl = raw.as("collection");
+            return ctx.selectDistinct(lbl).from(TOPICS).where(raw.isNotNull()).orderBy(lbl).fetch().map(r -> r.get(lbl));
+        });
     }
 
     /** Insert a new topic row. Returns the generated id. */
@@ -355,24 +440,36 @@ public final class TaxonomyRepository {
                              String terms) {
         OffsetDateTime createdAtTs = parseTs(createdAt);
         return tenantScope.withTenant(tenant, ctx -> {
-            ensureCollectionRegistered(ctx, tenant, collection);
+            final String coll = ensureCollectionRegistered(ctx, tenant, collection);
+            // RDR-229 P3.1 stage 2b: the id of the collection, beside its name (null for a blank one).
             return ctx.insertInto(TOPICS,
                     TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
                     TOPICS.COLLECTION, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
-                    TOPICS.REVIEW_STATUS, TOPICS.TERMS)
-                .values(tenant, label, parentId, collection, docCount, createdAtTs, "pending", terms)
+                    TOPICS.REVIEW_STATUS, TOPICS.TERMS, TOPICS.COLLECTION_ID)
+                .values(tenant, label, parentId, coll, docCount, createdAtTs, "pending", terms,
+                        CollectionIds.require(ctx, tenant, coll))
                 .returningResult(TOPICS.ID)
                 .fetchOne()
                 .get(TOPICS.ID);
         });
     }
 
-    /** Update topic label without changing review_status. */
+    /**
+     * Update topic label without changing review_status.
+     *
+     * <p>RDR-229 P3.5a (nexus-p2m1x.23), also {@link #renameTopic} and {@link #markTopicReviewed}: the topic's collection is read {@code FOR
+     * KEY SHARE} by the id the topic carries before the update (a verb that retires it waits), and the update is confined to the topic
+     * of that home and keeps the id. A name column can be stale after a one-row rename, and the old name may be another collection's.
+     */
     public void updateTopicLabel(String tenant, long topicId, String newLabel) {
         tenantScope.withTenant(tenant, ctx -> {
+            var home = TaxonomyRegistryReads.registryFirstOfTopic(ctx, tenant, topicId);
+            if (home.isEmpty()) return null;
             ctx.update(TOPICS)
                .set(TOPICS.LABEL, newLabel)
-               .where(TOPICS.ID.eq(topicId))
+               .set(TOPICS.COLLECTION_ID, topicRowCollectionId())
+               .set(TOPICS.COLLECTION, home.get().nameToWrite())
+               .where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic()))
                .execute();
             return null;
         });
@@ -381,10 +478,14 @@ public final class TaxonomyRepository {
     /** Rename topic and mark as accepted. */
     public void renameTopic(String tenant, long topicId, String newLabel) {
         tenantScope.withTenant(tenant, ctx -> {
+            var home = TaxonomyRegistryReads.registryFirstOfTopic(ctx, tenant, topicId);
+            if (home.isEmpty()) return null;
             ctx.update(TOPICS)
                .set(TOPICS.LABEL, newLabel)
                .set(TOPICS.REVIEW_STATUS, "accepted")
-               .where(TOPICS.ID.eq(topicId))
+               .set(TOPICS.COLLECTION_ID, topicRowCollectionId())
+               .set(TOPICS.COLLECTION, home.get().nameToWrite())
+               .where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic()))
                .execute();
             return null;
         });
@@ -393,9 +494,13 @@ public final class TaxonomyRepository {
     /** Update review_status. */
     public void markTopicReviewed(String tenant, long topicId, String status) {
         tenantScope.withTenant(tenant, ctx -> {
+            var home = TaxonomyRegistryReads.registryFirstOfTopic(ctx, tenant, topicId);
+            if (home.isEmpty()) return null;
             ctx.update(TOPICS)
                .set(TOPICS.REVIEW_STATUS, status)
-               .where(TOPICS.ID.eq(topicId))
+               .set(TOPICS.COLLECTION_ID, topicRowCollectionId())
+               .set(TOPICS.COLLECTION, home.get().nameToWrite())
+               .where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic()))
                .execute();
             return null;
         });
@@ -434,7 +539,7 @@ public final class TaxonomyRepository {
      */
     public List<Map<String, Object>> getDocCountDrift(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            mapDriftRows(ctx.selectFrom(TOPICS_DOC_COUNT_DRIFT.call(tenant)).fetch()));
+            mapDriftRows(ctx, tenant, ctx.selectFrom(TOPICS_DOC_COUNT_DRIFT.call(tenant)).fetch()));
     }
 
     /**
@@ -449,7 +554,7 @@ public final class TaxonomyRepository {
      */
     public Map<String, Object> recountDocCount(String tenant, boolean dryRun) {
         return tenantScope.withTenant(tenant, ctx -> {
-            List<Map<String, Object>> rows = mapDriftRows(
+            List<Map<String, Object>> rows = mapDriftRows(ctx, tenant,
                 ctx.selectFrom(TOPICS_RECOUNT_DOC_COUNT.call(tenant, dryRun)).fetch());
             var out = new LinkedHashMap<String, Object>();
             out.put("dry_run", dryRun);
@@ -468,13 +573,23 @@ public final class TaxonomyRepository {
      *  the two generated jOOQ Table classes carry distinct Field identities
      *  despite the identical column names, so a single typed-Field helper
      *  cannot serve both without relying on jOOQ's by-name fallback). */
-    private static List<Map<String, Object>> mapDriftRows(org.jooq.Result<? extends org.jooq.Record> result) {
+    private List<Map<String, Object>> mapDriftRows(DSLContext ctx, String tenant, org.jooq.Result<? extends org.jooq.Record> result) {
+        // The functions return t.collection, the row's own name column, which a one-row rename leaves stale. From gate 3 the collection is
+        // the live registry label of the topic's id, read here by topic id, else the name the function returned (RDR-229 P3.5c).
+        var k = ck();
+        var lbl = k.label(tenant, TOPICS.COLLECTION, TOPICS.COLLECTION_ID);
+        Map<Long, String> labels = new HashMap<>();
+        if (k.byId() && !result.isEmpty()) {
+            var ids = result.getValues("topic_id", Long.class);
+            ctx.select(TOPICS.ID, lbl).from(TOPICS).where(TOPICS.ID.in(ids)).forEach(x -> labels.put(x.value1(), x.value2()));
+        }
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (org.jooq.Record rec : result) {
             var m = new LinkedHashMap<String, Object>();
             m.put("topic_id",     rec.get("topic_id", Long.class));
             m.put("label",        rec.get("label", String.class));
-            m.put("collection",   rec.get("collection", String.class));
+            String live = labels.get(rec.get("topic_id", Long.class));
+            m.put("collection",   live != null ? live : rec.get("collection", String.class));
             m.put("doc_count",    rec.get("doc_count", Integer.class));
             m.put("actual_count", rec.get("actual_count", Long.class));
             rows.add(Collections.unmodifiableMap(m));
@@ -488,15 +603,14 @@ public final class TaxonomyRepository {
      */
     public Optional<String> deleteTopic(String tenant, long topicId) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.select(TOPICS.COLLECTION)
-                .from(TOPICS)
-                .where(TOPICS.ID.eq(topicId))
-                .fetch();
-            if (rows.isEmpty()) return Optional.<String>empty();
-            String collection = rows.get(0).get(TOPICS.COLLECTION);
+            // RDR-229 P3.5a (nexus-p2m1x.23): the topic's collection AND the source collections of the assignments the FK cascade removes are
+            // read FOR KEY SHARE (one statement, id order) before the delete; the delete is confined to the topic of that home
+            var home = TaxonomyRegistryReads.registryFirstOfTopics(ctx, tenant, true, List.of(topicId));
+            if (home.isEmpty()) return Optional.<String>empty();
             // Assignments cascade via FK ON DELETE CASCADE
-            ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(topicId)).execute();
-            return Optional.of(collection);
+            // the bind matched nothing: the topic was deleted or re-homed after the home was read, so it is a missing topic, as it was before
+            int deleted = ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic())).execute();
+            return deleted == 0 ? Optional.<String>empty() : Optional.of(home.get().currentLabel());
         });
     }
 
@@ -507,12 +621,13 @@ public final class TaxonomyRepository {
     public Optional<String> mergeTopics(String tenant, long sourceId, long targetId) {
         if (sourceId == targetId) return Optional.empty();
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.select(TOPICS.COLLECTION)
-                .from(TOPICS)
-                .where(TOPICS.ID.eq(sourceId))
-                .fetch();
-            if (rows.isEmpty()) return Optional.<String>empty();
-            String collection = rows.get(0).get(TOPICS.COLLECTION);
+            // RDR-229 P3.5a (nexus-p2m1x.23): the registry rows the merge writes under are read FOR KEY SHARE in ONE statement in id order before
+            // any assignment row is written: the collections of both topics, by the ids they carry (a name column can be stale), and the source
+            // collections of the assignments of both (the moved rows, and the target's rows a conflict re-points). A collection with no row (the
+            // leftovers of a deleted one) is merged as it always was
+            var home = TaxonomyRegistryReads.registryFirstOfTopics(ctx, tenant, true, List.of(sourceId, targetId));
+            if (home.isEmpty()) return Optional.<String>empty();
+            String collection = home.get().currentLabel();
 
             // Move assignments: prefer higher similarity on conflict.
             // GREATEST(COALESCE(...), COALESCE(...)) + CASE WHEN expressions referencing
@@ -526,7 +641,8 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.SIMILARITY,
                     TOPIC_ASSIGNMENTS.ASSIGNED_AT,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
                .select(
                     select(
                         TOPIC_ASSIGNMENTS.TENANT_ID,
@@ -535,11 +651,17 @@ public final class TaxonomyRepository {
                         TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                         TOPIC_ASSIGNMENTS.SIMILARITY,
                         TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                        // nexus-p2m1x.23: the moved row is filed under its source collection's CURRENT label, beside the id it keeps
+                        currentNameOf(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
                         // RDR-225: the moved row keeps the model of the chunk it points at.
-                        TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                        TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                        // RDR-229 P3.1 stage 2b: and the id of its source collection, COPIED from the row it moves (the id the row was
+                        // written with, never re-resolved from the name by an unlocked read); only a row that is itself unstamped
+                        // falls back to the name, which is the stamp-move's own repair and not a new registration
+                        coalesce(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
+                            CollectionIds.idOf(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)))
                     .from(TOPIC_ASSIGNMENTS)
-                    .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId)))
+                    .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId).and(home.get().holdsTopic(TOPIC_ASSIGNMENTS.TOPIC_ID, sourceId))))
                .onConflict(
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
@@ -554,26 +676,32 @@ public final class TaxonomyRepository {
                         + " THEN EXCLUDED.assigned_at"
                         + " ELSE nexus.topic_assignments.assigned_at END", OffsetDateTime.class))
                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    field("CASE WHEN COALESCE(EXCLUDED.similarity, -1.0)"
-                        + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
-                        + " THEN EXCLUDED.source_collection"
-                        + " ELSE nexus.topic_assignments.source_collection END", String.class))
+                    // nexus-p2m1x.23: the winner's name is its collection's CURRENT label (the incoming row carries it; the existing row's
+                    // column may be stale after a one-row rename, so it is read from the registry by the id the row keeps)
+                    when(coalesce(org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SIMILARITY), -1.0).gt(coalesce(TOPIC_ASSIGNMENTS.SIMILARITY, -1.0)),
+                            org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
+                        .otherwise(currentNameOf(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)))
                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
                     modelFollowing(coalesce(org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SIMILARITY), -1.0)
+                        .gt(coalesce(TOPIC_ASSIGNMENTS.SIMILARITY, -1.0))))
+               .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
+                    sourceIdFollowing(coalesce(org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SIMILARITY), -1.0)
                         .gt(coalesce(TOPIC_ASSIGNMENTS.SIMILARITY, -1.0))))
                .execute();
 
             ctx.deleteFrom(TOPIC_ASSIGNMENTS)
-               .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId))
+               .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId).and(home.get().holdsTopic(TOPIC_ASSIGNMENTS.TOPIC_ID, sourceId)))
                .execute();
 
             // RDR-154 P0 (nexus-i7ivk): no manual doc_count resync. The assignment
             // move (INSERT) and source purge (DELETE) above each fire the
             // statement-level triggers, which recompute target.doc_count from the
             // live assignment rows; the trigger is the sole writer.
-            ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(sourceId)).execute();
+            // the bind matched nothing: the source topic was deleted or re-homed after the home was read, a missing topic as before. The
+            // assignment statements above were confined to the same home, so they moved nothing either
+            int deleted = ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(sourceId).and(home.get().ownsTopic())).execute();
 
-            return Optional.of(collection);
+            return deleted == 0 ? Optional.<String>empty() : Optional.of(collection);
         });
     }
 
@@ -611,17 +739,18 @@ public final class TaxonomyRepository {
      * centroid, manual and import writes are not checked (the {@code /import/*} verbs carry
      * tombstoned collections as they were).
      */
-    private static java.util.Set<Long> supersededTopicIds(DSLContext ctx, String tenant,
-                                                          java.util.Collection<Long> topicIds) {
+    private java.util.Set<Long> supersededTopicIds(DSLContext ctx, String tenant,
+                                                   java.util.Collection<Long> topicIds) {
         if (topicIds.isEmpty()) return java.util.Set.of();
+        var k = ck();
         return new java.util.HashSet<>(ctx.select(TOPICS.ID)
             .from(TOPICS)
             .join(CATALOG_COLLECTIONS)
             .on(CATALOG_COLLECTIONS.TENANT_ID.eq(TOPICS.TENANT_ID))
-            .and(CATALOG_COLLECTIONS.NAME.eq(TOPICS.COLLECTION))
+            .and(k.same(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID, TOPICS.COLLECTION, TOPICS.COLLECTION_ID))
             .where(TOPICS.TENANT_ID.eq(tenant))
             .and(TOPICS.ID.in(topicIds))
-            .and(coalesce(CATALOG_COLLECTIONS.SUPERSEDED_BY, "").ne(""))
+            .and(k.retired(CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID))
             .fetch(TOPICS.ID));
     }
 
@@ -678,11 +807,13 @@ public final class TaxonomyRepository {
             // (mirrors P3a's plpgsql centroid-branch fix), so ANY row
             // carrying a non-blank source_collection needs the same
             // auto-stub, not just "assigned_by": "projection" rows.
-            ordered.stream()
+            List<String> sources = ordered.stream()
                 .map(r -> optS(r, "source_collection"))
                 .filter(c -> c != null && !c.isBlank())
                 .distinct()
-                .forEach(c -> ensureCollectionRegistered(ctx, tenant, c));
+                .toList();
+            CollectionRegistry.requireAllForWrite(ctx, tenant, sources);   // RDR-229 P3.5a: every source's key share at once, in id order
+            sources.forEach(c -> ensureCollectionRegistered(ctx, tenant, c));
             java.util.Set<Long> retired = supersededTopicIds(ctx, tenant, ordered.stream()
                 .filter(r -> "projection".equals(reqS(r, "assigned_by")))
                 .map(r -> reqL(r, "topic_id"))
@@ -708,17 +839,20 @@ public final class TaxonomyRepository {
      * (one row per transaction) and {@link #assignMany} (N rows per
      * transaction). Assumes {@code ctx} is already scoped to {@code tenant}.
      */
-    private static void assignOne(DSLContext ctx, String tenant, String docId, long topicId,
+    private void assignOne(DSLContext ctx, String tenant, String docId, long topicId,
                                   String assignedBy, Double similarity,
                                   String sourceCollection, String assignedAt) {
         assignOne(ctx, tenant, docId, topicId, assignedBy, similarity,
                   sourceCollection, assignedAt, true);
     }
 
-    private static void assignOne(DSLContext ctx, String tenant, String docId, long topicId,
+    private void assignOne(DSLContext ctx, String tenant, String docId, long topicId,
                                   String assignedBy, Double similarity,
                                   String sourceCollection, String assignedAt,
                                   boolean ensureCollection) {
+        // the id is the identity: a source collection named by id is written under its CURRENT label (a memo hit when assignMany or
+        // the caller already read it FOR KEY SHARE; a label no row has is written as given, as it always was)
+        sourceCollection = labelNow(ctx, tenant, sourceCollection);
         if ("projection".equals(assignedBy)) {
             // RDR-156 P0.2: ensure collection is registered before the assignment
             // write (assignMany pre-registers distinct collections and passes false)
@@ -737,9 +871,10 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.SIMILARITY,
                     TOPIC_ASSIGNMENTS.ASSIGNED_AT,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
                .values(tenant, docIdBytes(docId), topicId, "projection", similarity, assignedAtTs, sourceCollection,
-                       modelOf(ctx, tenant, sourceCollection))
+                       modelOf(ctx, tenant, sourceCollection), CollectionIds.require(ctx, tenant, sourceCollection))
                .onConflict(
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
@@ -760,6 +895,9 @@ public final class TaxonomyRepository {
                         + " ELSE nexus.topic_assignments.source_collection END", String.class))
                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
                     modelFollowing(org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SIMILARITY)
+                        .gt(coalesce(TOPIC_ASSIGNMENTS.SIMILARITY, -1.0))))
+               .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
+                    sourceIdFollowing(org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SIMILARITY)
                         .gt(coalesce(TOPIC_ASSIGNMENTS.SIMILARITY, -1.0))))
                .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
                .execute();
@@ -786,9 +924,10 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.TOPIC_ID,
                     TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
                .values(tenant, docIdBytes(docId), topicId, assignedBy, sourceCollection,
-                       modelOf(ctx, tenant, sourceCollection))
+                       modelOf(ctx, tenant, sourceCollection), CollectionIds.require(ctx, tenant, sourceCollection))
                .onConflict(
                    TOPIC_ASSIGNMENTS.TENANT_ID,
                    TOPIC_ASSIGNMENTS.DOC_ID,
@@ -1033,6 +1172,10 @@ public final class TaxonomyRepository {
                 // NOT a DeadlockRetry trigger; the single bounded retry lives in
                 // assignFromChashes above, outside this belt.
                 PgSession.setTaxonomyAssignBounds(ctx);
+                // RDR-229 P3.5a: the write's own registry read (a cache hit for a label request); for a request by id, the by-id
+                // read FOR KEY SHARE, so the id cannot be freed and its label taken again under this write
+                // RDR-229 P3.5c, I8: the function files the assignments under the LOCKED row's current label, never the label the request carried
+                final String coll = CollectionRegistry.requireWritable(ctx, tenant, collection).label();
                 // chunks_<dim>.chash is bytea (RDR-180); the HTTP/route boundary carries
                 // hex text, so the existence probe goes through ChashHex.hex(...) — the
                 // house-blessed jOOQ seam that binds hex->bytes / fetches bytes->hex
@@ -1052,7 +1195,7 @@ public final class TaxonomyRepository {
                 List<String> found = ctx.select(ChashHex.hex(CHUNKS.CHASH)).from(CHUNKS)
                         .where(CHUNKS.EMBEDDING_MODEL.eq(model)
                             .and(CHUNKS.TENANT_ID.eq(tenant))
-                            .and(CHUNKS.COLLECTION.eq(collection))
+                            .and(ck().eq(tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, collection))
                             .and(ChashHex.hex(CHUNKS.CHASH).in(chashArr)))
                         .fetch(ChashHex.hex(CHUNKS.CHASH));
                 java.util.Set<String> foundSet = new java.util.HashSet<>(found);
@@ -1061,7 +1204,7 @@ public final class TaxonomyRepository {
                     .distinct()
                     .toList();
 
-                int assigned = assignFromChashesOnePass(ctx, dim, tenant, model, collection, chashArr, false).size();
+                int assigned = assignFromChashesOnePass(ctx, dim, tenant, model, coll, chashArr, false).size();
                 // Still INSIDE this transaction — the own pass's persisted row(s)
                 // and the doc_count trigger's topics lock are both live here.
                 duringOwnPassHookForTests.run();
@@ -1079,7 +1222,9 @@ public final class TaxonomyRepository {
                 () -> tenantScope.withTenant(tenant, ctx -> {
                     // Same bound discipline as the own pass, in its OWN transaction.
                     PgSession.setTaxonomyAssignBounds(ctx);
-                    return assignFromChashesOnePass(ctx, dim, tenant, model, collection, chashArr, true).size();
+                    // I8 again: this pass is its own transaction, so it reads the row (FOR KEY SHARE) and files under its current label too
+                    final String coll = CollectionRegistry.requireWritable(ctx, tenant, collection).label();
+                    return assignFromChashesOnePass(ctx, dim, tenant, model, coll, chashArr, true).size();
                 }));
         }
 
@@ -1361,7 +1506,7 @@ public final class TaxonomyRepository {
      * declares {@code UTC_SECOND} for exactly this shape; it just was not being used
      * on these reads.
      */
-    private static String utcIso(Object ts) {
+    static String utcIso(Object ts) {
         if (!(ts instanceof OffsetDateTime odt)) return null;
         return UTC_SECOND.format(odt.withOffsetSameInstant(ZoneOffset.UTC));
     }
@@ -1391,7 +1536,8 @@ public final class TaxonomyRepository {
                        TOPIC_ASSIGNMENTS.TOPIC_ID,
                        TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                        TOPIC_ASSIGNMENTS.SIMILARITY,
-                       TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                       ck().label(tenant, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
+                           .as("source_collection"),
                        TOPIC_ASSIGNMENTS.ASSIGNED_AT)
                .from(TOPIC_ASSIGNMENTS)
                .where(TOPIC_ASSIGNMENTS.DOC_ID.in(docIdBytesList))
@@ -1403,7 +1549,7 @@ public final class TaxonomyRepository {
                    m.put("topic_id",          r.get(TOPIC_ASSIGNMENTS.TOPIC_ID));
                    m.put("assigned_by",       r.get(TOPIC_ASSIGNMENTS.ASSIGNED_BY));
                    m.put("similarity",        r.get(TOPIC_ASSIGNMENTS.SIMILARITY));
-                   m.put("source_collection", r.get(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION));
+                   m.put("source_collection", r.get("source_collection", String.class));
                    m.put("assigned_at",       utcIso(r.get(TOPIC_ASSIGNMENTS.ASSIGNED_AT)));
                    return m;
                }));
@@ -1450,6 +1596,10 @@ public final class TaxonomyRepository {
      * while a genuinely chash-shaped title still gets full delete semantics.
      */
     public int purgeAssignmentsForDoc(String tenant, String project, String title) {
+        // RDR-229 P3.5a (nexus-p2m1x.23): the project is a LABEL; it names the collection whose row the label resolves to NOW, read FOR KEY SHARE
+        // (a label no row holds is the leftovers of a deleted collection and reaches only rows no id has reached, the purge's rule). The
+        // topics are those of that row by its id: a topic whose name column bears the label but whose id is another collection's is not this
+        // project's. The source collections of the assignments removed are read with it, in id order.
         if (!title.matches("^[0-9a-f]{64}$")) {
             // Not a chash-shaped identifier -- structurally cannot match any
             // topic_assignments row (see javadoc above). Still run the
@@ -1457,8 +1607,9 @@ public final class TaxonomyRepository {
             // behavior for a non-matching title (unconditional, not gated
             // on removed > 0).
             return tenantScope.withTenant(tenant, ctx -> {
+                var row = TaxonomyRegistryReads.registryFirstAround(ctx, tenant, project, TaxonomyRegistryReads.Names::empty);
                 ctx.deleteFrom(TOPICS)
-                   .where(TOPICS.COLLECTION.eq(project)
+                   .where(ownTopics(row.orElse(null), project)
                        .and(TOPICS.ID.notIn(
                            selectDistinct(TOPIC_ASSIGNMENTS.TOPIC_ID).from(TOPIC_ASSIGNMENTS))))
                    .execute();
@@ -1466,13 +1617,21 @@ public final class TaxonomyRepository {
             });
         }
         return tenantScope.withTenant(tenant, ctx -> {
+            final byte[] doc = docIdBytes(title);
+            // the topics are judged twice: from an unlocked guess for the lock order, then from the row as locked (the write acts on that one)
+            var row = TaxonomyRegistryReads.registryFirstAround(ctx, tenant, project,
+                () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant, TOPIC_ASSIGNMENTS.DOC_ID.eq(doc)
+                    .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(select(TOPICS.ID).from(TOPICS).where(TaxonomyRegistryReads.topicsNamedBy(ctx, tenant, project))))),
+                locked -> TaxonomyRegistryReads.sourcesOf(ctx, tenant, TOPIC_ASSIGNMENTS.DOC_ID.eq(doc)
+                    .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(select(TOPICS.ID).from(TOPICS).where(ownTopics(locked.orElse(null), project))))));
+            final org.jooq.Condition ownTopics = ownTopics(row.orElse(null), project);
             int removed = ctx.deleteFrom(TOPIC_ASSIGNMENTS)
-                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(docIdBytes(title))
+                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(doc)
                     .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(
-                        select(TOPICS.ID).from(TOPICS).where(TOPICS.COLLECTION.eq(project)))))
+                        select(TOPICS.ID).from(TOPICS).where(ownTopics))))
                 .execute();
             ctx.deleteFrom(TOPICS)
-               .where(TOPICS.COLLECTION.eq(project)
+               .where(ownTopics
                    .and(TOPICS.ID.notIn(
                        selectDistinct(TOPIC_ASSIGNMENTS.TOPIC_ID).from(TOPIC_ASSIGNMENTS))))
                .execute();
@@ -1501,14 +1660,27 @@ public final class TaxonomyRepository {
      * {@code docs__art} reaches {@code docs__art-x}), which is wrong when each collection has its own threshold.
      */
     public int pruneProjectionBelow(String tenant, String sourceCollection, double minSimilarity, boolean exact) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+        return tenantScope.withTenant(tenant, ctx -> {
+            // RDR-229 P3.5a (nexus-p2m1x.23): the rows pruned are the source collections' own, by their ids: exact reads the one row the label
+            // resolves to now FOR KEY SHARE, a prefix reads the rows of every collection whose label starts with it in one id-ordered
+            // statement. A source_collection name column can be stale after a one-row rename (the old label may now be another collection's), so
+            // it matches only a row no id has reached.
+            final org.jooq.Condition source;
+            if (exact) {
+                var row = CollectionRegistry.requireForWriteIfPresent(ctx, tenant, sourceCollection);
+                source = CollectionOwnedRows.of(row, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sourceCollection);
+            } else {
+                var rows = TaxonomyRegistryReads.registryFirstOfPrefix(ctx, tenant, sourceCollection);
+                var byId = rows.isEmpty() ? org.jooq.impl.DSL.falseCondition()
+                    : TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.in(TaxonomyRegistryReads.idsOf(rows));
+                source = byId.or(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.isNull().and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.startsWith(sourceCollection)));
+            }
+            return ctx.deleteFrom(TOPIC_ASSIGNMENTS)
                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(exact
-                       ? TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(sourceCollection)
-                       : TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.startsWith(sourceCollection))
+                   .and(source)
                    .and(TOPIC_ASSIGNMENTS.SIMILARITY.lt(minSimilarity)))
-               .execute());
+               .execute();
+        });
     }
 
     /**
@@ -1532,6 +1704,24 @@ public final class TaxonomyRepository {
 
     private static final java.util.Set<String> PURGE_SCOPES =
         java.util.Set.of(PURGE_SCOPE_FULL, PURGE_SCOPE_TAXONOMY_ONLY);
+
+    /**
+     * RDR-229 P3.5a (nexus-p2m1x.23): the by-id read of a write that is not keyed to a live, registered collection (a
+     * purge, a delete of centroids: they may clear the leftovers of a collection whose registry row is already gone). When
+     * the request named {@code collection} by id ({@link ExpectedCollectionIds}), reads that id in {@code ctx}'s
+     * transaction, {@code FOR KEY SHARE}, as the first collection-keyed statement: no row is a 404, a retired row a 409,
+     * and the write after it is by that id's row, never by a label another row has taken. By label it reads the row it
+     * resolves to, {@code FOR KEY SHARE} too (linda's option (b)), and ignores a missing one, which is the behaviour of these
+     * writes before the id existed.
+     */
+    public static Long consumeRequestedId(DSLContext ctx, String tenant, String collection) {
+        try {
+            return CollectionIds.require(ctx, tenant, collection);
+        } catch (UnregisteredCollectionException byLabelNoRow) {
+            // by label, with no registry row: the rows left under the name are still the caller's to clear
+            return null;
+        }
+    }
 
     /** Purge all taxonomy rows for a collection, full (cross-collection-reaching) scope. */
     public Map<String, Integer> purgeCollection(String tenant, String collection) {
@@ -1560,9 +1750,30 @@ public final class TaxonomyRepository {
                 "purgeCollection: unknown scope '" + scope + "' (allowed: " + PURGE_SCOPES + ")");
         }
         return tenantScope.withTenant(tenant, ctx -> {
+            // before any collection-keyed statement. The rows to purge are the registry row's own, by its id (a name column can be stale
+            // after a one-row rename, and the old name may now be another collection's); a label no row holds
+            // reaches only a row the stamp has not reached (no id yet): a stamped row belongs to a collection whatever its name says, and the
+            // label may be the OLD name of a renamed one
+            // RDR-229 P3.5a (nexus-p2m1x.23): the rows the purge reaches are read in one id-ordered run, the collection's own among them: the
+            // doomed topics' assignments carry the source collections of the documents projected onto them (other collections' chunks), and
+            // those collections' registry rows are read FOR KEY SHARE too, before any delete
+            // the doomed topics are judged twice: from an unlocked guess for the lock order, then from the row as locked (the delete acts on that one)
+            final var purgedRow = TaxonomyRegistryReads.registryFirstAround(ctx, tenant, collection,
+                () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant, TOPIC_ASSIGNMENTS.TOPIC_ID.in(
+                    select(TOPICS.ID).from(TOPICS).where(TaxonomyRegistryReads.topicsNamedBy(ctx, tenant, collection)))),
+                locked -> TaxonomyRegistryReads.sourcesOf(ctx, tenant, TOPIC_ASSIGNMENTS.TOPIC_ID.in(
+                    select(TOPICS.ID).from(TOPICS).where(ownTopics(locked.orElse(null), collection)))));
+            final Long purgedId = purgedRow.map(CollectionRow::collectionId).orElse(null);
+            // the label of the unstamped arms (rows the id stamp has not reached) is the locked row's CURRENT label: the request's, after a one-row
+            // rename, is the new holder's, whose unstamped rows would match (a label no row holds stays the request's)
+            final String label = purgedRow.map(CollectionRow::label).orElse(collection);
+            final org.jooq.Condition topicsOf = purgedId == null ? TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(label))
+                : TOPICS.COLLECTION_ID.eq(purgedId).or(TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(label)));
+            // the doomed topics are those of the row as locked (the condition above), not topicsOf(tenant, collection): before gate 3 that
+            // helper names the collection by the REQUEST's label, which after a one-row rename is the new holder's topics (ced0ada045)
             var doomedIds = ctx.select(TOPICS.ID)
                 .from(TOPICS)
-                .where(TOPICS.COLLECTION.eq(collection))
+                .where(topicsOf)
                 .fetch()
                 .map(r -> r.get(TOPICS.ID));
             int links = 0, assignments = 0;
@@ -1576,23 +1787,26 @@ public final class TaxonomyRepository {
                     .execute();
             }
             if (PURGE_SCOPE_FULL.equals(scope)) {
-                assignments += ctx.deleteFrom(TOPIC_ASSIGNMENTS)
-                    .where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection))
-                    .execute();
+                final org.jooq.Condition unstamped = TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.isNull().and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(label));
+                assignments += ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(purgedId == null ? unstamped : TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(purgedId).or(unstamped)).execute();
             }
-            int topics = ctx.deleteFrom(TOPICS)
-                .where(TOPICS.COLLECTION.eq(collection))
-                .execute();
-            int meta = ctx.deleteFrom(TAXONOMY_META)
-                .where(TAXONOMY_META.COLLECTION.eq(collection))
-                .execute();
+            int topics = ctx.deleteFrom(TOPICS).where(topicsOf).execute();
+            final org.jooq.Condition metaUnstamped = TAXONOMY_META.COLLECTION_ID.isNull().and(TAXONOMY_META.COLLECTION.eq(label));
+            int meta = ctx.deleteFrom(TAXONOMY_META).where(purgedId == null ? metaUnstamped : TAXONOMY_META.COLLECTION_ID.eq(purgedId).or(metaUnstamped)).execute();
             return Map.of("topics", topics, "assignments", assignments, "links", links, "meta", meta);
         });
     }
 
-    /** Rename all taxonomy rows from old to new collection. */
+    /**
+     * Rename all taxonomy rows from old to new collection. The target is a label a user supplied, so it is judged by
+     * the label rule the catalog rename applies ({@link CollectionLabel#validateUserLabel}) before any row moves
+     * (n3hhc's class: a route that writes its target with no label check).
+     */
     public Map<String, Integer> renameCollection(String tenant, String oldCol, String newCol) {
-        return tenantScope.withTenant(tenant, ctx -> {
+        CollectionLabel.validateUserLabel(newCol);
+        boolean[] noop = new boolean[1];   // set by the committed attempt when the one-row regime made this a no-op
+        Map<String, Integer> answer = renameGuard.runRename(tenantScope, tenant, ctx -> {
+            noop[0] = false;
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): refused while a re-embed job holds either name.
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldCol, newCol);
             // RDR-164 P1a: the new collection name must be registered before the denorm
@@ -1600,8 +1814,11 @@ public final class TaxonomyRepository {
             // FKs to catalog_collections; topic_assignments' FK is ON UPDATE CASCADE but
             // the child UPDATE to newCol still requires the value to exist in the registry).
             ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newCol);
+            // RDR-229 P3.1 stage 2b: every rewritten row takes the target's registry id with its name.
+            final Long newId = CollectionIds.require(ctx, tenant, newCol);
             int topics = ctx.update(TOPICS)
                 .set(TOPICS.COLLECTION, newCol)
+                .set(TOPICS.COLLECTION_ID, newId)
                 .where(TOPICS.COLLECTION.eq(oldCol))
                 .execute();
             // RDR-225: topic_assignments_chunk_fk is (tenant_id, source_collection, doc_id,
@@ -1611,14 +1828,22 @@ public final class TaxonomyRepository {
             int assignments = ctx.update(TOPIC_ASSIGNMENTS)
                 .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, newCol)
                 .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, modelOf(ctx, tenant, newCol))
+                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, newId)
                 .where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldCol))
                 .execute();
             int meta = ctx.update(TAXONOMY_META)
                 .set(TAXONOMY_META.COLLECTION, newCol)
+                .set(TAXONOMY_META.COLLECTION_ID, newId)
                 .where(TAXONOMY_META.COLLECTION.eq(oldCol))
                 .execute();
             return Map.of("topics", topics, "assignments", assignments, "meta", meta);
+        }, ctx -> {
+            RenameGuard.requireRegistryRenamed(ctx, tenant, oldCol, newCol);   // the registry rename moved the label: nothing to rewrite
+            noop[0] = true;
+            return Map.of("topics", 0, "assignments", 0, "meta", 0);
         });
+        if (noop[0]) RenameNoOpActivity.record("taxonomy", oldCol, newCol);   // counted once committed
+        return answer;
     }
 
     // ── Taxonomy meta ──────────────────────────────────────────────────────────
@@ -1627,16 +1852,20 @@ public final class TaxonomyRepository {
     public void recordDiscoverCount(String tenant, String collection, int docCount, String discoveredAt) {
         OffsetDateTime discoveredAtTs = parseTs(discoveredAt);
         tenantScope.withTenant(tenant, ctx -> {
-            ensureCollectionRegistered(ctx, tenant, collection);
+            final String coll = ensureCollectionRegistered(ctx, tenant, collection);
             // GREATEST(existing_col, EXCLUDED.col) — references both the table row and
             // EXCLUDED in the same expression; retained as DSL.field() fragments per spec.
-            ctx.insertInto(TAXONOMY_META,
+            var insert = ctx.insertInto(TAXONOMY_META,
                     TAXONOMY_META.TENANT_ID,
                     TAXONOMY_META.COLLECTION,
                     TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
-                    TAXONOMY_META.LAST_DISCOVER_AT)
-               .values(tenant, collection, docCount, discoveredAtTs)
-               .onConflict(TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+                    TAXONOMY_META.LAST_DISCOVER_AT,
+                    TAXONOMY_META.COLLECTION_ID)
+               .values(tenant, coll, docCount, discoveredAtTs, CollectionIds.require(ctx, tenant, collection));
+            final boolean byId1 = ck().byId();
+            TwinKeyUpsert.run(ctx, "taxonomy_meta", byId1 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+                c -> { Field<?>[] key = byId1 ? META_ID_KEY : META_NAME_KEY; return insert
+               .onConflict(key)
                .doUpdate()
                .set(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
                     field("GREATEST(nexus.taxonomy_meta.last_discover_doc_count,"
@@ -1644,7 +1873,8 @@ public final class TaxonomyRepository {
                .set(TAXONOMY_META.LAST_DISCOVER_AT,
                     field("GREATEST(nexus.taxonomy_meta.last_discover_at,"
                         + " EXCLUDED.last_discover_at)", OffsetDateTime.class))
-               .execute();
+               .set(TAXONOMY_META.COLLECTION_ID, org.jooq.impl.DSL.excluded(TAXONOMY_META.COLLECTION_ID))
+               .execute(); });
             return null;
         });
     }
@@ -1652,9 +1882,12 @@ public final class TaxonomyRepository {
     /** Get the last discover doc_count for rebalance check. */
     public Optional<Integer> getLastDiscoverDocCount(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // by the collection's registry id, a name only for a row the id stamp has not reached (CollectionOwnedRows): a one-row rename
+            // leaves the name column at the old label, so a match by the current label alone reads nothing
             var rows = ctx.select(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT)
                 .from(TAXONOMY_META)
-                .where(TAXONOMY_META.COLLECTION.eq(collection))
+                .where(CollectionOwnedRows.of(rowOfLabel(ctx, tenant, collection), TAXONOMY_META.COLLECTION_ID, TAXONOMY_META.COLLECTION,
+                    collection))
                 .fetch();
             return rows.isEmpty() ? Optional.empty()
                 : Optional.of(rows.get(0).get(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT));
@@ -1711,15 +1944,15 @@ public final class TaxonomyRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : ctx.select(
-                        TAXONOMY_META.COLLECTION,
+                        ck().label(tenant, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID).as("collection"),
                         TAXONOMY_META.LAST_DISCOVER_AT,
                         TAXONOMY_META.LAST_DISCOVER_DOC_COUNT)
                     .from(TAXONOMY_META)
-                    .where(TAXONOMY_META.COLLECTION.in(collections))
+                    .where(ck().in(tenant, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID, collections))
                     .and(TAXONOMY_META.LAST_DISCOVER_AT.isNotNull())
                     .fetch()) {
                 var m = new LinkedHashMap<String, Object>();
-                m.put("collection", r.get(TAXONOMY_META.COLLECTION));
+                m.put("collection", r.get("collection", String.class));
                 m.put("last_discover_at", utcIso(r.get(TAXONOMY_META.LAST_DISCOVER_AT)));
                 m.put("last_discover_doc_count", r.get(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT));
                 out.add(m);
@@ -1784,12 +2017,14 @@ public final class TaxonomyRepository {
 
     /** Count distinct source_collections for projection rows (N_effective for ICF). */
     public int countDistinctSourceCollections(String tenant) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
+        return tenantScope.withTenant(tenant, ctx -> {
+            final var sk = srcKey();  // one reading of gate 3 for the whole statement
+            return ctx.select(countDistinct(sk))
                .from(TOPIC_ASSIGNMENTS)
                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
-               .fetchOne(0, Integer.class));
+                   .and(sk.isNotNull()))
+               .fetchOne(0, Integer.class);
+        });
     }
 
     /**
@@ -1801,21 +2036,23 @@ public final class TaxonomyRepository {
      * retained as a DSL.field() cast fragment for the CAST expression per spec.
      */
     public List<Map<String, Object>> computeIcfRows(String tenant, int nEffective) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(
+        return tenantScope.withTenant(tenant, ctx -> {
+            final var sk = srcKey();  // one reading of gate 3 for the whole statement
+            return ctx.select(
                     TOPIC_ASSIGNMENTS.TOPIC_ID,
                     field("CAST({0} AS DOUBLE PRECISION)", Double.class, val(nEffective))
-                        .div(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
+                        .div(countDistinct(sk))
                         .as("icf_raw"))
                .from(TOPIC_ASSIGNMENTS)
                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
+                   .and(sk.isNotNull()))
                .groupBy(TOPIC_ASSIGNMENTS.TOPIC_ID)
-               .having(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).gt(0))
+               .having(countDistinct(sk).gt(0))
                .fetch()
                .map(r -> Map.of(
                    "topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID),
-                   "icf_raw",  r.get("icf_raw", Double.class))));
+                   "icf_raw",  r.get("icf_raw", Double.class)));
+        });
     }
 
     // ── Top topics / corpus evidence ───────────────────────────────────────────
@@ -1830,7 +2067,7 @@ public final class TaxonomyRepository {
                .from(TOPIC_ASSIGNMENTS)
                .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection))
+                   .and(assignedFrom(tenant, collection))
                    .and(TOPIC_ASSIGNMENTS.SIMILARITY.isNotNull()))
                .groupBy(TOPIC_ASSIGNMENTS.TOPIC_ID, TOPICS.LABEL)
                .orderBy(sum(TOPIC_ASSIGNMENTS.SIMILARITY).desc(), count().desc())
@@ -1849,7 +2086,7 @@ public final class TaxonomyRepository {
                 .from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
                     .and(TOPIC_ASSIGNMENTS.DOC_ID.eq(docIdBytes(docId)))
-                    .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(sourceCollection))
+                    .and(assignedFrom(tenant, sourceCollection))
                     .and(TOPIC_ASSIGNMENTS.SIMILARITY.isNotNull()))
                 .fetch();
             if (rows.isEmpty()) return Optional.<Double>empty();
@@ -1860,17 +2097,19 @@ public final class TaxonomyRepository {
 
     /** Return projection count by source_collection. */
     public List<Map<String, Object>> getProjectionCountsByCollection(String tenant) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, count().as("cnt"))
+        return tenantScope.withTenant(tenant, ctx -> {
+            var k = ck();  // one reading: the grouping key and the label must agree
+            var sc = TOPIC_ASSIGNMENTS.SOURCE_COLLECTION;
+            var scId = TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID;
+            return ctx.select(k.label(tenant, sc, scId).as("source_collection"), count().as("cnt"))
                .from(TOPIC_ASSIGNMENTS)
-               .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull())
-                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.ne("")))
-               .groupBy(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+               .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection").and(k.present(sc, scId)))
+               .groupBy(k.key(sc, scId))
                .fetch()
                .map(r -> Map.of(
-                   "source_collection", r.get(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
-                   "count",             r.get("cnt", Integer.class))));
+                   "source_collection", r.get("source_collection", String.class),
+                   "count",             r.get("cnt", Integer.class)));
+        });
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -1906,7 +2145,7 @@ public final class TaxonomyRepository {
     // not ETL) are NOT in scope: they never supply an explicit id (server-generated,
     // exempt), and they already arbitrate the ONLY key they can hit
     // (TOPICS.TENANT_ID, TOPICS.COLLECTION, TOPICS.LABEL) WHERE PARENT_ID IS NULL) —
-    // plus lockTaxonomyCollection serializes per-collection writers, a stronger belt
+    // plus TaxonomyCollectionLock serializes per-collection writers, a stronger belt
     // than the retry this class's import siblings use. Non-root topics (parent_id NOT
     // NULL) are outside the partial index's predicate entirely — no identity key to
     // guard.
@@ -1916,7 +2155,7 @@ public final class TaxonomyRepository {
     // importDocumentsBatch — this method's direct siblings — carry the same guard
     // WITHOUT a retry wrapper, because fidelity ETL import is a migration/seeding
     // path, never concurrent with live writes for the same tenant (see
-    // advanceTopicsIdSequence's javadoc immediately below, which accepts the same
+    // TaxonomyImportSupport.advanceTopicsIdSequence's javadoc, which accepts the same
     // non-concurrency assumption for the sequence advance).
 
     /** Address key of {@code nexus.topics} (taxonomy-001-baseline.xml:58). */
@@ -1929,11 +2168,11 @@ public final class TaxonomyRepository {
      * label)}, or {@code null}. Only root topics (parent_id IS NULL) are governed
      * by this identity key — mirrors the partial index's own predicate exactly.
      */
-    private static Long resolveRootTopicId(DSLContext ctx, String tenant,
+    private Long resolveRootTopicId(DSLContext ctx, String tenant,
                                            String collection, String label) {
         return ctx.select(TOPICS.ID).from(TOPICS)
                   .where(TOPICS.TENANT_ID.eq(tenant)
-                         .and(TOPICS.COLLECTION.eq(collection))
+                         .and(topicsOf(tenant, collection))
                          .and(TOPICS.LABEL.eq(label))
                          .and(TOPICS.PARENT_ID.isNull()))
                   .limit(1)
@@ -1945,7 +2184,7 @@ public final class TaxonomyRepository {
      * to a second id (nexus-q2ign). {@code parentId != null} (a non-root topic)
      * is never governed by this key and returns quietly.
      */
-    private static void guardTopicIdentity(DSLContext ctx, String tenant, long attemptedId,
+    private void guardTopicIdentity(DSLContext ctx, String tenant, long attemptedId,
                                            Long parentId, String collection, String label) {
         if (parentId != null) return;
         Long existing = resolveRootTopicId(ctx, tenant, collection, label);
@@ -1958,47 +2197,6 @@ public final class TaxonomyRepository {
     }
 
     // ── Fidelity ETL import ────────────────────────────────────────────────────
-
-    /**
-     * g37fr FINDING 2 (RDR-155 P4b, engine v0.1.53): fidelity import
-     * preserves source ids verbatim, which leaves the topics BIGSERIAL
-     * sequence BEHIND the imported ids — the next live serial INSERT
-     * (persist_rebuild) then collides 409 on a shared store. Standard PG
-     * import discipline: advance the sequence past the imported id inside
-     * the import transaction. The GREATEST against the sequence's own
-     * last_value means setval never moves the sequence backward. Requires
-     * UPDATE on the sequence (granted to nexus_svc by taxonomy-005).
-     *
-     * NOT atomic against a concurrent nextval() on the same sequence: the
-     * last_value read and the setval are two steps, so a live serial
-     * INSERT racing this import could claim an id above the value setval
-     * then writes. Accepted: fidelity import is a migration/seeding path,
-     * never concurrent with live topic writes for the same tenant; if an
-     * import-during-serving path ever appears, revisit with a lock on the
-     * sequence or an advisory lock keyed on the table.
-     */
-    // nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive): retired from a raw
-    // ctx.execute("SELECT setval(pg_get_serial_sequence(...), GREATEST(...))", ...)
-    // template onto typed jOOQ DSL -- setval/pg_get_serial_sequence are ordinary
-    // PostgreSQL functions (DSL.function(name, type, boundArgs...), the same idiom
-    // this class already uses at set_config/pg_advisory_xact_lock/hashtext above);
-    // GREATEST is jOOQ core's own DSL.greatest(...); the scalar subquery
-    // "(SELECT last_value FROM nexus.topics_id_seq)" is jOOQ's type-safe
-    // field(Select) scalar-subquery wrapping (manual: "SQL building > Column
-    // expressions > Scalar subqueries") over DSL.table(DSL.name(...)) + a
-    // DSL.name(...)-addressed column -- the same safe quoted-identifier idiom
-    // other engine code uses for a schema-qualified
-    // relation this class has no generated Table for (a bare PostgreSQL sequence
-    // read as a one-row relation, which jOOQ codegen does not model as a Table).
-    private static void advanceTopicsIdSequence(DSLContext ctx, long maxImportedId) {
-        Field<Long> lastValue = field(name("last_value"), Long.class);
-        Field<Long> lastValueSubquery =
-            field(select(lastValue).from(table(name("nexus", "topics_id_seq"))));
-        ctx.select(function("setval", Long.class,
-                function("pg_get_serial_sequence", String.class, val("nexus.topics"), val("id")),
-                greatest(lastValueSubquery, val(maxImportedId))))
-           .fetch();
-    }
 
     /**
      * Fidelity-preserving import for a topics row.
@@ -2040,7 +2238,7 @@ public final class TaxonomyRepository {
             ctx.insertInto(TOPICS,
                     TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
                     TOPICS.COLLECTION, TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT,
-                    TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS)
+                    TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS, TOPICS.COLLECTION_ID)
                // jOOQ's typed values(...) overload requires either ALL-raw or
                // ALL-Field arguments per InsertValuesStepN — realDocCount is a
                // Field<Integer> (a scalar subquery, not a bindable literal), so
@@ -2048,7 +2246,8 @@ public final class TaxonomyRepository {
                // all-Field overload.
                .values(val(srcId), val(tenant), val(label), val(parentId),
                        val(collection), val(centroidHash), realDocCount,
-                       val(createdAtTs), val(reviewStatus), val(terms))
+                       val(createdAtTs), val(reviewStatus), val(terms),
+                       val(CollectionIds.require(ctx, tenant, collection), TOPICS.COLLECTION_ID))
                .onConflict(TOPICS.ID)
                .doUpdate()
                // RDR-154 P0 (nexus-i7ivk): doc_count is trigger-maintained and
@@ -2059,8 +2258,10 @@ public final class TaxonomyRepository {
                .set(TOPICS.REVIEW_STATUS, field("EXCLUDED.review_status", String.class))
                .set(TOPICS.CENTROID_HASH, field("EXCLUDED.centroid_hash", String.class))
                .set(TOPICS.TERMS,         field("EXCLUDED.terms",         String.class))
+               // RDR-229 P3.1 stage 2b: the conflict arm leaves the name alone, so the id follows the stored name.
+               .set(TOPICS.COLLECTION_ID, topicRowCollectionId())
                .execute();
-            advanceTopicsIdSequence(ctx, srcId);
+            TaxonomyImportSupport.advanceTopicsIdSequence(ctx, srcId);
             return null;
         });
         return srcId;
@@ -2098,9 +2299,10 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.SIMILARITY,
                     TOPIC_ASSIGNMENTS.ASSIGNED_AT,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
                .values(tenant, docIdBytes(docId), topicId, assignedBy, similarity, assignedAtTs, sourceCollection,
-                       modelOf(ctx, tenant, sourceCollection))
+                       modelOf(ctx, tenant, sourceCollection), CollectionIds.require(ctx, tenant, sourceCollection))
                .onConflict(
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
@@ -2121,6 +2323,8 @@ public final class TaxonomyRepository {
                     field("EXCLUDED.source_collection", String.class))
                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
                     org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL))
+               .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
+                    org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID))
                .execute();
             return null;
         });
@@ -2159,13 +2363,18 @@ public final class TaxonomyRepository {
             ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, collection);
             // GREATEST(existing_col, EXCLUDED.col) — references both the table row and
             // EXCLUDED in the same expression; retained as DSL.field() fragments per spec.
-            ctx.insertInto(TAXONOMY_META,
+            var insert = ctx.insertInto(TAXONOMY_META,
                     TAXONOMY_META.TENANT_ID,
                     TAXONOMY_META.COLLECTION,
                     TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
-                    TAXONOMY_META.LAST_DISCOVER_AT)
-               .values(tenant, collection, lastDiscoverDocCount, lastDiscoverAtTs)
-               .onConflict(TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+                    TAXONOMY_META.LAST_DISCOVER_AT,
+                    TAXONOMY_META.COLLECTION_ID)
+               .values(tenant, collection, lastDiscoverDocCount, lastDiscoverAtTs,
+                       CollectionIds.require(ctx, tenant, collection));
+            final boolean byId2 = ck().byId();
+            TwinKeyUpsert.run(ctx, "taxonomy_meta", byId2 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+                c -> { Field<?>[] key = byId2 ? META_ID_KEY : META_NAME_KEY; return insert
+               .onConflict(key)
                .doUpdate()
                .set(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
                     field("GREATEST(nexus.taxonomy_meta.last_discover_doc_count,"
@@ -2173,7 +2382,8 @@ public final class TaxonomyRepository {
                .set(TAXONOMY_META.LAST_DISCOVER_AT,
                     field("GREATEST(nexus.taxonomy_meta.last_discover_at,"
                         + " EXCLUDED.last_discover_at)", OffsetDateTime.class))
-               .execute();
+               .set(TAXONOMY_META.COLLECTION_ID, org.jooq.impl.DSL.excluded(TAXONOMY_META.COLLECTION_ID))
+               .execute(); });
             return null;
         });
     }
@@ -2205,7 +2415,7 @@ public final class TaxonomyRepository {
             int n = switch (kind) {
                 case "topic"      -> importTopicsBatch(ctx, tenant, rows);
                 case "assignment" -> importAssignmentsBatch(ctx, tenant, rows);
-                case "link"       -> importLinksBatch(ctx, tenant, rows);
+                case "link"       -> TaxonomyImportSupport.importLinksBatch(ctx, tenant, rows);
                 case "meta"       -> importMetaBatch(ctx, tenant, rows);
                 default -> throw new IllegalArgumentException("Unknown taxonomy kind: " + kind);
             };
@@ -2223,16 +2433,19 @@ public final class TaxonomyRepository {
      * chunk — last occurrence wins — because a single multi-row
      * {@code ON CONFLICT DO UPDATE} cannot affect the same row twice.
      */
-    private static final int MAX_BATCH_PARAMS = 30_000;
+    private static final int MAX_BATCH_PARAMS = TaxonomyImportSupport.MAX_BATCH_PARAMS;
 
-    private static int importTopicsBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+    private int importTopicsBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
         // Register each DISTINCT collection once (was: once per row).
         var collections = new java.util.LinkedHashSet<String>();
         for (var r : rows) {
             String c = optS(r, "collection");
             if (c != null) collections.add(c);
         }
+        CollectionRegistry.lockAllInIdOrder(ctx, tenant, collections);   // RDR-229 P3.5a: id order, before any registration or write
         for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
+        // RDR-229 P3.1 stage 2b: each distinct collection's registry id, read once in this transaction.
+        final Map<String, Long> collectionIds = idsOf(ctx, tenant, collections);
 
         // Dedupe on id (the conflict key), last occurrence wins. Sort by id (the
         // ON CONFLICT key) so concurrent batches lock TOPICS rows in one global order
@@ -2242,14 +2455,14 @@ public final class TaxonomyRepository {
         List<Map<String, Object>> deduped = new ArrayList<>(unique.values());
         deduped.sort(Comparator.comparing(r -> reqL(r, "id")));
 
-        final int cols = 10;
+        final int cols = 11;
         final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
         for (int start = 0; start < deduped.size(); start += chunkSize) {
             List<Map<String, Object>> batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
             var insert = ctx.insertInto(TOPICS,
                     TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
                     TOPICS.COLLECTION, TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT,
-                    TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS);
+                    TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS, TOPICS.COLLECTION_ID);
             for (var r : batch) {
                 // nexus-q2ign: same guard as the single-row importTopic — the
                 // batch form is not exempt from the key its ON CONFLICT (TOPICS.ID)
@@ -2280,26 +2493,30 @@ public final class TaxonomyRepository {
                 insert = insert.values(reqL(r, "id"), tenant, optS(r, "label"), optL(r, "parent_id"),
                         optS(r, "collection"), optS(r, "centroid_hash"), 0,
                         parseTsStrict(reqS(r, "created_at")), optS(r, "review_status"),
-                        optS(r, "terms"));
+                        optS(r, "terms"), collectionIds.get(optS(r, "collection")));
             }
             insert.onConflict(TOPICS.ID).doUpdate()
                   .set(TOPICS.REVIEW_STATUS, field("EXCLUDED.review_status", String.class))
                   .set(TOPICS.CENTROID_HASH, field("EXCLUDED.centroid_hash", String.class))
                   .set(TOPICS.TERMS,         field("EXCLUDED.terms",         String.class))
+                  // the conflict arm leaves the name alone, so the id follows the stored name
+                  .set(TOPICS.COLLECTION_ID, topicRowCollectionId())
                   .execute();
         }
         // Deduped list is id-sorted — the last element carries the max id.
-        advanceTopicsIdSequence(ctx, reqL(deduped.get(deduped.size() - 1), "id"));
+        TaxonomyImportSupport.advanceTopicsIdSequence(ctx, reqL(deduped.get(deduped.size() - 1), "id"));
         return rows.size();
     }
 
-    private static int importAssignmentsBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+    private int importAssignmentsBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
         var collections = new java.util.LinkedHashSet<String>();
         for (var r : rows) {
             String c = optS(r, "source_collection");
             if (c != null) collections.add(c);
         }
+        CollectionRegistry.lockAllInIdOrder(ctx, tenant, collections);   // RDR-229 P3.5a: id order, before any registration or write
         for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
+        final Map<String, Long> collectionIds = idsOf(ctx, tenant, collections);
 
         // Conflict key: (tenant_id, doc_id, topic_id). tenant is constant for this
         // call. Sort by (doc_id, topic_id) so concurrent batches lock TOPIC_ASSIGNMENTS
@@ -2311,7 +2528,7 @@ public final class TaxonomyRepository {
                 .comparing((Map<String, Object> r) -> reqS(r, "doc_id"))
                 .thenComparing(r -> reqL(r, "topic_id")));
 
-        final int cols = 8;
+        final int cols = 9;
         final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
         for (int start = 0; start < deduped.size(); start += chunkSize) {
             List<Map<String, Object>> batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
@@ -2319,14 +2536,16 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                     TOPIC_ASSIGNMENTS.SIMILARITY, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL);
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID);
             for (var r : batch) {
                 String assignedAt = optS(r, "assigned_at");
                 OffsetDateTime assignedAtTs = (assignedAt != null && !assignedAt.isBlank())
                     ? parseTsStrict(assignedAt) : null;
                 insert = insert.values(tenant, docIdBytes(reqS(r, "doc_id")), reqL(r, "topic_id"),
                         optS(r, "assigned_by"), optD(r, "similarity"), assignedAtTs,
-                        optS(r, "source_collection"), modelOf(ctx, tenant, optS(r, "source_collection")));
+                        optS(r, "source_collection"), modelOf(ctx, tenant, optS(r, "source_collection")),
+                        collectionIds.get(optS(r, "source_collection")));
             }
             insert.onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                                TOPIC_ASSIGNMENTS.TOPIC_ID)
@@ -2344,48 +2563,19 @@ public final class TaxonomyRepository {
                        field("EXCLUDED.source_collection", String.class))
                   .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
                        org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL))
+                  .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
+                       org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID))
                   .execute();
         }
         return rows.size();
     }
 
-    private static int importLinksBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
-        // Conflict key: (tenant_id, from_topic_id, to_topic_id). Sort by
-        // (from_topic_id, to_topic_id) so concurrent batches lock TOPIC_LINKS rows in
-        // one global order — deadlock avoidance, nexus-ps9wb.
-        var unique = new LinkedHashMap<String, Map<String, Object>>(rows.size());
-        for (var r : rows) unique.put(reqL(r, "from_topic_id") + "::" + reqL(r, "to_topic_id"), r);
-        List<Map<String, Object>> deduped = new ArrayList<>(unique.values());
-        deduped.sort(Comparator
-                .comparing((Map<String, Object> r) -> reqL(r, "from_topic_id"))
-                .thenComparing(r -> reqL(r, "to_topic_id")));
-
-        final int cols = 5;
-        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
-        for (int start = 0; start < deduped.size(); start += chunkSize) {
-            List<Map<String, Object>> batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
-            var insert = ctx.insertInto(TOPIC_LINKS,
-                    TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID,
-                    TOPIC_LINKS.TO_TOPIC_ID, TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES);
-            for (var r : batch) {
-                // nexus-cefa1.6: see upsertTopicLink's identical jsonbRequired comment.
-                insert = insert.values(tenant, reqL(r, "from_topic_id"), reqL(r, "to_topic_id"),
-                        optI(r, "link_count", 0), jsonbRequired(optS(r, "link_types"), "link_types"));
-            }
-            insert.onConflict(TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
-                  .doUpdate()
-                  .set(TOPIC_LINKS.LINK_COUNT,
-                       field("GREATEST(nexus.topic_links.link_count, EXCLUDED.link_count)", Integer.class))
-                  .set(TOPIC_LINKS.LINK_TYPES, field("EXCLUDED.link_types", JSONB.class))
-                  .execute();
-        }
-        return rows.size();
-    }
-
-    private static int importMetaBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
+    private int importMetaBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
         var collections = new java.util.LinkedHashSet<String>();
         for (var r : rows) collections.add(reqS(r, "collection"));
+        CollectionRegistry.lockAllInIdOrder(ctx, tenant, collections);   // RDR-229 P3.5a: id order, before any registration or write
         for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
+        final Map<String, Long> collectionIds = idsOf(ctx, tenant, collections);
 
         // Conflict key: (tenant_id, collection). Sort by collection so concurrent
         // batches lock TAXONOMY_META rows in one global order — deadlock avoidance,
@@ -2395,21 +2585,25 @@ public final class TaxonomyRepository {
         List<Map<String, Object>> deduped = new ArrayList<>(unique.values());
         deduped.sort(Comparator.comparing(r -> reqS(r, "collection")));
 
-        final int cols = 4;
+        final int cols = 5;
         final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
         for (int start = 0; start < deduped.size(); start += chunkSize) {
             List<Map<String, Object>> batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
             var insert = ctx.insertInto(TAXONOMY_META,
                     TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION,
-                    TAXONOMY_META.LAST_DISCOVER_DOC_COUNT, TAXONOMY_META.LAST_DISCOVER_AT);
+                    TAXONOMY_META.LAST_DISCOVER_DOC_COUNT, TAXONOMY_META.LAST_DISCOVER_AT,
+                    TAXONOMY_META.COLLECTION_ID);
             for (var r : batch) {
                 String lastAt = optS(r, "last_discover_at");
                 OffsetDateTime lastAtTs = (lastAt != null && !lastAt.isBlank())
                     ? parseTsStrict(lastAt) : null;
                 insert = insert.values(tenant, reqS(r, "collection"),
-                        optI(r, "last_discover_doc_count", 0), lastAtTs);
+                        optI(r, "last_discover_doc_count", 0), lastAtTs, collectionIds.get(reqS(r, "collection")));
             }
-            insert.onConflict(TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+            final var rowsInsert = insert;
+            final boolean byId3 = ck().byId();
+            TwinKeyUpsert.run(ctx, "taxonomy_meta", byId3 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+                c -> { Field<?>[] key = byId3 ? META_ID_KEY : META_NAME_KEY; return rowsInsert.onConflict(key)
                   .doUpdate()
                   .set(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
                        field("GREATEST(nexus.taxonomy_meta.last_discover_doc_count,"
@@ -2417,325 +2611,28 @@ public final class TaxonomyRepository {
                   .set(TAXONOMY_META.LAST_DISCOVER_AT,
                        field("GREATEST(nexus.taxonomy_meta.last_discover_at,"
                            + " EXCLUDED.last_discover_at)", OffsetDateTime.class))
-                  .execute();
+                  .set(TAXONOMY_META.COLLECTION_ID, org.jooq.impl.DSL.excluded(TAXONOMY_META.COLLECTION_ID))
+                  .execute(); });
         }
         return rows.size();
     }
 
-    // ── batch map-extraction helpers (mirror TaxonomyHandler's per-row parse) ──
-    private static String reqS(Map<String, Object> r, String k) {
-        Object v = r.get(k);
-        if (v == null || v.toString().isEmpty()) throw new IllegalArgumentException("Missing required field: " + k);
-        return v.toString();
-    }
-    private static String optS(Map<String, Object> r, String k) {
-        Object v = r.get(k);
-        return v == null ? null : v.toString();
-    }
-    private static Double optD(Map<String, Object> r, String k) {
-        Object v = r.get(k);
-        if (v == null) return null;
-        if (v instanceof Number n) return n.doubleValue();
-        try { return Double.parseDouble(v.toString()); } catch (NumberFormatException e) { return null; }
-    }
-    private static Long optL(Map<String, Object> r, String k) {
-        Object v = r.get(k);
-        if (v == null) return null;
-        if (v instanceof Number n) return n.longValue();
-        try { return Long.parseLong(v.toString()); } catch (NumberFormatException e) { return null; }
-    }
-    private static long reqL(Map<String, Object> r, String k) {
-        Long l = optL(r, k);
-        if (l == null) throw new IllegalArgumentException("Missing required field: " + k);
-        return l;
-    }
-    private static int optI(Map<String, Object> r, String k, int def) {
-        Object v = r.get(k);
-        if (v instanceof Number n) return n.intValue();
-        if (v != null) { try { return Integer.parseInt(v.toString()); } catch (NumberFormatException ignored) { } }
-        return def;
-    }
+    // ── Analytical methods (nexus-gmiaf.14): the read-only ones live in TaxonomyAnalytics ──
 
-    // ── Analytical methods (nexus-gmiaf.14 drop-in completion) ────────────────
-
-    /**
-     * Compute ICF map atomically: returns [{topic_id, n_effective, df}] in one transaction.
-     * Callers compute log2(n_effective / df) in Python.
-     */
     public Map<String, Object> computeIcfMapAtomic(String tenant) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            int nEffective = ctx.select(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
-                .from(TOPIC_ASSIGNMENTS)
-                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                    .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
-                .fetchOne(0, Integer.class);
-
-            List<Map<String, Object>> rows = new ArrayList<>();
-            if (nEffective >= 2) {
-                var icfRows = ctx.select(
-                        TOPIC_ASSIGNMENTS.TOPIC_ID,
-                        countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).as("df"))
-                    .from(TOPIC_ASSIGNMENTS)
-                    .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                        .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
-                    .groupBy(TOPIC_ASSIGNMENTS.TOPIC_ID)
-                    .having(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).gt(0))
-                    .fetch();
-                for (var r : icfRows) {
-                    var m = new LinkedHashMap<String, Object>();
-                    m.put("topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID));
-                    m.put("df", r.get("df", Integer.class));
-                    rows.add(m);
-                }
-            }
-            var result = new LinkedHashMap<String, Object>();
-            result.put("n_effective", nEffective);
-            result.put("rows", rows);
-            return result;
-        });
+        return analytics.computeIcfMapAtomic(tenant);
     }
 
-    /**
-     * Hub detection data: returns per-topic DF + total_chunks + label + collection + source set,
-     * plus the staleness aggregates behind {@code --warn-stale} (nexus-onjvy).
-     * Python-side computes ICF, stopword matching, and score.
-     *
-     * <p>STALENESS (RDR-077 C-2 semantics, previously SQLite-only). Per hub, over the
-     * source collections actually contributing to it:
-     * <ul>
-     *   <li>{@code max_last_discover_at} — MAX(taxonomy_meta.last_discover_at), NULLs
-     *       excluded by MAX, exactly as the retired SQLite oracle did.</li>
-     *   <li>{@code never_discovered_count} — contributing collections with a NULL
-     *       last_discover_at PLUS those with no taxonomy_meta row at all. Both are
-     *       "never discovered" from the command's point of view.</li>
-     *   <li>{@code is_stale} — a contributing collection was discovered after the hub's
-     *       latest assignment (discover ran, projection did not), or any contributing
-     *       collection was never discovered. RDR-077 Phase 5 sense, Sam's ruling
-     *       2026-10-26 (nexus-9kp10); it read the reverse until then.</li>
-     * </ul>
-     *
-     * <p>{@code is_stale} is compared on real TIMESTAMPTZ values here. Clients from
-     * nexus-9kp10 on re-derive it from {@code last_assigned_at},
-     * {@code max_last_discover_at} and {@code never_discovered_count} (parsed, not
-     * compared as strings), because engines before this change send the reverse
-     * sense; this verdict serves older clients, which pass it through.
-     *
-     * <p>One extra query, not N+1: taxonomy_meta is fetched once for every collection
-     * referenced by any hub, then folded per topic in memory.
-     *
-     * @param minCollections minimum distinct source_collections (DF threshold)
-     */
     public List<Map<String, Object>> detectHubsData(String tenant, int minCollections) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.select(
-                    TOPICS.ID.as("topic_id"),
-                    TOPICS.LABEL,
-                    TOPICS.COLLECTION,
-                    countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).as("df"),
-                    count().as("total_chunks"),
-                    max(TOPIC_ASSIGNMENTS.ASSIGNED_AT).as("last_assigned_at"))
-               .from(TOPIC_ASSIGNMENTS)
-               .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
-               .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
-               .groupBy(TOPICS.ID, TOPICS.LABEL, TOPICS.COLLECTION)
-               .having(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).ge(minCollections))
-               .orderBy(count().desc())
-               .fetch();
-
-            // Per-hub source collection sets
-            var allSources = ctx.select(TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-                .from(TOPIC_ASSIGNMENTS)
-                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                    .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
-                .orderBy(TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-                .fetch();
-
-            // Build topic_id -> [source_collection, ...] map
-            java.util.Map<Long, List<String>> sourcesMap = new java.util.HashMap<>();
-            for (var r : allSources) {
-                long tid = r.get(TOPIC_ASSIGNMENTS.TOPIC_ID);
-                String sc = r.get(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION);
-                sourcesMap.computeIfAbsent(tid, k -> new ArrayList<>()).add(sc);
-            }
-
-            // taxonomy_meta for every collection any hub draws from, in one query.
-            // Only non-null last_discover_at values are kept: a collection with a NULL
-            // timestamp and one with no taxonomy_meta row at all are both "never
-            // discovered" here, and the oracle counted them together too (its
-            // never_count summed the NULLs and the missing rows). So a single
-            // "absent from this map" test covers both states.
-            var contributing = sourcesMap.values().stream()
-                .flatMap(List::stream).distinct().toList();
-            java.util.Map<String, OffsetDateTime> discoverAt = new java.util.HashMap<>();
-            if (!contributing.isEmpty()) {
-                for (var r : ctx.select(TAXONOMY_META.COLLECTION, TAXONOMY_META.LAST_DISCOVER_AT)
-                        .from(TAXONOMY_META)
-                        .where(TAXONOMY_META.COLLECTION.in(contributing))
-                        .fetch()) {
-                    OffsetDateTime at = r.get(TAXONOMY_META.LAST_DISCOVER_AT);
-                    if (at != null) discoverAt.put(r.get(TAXONOMY_META.COLLECTION), at);
-                }
-            }
-
-            List<Map<String, Object>> result = new ArrayList<>();
-            for (var r : rows) {
-                long tid = r.get("topic_id", Long.class);
-                var m = new LinkedHashMap<String, Object>();
-                m.put("topic_id", tid);
-                m.put("label", r.get(TOPICS.LABEL));
-                m.put("collection", r.get(TOPICS.COLLECTION));
-                m.put("df", r.get("df", Integer.class));
-                m.put("total_chunks", r.get("total_chunks", Integer.class));
-                Object lastAt = r.get("last_assigned_at");
-                m.put("last_assigned_at", utcIso(lastAt));
-                List<String> sources = sourcesMap.getOrDefault(tid, List.of());
-                m.put("source_collections", sources);
-
-                OffsetDateTime maxDiscover = null;
-                int neverCount = 0;
-                for (String coll : new java.util.LinkedHashSet<>(sources)) {
-                    OffsetDateTime at = discoverAt.get(coll);
-                    if (at == null) {
-                        // NULL last_discover_at, or no taxonomy_meta row at all.
-                        neverCount++;
-                        continue;
-                    }
-                    if (maxDiscover == null || at.isAfter(maxDiscover)) maxDiscover = at;
-                }
-
-                boolean isStale = neverCount > 0;
-                if (!isStale && maxDiscover != null
-                        && lastAt instanceof OffsetDateTime assignedAt) {
-                    isStale = maxDiscover.isAfter(assignedAt);
-                }
-                m.put("max_last_discover_at", utcIso(maxDiscover));
-                m.put("never_discovered_count", neverCount);
-                m.put("is_stale", isStale);
-                result.add(m);
-            }
-            return result;
-        });
+        return analytics.detectHubsData(tenant, minCollections);
     }
 
-    /**
-     * Audit collection: returns similarity distribution data and top receiving hub topics.
-     * Python-side computes quantiles; we return sorted similarities + hub rows.
-     */
     public Map<String, Object> auditCollectionData(String tenant, String collection, int topN) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            var simRows = ctx.select(TOPIC_ASSIGNMENTS.SIMILARITY)
-                .from(TOPIC_ASSIGNMENTS)
-                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                    .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection))
-                    .and(TOPIC_ASSIGNMENTS.SIMILARITY.isNotNull()))
-                .orderBy(TOPIC_ASSIGNMENTS.SIMILARITY.asc())
-                .fetch();
-
-            List<Double> sims = new ArrayList<>();
-            for (var r : simRows) {
-                sims.add(r.get(TOPIC_ASSIGNMENTS.SIMILARITY));
-            }
-
-            var hubRows = ctx.select(
-                    TOPIC_ASSIGNMENTS.TOPIC_ID,
-                    TOPICS.LABEL,
-                    count().as("chunks"))
-               .from(TOPIC_ASSIGNMENTS)
-               .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
-               .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection)))
-               .groupBy(TOPIC_ASSIGNMENTS.TOPIC_ID, TOPICS.LABEL)
-               .orderBy(count().desc())
-               .limit(topN)
-               .fetch();
-
-            List<Map<String, Object>> hubs = new ArrayList<>();
-            for (var r : hubRows) {
-                var m = new LinkedHashMap<String, Object>();
-                m.put("topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID));
-                m.put("label", r.get(TOPICS.LABEL));
-                m.put("chunk_count", r.get("chunks", Integer.class));
-                hubs.add(m);
-            }
-
-            var result = new LinkedHashMap<String, Object>();
-            result.put("collection", collection);
-            result.put("similarities", sims);
-            result.put("hub_rows", hubs);
-            return result;
-        });
+        return analytics.auditCollectionData(tenant, collection, topN);
     }
 
-    /**
-     * Topics carrying projection assignments that have no {@code topic_links}
-     * row, restricted to those a link is structurally POSSIBLE for.
-     *
-     * <p>The predicate mirrors {@link #refreshProjectionLinks} exactly, and that
-     * is the whole point: a drift audit whose notion of "linkable" differs from
-     * the materializer's reports fiction. {@code refreshProjectionLinks} pairs a
-     * projection TARGET with a NON-projection SOURCE, so a topic is only drifted
-     * if some doc gives it a non-projection partner. Two projection assignments
-     * on one doc produce no link and are not drift; a lone assignment cannot
-     * pair at all.
-     *
-     * <p>This route exists because the client-side check could not ask the
-     * engine and audited the frozen SQLite migration source instead
-     * (nexus-ypori) — reporting stale relic rows as live faults while the real
-     * store went unexamined. Computing it here is also the only affordable
-     * shape: reconstructing it client-side costs one round trip per topic plus
-     * a bulk assignment read.
-     *
-     * @param limit max drift rows returned; the total count is exact regardless
-     * @return {@code {projection_total, drift_count, rows:[{topic_id,label,collection}]}}
-     */
     public Map<String, Object> linkDrift(String tenant, int limit) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            var tgt = TOPIC_ASSIGNMENTS.as("ta");
-            var src = TOPIC_ASSIGNMENTS.as("ta2");
-
-            var linkable = tgt.ASSIGNED_BY.eq("projection")
-                .and(notExists(
-                    ctx.selectOne().from(TOPIC_LINKS)
-                       .where(TOPIC_LINKS.FROM_TOPIC_ID.eq(tgt.TOPIC_ID)
-                           .or(TOPIC_LINKS.TO_TOPIC_ID.eq(tgt.TOPIC_ID)))))
-                .and(exists(
-                    ctx.selectOne().from(src)
-                       .where(src.DOC_ID.eq(tgt.DOC_ID)
-                           .and(src.TOPIC_ID.ne(tgt.TOPIC_ID))
-                           .and(src.ASSIGNED_BY.ne("projection")))));
-
-            int projectionTotal = ctx.select(countDistinct(TOPIC_ASSIGNMENTS.TOPIC_ID))
-                .from(TOPIC_ASSIGNMENTS)
-                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection"))
-                .fetchOne(0, int.class);
-
-            int driftCount = ctx.select(countDistinct(tgt.TOPIC_ID))
-                .from(tgt).where(linkable)
-                .fetchOne(0, int.class);
-
-            var rows = ctx.selectDistinct(tgt.TOPIC_ID, TOPICS.LABEL, tgt.SOURCE_COLLECTION)
-                .from(tgt)
-                .leftJoin(TOPICS).on(TOPICS.ID.eq(tgt.TOPIC_ID))
-                .where(linkable)
-                .orderBy(tgt.TOPIC_ID)
-                .limit(Math.max(0, limit))
-                .fetch();
-
-            List<Map<String, Object>> out = new ArrayList<>();
-            for (var r : rows) {
-                var m = new LinkedHashMap<String, Object>();
-                m.put("topic_id", r.get(tgt.TOPIC_ID));
-                m.put("label", r.get(TOPICS.LABEL));
-                m.put("collection", r.get(tgt.SOURCE_COLLECTION));
-                out.add(m);
-            }
-            var result = new LinkedHashMap<String, Object>();
-            result.put("projection_total", projectionTotal);
-            result.put("drift_count", driftCount);
-            result.put("rows", out);
-            return result;
-        });
+        return analytics.linkDrift(tenant, limit);
     }
 
     /**
@@ -2760,7 +2657,7 @@ public final class TaxonomyRepository {
                .join(ta2).on(ta.TOPIC_ID.eq(ta2.ID))
                .join(tb2).on(tb.TOPIC_ID.eq(tb2.ID))
                .where(ta.TOPIC_ID.lt(tb.TOPIC_ID)
-                   .and(ta2.COLLECTION.ne(tb2.COLLECTION)))
+                   .and(ck().differ(ta2.COLLECTION, ta2.COLLECTION_ID, tb2.COLLECTION, tb2.COLLECTION_ID)))
                .groupBy(
                    field("LEAST(a.topic_id, b.topic_id)", Long.class),
                    field("GREATEST(a.topic_id, b.topic_id)", Long.class))
@@ -2910,12 +2807,29 @@ public final class TaxonomyRepository {
             // children escape the taxonomy-004 partial index (parent_id NOT
             // NULL) so a race here duplicates children rather than 409ing —
             // the same per-collection lock closes both.
-            lockTaxonomyCollection(ctx, tenant, collectionName);
-            ensureCollectionRegistered(ctx, tenant, collectionName);
+            // RDR-229 P3.5a (nexus-p2m1x.23): the parent's assignments carry the source collections of documents projected onto it, and the
+            // delete below removes them. After the advisory lock (which comes first) the registry rows are read FOR KEY SHARE in ONE
+            // collection_id-ordered statement, the collection's own among them, so the split holds no row while it waits for a lower one (a verb
+            // that locks a lower source and then wants this collection's row meets no cycle); the parent must be a topic of this collection
+            final java.util.concurrent.atomic.AtomicReference<java.util.Set<Long>> held = new java.util.concurrent.atomic.AtomicReference<>(java.util.Set.of());
+            final java.util.function.Supplier<TaxonomyRegistryReads.Names> parentSources = () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant,
+                TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId));
+            final CollectionRow locked = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collectionName,
+                keyed -> held.set(TaxonomyRegistryReads.registryFirstBeforeOwn(ctx, tenant, collectionName, keyed, parentSources)));   // advisory lock keyed by id, then the key share
+            final String coll = TaxonomyCollectionLock.currentLabel(locked, collectionName);
+            if (locked != null) {
+                TaxonomyRegistryReads.registryFirstRest(ctx, tenant, parentSources, held.get(), locked);   // a source that appeared meanwhile
+                TaxonomyRegistryReads.requireTopicIn(ctx, topicId, locked);
+            }
+            // RDR-229 P3.1 stage 2b: the collection's registry id for every child topic written below.
+            final Long collectionId = CollectionIds.require(ctx, tenant, coll);
             // Delete parent assignments
             ctx.deleteFrom(TOPIC_ASSIGNMENTS)
                .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)
-                   .and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId)))
+                   .and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId))
+                   .and(locked == null ? org.jooq.impl.DSL.trueCondition()
+                       : TOPIC_ASSIGNMENTS.TOPIC_ID.in(select(TOPICS.ID).from(TOPICS).where(TOPICS.ID.eq(topicId)
+                           .and(TOPICS.COLLECTION_ID.eq(locked.collectionId()).or(TOPICS.COLLECTION_ID.isNull()))))))
                .execute();
 
             List<Long> childIds = new ArrayList<>();
@@ -2936,14 +2850,14 @@ public final class TaxonomyRepository {
                 OffsetDateTime createdAtTs = parseTsStrict(createdAt);
                 long childId = ctx.insertInto(TOPICS,
                         TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
-                        TOPICS.COLLECTION, TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS)
-                    .values(tenant, label, topicId, collectionName, 0, createdAtTs, termsJson)
+                        TOPICS.COLLECTION, TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS, TOPICS.COLLECTION_ID)
+                    .values(tenant, label, topicId, coll, 0, createdAtTs, termsJson, collectionId)
                     .returningResult(TOPICS.ID)
                     .fetchOne()
                     .get(TOPICS.ID);
                 childIds.add(childId);
 
-                batchInsertAssignments(ctx, tenant, childId, docIds, "split", collectionName);
+                batchInsertAssignments(ctx, tenant, childId, docIds, "split", coll);
             }
 
             // RDR-154 P0 (nexus-i7ivk): no manual parent zero-out. The parent's
@@ -2970,10 +2884,12 @@ public final class TaxonomyRepository {
      */
     public Map<String, Object> readRebuildOldState(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // the collection's own topics by its registry id (see getLastDiscoverDocCount), by name only for a row the stamp has not reached
+            final org.jooq.Condition ownTopics = ownTopics(rowOfLabel(ctx, tenant, collection).orElse(null), collection);
             List<Map<String, Object>> oldTopicMap = ctx.select(
                     TOPICS.ID, TOPICS.LABEL, TOPICS.REVIEW_STATUS)
                 .from(TOPICS)
-                .where(TOPICS.COLLECTION.eq(collection))
+                .where(ownTopics)
                 .fetch()
                 .map(r -> {
                     Map<String, Object> m = new LinkedHashMap<>();
@@ -2987,7 +2903,7 @@ public final class TaxonomyRepository {
                 .from(TOPIC_ASSIGNMENTS)
                 .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
                 .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("manual")
-                    .and(TOPICS.COLLECTION.eq(collection)))
+                    .and(ownTopics))
                 .fetch()
                 .map(r -> {
                     // RDR-194 P3c: compiler-silent Map<String,Object> put site
@@ -3033,14 +2949,18 @@ public final class TaxonomyRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // nexus-n2ls1: same guard-then-write shape as persistDiscoveredTopics
             // (delete-then-insert here) — serialize per-collection first.
-            lockTaxonomyCollection(ctx, tenant, collection);
-            ensureCollectionRegistered(ctx, tenant, collection);
-            // REPLACE semantics — clear old rows even when there are no new specs.
+            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
+            final String coll = TaxonomyCollectionLock.currentLabel(lockedRow, collection);
+            // RDR-229 P3.1 stage 2b: the collection's registry id for every topic and assignment written below.
+            final Long collectionId = CollectionIds.require(ctx, tenant, coll);
+            // REPLACE semantics — clear old rows even when there are no new specs. The collection's own rows are found by its id (a rename
+            // leaves their name column at the old label), by name only for a row the id stamp has not reached (CollectionOwnedRows)
+            final org.jooq.Condition ownTopics = ownTopics(lockedRow, coll);
             ctx.deleteFrom(TOPIC_ASSIGNMENTS)
                .where(TOPIC_ASSIGNMENTS.TOPIC_ID.in(
-                   select(TOPICS.ID).from(TOPICS).where(TOPICS.COLLECTION.eq(collection))))
+                   select(TOPICS.ID).from(TOPICS).where(ownTopics)))
                .execute();
-            ctx.deleteFrom(TOPICS).where(TOPICS.COLLECTION.eq(collection)).execute();
+            ctx.deleteFrom(TOPICS).where(ownTopics).execute();
 
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             List<Long> topicIds = new ArrayList<>();
@@ -3067,31 +2987,33 @@ public final class TaxonomyRepository {
                 // client-side union-merge. The losing spec's terms/
                 // review_status are deliberately dropped (display aids, first
                 // wins — same as the client dedup).
-                Long topicId = ctx.insertInto(TOPICS,
+                final var rootInsert = ctx.insertInto(TOPICS,
                         TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
-                        TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS, TOPICS.REVIEW_STATUS)
-                    .values(tenant, label, collection, 0, now, terms, reviewStatus)
-                    .onConflict(TOPICS.TENANT_ID, TOPICS.COLLECTION, TOPICS.LABEL)
-                    .where(TOPICS.PARENT_ID.isNull())
-                    .doNothing()
+                        TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS, TOPICS.REVIEW_STATUS,
+                        TOPICS.COLLECTION_ID)
+                    .values(tenant, label, coll, 0, now, terms, reviewStatus, collectionId);
+                // Target-less DO NOTHING (the twin-key rule): the root-label key and its id twin both arbitrate, so a racing root insert
+                // is skipped whichever key it trips, and the select below finds the winner's row.
+                Long topicId = rootInsert
+                    .onConflictDoNothing()
                     .returningResult(TOPICS.ID)
                     .fetchOne(TOPICS.ID);
                 if (topicId == null) {
                     topicId = ctx.select(TOPICS.ID).from(TOPICS)
                         .where(TOPICS.TENANT_ID.eq(tenant),
-                               TOPICS.COLLECTION.eq(collection),
+                               ownTopics(lockedRow, coll),
                                TOPICS.LABEL.eq(label),
                                TOPICS.PARENT_ID.isNull())
                         .fetchOne(TOPICS.ID);
                     if (topicId == null) {
                         throw new IllegalStateException(
                             "persist_rebuild conflict-skip found no existing root topic for label '"
-                            + label + "' in " + collection);
+                            + label + "' in " + coll);
                     }
                 }
                 topicIds.add(topicId);
 
-                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy, collection);
+                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy, coll);
             }
 
             // Manual transfers are intentionally NOT batched (nexus-eh89h): they
@@ -3113,21 +3035,23 @@ public final class TaxonomyRepository {
                             TOPIC_ASSIGNMENTS.TOPIC_ID,
                             TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                             TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                            TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-                       .values(tenant, docIdBytes(e.getKey()), topicIds.get(specIndex), "manual", collection,
-                               modelOf(ctx, tenant, collection))
+                            TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
+                       .values(tenant, docIdBytes(e.getKey()), topicIds.get(specIndex), "manual", coll,
+                               modelOf(ctx, tenant, coll), collectionId)
                        .onConflict(
                            TOPIC_ASSIGNMENTS.TENANT_ID,
                            TOPIC_ASSIGNMENTS.DOC_ID,
                            TOPIC_ASSIGNMENTS.TOPIC_ID)
                        .doUpdate()
                        .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "manual")
-                       .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection)
-                       .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, modelOf(ctx, tenant, collection))
+                       .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, coll)
+                       .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, modelOf(ctx, tenant, coll))
+                       .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, collectionId)
                        .execute();
                 }
             }
-            log.info("persist_rebuild collection={} topics={}", collection, topicIds.size());
+            log.info("persist_rebuild collection={} topics={}", coll, topicIds.size());
             return topicIds;
         });
     }
@@ -3152,20 +3076,32 @@ public final class TaxonomyRepository {
     @SuppressWarnings("unchecked")
     public List<Long> persistDiscoveredTopics(String tenant, String collection,
                                                List<Map<String, Object>> specs) {
-        if (specs == null || specs.isEmpty()) return List.of();
+        if (specs == null || specs.isEmpty()) {
+            // linda's ruling (RDR-229 P3.5a): a writer reads its collection's row FOR KEY SHARE first when the request named it BY ID, with nothing
+            // to write too, so a 200 holds only for a live row (a freed id is 404, a retired one 409); by label it opens no transaction and answers 200 []
+            if (!ExpectedCollectionIds.named(collection)) {
+                return List.of();
+            }
+            return tenantScope.withTenant(tenant, ctx -> {
+                TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);
+                return List.<Long>of();
+            });
+        }
         return tenantScope.withTenant(tenant, ctx -> {
             // nexus-n2ls1: serialize per-collection BEFORE the guard — the guard
             // alone is a TOCTOU race under concurrent discovery (both count 0,
             // both insert, loser 23505 → 409).
-            lockTaxonomyCollection(ctx, tenant, collection);
-            ensureCollectionRegistered(ctx, tenant, collection);
+            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
+            final String coll = TaxonomyCollectionLock.currentLabel(lockedRow, collection);
+            // RDR-229 P3.1 stage 2b: the collection's registry id for every topic written below.
+            final Long collectionId = CollectionIds.require(ctx, tenant, coll);
             int existing = ctx.selectCount()
                 .from(TOPICS)
-                .where(TOPICS.COLLECTION.eq(collection))
+                .where(ownTopics(lockedRow, coll))
                 .fetchOne(0, Integer.class);
             if (existing > 0) {
                 log.info("discover_skip_existing collection={} existing_topics={}",
-                         collection, existing);
+                         coll, existing);
                 return List.of();
             }
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
@@ -3193,19 +3129,20 @@ public final class TaxonomyRepository {
                 // assignments insert, matching the nexus-slcn7 client-side
                 // union-merge); its terms are deliberately dropped (display
                 // aid, first wins — same as the client dedup).
-                Long topicId = ctx.insertInto(TOPICS,
+                final var rootInsert = ctx.insertInto(TOPICS,
                         TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
-                        TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS)
-                    .values(tenant, label, collection, 0, now, terms)
-                    .onConflict(TOPICS.TENANT_ID, TOPICS.COLLECTION, TOPICS.LABEL)
-                    .where(TOPICS.PARENT_ID.isNull())
-                    .doNothing()
+                        TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS, TOPICS.COLLECTION_ID)
+                    .values(tenant, label, coll, 0, now, terms, collectionId);
+                // Target-less DO NOTHING (the twin-key rule): the root-label key and its id twin both arbitrate, so a racing root insert
+                // is skipped whichever key it trips, and the select below finds the winner's row.
+                Long topicId = rootInsert
+                    .onConflictDoNothing()
                     .returningResult(TOPICS.ID)
                     .fetchOne(TOPICS.ID);
                 if (topicId == null) {
                     topicId = ctx.select(TOPICS.ID).from(TOPICS)
                         .where(TOPICS.TENANT_ID.eq(tenant),
-                               TOPICS.COLLECTION.eq(collection),
+                               ownTopics(lockedRow, coll),
                                TOPICS.LABEL.eq(label),
                                TOPICS.PARENT_ID.isNull())
                         .fetchOne(TOPICS.ID);
@@ -3215,14 +3152,14 @@ public final class TaxonomyRepository {
                         // fail loud rather than desync the specs alignment.
                         throw new IllegalStateException(
                             "persist_discovered conflict-skip found no existing root topic for label '"
-                            + label + "' in " + collection);
+                            + label + "' in " + coll);
                     }
                 }
                 topicIds.add(topicId);
 
-                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy, collection);
+                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy, coll);
             }
-            log.info("persist_discovered collection={} topics={}", collection, topicIds.size());
+            log.info("persist_discovered collection={} topics={}", coll, topicIds.size());
             return topicIds;
         });
     }
@@ -3253,20 +3190,24 @@ public final class TaxonomyRepository {
         if (docIds == null || docIds.isEmpty()) return;
         // RDR-225 (nexus-3wh8d.13): one source collection per call, so one model per call.
         final String model = modelOf(ctx, tenant, sourceCollection);
-        // 6 bind params per row (RDR-194 D1/P3b, nexus-tk070.p3b: source_collection
-        // added; RDR-225: embedding_model) → 5000 rows = 30000 params, still under PG's Int16 Bind-message
-        // parameter-count limit of 32767. (A topic with >5000 docs fires the
-        // trigger ceil(N/5000) times — still vastly better than per-row;
+        // RDR-229 P3.1 stage 2b: and one id, the source collection's, read in this transaction.
+        final Long sourceId = CollectionIds.require(ctx, tenant, sourceCollection);
+        // 7 bind params per row (RDR-194 D1/P3b, nexus-tk070.p3b: source_collection
+        // added; RDR-225: embedding_model; RDR-229 P3.1: source_collection_id) → 4000 rows = 28000 params, still
+        // under PG's Int16 Bind-message parameter-count limit of 32767 (5000 rows would be 35000). (A topic with
+        // >4000 docs fires the trigger ceil(N/4000) times — still vastly better than per-row;
         // realistic topics are hundreds to low-thousands.)
-        final int MAX_ROWS = 5000;
+        final int MAX_ROWS = 4000;
         for (int start = 0; start < docIds.size(); start += MAX_ROWS) {
             List<String> batch = docIds.subList(start, Math.min(start + MAX_ROWS, docIds.size()));
             var insert = ctx.insertInto(TOPIC_ASSIGNMENTS,
                     TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL);
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID);
             for (String docId : batch) {
-                insert = insert.values(tenant, docIdBytes(docId), topicId, assignedBy, sourceCollection, model);
+                insert = insert.values(tenant, docIdBytes(docId), topicId, assignedBy, sourceCollection, model,
+                        sourceId);
             }
             insert.onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                               TOPIC_ASSIGNMENTS.TOPIC_ID)

@@ -489,7 +489,7 @@ def test_runbook_local_steps_use_the_verb_and_hand_no_credentials_except_to_an_o
 def test_runbook_tells_an_old_client_to_upgrade_first():
     head = " ".join(_runbook_section()[:1500].split())
     assert "Upgrade the client first" in head and "7.97.0" in head
-    assert "uv tool upgrade conexus" in head and "does not block" in head
+    assert "nx self install" in head and "does not block" in head
 
 
 def test_runbook_steps_two_and_three_gate_on_check():

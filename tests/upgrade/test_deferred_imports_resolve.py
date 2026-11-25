@@ -78,6 +78,13 @@ def test_deferred_import_resolves(module: str, name: str, path: Path, lineno: in
             f"{path.name}:{lineno} defers `from {module} import {name}`, but the "
             f"MODULE does not import: {exc}"
         )
+    if not hasattr(imported, name) and hasattr(imported, "__path__"):
+        # `from pkg import sub` imports a submodule that is not yet an attribute; resolve it the
+        # same way, or the pin passes or fails on which earlier test happened to import it.
+        try:
+            importlib.import_module(f"{module}.{name}")
+        except ImportError:
+            pass
     assert hasattr(imported, name), (
         f"{path.name}:{lineno} defers `from {module} import {name}`, but "
         f"{module!r} has no attribute {name!r} — this import raises ImportError "

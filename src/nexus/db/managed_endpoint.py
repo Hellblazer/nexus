@@ -198,7 +198,8 @@ def probe_managed_service(
 
     if http_get is None:
         def http_get(u: str, t: float) -> httpx.Response:
-            return httpx.get(u, timeout=t)
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+            return httpx.get(u, timeout=t, verify=get_shared_ssl_context())
 
     before_request()  # nexus-ldf2s: the version probe is a request like any other
     try:

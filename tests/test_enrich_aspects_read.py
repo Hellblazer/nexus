@@ -122,7 +122,7 @@ class TestAspectsShow:
         runner = CliRunner()
         result = runner.invoke(enrich, ["aspects-show", str(t)])
         assert result.exit_code == 0, result.output
-        assert "Run 'nx enrich aspects" not in result.output, (
+        assert "nx enrich aspects code__" not in result.output, (
             f"must not recommend a command that aborts: {result.output!r}"
         )
         assert "code__myrepo" in result.output
@@ -150,7 +150,7 @@ class TestAspectsShow:
         runner = CliRunner()
         result = runner.invoke(enrich, ["aspects-show", str(t)])
         assert result.exit_code == 0, result.output
-        assert "Run 'nx enrich aspects knowledge__myrepo-papers'" in result.output
+        assert "Run `nx enrich aspects knowledge__myrepo-papers`" in result.output
 
 
 # ── aspects-list ────────────────────────────────────────────────────────────

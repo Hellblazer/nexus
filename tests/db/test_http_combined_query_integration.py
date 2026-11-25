@@ -303,7 +303,7 @@ def _run_psql_in_container(pg_user: str, pg_db: str, sql: str) -> None:
             "psql", "-U", pg_user, "-d", pg_db,
             "-v", "ON_ERROR_STOP=1", "-c", sql,
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -401,10 +401,16 @@ def seed_chunks(pg_instance: dict, vec_client):
 
 
 @pytest.fixture
-def cat_client(local_service: tuple[str, str]):
-    """HttpCatalogClient bound to the live local_service, closed on teardown."""
-    from nexus.catalog.http_catalog_client import HttpCatalogClient
+def cat_client(local_service: tuple[str, str], vec_client):
+    """HttpCatalogClient bound to the live local_service, closed on teardown.
 
+    RDR-229 P3.1: the engine refuses a catalog document whose ``physical_collection`` has no registry row
+    (422 ``unregistered_collection``), so the collection is registered first, as every product write path
+    does; ``vec_client`` points registration at this service."""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.corpus import ensure_collection_registered
+
+    ensure_collection_registered(_COLLECTION)
     base_url, token = local_service
     with HttpCatalogClient(base_url=base_url, tenant="default", _token=token) as c:
         yield c

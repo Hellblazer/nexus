@@ -43,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -92,7 +93,8 @@ def _psql_superuser(state: dict, sql: str) -> str:
     proc = subprocess.run(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
          "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-A", "-t", "-1", "-f", "-"],
-        input=sql, capture_output=True, text=True, timeout=60,
+        input=sql, capture_output=True, text=True, encoding="utf-8", timeout=60,
+        env={**os.environ, "PGCLIENTENCODING": "UTF8"},
     )
     if proc.returncode != 0:
         raise RuntimeError(f"psql failed: {proc.stderr}\nSQL: {sql}")
@@ -144,6 +146,31 @@ def registered_dim(tenant: str, collection: str) -> int:
     return dim
 
 
+def collection_id_sql(tenant: str, collection: str) -> str:
+    """A scalar subselect for the registry's ``collection_id`` of *(tenant, collection)*.
+
+    RDR-229 P3.1 (nexus-p2m1x.17): a row that names a collection must carry the id beside the name
+    (``chunks_collection_id_check`` and its siblings), so every SQL seed stamps it in the same statement,
+    the way ``CollectionIdSeeds`` does on the Java side. The registry row must already exist, or the
+    subselect is NULL and the CHECK refuses the row.
+    """
+    return collection_id_for(_lit(tenant), collection)
+
+
+def collection_id_for(tenant_expr: str, collection: str) -> str:
+    """:func:`collection_id_sql` for a statement that derives the tenant from its own ``FROM`` (a seed that
+    joins ``nexus.topics`` for it): *tenant_expr* is a SQL expression, a quoted literal or a column such as
+    ``topics.tenant_id``, which the subselect compares against the registry row's tenant."""
+    return (
+        "(SELECT collection_id FROM nexus.catalog_collections "
+        f"WHERE tenant_id = {tenant_expr} AND name = {_lit(collection)})"
+    )
+
+
+#: A seed's psql failure that is the twin-key race (see seed_chunks_direct), retried once like the engine's TwinKeyUpsert.
+_ID_TWIN_RACE: re.Pattern[str] = re.compile(r'duplicate key value violates unique constraint "\w+_cid_uq"')
+
+
 def chunks_insert_sql(
     tenant: str,
     collection: str,
@@ -168,14 +195,15 @@ def chunks_insert_sql(
         "(SELECT embedding_model FROM nexus.catalog_collections "
         f"WHERE tenant_id = {_lit(tenant)} AND name = {_lit(collection)})"
     )
+    cid = collection_id_sql(tenant, collection)
     rows = ",\n".join(
         f"({_lit(tenant)}, {_lit(collection)}, decode({_lit(chash)}, 'hex'), "
-        f"{_lit(doc)}, {_vector_lit(vec)}, {_lit(json.dumps(meta))}::jsonb, {model})"
+        f"{_lit(doc)}, {_vector_lit(vec)}, {_lit(json.dumps(meta))}::jsonb, {model}, {cid})"
         for chash, doc, vec, meta in zip(ids, documents, embeddings, metas, strict=True)
     )
     return (
         "INSERT INTO nexus.chunks "
-        f"(tenant_id, collection, chash, chunk_text, {col}, metadata, embedding_model)\n"
+        f"(tenant_id, collection, chash, chunk_text, {col}, metadata, embedding_model, collection_id)\n"
         f"VALUES {rows}\n"
         "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO UPDATE SET\n"
         f"  chunk_text = EXCLUDED.chunk_text, {col} = EXCLUDED.{col},\n"
@@ -271,11 +299,16 @@ def seed_chunks_direct(
         + "COMMIT;\n"
     )
     state = _pg_state()
-    proc = subprocess.run(
-        [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
-         "-U", "nexus_svc", "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"],
-        input=script, capture_output=True, text=True, timeout=130,
-    )
+    cmd = [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
+           "-U", "nexus_svc", "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"]
+    env = {**os.environ, "PGCLIENTENCODING": "UTF8"}
+    proc = subprocess.run(cmd, input=script, capture_output=True, text=True, encoding="utf-8", timeout=130, env=env)
+    if proc.returncode != 0 and _ID_TWIN_RACE.search(proc.stderr):
+        # RDR-229 P3.3b: a chunks leaf holds the name key and its id twin (<leaf>_cid_uq). ON CONFLICT on the name
+        # key absorbs a conflict only on that key, so a concurrent seed of the same row (the indexer writes files from
+        # a thread pool; identical files share a chash) trips the twin as a plain 23505. The engine's
+        # TwinKeyUpsert retries once for the same reason; by now the winner has committed, so the name key arbitrates.
+        proc = subprocess.run(cmd, input=script, capture_output=True, text=True, encoding="utf-8", timeout=130, env=env)
     if proc.returncode != 0:
         raise RuntimeError(
             f"seed_chunks_direct: psql failed ({proc.returncode}) for tenant {tenant!r} "

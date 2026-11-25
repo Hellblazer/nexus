@@ -63,7 +63,15 @@
 # 5389 -> 5390 (nexus-hczdo.1.4, 2026-11-18): +1. RDR-253 Step 3 (identity client) needs a real engine tenant for its journeys (holder, lease, token and sweep rows are the engine's compare-and-set),
 # and Sam ruled "Fold to +1" (T2 nexus/sam-ruling-rdr253-step3-tenants-2026-11-18) over +7 or +34: ONE test, tests/identity/test_identity_engine_journeys.py::test_the_engine_backed_identity_journeys,
 # takes one tenant and runs every module's rows on scoped worlds (the seven modules hold row functions and ROWS tables, no test). Do not add a second tenant-minting test to tests/identity; add rows.
-provisioned_tests = 5390
+# 5390 -> 5394 (nexus-p2m1x.28, 2026-11-23, Sam "5394, plus stack rule", T2 nexus/sam-ruling-reland-storage-touch-ceiling-2026-11-23):
+# +4 net. The RDR-229 Phase 3 reland (develop 5569797d2a) brought 9 provisioners; CI 45087977884 counted 5396 against develop
+# 339fae2eb7's 5387 (CI 45059393573). Two were mis-marked: the ambient-writer read-back pair in tests/test_collection_registration.py
+# passes with NX_TEST_T2_SUBSTRATE=none, so its t2_tenant mark is dropped in this commit. The 7 that need a real tenant, per module:
+# test_upgrade_state_fixture 3 (the pre-P3.1 row is built on real PG and the CHECK re-enforced), test_rdr229_preflight_registers_collection 2
+# (the engine's 422 for an unregistered collection, then the pre-flight registering first), test_silent_error_logging 1 (store_put
+# registers with the catalog before the hook, P3.1), test_collection_registration 1 (the 409 refusal reaches the engine).
+# The rest of the Phase 3 stack: the final tree's measured value with per-module reasons, capped at 5410 (linda, Sam's rule).
+provisioned_tests = 5394
 tolerance_tests = 0
 # 5359 -> 5381 accepted by Sam 2026-11-07 (ask halcyon/rdr243-p3-tenant-ceiling, version 6856e9c9541f1b19, choice 1 "Accept +22"): RDR-243 Phase 3's +22 tenant-minting tests (scripts/tenant_delta.py against origin/develop: canary +10, --sensitive-glob +8, catalog MCP withhold +3, doctor rows +1); each reads the real engine and catalog, the subject being the flag the engine keeps.
 # 5380 -> 5381 (RDR-243 Phase 3 fix r3, 2026-11-07): +1, tests/commands/test_index_repo_sensitive_glob.py 7 -> 8 (the --sensitive-glob re-flag of an existing document relabels its topics: the flag is the one-way row the engine keeps, set through the audited route on a real catalog; scripts/tenant_delta.py against origin/develop reads +22 for the branch).

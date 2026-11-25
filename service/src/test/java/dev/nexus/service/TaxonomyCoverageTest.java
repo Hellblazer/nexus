@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
@@ -121,12 +122,12 @@ class TaxonomyCoverageTest {
             PgContainerHelper.insertCollection(dsl, tenant, name);
             String model = PgContainerHelper.collectionModel(dsl, tenant, name);
             long topic = dsl.insertInto(TOPICS)
-                .set(TOPICS.TENANT_ID, tenant).set(TOPICS.LABEL, "topic of " + name).set(TOPICS.COLLECTION, name)
+                .set(TOPICS.TENANT_ID, tenant).set(TOPICS.LABEL, "topic of " + name).set(TOPICS.COLLECTION, name).set(TOPICS.COLLECTION_ID, CollectionIds.idOf(tenant, name))
                 .set(TOPICS.CREATED_AT, SEED_TS)
                 .returningResult(TOPICS.ID).fetchOne(TOPICS.ID);
             if (centroid) {
                 dsl.insertInto(TAXONOMY_CENTROIDS)
-                    .set(TAXONOMY_CENTROIDS.TENANT_ID, tenant).set(TAXONOMY_CENTROIDS.COLLECTION, name)
+                    .set(TAXONOMY_CENTROIDS.TENANT_ID, tenant).set(TAXONOMY_CENTROIDS.COLLECTION, name).set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf(tenant, name))
                     .set(TAXONOMY_CENTROIDS.TOPIC_ID, topic).set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, model)
                     .set(TAXONOMY_CENTROIDS.LABEL, "centroid of " + name)
                     .set(VectorSeeds.centroidEmbedding(dim), VectorSeeds.vecXY(dim, 1f, 0f))
@@ -147,7 +148,7 @@ class TaxonomyCoverageTest {
 
     private void storeChunk(DSLContext dsl, Coll c, byte[] chash) {
         dsl.insertInto(CHUNKS)
-            .set(CHUNKS.TENANT_ID, c.tenant()).set(CHUNKS.COLLECTION, c.name()).set(CHUNKS.CHASH, chash)
+            .set(CHUNKS.TENANT_ID, c.tenant()).set(CHUNKS.COLLECTION, c.name()).set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(c.tenant(), c.name())).set(CHUNKS.CHASH, chash)
             .set(CHUNKS.EMBEDDING_MODEL, c.model()).set(CHUNKS.CHUNK_TEXT, "coverage chunk " + HexFormat.of().formatHex(chash))
             .set(VectorSeeds.chunkEmbedding(c.dim()), VectorSeeds.vecXY(c.dim(), 1f, 0f))
             .execute();
@@ -158,6 +159,7 @@ class TaxonomyCoverageTest {
             .set(CATALOG_DOCUMENTS.TENANT_ID, c.tenant()).set(CATALOG_DOCUMENTS.TUMBLER, doc)
             .set(CATALOG_DOCUMENTS.TITLE, "Doc " + doc).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, c.name())
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(c.tenant(), c.name()))
             .set(CATALOG_DOCUMENTS.DELETED_AT, tombstoned ? SEED_TS : null)
             .onConflictDoNothing()
             .execute();
@@ -165,6 +167,7 @@ class TaxonomyCoverageTest {
             .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, c.tenant()).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0).set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash(c, key))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, c.name())
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(c.tenant(), c.name()))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, c.model())
             .execute();
     }
@@ -172,7 +175,7 @@ class TaxonomyCoverageTest {
     private void assign(DSLContext dsl, Coll chunkCollection, long topic, String key) {
         dsl.insertInto(TOPIC_ASSIGNMENTS)
             .set(TOPIC_ASSIGNMENTS.TENANT_ID, chunkCollection.tenant()).set(TOPIC_ASSIGNMENTS.DOC_ID, chash(chunkCollection, key))
-            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topic).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, chunkCollection.name())
+            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topic).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, chunkCollection.name()).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(chunkCollection.tenant(), chunkCollection.name()))
             .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, SEED_TS).set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, chunkCollection.model())
             .execute();
     }
@@ -278,7 +281,7 @@ class TaxonomyCoverageTest {
             storeChunk(dsl, sibling, chash(own, "k0"));
             dsl.insertInto(TOPIC_ASSIGNMENTS)
                 .set(TOPIC_ASSIGNMENTS.TENANT_ID, TENANT).set(TOPIC_ASSIGNMENTS.DOC_ID, chash(own, "k0"))
-                .set(TOPIC_ASSIGNMENTS.TOPIC_ID, own.topic()).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sibling.name())
+                .set(TOPIC_ASSIGNMENTS.TOPIC_ID, own.topic()).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sibling.name()).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(TENANT, sibling.name()))
                 .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, SEED_TS).set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, own.model())
                 .execute();
         });
@@ -339,7 +342,8 @@ class TaxonomyCoverageTest {
         seed(dsl -> {
             long second = dsl.insertInto(TOPICS)
                 .set(TOPICS.TENANT_ID, c.tenant()).set(TOPICS.LABEL, "second topic of " + c.name())
-                .set(TOPICS.COLLECTION, c.name()).set(TOPICS.CREATED_AT, SEED_TS)
+                .set(TOPICS.COLLECTION, c.name())
+                .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(c.tenant(), c.name())).set(TOPICS.CREATED_AT, SEED_TS)
                 .returningResult(TOPICS.ID).fetchOne(TOPICS.ID);
             // d0: two live owners, assigned to both of the collection's topics
             storeChunk(dsl, c, "d0");
@@ -389,11 +393,11 @@ class TaxonomyCoverageTest {
             PgContainerHelper.insertCollection(dsl, OTHER_TENANT, mine.name());
             String model = PgContainerHelper.collectionModel(dsl, OTHER_TENANT, mine.name());
             long topic = dsl.insertInto(TOPICS)
-                .set(TOPICS.TENANT_ID, OTHER_TENANT).set(TOPICS.LABEL, "theirs").set(TOPICS.COLLECTION, mine.name())
+                .set(TOPICS.TENANT_ID, OTHER_TENANT).set(TOPICS.LABEL, "theirs").set(TOPICS.COLLECTION, mine.name()).set(TOPICS.COLLECTION_ID, CollectionIds.idOf(OTHER_TENANT, mine.name()))
                 .set(TOPICS.CREATED_AT, SEED_TS)
                 .returningResult(TOPICS.ID).fetchOne(TOPICS.ID);
             dsl.insertInto(TAXONOMY_CENTROIDS)
-                .set(TAXONOMY_CENTROIDS.TENANT_ID, OTHER_TENANT).set(TAXONOMY_CENTROIDS.COLLECTION, mine.name())
+                .set(TAXONOMY_CENTROIDS.TENANT_ID, OTHER_TENANT).set(TAXONOMY_CENTROIDS.COLLECTION, mine.name()).set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf(OTHER_TENANT, mine.name()))
                 .set(TAXONOMY_CENTROIDS.TOPIC_ID, topic).set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, model)
                 .set(TAXONOMY_CENTROIDS.LABEL, "theirs")
                 .set(VectorSeeds.centroidEmbedding(mine.dim()), VectorSeeds.vecXY(mine.dim(), 1f, 0f))
@@ -452,29 +456,58 @@ class TaxonomyCoverageTest {
         seed(dsl -> {
             var series = DSL.generateSeries(1, total).as("s", "i");
             Field<Integer> i = series.field("i", Integer.class);
-            dsl.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
-                .select(dsl.select(DSL.val(c.tenant(), CHUNKS.TENANT_ID), DSL.val(c.name(), CHUNKS.COLLECTION),
-                        indexChash(i), DSL.val(c.model(), CHUNKS.EMBEDDING_MODEL), DSL.inline("text"),
-                        DSL.val(VectorSeeds.vecXY(1024, 1f, 0f), CHUNKS.EMBEDDING_1024)).from(series))
+            dsl.insertInto(CHUNKS,
+                    CHUNKS.TENANT_ID,
+                    CHUNKS.COLLECTION,
+                    CHUNKS.COLLECTION_ID,
+                    CHUNKS.CHASH,
+                    CHUNKS.EMBEDDING_MODEL,
+                    CHUNKS.CHUNK_TEXT,
+                    CHUNKS.EMBEDDING_1024)
+                .select(dsl.select(DSL.val(c.tenant(), CHUNKS.TENANT_ID),
+                   DSL.val(c.name(), CHUNKS.COLLECTION),
+                   CollectionIds.idOf(DSL.val(c.tenant(), CHUNKS.TENANT_ID), DSL.val(c.name(), CHUNKS.COLLECTION)),
+                   indexChash(i),
+                   DSL.val(c.model(), CHUNKS.EMBEDDING_MODEL),
+                   DSL.inline("text"),
+                   DSL.val(VectorSeeds.vecXY(1024, 1f, 0f), CHUNKS.EMBEDDING_1024)).from(series))
                 .execute();
             dsl.insertInto(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.TENANT_ID, c.tenant()).set(CATALOG_DOCUMENTS.TUMBLER, doc)
                 .set(CATALOG_DOCUMENTS.TITLE, doc).onConflictDoNothing().execute();
-            dsl.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                .select(dsl.select(DSL.val(c.tenant(), CATALOG_DOCUMENT_CHUNKS.TENANT_ID), DSL.inline(doc), i,
-                        indexChash(i), i, DSL.val(c.name(), CATALOG_DOCUMENT_CHUNKS.COLLECTION),
-                        DSL.val(c.model(), CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)).from(series))
+            dsl.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                    CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION,
+                    CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                .select(dsl.select(DSL.val(c.tenant(), CATALOG_DOCUMENT_CHUNKS.TENANT_ID),
+                   DSL.inline(doc),
+                   i,
+                   indexChash(i),
+                   i,
+                   DSL.val(c.name(), CATALOG_DOCUMENT_CHUNKS.COLLECTION),
+                   CollectionIds.idOf(DSL.val(c.tenant(), CATALOG_DOCUMENT_CHUNKS.TENANT_ID), DSL.val(c.name(), CATALOG_DOCUMENT_CHUNKS.COLLECTION)),
+                   DSL.val(c.model(), CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)).from(series))
                 .execute();
-            dsl.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
-                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+            dsl.insertInto(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
                     TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-                .select(dsl.select(DSL.val(c.tenant(), TOPIC_ASSIGNMENTS.TENANT_ID), indexChash(i),
-                        DSL.val(c.topic(), TOPIC_ASSIGNMENTS.TOPIC_ID), DSL.inline("centroid"),
-                        DSL.val(c.name(), TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
-                        DSL.val(c.model(), TOPIC_ASSIGNMENTS.EMBEDDING_MODEL))
+                .select(dsl.select(DSL.val(c.tenant(), TOPIC_ASSIGNMENTS.TENANT_ID),
+                   indexChash(i),
+                   DSL.val(c.topic(), TOPIC_ASSIGNMENTS.TOPIC_ID),
+                   DSL.inline("centroid"),
+                   DSL.val(c.name(), TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
+                   CollectionIds.idOf(DSL.val(c.tenant(), TOPIC_ASSIGNMENTS.TENANT_ID), DSL.val(c.name(), TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)),
+                   DSL.val(c.model(), TOPIC_ASSIGNMENTS.EMBEDDING_MODEL))
                     .from(series).where(i.notIn(unassignedIdx)))
                 .execute();
         });

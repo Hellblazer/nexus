@@ -17,6 +17,14 @@ import org.slf4j.LoggerFactory;
  *   <li>{@code data_move_run_complete label= run= tenant=}: one run's CALL returned and the run is complete;</li>
  *   <li>{@code data_move_blocked label= stage= tenant= retries= sqlstate= reason=}: the transition to blocked, to be
  *       retried; {@code retries} is the consecutive transient count after this failure;</li>
+ *   <li>{@code data_move_needs_operator label= step= sqlstate= bound_ms= retries= terminates_index_builds= reason=}: ERROR,
+ *       once, on the transient failure that enters the needs-an-operator state ({@link MoveRetryPolicy#needsOperator}: the
+ *       {@value MoveRetryPolicy#NEEDS_OPERATOR_AT}th consecutive transient, or the
+ *       {@value MoveRetryPolicy#NEEDS_OPERATOR_AT_ON_COMPLETE}rd consecutive lock or statement timeout at {@code on_complete});
+ *       the move keeps retrying. {@code step} is the stage ({@code on_complete}), {@code bound_ms} the bound that step missed
+ *       ({@code -} when no move setting bounds it), {@code terminates_index_builds} whether each retry ends in-flight index
+ *       builds (an {@code on_complete} run of bounds on a chunk-family move). Not logged again for a later retry, and logged
+ *       again only after the state has been left and is entered anew;</li>
  *   <li>{@code data_move_failed label= stage= tenant= sqlstate= error=}: the transition to failed, for good;</li>
  *   <li>{@code data_move_completed label= on_complete=}: the move is complete in the registry;</li>
  *   <li>{@code data_move_verification_failed label= found=}: a detail line, not a transition. Every verification ran and
@@ -43,8 +51,10 @@ import org.slf4j.LoggerFactory;
  * characters is redacted too, and also masks any unrelated text that contains it. Not covered: a credential the engine does not
  * hold, a form of one not listed (a Base64 or hashed echo), and output that bypasses the logback appenders.
  *
- * <p>{@code stage=FINISH} (a finisher's own {@code FAILED} or {@code BLOCKED} verdict) is reachable only from a test
- * finisher: {@link VerifyingFinisher} reports every failure as {@code REPORT} instead.
+ * <p>{@code stage=FINISH} (a finisher's own {@code FAILED} or {@code BLOCKED} verdict) comes from a test finisher: {@link
+ * VerifyingFinisher} reports every failure as {@code REPORT} instead. Its one {@code BLOCKED} is the name-key drop's deferral
+ * while an index build runs ({@link BuildWait}), which has its own line ({@code data_move_completion_deferred}, and
+ * {@code data_move_completion_overdue} past six hours) and no {@code data_move_blocked}.
  */
 final class MoveEvents {
 
@@ -68,6 +78,13 @@ final class MoveEvents {
     static void blocked(String label, String stage, String tenant, int retries, String sqlstate, String reason) {
         log.warn("event=data_move_blocked label=\"{}\" stage={} tenant=\"{}\" retries={} sqlstate={} reason=\"{}\"",
             value(label), value(stage), value(tenant), retries, value(sqlstate), value(reason));
+    }
+
+    static void needsOperator(String label, String step, String sqlstate, int boundMs, int retries,
+                              boolean terminatesIndexBuilds, String reason) {
+        log.error("event=data_move_needs_operator label=\"{}\" step={} sqlstate={} bound_ms={} retries={} "
+                + "terminates_index_builds={} reason=\"{}\"", value(label), value(step), value(sqlstate),
+            boundMs < 0 ? "-" : Integer.toString(boundMs), retries, terminatesIndexBuilds, value(reason));
     }
 
     static void verificationFailed(String label, String found) {

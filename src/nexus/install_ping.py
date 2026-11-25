@@ -15,6 +15,25 @@ Opt-out, default on. Any of these disables it:
 * running out of a dev checkout (see :func:`running_from_dev_checkout`)
 * ``telemetry.enabled: false`` in ``~/.config/nexus/config.yml``
   (``nx telemetry off``)
+* ``NX_TELEMETRY=0`` (or ``false``, ``no``, ``off``): an explicit opt-out
+  spelled the other way round, reported as ``env NX_TELEMETRY=0``
+* an automated environment (see :func:`automation_reason`): a pytest
+  process (``PYTEST_CURRENT_TEST``), a lab-run grant (``LAB_CPUS`` /
+  ``LAB_MEM_MB``, which ``lab-run`` exports), a CI vendor (``CI``,
+  ``GITHUB_ACTIONS`` and the rest of :data:`CI_ENV_VARS`), or a container
+  (``/.dockerenv``, ``/run/.containerenv``, a docker / containerd / kubepods
+  / lxc entry in ``/proc/1/cgroup``, ``KUBERNETES_SERVICE_HOST``). A test or
+  build run is not an install, and counting one taints the numbers. Container
+  detection is best effort, per runtime.
+
+``NX_TELEMETRY=1`` (any value other than empty, ``0``, ``false``, ``no`` or
+``off``) is the explicit opt-in for someone who really does run nx in a
+container: it overrides ONLY the automation skips. The opt-outs above all
+still win over it -- ``NX_NO_TELEMETRY``, ``NX_TELEMETRY=0``, the config key,
+and the dev checkout (a dev box is not an install whatever the environment
+says). The decision order is therefore: ``NX_NO_TELEMETRY``, ``NX_TELEMETRY``
+set to a falsy value, dev checkout, config key, ``NX_TELEMETRY`` opt-in,
+automation, default on.
 
 Every failure is swallowed at debug level. The ping never blocks startup,
 never retries, and never raises into the caller; a ping the network drops is
@@ -26,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import sys
 import threading
 import time
@@ -33,7 +53,7 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import structlog
 
@@ -44,6 +64,11 @@ _log = structlog.get_logger(__name__)
 
 #: Env opt-out. ``0`` and empty mean "not set"; anything else disables.
 NO_TELEMETRY_ENV = "NX_NO_TELEMETRY"
+#: Explicit opt-in that overrides the automation skips (not the opt-outs).
+#: Set to a falsy value (``0``, ``false``, ``no``, ``off``) it is an opt-out.
+OPT_IN_ENV = "NX_TELEMETRY"
+#: The hint ``nx telemetry status`` / ``on`` append when an automation signal is why the ping is off.
+AUTOMATION_HINT = "set NX_TELEMETRY=1 to count this install"
 #: Test / private-deployment override for the ping target.
 PING_URL_ENV = "NX_INSTALL_PING_URL"
 #: Route on the managed service (unauthenticated; see the engine's InstallPingHandler).
@@ -55,6 +80,107 @@ PING_TIMEOUT_S = 2.0
 #: Files under the nexus config dir.
 INSTALL_ID_FILENAME = "install_id"
 LAST_PING_FILENAME = "install_ping.last"
+
+
+#: CI vendor variables; any one set to a truthy value marks a CI run. ``CI`` and
+#: ``CONTINUOUS_INTEGRATION`` are the generic ones most vendors export; the rest
+#: are vendor-specific for the ones that do not (Jenkins, TeamCity, Azure
+#: Pipelines, CodeBuild, Bitbucket, Drone, AppVeyor ...). Values are matched with
+#: :func:`_truthy`, so ``CI=false`` and ``CI=0`` do not count.
+CI_ENV_VARS: tuple[str, ...] = (
+    "CI",
+    "CONTINUOUS_INTEGRATION",
+    "GITHUB_ACTIONS",
+    "GITLAB_CI",
+    "BUILDKITE",
+    "CIRCLECI",
+    "TRAVIS",
+    "JENKINS_URL",
+    "JENKINS_HOME",
+    "HUDSON_URL",
+    "TEAMCITY_VERSION",
+    "TF_BUILD",
+    "BITBUCKET_BUILD_NUMBER",
+    "DRONE",
+    "CODEBUILD_BUILD_ID",
+    "APPVEYOR",
+    "SEMAPHORE",
+    "CIRRUS_CI",
+    "BUDDY",
+    "CF_BUILD_ID",
+    "GO_PIPELINE_NAME",
+)
+#: A hand ``lab-run`` grant runs the command under ``env -i`` and exports only
+#: these (plus PYTEST_XDIST_AUTO_NUM_WORKERS, LAB_JOB_KEY, NX_NO_TELEMETRY), so a
+#: Nomad variable is never seen there; the repo detects a grant the same way
+#: (tests/conftest.py, tests/_tmp_root.py). NOMAD_ALLOC_ID is deliberately NOT a
+#: signal: it would mislabel any real Nomad workload.
+LAB_RUN_ENV_VARS: tuple[str, ...] = ("LAB_CPUS", "LAB_MEM_MB")
+#: pytest sets this for the duration of every test phase.
+PYTEST_ENV = "PYTEST_CURRENT_TEST"
+#: Set inside every Kubernetes pod.
+KUBERNETES_ENV = "KUBERNETES_SERVICE_HOST"
+#: Marker files, relative to the container root.
+CONTAINER_MARKER_FILES: tuple[str, ...] = (".dockerenv", "run/.containerenv")
+#: Names of container runtimes that show up in ``/proc/1/cgroup``. A pattern, not
+#: a tuple of names: ``tests/test_nx_bare_exec_lint.py`` reads a literal whose
+#: first element is a tool name ("docker") as a bare argv0 spawn.
+CGROUP_CONTAINER_MARKERS = re.compile(r"docker|containerd|kubepods|lxc")
+#: Where the container probes look; tests point it at a tmp tree.
+_CONTAINER_ROOT: Path = Path("/")
+
+
+def _truthy(value: str | None) -> bool:
+    """Set to something other than empty / ``0`` / ``false`` / ``no`` / ``off``."""
+    return (value or "").strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _automation_env() -> Mapping[str, str]:
+    """The environment the automation signals are read from (tests replace it)."""
+    return os.environ
+
+
+def _container_reason(environ: Mapping[str, str], root: Path) -> str | None:
+    if _truthy(environ.get(KUBERNETES_ENV)):
+        return f"automation: container ({KUBERNETES_ENV})"
+    for rel in CONTAINER_MARKER_FILES:
+        try:
+            if (root / rel).exists():
+                return f"automation: container (/{rel})"
+        except OSError:
+            continue
+    try:
+        text = (root / "proc" / "1" / "cgroup").read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):  # unreadable /proc (sandbox, Windows, a directory) is "not a container"
+        return None
+    found = CGROUP_CONTAINER_MARKERS.search(text.lower())
+    if found:
+        return f"automation: container (/proc/1/cgroup: {found.group(0)})"
+    return None
+
+
+def automation_reason(environ: Mapping[str, str] | None = None, root: Path | None = None) -> str | None:
+    """Why this process looks automated (a test, lab-run, CI or container), or None.
+
+    The returned string is the status ``source``. Never raises: an unreadable
+    probe means "not detected". ``environ`` and ``root`` default to the real
+    process environment and ``/``; they exist so tests do not depend on the host.
+    """
+    env = _automation_env() if environ is None else environ
+    base = _CONTAINER_ROOT if root is None else root
+    try:
+        if _truthy(env.get(PYTEST_ENV)):
+            return f"automation: pytest ({PYTEST_ENV})"
+        for name in LAB_RUN_ENV_VARS:
+            if _truthy(env.get(name)):
+                return f"automation: lab-run ({name})"
+        for name in CI_ENV_VARS:
+            if _truthy(env.get(name)):
+                return f"automation: CI ({name})"
+        return _container_reason(env, base)
+    except Exception as exc:  # noqa: BLE001 — a beacon check never raises into startup
+        _log.debug("install_ping_automation_check_failed", error=str(exc))
+        return None
 
 
 def running_from_dev_checkout() -> bool:
@@ -88,7 +214,11 @@ def running_from_dev_checkout() -> bool:
     ``uv tool``-installed WHEEL and are therefore not a checkout by
     construction, which is the same reason the nexus-a2qhz guard is inert
     inside the rehearsal containers. ``NX_NO_TELEMETRY`` remains required
-    there. The guard is the general case; the env var is the exception.
+    there, and the e2e-sandbox lint (tests/test_e2e_no_telemetry_lint.py)
+    still enforces it deliberately even though the automation skips now
+    exist: an ``env -i`` sandbox scrubs ``CI`` and ``PYTEST_CURRENT_TEST``,
+    and container detection is heuristic. The guard is the general case; the
+    env var is the exception.
     """
     try:
         from nexus.db.service_endpoint import (  # noqa: PLC0415 — startup cost, and see above
@@ -101,14 +231,19 @@ def running_from_dev_checkout() -> bool:
         return False
 
 
+def _opted_in() -> bool:
+    return _truthy(os.environ.get(OPT_IN_ENV))
+
+
+def _opted_out_by_opt_in_var() -> bool:
+    """``NX_TELEMETRY`` explicitly set (non-empty) to a falsy value: an opt-out."""
+    raw = os.environ.get(OPT_IN_ENV, "").strip()
+    return bool(raw) and not _truthy(raw)
+
+
 def telemetry_enabled() -> bool:
-    """Opt-out check: env first, then the dev checkout, then the config key."""
-    env = os.environ.get(NO_TELEMETRY_ENV, "").strip()
-    if env and env != "0":
-        return False
-    if running_from_dev_checkout():
-        return False
-    return _config_enabled()
+    """Env opt-out, dev checkout, config key, then the opt-in / automation skips."""
+    return bool(telemetry_status()["enabled"])
 
 
 def telemetry_status() -> dict[str, Any]:
@@ -116,10 +251,17 @@ def telemetry_status() -> dict[str, Any]:
     env = os.environ.get(NO_TELEMETRY_ENV, "").strip()
     if env and env != "0":
         return {"enabled": False, "source": f"env {NO_TELEMETRY_ENV}={env}"}
+    if _opted_out_by_opt_in_var():
+        return {"enabled": False, "source": f"env {OPT_IN_ENV}={os.environ.get(OPT_IN_ENV, '').strip()}"}
     if running_from_dev_checkout():
         return {"enabled": False, "source": "dev checkout"}
     if not _config_enabled():
         return {"enabled": False, "source": "config telemetry.enabled"}
+    if _opted_in():
+        return {"enabled": True, "source": f"env {OPT_IN_ENV}={os.environ.get(OPT_IN_ENV, '').strip()}"}
+    reason = automation_reason()
+    if reason is not None:
+        return {"enabled": False, "source": reason}
     return {"enabled": True, "source": "default"}
 
 

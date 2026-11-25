@@ -26,15 +26,21 @@ public interface MoveFinisher {
      * What the finisher is given: the move, the tenants the pass ran it for (empty for a table with no tenant scope), the
      * admin connection of the pass, and the admin values, so it can open the dedicated per-tenant connections the
      * verification runs on and the separate table-wide one ({@link CallConnection#open}); {@code stopped} says whether the
-     * worker has been stopped, which a finisher reads between its steps and answers with {@link Outcome#LEFT_OPEN}.
+     * worker has been stopped, which a finisher reads between its steps and answers with {@link Outcome#LEFT_OPEN}; {@code reporter}
+     * (null for none) is told the backend and start of a validation that runs before the claim, for the status.
      */
     record Context(DataMove move, List<String> tenants, DSLContext admin, AdminConnection adminConnection,
-                   String applicationName, BooleanSupplier stopped) {
+                   String applicationName, BooleanSupplier stopped, MoveReporter reporter) {
+
+        public Context(DataMove move, List<String> tenants, DSLContext admin, AdminConnection adminConnection,
+                       String applicationName, BooleanSupplier stopped) {
+            this(move, tenants, admin, adminConnection, applicationName, stopped, null);
+        }
 
         /** A context whose worker is never stopped (a test, or a finisher run on its own). */
         public Context(DataMove move, List<String> tenants, DSLContext admin, AdminConnection adminConnection,
                        String applicationName) {
-            this(move, tenants, admin, adminConnection, applicationName, () -> false);
+            this(move, tenants, admin, adminConnection, applicationName, () -> false, null);
         }
     }
 
@@ -44,7 +50,7 @@ public interface MoveFinisher {
         COMPLETED,
         /** The move failed for good: a non-empty verification, or an {@code on_complete} that failed for another reason. */
         FAILED,
-        /** Not now: a timeout or a lock; the move is retried after its wait. */
+        /** Not now: the move is retried after its wait, and nothing is counted. A finisher's own verdict, and the name-key drop's deferral while an index build runs ({@link BuildWait}). */
         BLOCKED,
         /** The runs are done and there is nothing more for this pass to do; the move is left alone for this process. */
         LEFT_OPEN,
@@ -53,7 +59,9 @@ public interface MoveFinisher {
         /** A pause was set before verification or before {@code on_complete}: nothing ran past it; {@link Result#move} is the paused row. */
         PAUSED,
         /** The move is no longer open (superseded, failed or completed meanwhile): the worker forgets it. */
-        GONE
+        GONE,
+        /** The move completed and its {@code on_complete} put it back ({@code completed_at} NULL again): not a completion, no event; the worker comes back to it. */
+        REOPENED
     }
 
     /**
@@ -88,9 +96,22 @@ public interface MoveFinisher {
         public static Result gone() {
             return new Result(Outcome.GONE, null, null, null);
         }
+
+        public static Result reopened() {
+            return new Result(Outcome.REOPENED, null, null, null);
+        }
     }
 
     Result finish(Context context);
+
+    /** Cancels a completion statement in flight (the engine is stopping); a finisher with none does nothing. */
+    default void cancelInFlight() { }
+
+    /**
+     * The worker no longer completes this move now: it is paused or gone, and {@link #finish} will not be called for it until it
+     * runs again. A finisher that keeps something per move across calls drops it, so a pause does not leave a stale start behind.
+     */
+    default void forget(String label) { }
 
     /** Does nothing: the runs are done and the move stays open. */
     MoveFinisher RUNS_ONLY = context -> Result.leftOpen();

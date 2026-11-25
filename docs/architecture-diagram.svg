@@ -52,7 +52,7 @@
     <g transform="translate(950, 62)">
       <rect width="400" height="52" rx="8" fill="#ffffff" stroke="#1e3a8a" stroke-width="1.5"/>
       <text x="200" y="22" text-anchor="middle" class="box-title">🧠  Knowledge Discovery &amp; Generation</text>
-      <text x="200" y="40" text-anchor="middle" class="box-sub">nx_answer · generate step · /nx:analyze</text>
+      <text x="200" y="40" text-anchor="middle" class="box-sub">nx_answer · generate step · /conexus:analyze</text>
     </g>
   </g>
 
@@ -79,7 +79,7 @@
       <rect width="160" height="80" rx="8" fill="#ffffff" stroke="#9a3412" stroke-width="2"/>
       <text x="80" y="30" text-anchor="middle" class="box-title">Query</text>
       <text x="80" y="48" text-anchor="middle" class="box-title">Decomposer</text>
-      <text x="80" y="68" text-anchor="middle" class="box-sub">/nx:query · /nx:plan-first</text>
+      <text x="80" y="68" text-anchor="middle" class="box-sub">/conexus:plan-first</text>
     </g>
 
     <line x1="125" y1="317" x2="167" y2="317" stroke="#1e293b" stroke-width="1.5" marker-end="url(#arrow)"/>
@@ -90,7 +90,7 @@
 
       <!-- inner boxes (left column) -->
       <rect x="20" y="42" width="270" height="36" rx="6" fill="#ffffff" stroke="#9a3412" stroke-width="1"/>
-      <text x="155" y="65" text-anchor="middle" class="box-text">plan_match · dimension + semantic</text>
+      <text x="155" y="65" text-anchor="middle" class="box-text">plan matcher · dimension + semantic</text>
 
       <rect x="20" y="86" width="270" height="36" rx="6" fill="#ffffff" stroke="#9a3412" stroke-width="1"/>
       <text x="155" y="109" text-anchor="middle" class="box-text">LLM-based rerank · nx_plan_audit</text>
@@ -114,7 +114,7 @@
 
       <rect x="25" y="100" width="330" height="52" rx="6" fill="#ffffff" stroke="#9a3412" stroke-width="1"/>
       <text x="190" y="120" text-anchor="middle" class="box-title">Low-level operator instantiation</text>
-      <text x="190" y="138" text-anchor="middle" class="box-sub">DAG of operator_* calls</text>
+      <text x="190" y="138" text-anchor="middle" class="box-sub">DAG of operator steps</text>
 
       <rect x="25" y="162" width="330" height="52" rx="6" fill="#ffffff" stroke="#9a3412" stroke-width="1"/>
       <text x="190" y="182" text-anchor="middle" class="box-title">Validation &amp; self-correction</text>
@@ -252,8 +252,8 @@
         <text x="590" y="74">store_*</text>
         <text x="485" y="96">plan_*</text>
         <text x="590" y="96">scratch_*</text>
-        <text x="485" y="118">catalog_link</text>
-        <text x="590" y="118">operator_*</text>
+        <text x="485" y="118">catalog_*</text>
+        <text x="590" y="118">tuple_*</text>
       </g>
     </g>
 
@@ -308,8 +308,8 @@
       <text x="130" y="28" text-anchor="middle" class="box-title">Problem / Method</text>
       <text x="130" y="46" text-anchor="middle" class="box-title">Taxonomy Construction</text>
       <line x1="30" y1="58" x2="230" y2="58" stroke="#e9d5ff" stroke-width="1"/>
-      <text x="130" y="80"  text-anchor="middle" class="box-text">CatalogTaxonomy</text>
-      <text x="130" y="98"  text-anchor="middle" class="box-sub">BERTopic + HDBSCAN</text>
+      <text x="130" y="80"  text-anchor="middle" class="box-text">HttpTaxonomyStore</text>
+      <text x="130" y="98"  text-anchor="middle" class="box-sub">HDBSCAN + c-TF-IDF</text>
       <text x="130" y="116" text-anchor="middle" class="box-sub">per-collection topic model</text>
     </g>
 
@@ -318,9 +318,9 @@
       <text x="130" y="26" text-anchor="middle" class="box-title">Progressive Update</text>
       <line x1="30" y1="38" x2="230" y2="38" stroke="#e9d5ff" stroke-width="1"/>
       <text x="130" y="58"  text-anchor="middle" class="box-text">auto_linker (on store_put)</text>
-      <text x="130" y="74"  text-anchor="middle" class="box-text">taxonomy_assign_hook</text>
+      <text x="130" y="74"  text-anchor="middle" class="box-text">taxonomy_assign_batch_hook</text>
       <text x="130" y="90"  text-anchor="middle" class="box-text">link_generator</text>
-      <text x="130" y="104" text-anchor="middle" class="box-sub">citation · code-RDR · file-path</text>
+      <text x="130" y="104" text-anchor="middle" class="box-sub">citation · RDR file-path</text>
     </g>
 
     <path d="M93,970 L93,1060 L572,1060" fill="none" stroke="#475569" stroke-width="1.4" stroke-dasharray="5,3" marker-end="url(#arrow-dim)"/>

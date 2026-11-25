@@ -116,7 +116,9 @@ exit 0
 def _stub_ps(bin_dir: Path, lines: list[str]) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
     ps = bin_dir / "ps"
-    ps.write_text("#!/bin/sh\ncat <<'PSEOF'\n" + "\n".join(lines) + "\nPSEOF\n")
+    # The table lists the process that ran ps ($PPID, gc_core), as a real ps does:
+    # gc counts a census as working only when its own pid is in it.
+    ps.write_text("#!/bin/sh\necho \"$PPID python3 gc_core.py\"\ncat <<'PSEOF'\n" + "\n".join(lines) + "\nPSEOF\n")
     ps.chmod(ps.stat().st_mode | stat.S_IXUSR)
 
 
@@ -307,7 +309,10 @@ def test_a_package_without_the_file_warns_in_the_line_self_install_re_echoes(sca
     result = _run(env(), "--source", "conexus", "--version", "7.18.0", "--legacy-venv", str(legacy))
     assert result.returncode == 0, result.stderr
     warnings = [ln for ln in result.stderr.splitlines() if ln.startswith(_BUILD_WARNING_PREFIX)]
-    assert len(warnings) == 1 and "UNCONSTRAINED" in warnings[0], result.stderr
+    # The stub venv has no site-packages, so the lease step adds its own (re-echoed) warning
+    # that the generation is not leased; only the constraints warning is under test here.
+    unconstrained = [ln for ln in warnings if "UNCONSTRAINED" in ln]
+    assert len(unconstrained) == 1, result.stderr
     installs = [ln for ln in argv_log.read_text().splitlines() if ln.startswith("pip install")]
     assert "--constraints" not in installs[-1]
 

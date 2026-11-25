@@ -78,7 +78,7 @@ sequenceDiagram
     E-->>R1: the dead row, with its state
 ```
 
-Every claim reaches a terminal transition: ack, nack, expire or dead. `lease_until` is clamped to the row's `expires_at`, so a claim cannot outlive its tuple. The re-run after a dead-letter is bounded by `NX_TUPLE_READ_MAX` passes; each pass either claims or dead-letters one row. The sweep does the same expire-and-count for lapsed claims nobody re-took.
+Every claim reaches a terminal transition: ack, nack, expire or dead. `lease_until` is clamped to the row's `expires_at`, so a claim cannot outlive its tuple. The re-run after a dead-letter is bounded by `NX_TUPLE_CLAIM_PASSES` passes (default 8; not `NX_TUPLE_READ_MAX`, which bounds a read); each pass either claims or dead-letters one row. The sweep does the same expire-and-count for lapsed claims nobody re-took.
 
 ## Queue: producer, worker, hand-back
 

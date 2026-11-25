@@ -27,7 +27,7 @@ import pytest
 
 from nexus import indexer
 from nexus.catalog import factory
-from tests._catalog_fixture_ops import ActiveCatalog, documents_by_file_path
+from tests._catalog_fixture_ops import ActiveCatalog, catalog_hook_seeded, documents_by_file_path
 from tests.integration.test_rdr223_pdf_journey import _COLLECTION, _FakeChunker, _FakeExtractor, _index, _lines, _write_pdf
 
 pytestmark = [pytest.mark.integration]
@@ -64,7 +64,8 @@ def _write_repo(root: Path) -> list[tuple[Path, str, str]]:
 
 
 def _hook(root: Path, files: list[tuple[Path, str, str]], head: str = "aaa") -> None:
-    indexer._catalog_hook(repo=root, repo_name="r6pfgb8", repo_hash=REPO_HASH, head_hash=head, indexed_files=files)
+    # RDR-229 P3.1: the collections are registered first, as ``_run_index`` does before it calls the hook.
+    catalog_hook_seeded(repo=root, repo_name="r6pfgb8", repo_hash=REPO_HASH, head_hash=head, indexed_files=files)
 
 
 def _meta(cat: ActiveCatalog, rel: str) -> dict:
@@ -336,7 +337,7 @@ def test_the_markdown_hook_stamps_the_format_of_the_row_it_finds_not_of_its_argu
     """The row is a ``prose`` document at ``notes.txt``: the engine derives ``prose`` for it. A hook call that
     passes ``paper`` (which alone derives ``pdf``) must not stamp from that argument. Both legs: the update of an
     existing row, and the update after a registration that resolved onto it."""
-    from nexus.doc_indexer import _catalog_markdown_hook
+    from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook  # RDR-229 P3.1: registers the collection first
 
     corpus = f"6pfgb23-seam-md-{'resolved' if resolved else 'update'}"
     txt = tmp_path / "notes.txt"
@@ -361,7 +362,7 @@ def test_the_pdf_hook_stamps_a_resolved_row_by_its_own_content_type_and_never_fl
     row once and stamps tags, category and source_format as the update branch does: the repo path's ``prose``,
     not ``paper``."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
-    from nexus.pipeline_stages import _catalog_pdf_hook
+    from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: registers the collection first
 
     corpus = "6pfgb23-seam-pdf"
     pdf = tmp_path / "repo-registered.pdf"

@@ -49,8 +49,34 @@ final class PciCanary implements PciCanarySchedule.Runner {
 
     private static final Logger log = LoggerFactory.getLogger(PciCanary.class);
 
-    /** The index a run measures. {@code index} is the name the router's set holds for it. */
-    record Target(String leaf, String tenant, String model, String collection, String index) { }
+    /**
+     * The index a run measures. {@code index} is the name the router's set holds for it. {@code collectionId} is null for a name-predicate index and the
+     * id of the index's predicate for an id-predicate index (then {@code collection} is that id's current label, for the ring): the statement selects
+     * through the id twin of the serving search, as the serving path does once gate 3 has latched.
+     */
+    record Target(String leaf, String tenant, String model, String collection, String index, Long collectionId) {
+        /** A name-predicate target. */
+        Target(String leaf, String tenant, String model, String collection, String index) {
+            this(leaf, tenant, model, collection, index, null);
+        }
+
+        /**
+         * The selector the canary's statement reads this target through. A name target stays on the name function. An id target (the reconciler
+         * makes one only once gate 3 has latched) goes through a selector built on the reconciler's {@code latched}, so the registry resolves its
+         * label to the id exactly as the serving path does (live rows only) and the search takes the _by_id twin; it must resolve to the id the
+         * index was built for, else the statement is refused.
+         */
+        CollectionSelector selector(dev.nexus.service.datamove.Gate3 latched, dev.nexus.service.db.TenantScope scope) {
+            if (collectionId == null) {
+                return CollectionSelector.byName(List.of(collection));
+            }
+            CollectionSelector sel = CollectionSelector.of(latched, scope, tenant, collection);
+            if (!sel.byId() || !collectionId.equals(sel.idOf(collection))) {
+                throw new IllegalStateException("the collection is no longer the one the id index was built for, or the latch no longer holds");
+            }
+            return sel;
+        }
+    }
 
     /** One row of a page: the chunk's id (its chash, hex) and its distance from the query. */
     record Hit(String id, double distance) { }

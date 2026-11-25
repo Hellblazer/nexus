@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-igea9 (RDR-252 post-close audit S1c): the stall factor of a group record.
+
+    An acknowledged red that stays open escalates after stall_factor times the acknowledgement deadline, counted from
+    the last acknowledgement (or the owner's own push). A whole number, 1 to 10; the default is 3. A sibling of
+    ack_deadline on the same row, set by the same group form and set calls.
+
+    Additive: one ALTER TABLE adding one column with a constant default and its CHECK, so every existing row reads 3 and nothing is backfilled or rewritten
+    at boot. group_records already has tenant_isolation ENABLE + FORCE (group-001-1), which a new column does not change,
+    and grants-nexus-svc.xml (runAlways, last in the master changelog) grants schema-wide, so no grant changeset.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="group-002-1" author="nexus-igea9">
+        <comment>nexus.group_records.stall_factor (RDR-252 audit S1c): deadlines an acknowledged red may stay open, default 3, 1 to 10.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.group_records ADD COLUMN stall_factor INTEGER NOT NULL DEFAULT 3
+    CONSTRAINT group_records_stall_factor_ck CHECK (stall_factor BETWEEN 1 AND 10);
+        </sql>
+        <rollback>
+ALTER TABLE nexus.group_records DROP CONSTRAINT IF EXISTS group_records_stall_factor_ck;
+ALTER TABLE nexus.group_records DROP COLUMN IF EXISTS stall_factor;
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

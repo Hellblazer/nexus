@@ -478,6 +478,79 @@ class StatusHandlerTest {
             .doesNotContain("chunks_gate_probe_owner_read").doesNotContain("nexus_admin");
     }
 
+    // ── RDR-229 P3.8 (nexus-p2m1x.28), [additive]: collection_tuple_index_present ────────────────────────────────
+
+    @Test
+    void collectionTupleIndex_keyIsAbsentWhenNoSupplierIsWired_andWhenTheProbeCouldNotRun() throws Exception {
+        start(new StatusHandler(null));
+        assertThat(get().has("collection_tuple_index_present")).as("an engine that predates the field").isFalse();
+        stop();
+        start(new StatusHandler(null).collectionTupleIndex(() -> null));
+        assertThat(get().has("collection_tuple_index_present")).as("a probe that could not run").isFalse();
+    }
+
+    @Test
+    void collectionTupleIndex_reportsTrueAndFalse_asABooleanOnly() throws Exception {
+        start(new StatusHandler(null).collectionTupleIndex(() -> Boolean.TRUE));
+        assertThat(get().get("collection_tuple_index_present").isBoolean()).isTrue();
+        assertThat(get().get("collection_tuple_index_present").asBoolean()).isTrue();
+        stop();
+        start(new StatusHandler(null).collectionTupleIndex(() -> Boolean.FALSE));
+        JsonNode body = get();
+        assertThat(body.get("collection_tuple_index_present").isBoolean()).isTrue();
+        assertThat(body.get("collection_tuple_index_present").asBoolean()).isFalse();
+        assertThat(body.toString()).as("an unauthenticated route never names the index or a collection")
+            .doesNotContain("catalog_collections_live_tuple_uq");
+    }
+
+    // ── RDR-229 P3.12 (nexus-p2m1x.32), [additive]: live_label_index_present ─────────────────────────────────────
+
+    @Test
+    void liveLabelIndex_keyIsAbsentWhenNoSupplierIsWired_andWhenTheProbeCouldNotRun() throws Exception {
+        start(new StatusHandler(null));
+        assertThat(get().has("live_label_index_present")).as("an engine that predates the field").isFalse();
+        stop();
+        start(new StatusHandler(null).liveLabelIndex(() -> null));
+        assertThat(get().has("live_label_index_present")).as("a probe that could not run").isFalse();
+    }
+
+    @Test
+    void liveLabelIndex_reportsTrueAndFalse_asABooleanOnly() throws Exception {
+        start(new StatusHandler(null).liveLabelIndex(() -> Boolean.TRUE));
+        assertThat(get().get("live_label_index_present").isBoolean()).isTrue();
+        assertThat(get().get("live_label_index_present").asBoolean()).isTrue();
+        stop();
+        start(new StatusHandler(null).liveLabelIndex(() -> Boolean.FALSE));
+        JsonNode body = get();
+        assertThat(body.get("live_label_index_present").isBoolean()).isTrue();
+        assertThat(body.get("live_label_index_present").asBoolean()).isFalse();
+        assertThat(body.toString()).as("an unauthenticated route never names the index or a collection")
+            .doesNotContain("idx_catalog_collections_live_label");
+    }
+
+    // ── RDR-229 P3.11 (nexus-p2m1x.31), [additive]: catalog_epoch_available ───────────────────────────────────────
+
+    @Test
+    void catalogEpoch_keyIsAbsentWhenNoSupplierIsWired_andWhenTheProbeCouldNotRun() throws Exception {
+        start(new StatusHandler(null));
+        assertThat(get().has("catalog_epoch_available")).as("an engine that predates the field").isFalse();
+        stop();
+        start(new StatusHandler(null).catalogEpoch(() -> null));
+        assertThat(get().has("catalog_epoch_available")).as("a probe that could not run").isFalse();
+    }
+
+    @Test
+    void catalogEpoch_reportsTrueAndFalse_asABooleanOnly() throws Exception {
+        start(new StatusHandler(null).catalogEpoch(() -> Boolean.TRUE));
+        assertThat(get().get("catalog_epoch_available").isBoolean()).isTrue();
+        assertThat(get().get("catalog_epoch_available").asBoolean()).isTrue();
+        stop();
+        start(new StatusHandler(null).catalogEpoch(() -> Boolean.FALSE));
+        JsonNode body = get();
+        assertThat(body.get("catalog_epoch_available").isBoolean()).isTrue();
+        assertThat(body.get("catalog_epoch_available").asBoolean()).isFalse();
+    }
+
     // ── nexus-43ulx.23 (RDR-227 Step 2), [additive]: per_collection_indexes ─────────────────────────────────────
 
     private static final java.time.Instant READ_AT = java.time.Instant.parse("2026-10-10T08:00:00Z");
@@ -523,6 +596,8 @@ class StatusHandlerTest {
         assertThat(o.get("unparsed").asInt()).isEqualTo(2);
         assertThat(o.get("reindex_leftover").asInt()).as("its own counter, next to unparsed (nexus-rn1yd)")
             .isEqualTo(3);
+        assertThat(o.get("valid_id").asInt()).as("additive, next to the name counts: the id indexes that serve once latched").isZero();
+        assertThat(o.get("invalid_id").asInt()).isZero();
         assertThat(o.get("last_read_at").asText()).isEqualTo("2026-10-10T08:00:00Z");
         assertThat(o.get("expired").asBoolean()).isFalse();
         JsonNode me = o.get("this_engine");
@@ -787,7 +862,7 @@ class StatusHandlerTest {
         JsonNode o = get().get("per_collection_indexes");
         var top = new java.util.ArrayList<String>();
         o.fieldNames().forEachRemaining(top::add);
-        assertThat(top).containsExactly("valid", "invalid", "unparsed", "reindex_leftover", "last_read_at", "expired",
+        assertThat(top).containsExactly("valid", "invalid", "unparsed", "reindex_leftover", "valid_id", "invalid_id", "last_read_at", "expired",
             "sweep_seconds", "this_engine");
         var inner = new java.util.ArrayList<String>();
         o.get("this_engine").fieldNames().forEachRemaining(inner::add);
@@ -814,6 +889,9 @@ class StatusHandlerTest {
             true)));
         cases.put("first_pass_in_flight", pci(read(0, 1, 0, false), new PciReconciler.DdlStatus(
             PciBuilderSession.BuilderState.OK, 1, 0, null, java.time.Instant.parse("2026-10-10T07:58:30.500Z"), true)));
+        // RDR-229 P3.4 (additive valid_id / invalid_id): a latched engine, name indexes retired, three id indexes serving.
+        cases.put("latched_id_only", pci(new PciIndexSweep.Status(true, 0, 0, 0, 0, READ_AT, null, 0, false, 3, 0),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT)));
         cases.put("standby", pci(read(4, 0, 0, false),
             new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.STANDBY, null, null, null)));
         cases.put("auth_failed", pci(read(2, 0, 0, false),

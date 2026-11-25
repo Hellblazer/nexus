@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -271,6 +272,7 @@ class ChashValidateCancelTest {
             PgContainerHelper.insertCollection(ctx, TENANT, COLLECTION);
             for (int i = 0; i < 200; i++) {
                 ctx.insertInto(CHUNKS).set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, COLLECTION)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                     .set(CHUNKS.CHASH, MessageDigest.getInstance("SHA-256").digest(("row " + i).getBytes(java.nio.charset.StandardCharsets.UTF_8)))
                     .set(CHUNKS.EMBEDDING_MODEL, MODEL).set(CHUNKS.CHUNK_TEXT, "row " + i)
                     .set(CHUNKS.EMBEDDING_768, Vector.of(new float[768])).execute();

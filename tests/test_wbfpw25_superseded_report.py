@@ -28,6 +28,7 @@ from nexus.catalog.note_write import (
 )
 from nexus.cli import main
 from nexus.corpus import t3_collection_name
+from nexus.knowledge_subject import catalog_subject_finder
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.mcp.core import store_put
 from tests._module_seam import module_time
@@ -54,7 +55,7 @@ def test_a_changed_reput_names_the_chunk_it_removed_and_a_first_or_identical_put
         same = store_put(content=v1, collection=subject, title=title)
         changed = store_put(content=v2, collection=subject, title=title)
 
-    col = t3_collection_name(subject, t3=client)
+    col = t3_collection_name(subject, subject_finder=catalog_subject_finder())
     assert first == f"Stored: {_chash(v1)} -> {col}", "a first put reads exactly as before"
     assert same == first, "an identical re-put drops nothing and reports nothing"
     lines = _lines(changed)
@@ -222,7 +223,7 @@ def test_a_failed_sweep_is_reported_not_left_to_the_log(t2_service_env):
         with patch("nexus.catalog.factory.make_catalog_writer", _failing_sweep_writer()):
             changed = store_put(content=v2, collection=subject, title=title)
 
-    col = t3_collection_name(subject, t3=client)
+    col = t3_collection_name(subject, subject_finder=catalog_subject_finder())
     lines = _lines(changed)
     assert lines[0] == f"Stored: {_chash(v2)} -> {col}"
     assert lines[1].startswith(_NOT_FINISHED), changed
@@ -386,6 +387,6 @@ def test_a_lost_ack_resend_prints_no_superseded_line_even_though_the_first_attem
             changed = store_put(content=v2, collection=subject, title=title)
     reset_brake()
 
-    col = t3_collection_name(subject, t3=client)
+    col = t3_collection_name(subject, subject_finder=catalog_subject_finder())
     assert any(w.fired for w in losers), "the lost answer was never injected: the test proved nothing"
     assert changed == f"Stored: {_chash(v2)} -> {col}", changed

@@ -53,6 +53,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 _LAYOUT: object | None = None
@@ -151,7 +152,7 @@ def _windows_snapshot(win_info_api: object | None = None) -> str:
 
 
 def ps_snapshot(
-    *, platform: str | None = None, win_info_api: object | None = None,
+    *, platform: str | None = None, win_info_api: object | None = None, info: dict | None = None,
 ) -> str:
     """One process snapshot. Empty string when ``ps`` is unavailable.
 
@@ -160,18 +161,41 @@ def ps_snapshot(
     leg raises and takes unrelated work down with it. Windows has no ``ps``;
     it reads its own process table (:func:`_windows_snapshot`, RDR-224,
     nexus-f9bgu.21). *platform* and *win_info_api* are test seams.
+
+    An empty answer is NOT "no processes": gc reads it as a failed census and
+    deletes nothing it could be holding (2026-11-21/22). *info*, when given, is
+    filled with why: ``reason`` (``ok``, ``rc=<n>``, ``timeout``, ``oserror: ...``,
+    ``empty table``), ``duration_s`` and ``rows``, for gc's record.
     """
+    started = time.monotonic()
+    text, reason = _take_snapshot(platform, win_info_api)
+    if info is not None:
+        rows = sum(1 for line in text.splitlines() if line.split(maxsplit=1)[:1] and line.split()[0].isdigit())
+        info.update(
+            reason=reason if (reason != "ok" or rows) else "empty table",
+            duration_s=round(time.monotonic() - started, 3), rows=rows,
+        )
+    return text
+
+
+def _take_snapshot(platform: str | None, win_info_api: object | None) -> tuple[str, str]:
+    """``(table, reason)`` for :func:`ps_snapshot`; the table is "" on any failure."""
     if (platform if platform is not None else sys.platform) == "win32":
-        return _windows_snapshot(win_info_api)
+        text = _windows_snapshot(win_info_api)
+        return text, "ok" if text else "windows process table unreadable"
     try:
         # ps is POSIX-only (Windows returned above): UTF-8 by locale; replace keeps a
         # stray byte in one command line from voiding the whole snapshot.
         r = subprocess.run(  # noqa: S603
             PS_COMMAND, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
         )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return r.stdout if r.returncode == 0 else ""
+    except subprocess.TimeoutExpired:
+        return "", "timeout"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "", f"oserror: {type(exc).__name__}: {exc}"
+    if r.returncode != 0:
+        return "", f"rc={r.returncode}" + (f": {r.stderr.strip()[:200]}" if r.stderr.strip() else "")
+    return r.stdout, "ok"
 
 
 def _boundary_text(path_text: str, platform: str | None = None) -> str:

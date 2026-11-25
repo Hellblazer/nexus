@@ -105,6 +105,25 @@ class PciBuilderTerminationIntegrationTest {
 
     // -- helpers -----------------------------------------------------------------------------------------
 
+    /**
+     * Runs {@code work} on a thread of its own. Not {@code CompletableFuture.supplyAsync}: that runs on the common pool, which has
+     * cores minus one workers (3 on a 4-core grant), so three {@link Sleeper}s hold every worker for their 60 s and the migration walk
+     * queued behind them starts a minute late, after the build it should have ended has completed.
+     */
+    private static <T> CompletableFuture<T> onOwnThread(java.util.function.Supplier<T> work) {
+        var future = new CompletableFuture<T>();
+        Thread t = new Thread(() -> {
+            try {
+                future.complete(work.get());
+            } catch (Throwable e) {
+                future.completeExceptionally(e);
+            }
+        }, "pci-termination-test");
+        t.setDaemon(true);
+        t.start();
+        return future;
+    }
+
     /** A session that runs {@code pg_sleep(60)} on its own thread, so a backend is busy until it is ended. */
     final class Sleeper implements AutoCloseable {
         private final Connection conn;
@@ -120,7 +139,7 @@ class PciBuilderTerminationIntegrationTest {
             conn.setAutoCommit(true);
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
             pid = ctx.select(DSL.function("pg_backend_pid", SQLDataType.INTEGER)).fetchOne(0, Integer.class);
-            sqlState = CompletableFuture.supplyAsync(() -> {
+            sqlState = onOwnThread(() -> {
                 try {
                     ctx.select(DSL.function("pg_sleep", SQLDataType.OTHER, DSL.val(60))).fetch();
                     return "completed";
@@ -308,7 +327,7 @@ class PciBuilderTerminationIntegrationTest {
     CompletableFuture<DdlOutcome> startHeldBuild(PciBuilderSession.Pass pass, PciCatalog.Leaf leaf, String collection)
             throws Exception {
         String index = PciCatalog.indexName(M1024, T1, collection);
-        var build = CompletableFuture.supplyAsync(() -> pass.build(leaf, 1024, collection));
+        var build = onOwnThread(() -> pass.build(leaf, 1024, collection));
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         while (System.nanoTime() < deadline && !indexExists(index)) {
             Thread.sleep(50);
@@ -338,7 +357,10 @@ class PciBuilderTerminationIntegrationTest {
      * The caller releases what holds the build in a {@code finally}, which lets a stuck walk end.
      */
     void migrateWithin(HikariDataSource ds, long seconds) {
-        var walk = CompletableFuture.runAsync(() -> SchemaMigrator.migrate(ds));
+        var walk = onOwnThread(() -> {
+            SchemaMigrator.migrate(ds);
+            return null;
+        });
         try {
             walk.get(seconds, TimeUnit.SECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
@@ -590,7 +612,7 @@ class PciBuilderTerminationIntegrationTest {
             assertThat(built).isNotNull();
             CompletableFuture<DdlOutcome> reindex;
             try (SnapshotHolder snapshot = new SnapshotHolder()) {
-                reindex = CompletableFuture.supplyAsync(() -> pass.reindex(leaf, built));
+                reindex = onOwnThread(() -> pass.reindex(leaf, built));
                 awaitLeftover(index);
 
                 assertThat(reindex.isDone()).as("the REINDEX waits for the older snapshot").isFalse();
@@ -641,7 +663,7 @@ class PciBuilderTerminationIntegrationTest {
             assertThat(pass.build(leaf, 1024, coll)).isEqualTo(DdlOutcome.DONE);
             PciCatalog.Index built = indexNamed(index);
             try (SnapshotHolder snapshot = new SnapshotHolder()) {
-                var reindex = CompletableFuture.supplyAsync(() -> pass.reindex(leaf, built));
+                var reindex = onOwnThread(() -> pass.reindex(leaf, built));
                 awaitLeftover(index);
                 forgetAChangeset();
 
@@ -669,6 +691,43 @@ class PciBuilderTerminationIntegrationTest {
     // -- a self-retrying changeset is not schema work (nexus-f3yqd.3) -------------------------------------
 
     static final String RETIRE_CHANGESET = "aspects-005-2";
+
+    /**
+     * Every changeset a boot of this test store keeps a build for because its precondition retries: aspects-005-2 (staged
+     * here) and collections-001-2 (RDR-229 P3.8, pending until the re-own move clears duplicate tuples). The tests
+     * assert the exact set, so a third self-retrying changeset is a visible change here, not a silent count bump.
+     */
+    /**
+     * The self-retrying changesets a fresh walk leaves pending: aspects-005-2 and collections-001-2 wait for their data moves, and
+     * RDR-229 P3.5b's CONTINUE-gated vectors-078 and vectors-084 changesets wait for the stamp moves, read from the shipped list
+     * ({@code dev.nexus.service.P35bContinueChangesets}), never typed here.
+     */
+    static final java.util.Set<String> SELF_RETRYING = selfRetrying();
+
+    private static java.util.Set<String> selfRetrying() {
+        java.util.Set<String> ids = new java.util.TreeSet<>(java.util.List.of(
+            "db/changelog/aspects-005-retire-aspect-queue-table.xml::aspects-005-2",
+            "db/changelog/collections-001-tuple-unique-index.xml::collections-001-2"));
+        // On the fresh walk the P3.5b ids are pending. On the form A clone (-Dnexus.test.formA.applied=true) the schema helper has recorded
+        // every one of them, so they wait for nothing and the retrying set is the two data-move changesets alone.
+        if (!dev.nexus.service.Rdr229CompleteStamps.formAApplied()) {
+            for (String id : dev.nexus.service.P35bContinueChangesets.ids()) {
+                ids.add(dev.nexus.service.P35bContinueChangesets.file(id) + "::" + id);
+            }
+        }
+        return java.util.Set.copyOf(ids);
+    }
+
+    /** The ids the boot named in its {@code event=pci_build_kept_for_retrying} lines. */
+    static java.util.Set<String> keptForRetrying(List<String> logs) {
+        java.util.Set<String> ids = new java.util.TreeSet<>();
+        for (String l : logs) {
+            if (!l.contains("event=pci_build_kept_for_retrying")) continue;
+            var m = java.util.regex.Pattern.compile("\\bid=(\\S+)").matcher(l);
+            if (m.find()) ids.add(m.group(1));
+        }
+        return ids;
+    }
     static final String QUEUE_COLLECTION = "pcitrm-queue-coll";
     static final String QUEUE_DOC = "pcitrm.1";
 
@@ -750,7 +809,9 @@ class PciBuilderTerminationIntegrationTest {
 
                     assertThat(logs).noneMatch(l -> l.contains("event=pci_builders_terminated"));
                     assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept") && l.contains("count=1")
-                        && l.contains("retrying=1"));
+                        && l.contains("retrying=" + SELF_RETRYING.size()));
+                    assertThat(keptForRetrying(logs)).as("the self-retrying changesets the boot kept the build for")
+                        .containsExactlyInAnyOrderElementsOf(SELF_RETRYING);
                     assertThat(logs).as("the keep line is one event, the excluded changeset another")
                         .filteredOn(l -> l.contains("event=pci_builders_kept")).hasSize(1);
                     assertThat(logs).anyMatch(l -> l.contains("event=pci_build_kept_for_retrying")
@@ -801,7 +862,9 @@ class PciBuilderTerminationIntegrationTest {
 
                     assertThat(logs).noneMatch(l -> l.contains("event=pci_builders_terminated"));
                     assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept") && l.contains("count=1")
-                        && l.contains("retrying=1"));
+                        && l.contains("retrying=" + SELF_RETRYING.size()));
+                    assertThat(keptForRetrying(logs)).as("the self-retrying changesets the boot kept the build for")
+                        .containsExactlyInAnyOrderElementsOf(SELF_RETRYING);
                     assertThat(changesetRecorded(RETIRE_CHANGESET)).as("the body ran and %s is recorded", RETIRE_CHANGESET)
                         .isTrue();
                     boolean tableLeft = asSuperuser(pg, ctx -> PgCatalogProbes.tableExists(ctx, "nexus", "aspect_extraction_queue"));

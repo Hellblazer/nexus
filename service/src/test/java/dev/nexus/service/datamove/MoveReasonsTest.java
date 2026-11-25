@@ -82,4 +82,40 @@ class MoveReasonsTest {
             .as("run text that merely says it is not the install's reason").isNull();
         assertThat(MoveReasons.classOf("some_other_extension is not installed")).isNull();
     }
+
+    // nexus-p2m1x.27 row 23: the name-key drop's deferral reads as a wait, not as an unknown failure
+
+    private static String deferral(String tail) {
+        return BuildWait.REASON_PREFIX + ": running=2; deferred_minutes=" + tail + "; " + BuildWait.Path.BEFORE_LOCKS.text
+            + "; the completion tries again later and ends none";
+    }
+
+    @Test
+    void aDeferralHasAPhraseOfItsOwn_notTheFallbackThatPointsAtTheLog() {
+        String text = MoveReasons.publicForm(deferral("75"));
+
+        assertThat(text).startsWith("waiting for in-flight index builds to finish (2 running)").contains("none is ended")
+            .contains("waiting for 1 h 15 m").doesNotContain("engine log").doesNotContain("pids").doesNotContain("overdue");
+    }
+
+    @Test
+    void anOverdueDeferralNamesTheAgeTheCountAndThePids_andNothingElse() {
+        String reason = BuildWait.REASON_PREFIX + ": running=2; deferred_minutes=432; overdue; pids=4101,4102; "
+            + BuildWait.Path.LOCK_WAIT.text + "; the completion tries again later and ends none";
+
+        String text = MoveReasons.publicForm(reason);
+
+        assertThat(text).contains("(2 running)").contains("waiting for 7 h 12 m").contains("overdue, more than 6 h")
+            .contains("builder pids 4101,4102").doesNotContain("lock wait");
+        assertThat(MoveReasons.publicForm(reason + "; pids=oops")).as("a number list only: the rest is not carried").doesNotContain("oops");
+    }
+
+    @Test
+    void classOf_giveADeferralItsOwnClass_neverNull_andOverdueIsAClassOfItsOwn() {
+        assertThat(MoveReasons.classOf(deferral("0"))).isEqualTo(MoveReasons.WAITING_FOR_BUILDS).isEqualTo("waiting_for_builds");
+        assertThat(MoveReasons.classOf(BuildWait.REASON_PREFIX + ": running=1; deferred_minutes=400; overdue; pids=9; x"))
+            .isEqualTo(MoveReasons.WAITING_FOR_BUILDS_OVERDUE).isEqualTo("waiting_for_builds_overdue");
+        assertThat(MoveReasons.classOf("run m/acme raised sqlstate=55P03: " + BuildWait.REASON_PREFIX))
+            .as("anchored: text that merely mentions the phrase is not a deferral").isNull();
+    }
 }

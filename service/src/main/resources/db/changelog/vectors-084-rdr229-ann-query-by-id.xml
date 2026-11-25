@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-p2m1x.24 / .25 (RDR-229 P3.5b, form A plan regression; linda's ruling, option b): nexus.taxonomy_ann_query_<dim> gains an
+    overload that takes the collection's registry id as a trailing p_collection_id bigint, so the same-collection predicate is
+    collection_id = $n, a parameter the planner estimates from the value, not an InitPlan subselect on catalog_collections.name that it
+    estimates at 1/ndistinct. At 768 and 1024 (TOASTed vectors) that estimate made a seq scan with a top-N sort cheaper than the HNSW
+    index; vectors-038's name filter (an inlined Const, estimated from the most common values) kept HNSW. 384 keeps HNSW either way and is
+    added for symmetry (three CREATE FUNCTION, no other DDL).
+
+    CONTINUE-gated exactly as vectors-078 (THE GATE, verbatim; see that file's header): skipped unrecorded and retried at each boot until
+    the stamp is complete. The three ids are in db/rdr229/p35b-continue-changesets.txt beside vectors-078's, so P3.7's rename waits for them
+    and tests/test_rdr229_p35b_continue_list.py keeps the list equal to the two files. Each is in the _CONTINUE_ALLOWLIST of
+    tests/test_changelog_continue_precondition_chunks_lint.py. The engine calls the new overload wherever gate 3 holds
+    (TaxonomyCentroidRepository.annQuery), with no fallback to the text overload: gate 3 requires these three ids recorded in
+    databasechangelog (ArbiterTwins.GATE3_WAITS_FOR_CHANGESETS, read by IdUniqueIndexPass.allValid); the text overloads of vectors-078-9..11 are kept, unused by the engine, for P4.1.
+    DATA EFFECT: none (definitions only). After vectors-078, before the grants.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-084-1" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A, plan fix (nexus-p2m1x.24/.25): an ADDITIONAL overload nexus.taxonomy_ann_query_384(..., p_collection_id bigint) whose same-collection predicate is collection_id = p_collection_id, a parameter the planner sees as a Const, where vectors-078-9 resolves the label in an InitPlan subselect the planner estimates at 1/ndistinct (seq scan plus top-N sort undercuts HNSW on the TOASTed widths). Same clauses, attributes (LANGUAGE sql STABLE SECURITY INVOKER, no SET clause: inlinable) and grants (none, as the text overload) otherwise. The text overload is kept, unused by the engine, for P4.1. DATA EFFECT: none, a function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_384(
+    p_embedding         nexus.vector(384),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int,
+    p_embedding_model text,
+    p_tenant          text,
+    p_collection_id     bigint
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_384 OPERATOR(nexus.<=>) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_model = p_embedding_model
+       AND tenant_id = p_tenant
+       AND embedding_384 IS NOT NULL
+       AND collection_id IS NOT NULL
+       AND (CASE WHEN p_cross_collection
+                 THEN collection_id IS DISTINCT FROM p_collection_id
+                 ELSE collection_id = p_collection_id
+            END)
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.catalog_collections cc
+            WHERE p_cross_collection
+              AND cc.tenant_id = p_tenant
+              AND cc.embedding_model = p_embedding_model
+              AND cc.collection_id = nexus.taxonomy_centroids.collection_id
+              AND cc.superseded_by_id IS NOT NULL)
+     ORDER BY embedding_384 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+]]></sql>
+        <rollback>
+            <!-- Drops only the added overload; the text-signature function of vectors-078-9 stays. -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.taxonomy_ann_query_384(nexus.vector, text, boolean, int, text, text, bigint);
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-084-2" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A, plan fix (nexus-p2m1x.24/.25): an ADDITIONAL overload nexus.taxonomy_ann_query_768(..., p_collection_id bigint) whose same-collection predicate is collection_id = p_collection_id, a parameter the planner sees as a Const, where vectors-078-10 resolves the label in an InitPlan subselect the planner estimates at 1/ndistinct (seq scan plus top-N sort undercuts HNSW on the TOASTed widths). Same clauses, attributes (LANGUAGE sql STABLE SECURITY INVOKER, no SET clause: inlinable) and grants (none, as the text overload) otherwise. The text overload is kept, unused by the engine, for P4.1. DATA EFFECT: none, a function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_768(
+    p_embedding         nexus.vector(768),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int,
+    p_embedding_model text,
+    p_tenant          text,
+    p_collection_id     bigint
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_768 OPERATOR(nexus.<=>) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_model = p_embedding_model
+       AND tenant_id = p_tenant
+       AND embedding_768 IS NOT NULL
+       AND collection_id IS NOT NULL
+       AND (CASE WHEN p_cross_collection
+                 THEN collection_id IS DISTINCT FROM p_collection_id
+                 ELSE collection_id = p_collection_id
+            END)
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.catalog_collections cc
+            WHERE p_cross_collection
+              AND cc.tenant_id = p_tenant
+              AND cc.embedding_model = p_embedding_model
+              AND cc.collection_id = nexus.taxonomy_centroids.collection_id
+              AND cc.superseded_by_id IS NOT NULL)
+     ORDER BY embedding_768 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+]]></sql>
+        <rollback>
+            <!-- Drops only the added overload; the text-signature function of vectors-078-10 stays. -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.taxonomy_ann_query_768(nexus.vector, text, boolean, int, text, text, bigint);
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-084-3" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A, plan fix (nexus-p2m1x.24/.25): an ADDITIONAL overload nexus.taxonomy_ann_query_1024(..., p_collection_id bigint) whose same-collection predicate is collection_id = p_collection_id, a parameter the planner sees as a Const, where vectors-078-11 resolves the label in an InitPlan subselect the planner estimates at 1/ndistinct (seq scan plus top-N sort undercuts HNSW on the TOASTed widths). Same clauses, attributes (LANGUAGE sql STABLE SECURITY INVOKER, no SET clause: inlinable) and grants (none, as the text overload) otherwise. The text overload is kept, unused by the engine, for P4.1. DATA EFFECT: none, a function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_1024(
+    p_embedding         nexus.vector(1024),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int,
+    p_embedding_model text,
+    p_tenant          text,
+    p_collection_id     bigint
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_1024 OPERATOR(nexus.<=>) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_model = p_embedding_model
+       AND tenant_id = p_tenant
+       AND embedding_1024 IS NOT NULL
+       AND collection_id IS NOT NULL
+       AND (CASE WHEN p_cross_collection
+                 THEN collection_id IS DISTINCT FROM p_collection_id
+                 ELSE collection_id = p_collection_id
+            END)
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.catalog_collections cc
+            WHERE p_cross_collection
+              AND cc.tenant_id = p_tenant
+              AND cc.embedding_model = p_embedding_model
+              AND cc.collection_id = nexus.taxonomy_centroids.collection_id
+              AND cc.superseded_by_id IS NOT NULL)
+     ORDER BY embedding_1024 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+]]></sql>
+        <rollback>
+            <!-- Drops only the added overload; the text-signature function of vectors-078-11 stays. -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.taxonomy_ann_query_1024(nexus.vector, text, boolean, int, text, text, bigint);
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

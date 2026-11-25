@@ -63,6 +63,62 @@ public final class BootWorkRegistry {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
+    private volatile java.util.function.Supplier<String> rdr229Completion;
+
+    /**
+     * RDR-229 P3.1 (fix round A, critique B1), [additive]: the source of {@code /v1/status}'s {@code rdr229_completion} field,
+     * a JSON object rendered from memory. It is held here, beside {@code boot_work}, because the status route already reads this
+     * registry, but it is NOT work and is never an entry: the three-gate state waits by design until P3.4, and an entry for it
+     * would count as work in every idle rule that reads {@code boot_work}. Null unbinds.
+     */
+    public void rdr229Completion(java.util.function.Supplier<String> source) {
+        this.rdr229Completion = source;
+    }
+
+    /** The {@code rdr229_completion} JSON object, or null when no check is bound or it has not read yet. */
+    public String rdr229Completion() {
+        var source = rdr229Completion;
+        return source == null ? null : source.get();
+    }
+
+    /**
+     * One data move that needs an operator (RDR-246, nexus-p2m1x.22), for {@code /v1/status}'s
+     * {@code data_moves_need_operator_moves}: its worker has failed it transiently {@code retries} times in a row (at least
+     * the retry policy's limit) and keeps trying. Nothing a run, a tenant or the server wrote: the label, a count, two
+     * times, an SQLSTATE and the move's own {@code statement_timeout_ms}.
+     *
+     * @param lastAttemptAt the move's {@code last_transient_at}
+     * @param nextRetryAt   {@code lastAttemptAt} plus the retry policy's backoff for {@code retries}, so a client never
+     *                      duplicates the formula
+     * @param sqlstate      the SQLSTATE of the last transient error, or null when its text names none
+     * @param terminatesIndexBuilds whether an attempt of this move ends in-flight index builds (PCI, leaf, id-unique): the last
+     *                      failure's finisher did, or, when this process has seen no failure of the move, its definition
+     *                      (an {@code on_complete} that names the chunk family) says one would
+     * @param step          the stage of the last failure ({@code on_complete}), or null when this process has seen none
+     * @param boundMs       the bound the last failure missed (the move's lock or statement timeout, by the step), or -1 when
+     *                      the failure was not a timeout or this process has seen none
+     * @param retryInProgress a retry pass is running now, so {@code nextRetryAt} is already past
+     */
+    public record NeedsOperator(String label, int retries, Instant lastAttemptAt, Instant nextRetryAt, String sqlstate,
+                                int statementTimeoutMs, boolean terminatesIndexBuilds, String step, int boundMs,
+                                boolean retryInProgress) { }
+
+    private volatile List<NeedsOperator> dataMovesNeedOperator = List.of();
+
+    /**
+     * The data moves in the needs-an-operator state now, replaced whole by each sample of the move reporter (an empty list
+     * clears it, as a move completing or its count resetting does). Held here beside {@code boot_work}, as
+     * {@link #rdr229Completion}, because the status route reads this registry; it is NOT work and never an entry.
+     */
+    public void dataMovesNeedOperator(List<NeedsOperator> moves) {
+        this.dataMovesNeedOperator = List.copyOf(Objects.requireNonNull(moves, "moves"));
+    }
+
+    /** The moves in the needs-an-operator state, in the order the reporter sampled them; empty when there are none. */
+    public List<NeedsOperator> dataMovesNeedOperator() {
+        return dataMovesNeedOperator;
+    }
+
     /**
      * Announce work. An id already registered is replaced, as a new run of the same work: it keeps its place in the
      * order and gets a new {@code startedAt} and no step.

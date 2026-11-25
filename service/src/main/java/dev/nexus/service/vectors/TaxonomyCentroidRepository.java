@@ -2,12 +2,16 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
+
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.CollectionRow;
 import dev.nexus.service.db.ModelPartitions;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.impl.DSL;
 import org.jooq.Result;
@@ -21,6 +25,7 @@ import java.util.Set;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_384;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_768;
 
 /**
@@ -80,9 +85,22 @@ public final class TaxonomyCentroidRepository {
     public record AnnHit(long topicId, double similarity) {}
 
     private final TenantScope tenantScope;
+    /**
+     * RDR-229 P3.5c (nexus-p2m1x.25), item 6 "Readers during the stamp": the gate-3 signal, read on every call and never
+     * cached. From gate 3 the upsert arbitrates on the id key and every reader here selects by {@code collection_id}
+     * ({@link CollectionSelector}); before it the name path is exactly as it was. {@link Gate3#never()} when the
+     * constructor takes none.
+     */
+    private final Gate3 gate3;
 
     public TaxonomyCentroidRepository(TenantScope tenantScope) {
+        this(tenantScope, Gate3.never());
+    }
+
+    /** {@link #TaxonomyCentroidRepository(TenantScope)} with the gate-3 signal (RDR-229 P3.5c). */
+    public TaxonomyCentroidRepository(TenantScope tenantScope, Gate3 gate3) {
         this.tenantScope = tenantScope;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
     }
 
     /**
@@ -136,6 +154,7 @@ public final class TaxonomyCentroidRepository {
                 // nexus-mp8ys: a centroid under a retired (superseded) name is stranded exactly like a chunk; refused
                 // 409 naming the successor, ahead of the dimension and partition checks.
                 CollectionRow collectionRow = CollectionRegistry.requireWritable(ctx, tenant, r.collection());
+                final String label = collectionRow.label();   // the id is the identity: written under the row's CURRENT label
                 String model = collectionRow.embeddingModel();
                 if (dim != collectionRow.dimension()) {
                     throw new IllegalArgumentException(
@@ -147,23 +166,45 @@ public final class TaxonomyCentroidRepository {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
                 // nexus-2qryr, RDR-225: a re-embed under a new model deletes the row stored under the
                 // old one (an upsert cannot move a row across partitions) before the new one is written.
+                // The collection's own rows are found by its id (a rename in place leaves their name column at the old label, so a match by
+                // the current label misses them and the upsert below would meet the leaf's id unique index), by name only for a row the stamp
+                // has not reached: the row of this topic under another model, or under a stale label, is replaced by the write below.
                 ctx.deleteFrom(ct.table())
                    .where(ct.tenantId().eq(tenant)
-                       .and(ct.collection().eq(r.collection()))
+                       .and(ownedBy(ct, collectionRow.collectionId(), label))
                        .and(ct.topicId().eq(r.topicId()))
-                       .and(ct.embeddingModel().ne(model)))
+                       .and(ct.embeddingModel().ne(model).or(ct.collection().ne(label))))
                    .execute();
-                ctx.insertInto(ct.table())
+                // RDR-229 P3.1 stage 2b (nexus-p2m1x.17): the collection's registry id, read in this transaction,
+                // set beside the name on insert and on the conflict arm. taxonomy_centroids carries NOT VALID
+                // CHECKs (the name and id both set or both unset; collection_id NOT NULL), evaluated on every row
+                // version, so a centroid without the id is refused (23514), and so is the conflict update of one
+                // the stamp has not reached.
+                final boolean byId = gate3.holds();
+                final Long collectionId = collectionRow.collectionId();   // the locked row's id, I7 and I8
+                // The name key arbitrates until gate 3 holds, the id key (tenant_id, collection_id, topic_id,
+                // embedding_model: P3.3c's parent UNIQUE) from then on. RDR-229 #7 (nexus-p2m1x.20): either arbiter leaves
+                // the other unique key to trip on a racing insert, so the statement retries once (TwinKeyUpsert). The id arm
+                // also sets the name to the writer's (linda 2026-11-22: the name columns are dead at P3.7, which revisits it).
+                dev.nexus.service.db.TwinKeyUpsert.run(ctx, "taxonomy_centroids",
+                    byId ? dev.nexus.service.db.TwinKeyUpsert.Arbiter.ID_KEY : dev.nexus.service.db.TwinKeyUpsert.Arbiter.NAME_KEY, c -> {
+                var upsert = ctx.insertInto(ct.table())
                    .columns(ct.tenantId(), ct.collection(), ct.topicId(), ct.embeddingModel(),
-                            ct.embedding(), ct.label(), ct.docCount())
-                   .values(tenant, r.collection(), r.topicId(), model,
-                           Vector.of(r.embedding()), r.label(), r.docCount())
-                   .onConflict(ct.tenantId(), ct.collection(), ct.topicId(), ct.embeddingModel())
+                            ct.embedding(), ct.label(), ct.docCount(), TAXONOMY_CENTROIDS.COLLECTION_ID)
+                   .values(tenant, label, r.topicId(), model,
+                           Vector.of(r.embedding()), r.label(), r.docCount(), collectionId);
+                var onConflict = (byId
+                       ? upsert.onConflict(ct.tenantId(), ct.collectionId(), ct.topicId(), ct.embeddingModel())
+                       : upsert.onConflict(ct.tenantId(), ct.collection(), ct.topicId(), ct.embeddingModel()))
                    .doUpdate()
                    .set(ct.embedding(), DSL.excluded(ct.embedding()))
                    .set(ct.label(),     DSL.excluded(ct.label()))
                    .set(ct.docCount(),  DSL.excluded(ct.docCount()))
-                   .execute();
+                   .set(TAXONOMY_CENTROIDS.COLLECTION_ID, DSL.excluded(TAXONOMY_CENTROIDS.COLLECTION_ID));
+                if (byId) {
+                    onConflict = onConflict.set(ct.collection(), DSL.excluded(ct.collection()));
+                }
+                return onConflict.execute(); });
             }
             return null;
         });
@@ -222,19 +263,44 @@ public final class TaxonomyCentroidRepository {
         // looked the registry up and found no centroid either). For a cross-collection query it is a change: an
         // unregistered source used to get other collections' centroids of the same width, and now gets none (a
         // wire-ledger entry records it).
-        String model;
+        final CollectionRow row;
         try {
-            model = CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel();
+            row = CollectionRegistry.lookup(tenantScope, tenant, collection);
         } catch (dev.nexus.service.db.UnregisteredCollectionException e) {
             return List.of();
         }
-        org.jooq.Table<?> fn = switch (dim) {
+        final String model = row.embeddingModel();
+        // RDR-229 P3.5b form A plan fix (nexus-p2m1x.24/.25, linda's ruling): from gate 3 the registry row's id goes to the
+        // function (vectors-084's overload), so the same-collection predicate is collection_id = $n, which the planner estimates
+        // from the value. The text overload resolves the label in an InitPlan subselect it estimates at 1/ndistinct, and at the
+        // TOASTed widths (768, 1024) a seq scan with a top-N sort then undercuts the HNSW index. vectors-084 is CONTINUE-gated, so
+        // gate 3 requires its three changesets recorded (ArbiterTwins.GATE3_WAITS_FOR_CHANGESETS, read by IdUniqueIndexPass.allValid):
+        // once gate 3 holds the overload exists, and there is no fallback to the text overload.
+        Result<? extends Record> result = gate3.holds()
+            ? runAnn(TaxonomyAnnQueryById.call(dim, queryVec, collection, crossCollection, nResults, model, tenant, row.collectionId()),
+                tenant, nResults, maxStatementMs)
+            : runAnn(textCall(dim, queryVec, collection, crossCollection, nResults, model, tenant), tenant, nResults, maxStatementMs);
+        List<AnnHit> hits = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            double distance = rec.get("distance", Double.class);
+            hits.add(new AnnHit(rec.get("topic_id", Long.class), 1.0 - distance));
+        }
+        return hits;
+    }
+
+    /** The text-signature call (vectors-013's, redefined by vectors-038 and vectors-078-9..11): the label, not the id. */
+    private static org.jooq.Table<?> textCall(int dim, Vector queryVec, String collection, boolean crossCollection, int nResults,
+                                              String model, String tenant) {
+        return switch (dim) {
             case 384  -> TAXONOMY_ANN_QUERY_384.call(queryVec, collection, crossCollection, nResults, model, tenant);
             case 768  -> TAXONOMY_ANN_QUERY_768.call(queryVec, collection, crossCollection, nResults, model, tenant);
             case 1024 -> TAXONOMY_ANN_QUERY_1024.call(queryVec, collection, crossCollection, nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
+    }
+
+    private Result<? extends Record> runAnn(org.jooq.Table<?> fn, String tenant, int nResults, int maxStatementMs) {
+        return tenantScope.withTenant(tenant, ctx -> {
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours. First, so the
             // GUC round trips below run under its network bound too (nexus-u9zkn).
@@ -261,12 +327,6 @@ public final class TaxonomyCentroidRepository {
             PgSession.setSearchPlanCacheMode(ctx);
             return ctx.selectFrom(fn).fetch();
         });
-        List<AnnHit> hits = new ArrayList<>(result.size());
-        for (Record rec : result) {
-            double distance = rec.get("distance", Double.class);
-            hits.add(new AnnHit(rec.get("topic_id", Long.class), 1.0 - distance));
-        }
-        return hits;
     }
 
     /**
@@ -285,7 +345,8 @@ public final class TaxonomyCentroidRepository {
     public int count(String tenant, String collection) {
         DimTables.CentroidTable ct = DimTables.CENTROIDS.get(384);
         long total = tenantScope.withTenant(tenant, ctx -> collection != null
-            ? ctx.fetchCount(ct.table(), ct.collection().eq(collection))
+            ? ctx.fetchCount(ct.table(),
+                CollectionSelector.of(gate3, ctx, tenant, collection).eq(ct.collection(), ct.collectionId()))
             : ctx.fetchCount(ct.table()));
         if (total > Integer.MAX_VALUE) {
             throw new IllegalStateException("centroid count overflow: " + total);
@@ -342,7 +403,8 @@ public final class TaxonomyCentroidRepository {
      * shape the rebuild/project paths index into.
      */
     public List<CentroidRecord> getByCollection(String tenant, String collection) {
-        return fetchCentroids(tenant, ct -> ct.collection().eq(collection));
+        return fetchCentroids(tenant, (ctx, held, ct) ->
+            CollectionSelector.of(held, ctx, tenant, collection).eq(ct.collection(), ct.collectionId()));
     }
 
     /**
@@ -367,11 +429,24 @@ public final class TaxonomyCentroidRepository {
      * by name through {@link #getByCollection}.
      */
     public List<CentroidRecord> getForeignCentroids(String tenant, String collection) {
-        return fetchCentroids(tenant, ct -> ct.collection().ne(collection).and(DSL.notExists(
-            DSL.selectOne().from(CATALOG_COLLECTIONS)
-               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(ct.tenantId()))
-               .and(CATALOG_COLLECTIONS.NAME.eq(ct.collection()))
-               .and(DSL.coalesce(CATALOG_COLLECTIONS.SUPERSEDED_BY, "").ne("")))));
+        return fetchCentroids(tenant, (ctx, held, ct) -> {
+            // The registry label's rule, id-side from gate 3: a tombstone is the row that names a successor by id; its
+            // centroids are not foreign. A collection that resolves to no id has no centroids of its own, so every
+            // other centroid is foreign.
+            if (held.holds()) {
+                Long own = CollectionSelector.of(held, ctx, tenant, collection).idOf(collection);
+                return (own == null ? DSL.trueCondition() : ct.collectionId().ne(own)).and(DSL.notExists(
+                    DSL.selectOne().from(CATALOG_COLLECTIONS)
+                       .where(CATALOG_COLLECTIONS.TENANT_ID.eq(ct.tenantId()))
+                       .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(ct.collectionId()))
+                       .and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNotNull())));
+            }
+            return ct.collection().ne(collection).and(DSL.notExists(
+                DSL.selectOne().from(CATALOG_COLLECTIONS)
+                   .where(CATALOG_COLLECTIONS.TENANT_ID.eq(ct.tenantId()))
+                   .and(CATALOG_COLLECTIONS.NAME.eq(ct.collection()))
+                   .and(DSL.coalesce(CATALOG_COLLECTIONS.SUPERSEDED_BY, "").ne(""))));
+        });
     }
 
     /**
@@ -384,18 +459,20 @@ public final class TaxonomyCentroidRepository {
      * correctness bug (silent row duplication), not merely wasted round trips. Added the
      * guard so each iteration visits only the rows actually populated at that dim.
      */
-    private List<CentroidRecord> fetchCentroids(
-            String tenant,
-            java.util.function.Function<DimTables.CentroidTable, org.jooq.Condition> predicate) {
+    private List<CentroidRecord> fetchCentroids(String tenant, CentroidPredicate predicate) {
         return tenantScope.withTenant(tenant, ctx -> {
             List<CentroidRecord> out = new ArrayList<>();
+            // RDR-229 P3.5c: gate 3 is read for the whole fetch (every dim, the predicate and the label); it is the latched value, which never goes back.
+            final boolean byId = gate3.holds();
             for (int dim : DIMS) {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
-                var rows = ctx.select(ct.collection(), ct.topicId(), ct.embedding(),
+                // From gate 3 a row's collection is the registry's label of its id (a one-row rename leaves the row's name stale).
+                Field<String> label = byId ? registryLabel(ct) : ct.collection();
+                var rows = ctx.select(label, ct.topicId(), ct.embedding(),
                                       ct.label(), ct.docCount())
                               .from(ct.table())
-                              .where(predicate.apply(ct).and(ct.embedding().isNotNull()))
-                              .orderBy(ct.collection().asc(), ct.topicId().asc())
+                              .where(predicate.apply(ctx, gate3, ct).and(ct.embedding().isNotNull()))
+                              .orderBy(label.asc(), ct.topicId().asc())
                               .fetch();
                 for (var rec : rows) {
                     Vector v = rec.value3();
@@ -409,6 +486,19 @@ public final class TaxonomyCentroidRepository {
             }
             return out;
         });
+    }
+
+    /** A centroid read's collection predicate, built in the fetch's transaction over the one fixed gate-3 reading. */
+    @FunctionalInterface
+    private interface CentroidPredicate {
+        org.jooq.Condition apply(org.jooq.DSLContext ctx, Gate3 held, DimTables.CentroidTable ct);
+    }
+
+    /** The registry's label of the centroid row's collection id: what a reader returns from gate 3, never the row's own name. */
+    private static Field<String> registryLabel(DimTables.CentroidTable ct) {
+        return DSL.field(DSL.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(ct.tenantId()))
+            .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(ct.collectionId())));
     }
 
     /**
@@ -429,13 +519,25 @@ public final class TaxonomyCentroidRepository {
      * @return number of rows actually deleted (RLS makes other tenants' rows invisible)
      */
     public int deleteByIds(String tenant, String collection, List<Long> topicIds) {
-        if (topicIds == null || topicIds.isEmpty()) return 0;
+        if (topicIds == null || topicIds.isEmpty()) {
+            // linda's ruling: a request by id reads the row even with nothing to delete, so a 200 holds only for a live row (a freed id is 404);
+            // by label it opens no transaction
+            if (!dev.nexus.service.db.ExpectedCollectionIds.named(collection)) {
+                return 0;
+            }
+            return tenantScope.withTenant(tenant, ctx -> {
+                dev.nexus.service.db.TaxonomyRepository.consumeRequestedId(ctx, tenant, collection);
+                return 0;
+            });
+        }
         return tenantScope.withTenant(tenant, ctx -> {
+            // RDR-229 P3.5a (nexus-p2m1x.23): the id the request named is read first, before any centroid row is touched
+            final Long id = dev.nexus.service.db.TaxonomyRepository.consumeRequestedId(ctx, tenant, collection);
             int deleted = 0;
             for (int dim : DIMS) {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
                 deleted += ctx.deleteFrom(ct.table())
-                              .where(ct.collection().eq(collection)
+                              .where(ownedBy(ct, id, collection)
                                   .and(ct.topicId().in(topicIds))
                                   .and(ct.embedding().isNotNull()))
                               .execute();
@@ -456,16 +558,30 @@ public final class TaxonomyCentroidRepository {
      */
     public int purgeByCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
+            final Long id = dev.nexus.service.db.TaxonomyRepository.consumeRequestedId(ctx, tenant, collection);   // RDR-229 P3.5a
             int deleted = 0;
             for (int dim : DIMS) {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
                 deleted += ctx.deleteFrom(ct.table())
-                              .where(ct.collection().eq(collection)
+                              .where(ownedBy(ct, id, collection)
                                   .and(ct.embedding().isNotNull()))
                               .execute();
             }
             return deleted;
         });
+    }
+
+    /**
+     * The centroid rows of one collection: by the registry id the write transaction read (a name column can be stale after a one-row
+     * rename, and the old name may now be another collection's), and by name only for a row the stamp has not reached (no id yet), with or
+     * without a registry row: a label no row holds may be the old name of a renamed collection, whose stamped rows are not its.
+     */
+    private static org.jooq.Condition ownedBy(DimTables.CentroidTable ct, Long id, String collection) {
+        org.jooq.Field<Long> idColumn = ct.table().field("collection_id", Long.class);
+        if (id == null) {
+            return idColumn.isNull().and(ct.collection().eq(collection));   // no registry row: only a row the id stamp has not reached
+        }
+        return idColumn.eq(id).or(idColumn.isNull().and(ct.collection().eq(collection)));
     }
 
     // centroidTable(int)/vectorLiteral(float[]): REMOVED (nexus-zrcj7, step 4). Both

@@ -1032,9 +1032,10 @@ class TestCaptureHttpsEtag:
             headers = {"etag": '"x"'}
 
         class _FakeClient:
-            def __init__(self, *, timeout: Any, follow_redirects: bool) -> None:
+            def __init__(self, *, timeout: Any, follow_redirects: bool, verify: Any) -> None:
                 captured["timeout"] = timeout
                 captured["follow_redirects"] = follow_redirects
+                captured["verify"] = verify
 
             def head(self, uri: str) -> _FakeResponse:
                 return _FakeResponse()
@@ -1049,6 +1050,10 @@ class TestCaptureHttpsEtag:
         assert etag == '"x"'
         assert captured["follow_redirects"] is True
         assert captured["closed"] is True
+        # The write path runs in the MCP server: the process-wide SSL context, read once (2026-11-21).
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — test-local
+
+        assert captured["verify"] is get_shared_ssl_context()
         timeout = captured["timeout"]
         assert timeout.connect == pytest.approx(ar_mod.HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S)
         assert timeout.read == pytest.approx(ar_mod.HTTPS_ETAG_CAPTURE_TIMEOUT_S)

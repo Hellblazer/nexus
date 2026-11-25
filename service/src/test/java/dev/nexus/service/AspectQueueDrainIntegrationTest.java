@@ -8,6 +8,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.AspectQueueDrain;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.TupleRepository;
@@ -33,6 +34,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -213,6 +215,165 @@ class AspectQueueDrainIntegrationTest {
             AspectQueueDrain.Result gone = fx.drain().run();
             assertThat(gone.tablePresent()).isFalse();
             assertThat(gone.rowsRetained()).isZero();
+        }
+    }
+
+    /**
+     * RDR-229 P3.5c: from gate 3 a document's home is the registry's current label of its {@code physical_collection_id}. The
+     * registry row of COLL_A is renamed in place after the migration (FK triggers off: P3.7's one-row rename leaves the document
+     * row saying COLL_A with the id), so the task a drain writes carries COLL_A before the latch and the new label after it.
+     */
+    @Test
+    void aDocumentsHomeIsReadByItsIdFromGate3() throws Exception {
+        String renamed = "knowledge__drain-a-renamed__minilm-l6-v2-384__v1";
+        try (Fixture fx = new Fixture(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT_A, COLL_A);
+            doc(ctx, TENANT_A, "a.1", COLL_A);
+            row(ctx, TENANT_A, COLL_A, "a.1", "/a/1.md", "pending", null, "h1");
+        })) {
+            fx.su(ctx -> {
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+                try {
+                    ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, renamed)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq(COLL_A)).execute();
+                } finally {
+                    ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+                }
+                return null;
+            });
+            AspectQueueDrain.Result byName = fx.drain().run();
+            assertThat(byName.moved()).isEqualTo(1);
+            assertThat(JSON.readTree(tasks(fx).get("a.1").get(TUPLES.BODY)).get("collection").asText())
+                .as("before the latch: the document's own name column").isEqualTo(COLL_A);
+
+            fx.su(ctx -> {
+                // a document row the stamp reached: name COLL_A, the id of the renamed registry row
+                ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+                    .values(DSL.val(TENANT_A), DSL.val("a.2"), DSL.val("Test Doc a.2"), DSL.val(COLL_A), CollectionIds.idOf(TENANT_A, renamed)).execute();
+                ctx.insertInto(QUEUE, DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("collection")),
+                        DSL.field(DSL.name("collection_id")), DSL.field(DSL.name("source_path")), DSL.field(DSL.name("doc_id")),
+                        DSL.field(DSL.name("status")), DSL.field(DSL.name("enqueued_at")), DSL.field(DSL.name("content_hash")))
+                    .values(DSL.val(TENANT_A), DSL.val(renamed), CollectionIds.idOf(TENANT_A, renamed), DSL.val("/a/2.md"),
+                        DSL.val("a.2"), DSL.val("pending"), DSL.val(OffsetDateTime.now()), DSL.val("h2"))
+                    .execute();
+                return null;
+            });
+            AspectQueueDrain byId = new AspectQueueDrain(fx.scope, fx.tuples,
+                new AspectQueueDrain.AdminCensus(new AdminConnection(fx.pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)),
+                () -> List.of(TENANT_A, TENANT_B), () -> true);
+            assertThat(byId.run().moved()).isEqualTo(1);
+            assertThat(JSON.readTree(tasks(fx).get("a.2").get(TUPLES.BODY)).get("collection").asText())
+                .as("from gate 3: the registry's current label of the document's id").isEqualTo(renamed);
+
+            // a document with no home: the queue row's own collection_id (the table kept the column), not its stale name
+            fx.su(ctx -> {
+                ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE)
+                    .values("drain-a", "a.3", "Test Doc a.3").execute();
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+                try {
+                    ctx.insertInto(QUEUE, DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("collection")),
+                            DSL.field(DSL.name("collection_id")), DSL.field(DSL.name("source_path")), DSL.field(DSL.name("doc_id")),
+                            DSL.field(DSL.name("status")), DSL.field(DSL.name("enqueued_at")), DSL.field(DSL.name("content_hash")))
+                        .values(DSL.val(TENANT_A), DSL.val(COLL_A), CollectionIds.idOf(TENANT_A, renamed), DSL.val("/a/3.md"),
+                            DSL.val("a.3"), DSL.val("pending"), DSL.val(OffsetDateTime.now()), DSL.val("h3"))
+                        .execute();
+                } finally {
+                    ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+                }
+                return null;
+            });
+            assertThat(byId.run().moved()).isEqualTo(1);
+            assertThat(JSON.readTree(tasks(fx).get("a.3").get(TUPLES.BODY)).get("collection").asText())
+                .as("no home: the queue row's collection_id names the registry's current label, not the stale name")
+                .isEqualTo(renamed);
+        }
+    }
+
+    /**
+     * RDR-229 P3.5c (linda 2026-11-23, census L2): from gate 3 a queued row with no home document and no collection id resolves its stored
+     * name to a LIVE registry row. One that does is dispatched under that name; one that names nothing is skipped with a WARN, counted, and
+     * left in the table: never dispatched under a label nothing holds.
+     */
+    @Test
+    void aQueuedRowWithNoIdResolvesItsNameToALiveRow_orIsSkippedAndLeftInTheTable() throws Exception {
+        String nobody = "knowledge__drain-nobody__minilm-l6-v2-384__v1";
+        try (Fixture fx = new Fixture(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT_A, COLL_A);
+            // two documents with no home, two queue rows with no collection_id: one names a registered live collection, one names nothing
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "a.live");
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "a.nobody");
+            row(ctx, TENANT_A, COLL_A, "a.live", "/a/live.md", "pending", null, "hl");
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();   // the queue row names a collection nothing registers
+            try {
+                row(ctx, TENANT_A, nobody, "a.nobody", "/a/nobody.md", "pending", null, "hn");
+            } finally {
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+            }
+        })) {
+            long before = AspectQueueDrain.skippedNoLiveCollection();
+            AspectQueueDrain latched = new AspectQueueDrain(fx.scope, fx.tuples,
+                new AspectQueueDrain.AdminCensus(new AdminConnection(fx.pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)),
+                () -> List.of(TENANT_A, TENANT_B), () -> true);
+
+            latched.run();
+
+            var tasks = tasks(fx);
+            assertThat(tasks).as("the row whose name a live registry row holds is dispatched, the other is not")
+                .containsKey("a.live").doesNotContainKey("a.nobody");
+            assertThat(JSON.readTree(tasks.get("a.live").get(TUPLES.BODY)).get("collection").asText()).isEqualTo(COLL_A);
+            assertThat(AspectQueueDrain.skippedNoLiveCollection()).as("counted (the row is read again on a later batch)").isGreaterThanOrEqualTo(before + 1);
+            int left = fx.su(ctx -> ctx.fetchCount(QUEUE, DSL.field(DSL.name("doc_id")).eq("a.nobody")));
+            assertThat(left).as("and left in the table").isEqualTo(1);
+        }
+    }
+
+    /**
+     * RDR-229 P3.5c (linda 2026-11-23, ruling a): a queued row whose collection_id names no registry row (dangling) is skipped with a WARN and
+     * a count, the same as the no-live-row case: it is not dispatched under its stored name, though a live collection bears that name.
+     */
+    @Test
+    void aQueuedRowWhoseCollectionIdNamesNoRegistryRowIsSkippedWithAWarn_notDispatchedUnderItsStoredName() throws Exception {
+        try (Fixture fx = new Fixture(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT_A, COLL_A);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "a.dangling");
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "a.seed");
+            row(ctx, TENANT_A, COLL_A, "a.seed", "/a/seed.md", "pending", null, "hs");   // creates the retired queue table the fixture then extends
+        })) {
+            fx.su(ctx -> {
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+                try {
+                    ctx.insertInto(QUEUE, DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("collection")),
+                            DSL.field(DSL.name("collection_id")), DSL.field(DSL.name("source_path")), DSL.field(DSL.name("doc_id")),
+                            DSL.field(DSL.name("status")), DSL.field(DSL.name("enqueued_at")), DSL.field(DSL.name("content_hash")))
+                        .values(DSL.val(TENANT_A), DSL.val(COLL_A), DSL.val(987654321L), DSL.val("/a/dangling.md"),
+                            DSL.val("a.dangling"), DSL.val("pending"), DSL.val(OffsetDateTime.now()), DSL.val("hd"))
+                        .execute();
+                } finally {
+                    ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+                }
+                return null;
+            });
+            long before = AspectQueueDrain.skippedNoLiveCollection();
+            var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AspectQueueDrain.class);
+            var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+            appender.start();
+            logger.setLevel(ch.qos.logback.classic.Level.WARN);
+            logger.addAppender(appender);
+            AspectQueueDrain latched = new AspectQueueDrain(fx.scope, fx.tuples,
+                new AspectQueueDrain.AdminCensus(new AdminConnection(fx.pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)),
+                () -> List.of(TENANT_A, TENANT_B), () -> true);
+            try {
+                latched.run();
+            } finally {
+                logger.detachAppender(appender);
+            }
+
+            assertThat(tasks(fx)).as("a dangling collection id is no collection: nothing is dispatched").doesNotContainKey("a.dangling");
+            assertThat(AspectQueueDrain.skippedNoLiveCollection()).as("counted").isGreaterThanOrEqualTo(before + 1);
+            assertThat(appender.list).as("and a WARN names the reason").anyMatch(e ->
+                e.getLevel() == ch.qos.logback.classic.Level.WARN && e.getFormattedMessage().contains("reason=dangling_collection_id"));
+            assertThat((int) fx.su(ctx -> ctx.fetchCount(QUEUE, DSL.field(DSL.name("doc_id")).eq("a.dangling")))).as("and the row stays").isEqualTo(1);
         }
     }
 

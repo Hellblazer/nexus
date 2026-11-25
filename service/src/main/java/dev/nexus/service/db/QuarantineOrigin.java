@@ -5,6 +5,7 @@ package dev.nexus.service.db;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
@@ -57,6 +58,14 @@ public final class QuarantineOrigin {
      */
     public static final String PREFIX = "quarantine-";
 
+    /**
+     * The metadata key beside {@code origin_collection} that holds the origin's registry {@code collection_id}
+     * (RDR-229 P3.1). A JSONB key, not a column; the SQL move (nexus.gc_quarantine_orphans, vectors-069/077) writes both tags, and a retag
+     * writes both. A dangling tag is marked by the key present with JSON null (the backfill), never absent: gate 3 does not hold while a
+     * quarantine chunk lacks the key ({@code CompletionCheck}).
+     */
+    public static final String ORIGIN_ID_KEY = "origin_collection_id";
+
     /** Origin collection deleted: its rows were taken out of one sibling. */
     public static final String OP_DELETE_ORIGIN = "collection_delete_quarantine";
     /** A quarantine collection itself was deleted. */
@@ -70,6 +79,49 @@ public final class QuarantineOrigin {
     private static final JSONB EMPTY_OBJECT = JSONB.jsonb("{}");
 
     private static final Field<String> ORIGIN_TAG = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
+    /**
+     * A chunk row whose {@code metadata} names {@code origin} as its origin: from gate 3 by the origin's registry id
+     * ({@code origin_collection_id}) alone, before it by the label tag. A row with no origin id after the latch (the key absent, or present
+     * and JSON null, which a dangling tag is backfilled to) is no sibling of the label's current holder: the arm
+     * {@code origin_collection_id IS NULL AND origin_collection = label} is refused (linda 2026-11-23), because a label names whichever row
+     * holds it now. Gate 3 does not hold while a quarantine chunk lacks the key ({@code CompletionCheck}), so after the latch every row has
+     * it. {@link #taggedWithoutId} finds the refused rows, to count and WARN. One definition for {@code rowsOf} and the restore's sibling lookup.
+     */
+    public static Condition taggedWith(boolean byId, String tenant, String origin) {
+        return byId
+            ? ORIGIN_ID.eq(CollectionIds.idOf(tenant, origin).cast(String.class))
+            : ORIGIN_TAG.eq(origin);
+    }
+
+    /** A row the label tag names as origin and that carries no origin id: what {@link #taggedWith} refuses from gate 3. */
+    public static Condition taggedWithoutId(String origin) {
+        return ORIGIN_ID.isNull().and(ORIGIN_TAG.eq(origin));
+    }
+
+    /** How many sibling reads skipped quarantine rows that carry a label tag and no origin id (RDR-229 P3.5c); process-wide, no tenant state. */
+    public static final java.util.concurrent.atomic.AtomicLong NO_ORIGIN_ID_SKIPPED = new java.util.concurrent.atomic.AtomicLong();
+
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(QuarantineOrigin.class);
+
+    /**
+     * From gate 3 a quarantine row that carries the label tag and no origin id is no sibling of the label's current holder (it is skipped by
+     * {@link #taggedWith}): count it and say so, so a pending backfill is seen (linda 2026-11-23). Existence only, bounded by the quarantine
+     * collections the sibling read walks.
+     */
+    public static void warnOfRowsWithNoOriginId(DSLContext ctx, String tenant, String origin) {
+        boolean any = ctx.fetchExists(DSL.selectOne().from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(tenant))
+            .and(CHUNKS.COLLECTION_ID.in(DSL.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"))))
+            .and(taggedWithoutId(origin)));
+        if (any) {
+            NO_ORIGIN_ID_SKIPPED.incrementAndGet();
+            LOG.warn("quarantine chunks tagged origin_collection={} carry no origin_collection_id: skipped as siblings of the label's current holder (pre-id quarantine; backfill pending)", origin);
+        }
+    }
+
+    /** The origin's registry id as the tag carries it (text); null on a row written before the id key. */
+    private static final Field<String> ORIGIN_ID = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, ORIGIN_ID_KEY);
 
     private QuarantineOrigin() {
     }
@@ -171,37 +223,61 @@ public final class QuarantineOrigin {
      * @param exceptName a live collection to leave out of the sole-claimant count (a rename's target, which
      *                   shares the origin's attributes once its row is written), or {@code null}
      */
-    private static Condition rowsOf(String tenant, String origin, String exceptName) {
+    private static Condition rowsOf(String tenant, String origin, String exceptName, Gate3 gate3) {
+        return rowsOf(tenant, origin, exceptName, gate3, null);
+    }
+
+    /**
+     * {@link #rowsOf(String, String, String, Gate3)} with the origin's registry row named by id: a one-row rename has already moved that row to the new label
+     * when it retags, so the attribute-derived sibling clause finds the origin by {@code originIdKnown}, not by the old label no row carries any more (folio's r3
+     * review F4). Null finds it by label, as before.
+     */
+    private static Condition rowsOf(String tenant, String origin, String exceptName, Gate3 gate3, Long originIdKnown) {
+        // RDR-229 P3.5c: before gate 3 the origin is found by the {@code origin_collection} TAG, a label, which stays current because the
+        // rename calls retagRowsOf (P3.7's one-row rename, wren's CollectionOneRowRename, must keep calling it); from gate 3 it is found by the
+        // tag's id ({@code origin_collection_id}, see taggedWith), which a rename does not change, and a row with no id is no sibling.
+        // one reading of gate 3 for the whole condition (RDR-229 P3.5c, linda 2026-11-23)
+        final boolean byId = CollectionKey.of(gate3).byId();
+        // the origin's id: the live-first resolver (a label may name a live row and tombstones); null before gate 3, where nothing reads it
+        // a one-row rename passes the id it renamed (its registry row no longer carries the label, P3.7), which wins over the resolver
+        final Field<Long> originId = !byId ? null
+            : originIdKnown != null ? DSL.val(originIdKnown) : CollectionIds.idOf(tenant, origin);
         var sib = CATALOG_COLLECTIONS.as("quarantine_sibling");
         var org = CATALOG_COLLECTIONS.as("quarantine_origin");
         var twin = CATALOG_COLLECTIONS.as("quarantine_twin");
-        Condition inQuarantine = CHUNKS.COLLECTION.in(
-            DSL.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
-               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
-                   .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"))));
+        // RDR-229 P3.5c: from gate 3 a chunk is in a quarantine collection by the collection's id, not its name
+        Condition quarantineRows = CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"));
+        Condition inQuarantine = byId
+            ? CHUNKS.COLLECTION_ID.in(DSL.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS).where(quarantineRows))
+            : CHUNKS.COLLECTION.in(DSL.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS).where(quarantineRows));
         Condition anotherLiveTwin = twin.TENANT_ID.eq(tenant)
-            .and(twin.NAME.ne(origin))
+            .and(byId ? twin.COLLECTION_ID.ne(originId) : twin.NAME.ne(origin))
             .and(exceptName == null ? DSL.noCondition() : twin.NAME.ne(exceptName))
             .and(twin.LIFECYCLE_STATE.ne("quarantine"))
-            .and(twin.SUPERSEDED_BY.eq(""))
+            .and(CollectionIdReads.live(gate3, twin.SUPERSEDED_BY, twin.SUPERSEDED_BY_ID))
             .and(twin.OWNER_ID.eq(org.OWNER_ID))
             .and(twin.EMBEDDING_MODEL.eq(org.EMBEDDING_MODEL))
             .and(twin.MODEL_VERSION.eq(org.MODEL_VERSION))
             .and(twin.CONTENT_TYPE.eq(org.CONTENT_TYPE));
-        Condition inRowDerivedSibling = CHUNKS.COLLECTION.in(
-            DSL.select(sib.NAME).from(sib).join(org).on(org.TENANT_ID.eq(sib.TENANT_ID))
-               .where(sib.TENANT_ID.eq(tenant)
-                   .and(org.NAME.eq(origin))
+        Condition siblingRows = sib.TENANT_ID.eq(tenant)
+                   .and(originIdKnown != null ? org.COLLECTION_ID.eq(originIdKnown) : byId ? org.COLLECTION_ID.eq(originId) : org.NAME.eq(origin))
                    .and(sib.LIFECYCLE_STATE.eq("quarantine"))
                    .and(sib.OWNER_ID.eq(org.OWNER_ID))
                    .and(sib.EMBEDDING_MODEL.eq(org.EMBEDDING_MODEL))
                    .and(sib.MODEL_VERSION.eq(org.MODEL_VERSION))
                    .and(sib.CONTENT_TYPE.eq(org.CONTENT_TYPE)
                        .or(sib.CONTENT_TYPE.eq(DSL.val(PREFIX).concat(org.CONTENT_TYPE))))
-                   .and(DSL.notExists(DSL.selectOne().from(twin).where(anotherLiveTwin)))));
+                   .and(DSL.notExists(DSL.selectOne().from(twin).where(anotherLiveTwin)));
+        Condition inRowDerivedSibling = byId
+            ? CHUNKS.COLLECTION_ID.in(DSL.select(sib.COLLECTION_ID).from(sib).join(org).on(org.TENANT_ID.eq(sib.TENANT_ID)).where(siblingRows))
+            : CHUNKS.COLLECTION.in(DSL.select(sib.NAME).from(sib).join(org).on(org.TENANT_ID.eq(sib.TENANT_ID)).where(siblingRows));
         Condition untaggedHere = ORIGIN_TAG.isNull()
-            .and(CHUNKS.COLLECTION.eq(PREFIX + origin).or(inRowDerivedSibling));
-        return CHUNKS.TENANT_ID.eq(tenant).and(inQuarantine).and(ORIGIN_TAG.eq(origin).or(untaggedHere));
+            .and(CollectionIdReads.is(gate3, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, PREFIX + origin).or(inRowDerivedSibling));
+        // From gate 3 the tag names the origin by its id ({@code origin_collection_id}, which retagRowsOf writes), the label tag being the
+        // pre-latch arm and the arm of a row written before the id key existed (it carries no id key); a tag that names no id reads by label.
+        // a one-row rename names the origin by the id it renamed: the old label no longer resolves to that row, so the tag is read by that id
+        Condition tagged = byId && originIdKnown != null ? ORIGIN_ID.eq(DSL.val(String.valueOf(originIdKnown))) : taggedWith(byId, tenant, origin);
+        return CHUNKS.TENANT_ID.eq(tenant).and(inQuarantine).and(tagged.or(untaggedHere));
     }
 
     /**
@@ -209,10 +285,15 @@ public final class QuarantineOrigin {
      * A live origin keeps its quarantine rows: it is still the place a restore returns them to.
      */
     static boolean isLiveRegistered(DSLContext ctx, String tenant, String name) {
+        return isLiveRegistered(ctx, tenant, name, Gate3.never());
+    }
+
+    /** {@link #isLiveRegistered(DSLContext, String, String)} reading the id from gate 3 (RDR-229 P3.5c). */
+    static boolean isLiveRegistered(DSLContext ctx, String tenant, String name, Gate3 gate3) {
         return ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                 .and(CATALOG_COLLECTIONS.NAME.eq(name))
-                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))));
+                .and(CollectionIdReads.live(gate3, CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID))));
     }
 
     /**
@@ -221,14 +302,14 @@ public final class QuarantineOrigin {
      * content of its own, but deleting its registry row would leave those rows with no live origin (restore
      * refuses a non-live origin, the engine's expiry skips it, and {@code nx t3 gc} refuses its name).
      */
-    static boolean holdsRowsOf(DSLContext ctx, String tenant, String origin) {
-        return holdsRowsOf(ctx, tenant, origin, CollectionRegistry.lifecycleState(ctx, tenant, origin));
+    static boolean holdsRowsOf(DSLContext ctx, String tenant, String origin, Gate3 gate3) {
+        return holdsRowsOf(ctx, tenant, origin, CollectionRegistry.lifecycleState(ctx, tenant, origin), gate3);
     }
 
-    /** {@link #holdsRowsOf(DSLContext, String, String)} for a caller that already holds the origin's row state. */
-    static boolean holdsRowsOf(DSLContext ctx, String tenant, String origin, Optional<String> lifecycleState) {
+    /** {@link #holdsRowsOf(DSLContext, String, String, Gate3)} for a caller that already holds the origin's row state. */
+    static boolean holdsRowsOf(DSLContext ctx, String tenant, String origin, Optional<String> lifecycleState, Gate3 gate3) {
         return !isQuarantine(lifecycleState, origin)
-            && ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(rowsOf(tenant, origin, null)));
+            && ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(rowsOf(tenant, origin, null, gate3)));
     }
 
     /**
@@ -236,13 +317,30 @@ public final class QuarantineOrigin {
      * re-embed plan states it before a job deletes its source (RDR-210 Cutover). A quarantine name has none.
      */
     static int countRowsOf(DSLContext ctx, String tenant, String origin) {
-        return isQuarantine(ctx, tenant, origin) ? 0 : ctx.fetchCount(CHUNKS, rowsOf(tenant, origin, null));
+        return countRowsOf(ctx, tenant, origin, Gate3.never());
     }
 
-    /** The quarantine collections that hold at least one row of {@code origin}, by name. */
-    private static List<String> siblingsHolding(DSLContext ctx, Condition rows) {
-        return ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS).where(rows)
-            .orderBy(CHUNKS.COLLECTION).fetch(CHUNKS.COLLECTION);
+    /** {@link #countRowsOf(DSLContext, String, String)} reading the id from gate 3 (RDR-229 P3.5c). */
+    static int countRowsOf(DSLContext ctx, String tenant, String origin, Gate3 gate3) {
+        return isQuarantine(ctx, tenant, origin) ? 0 : ctx.fetchCount(CHUNKS, rowsOf(tenant, origin, null, gate3));
+    }
+
+    /** One quarantine collection that holds rows of an origin: its label (output only from gate 3) and, from gate 3, its registry id. */
+    private record Sibling(Long id, String label) { }
+
+    /** The quarantine collections that hold at least one row of {@code origin}: by the chunk's collection id from gate 3, by name before. */
+    private static List<Sibling> siblingsHolding(DSLContext ctx, Condition rows, boolean byId) {
+        if (!byId) {
+            return ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS).where(rows).orderBy(CHUNKS.COLLECTION)
+                .fetch(r -> new Sibling(null, r.value1()));
+        }
+        // from gate 3 a sibling is a collection id; its label is the registry's current name of that id, for output only
+        var c = CATALOG_COLLECTIONS.as("quarantine_label");
+        Field<String> label = DSL.coalesce(DSL.field(DSL.select(c.NAME).from(c)
+            .where(c.TENANT_ID.eq(CHUNKS.TENANT_ID).and(c.COLLECTION_ID.eq(CHUNKS.COLLECTION_ID)))), DSL.inline("")).as("label");
+        return ctx.selectDistinct(CHUNKS.COLLECTION_ID, label).from(CHUNKS).where(rows.and(CHUNKS.COLLECTION_ID.isNotNull()))
+            .orderBy(label, CHUNKS.COLLECTION_ID)
+            .fetch(r -> new Sibling(r.value1(), r.value2()));
     }
 
     private static List<String> sorted(List<String> hex) {
@@ -257,12 +355,15 @@ public final class QuarantineOrigin {
      *
      * @return sibling name to rows deleted, for the siblings that lost rows, in name order
      */
-    static Map<String, Integer> deleteRowsOf(DSLContext ctx, String tenant, String origin) {
-        Condition rows = rowsOf(tenant, origin, null);
+    static Map<String, Integer> deleteRowsOf(DSLContext ctx, String tenant, String origin, Gate3 gate3) {
+        final boolean byId = CollectionKey.of(gate3).byId();
+        Condition rows = rowsOf(tenant, origin, null, gate3);
         Map<String, Integer> out = new LinkedHashMap<>();
-        List<String> siblings = siblingsHolding(ctx, rows);
-        for (String sibling : siblings) {
-            List<String> hex = sorted(ctx.deleteFrom(CHUNKS).where(rows.and(CHUNKS.COLLECTION.eq(sibling)))
+        for (Sibling sib : siblingsHolding(ctx, rows, byId)) {
+            String sibling = sib.label();
+            // by the sibling's id from gate 3: a tombstone and a live row may share the label, and only the id tells their rows apart
+            List<String> hex = sorted(ctx.deleteFrom(CHUNKS)
+                .where(rows.and(byId ? CHUNKS.COLLECTION_ID.eq(sib.id()) : CHUNKS.COLLECTION.eq(sibling)))
                 .returningResult(ChashHex.hex(CHUNKS.CHASH)).fetch(ChashHex.hex(CHUNKS.CHASH)));
             if (hex.isEmpty()) {
                 continue;
@@ -284,19 +385,49 @@ public final class QuarantineOrigin {
      * @return rows retagged
      */
     static int retagRowsOf(DSLContext ctx, String tenant, String from, String to) {
-        Condition rows = rowsOf(tenant, from, to);
-        JSONB incoming = JSONB.jsonb(CatalogRepository.MAPPER.createObjectNode().put("origin_collection", to).toString());
+        return retagRowsOf(ctx, tenant, from, to, Gate3.never());
+    }
+
+    /** {@link #retagRowsOf(DSLContext, String, String, String)} reading the id from gate 3 (RDR-229 P3.5c). */
+    static int retagRowsOf(DSLContext ctx, String tenant, String from, String to, Gate3 gate3) {
+        return retagRowsOf(ctx, tenant, from, to, gate3, null);
+    }
+
+    /**
+     * {@link #retagRowsOf(DSLContext, String, String, String, Gate3)} for a one-row rename (RDR-229 P3.7): {@code originIdKnown} is the renamed collection's id,
+     * whose registry row already carries {@code to}, so the attribute-derived siblings are found through it, not through a label no row carries any more
+     * (folio's r3 review F4). Null reads the origin as the other callers do.
+     */
+    static int retagRowsOf(DSLContext ctx, String tenant, String from, String to, Gate3 gate3, Long originIdKnown) {
+        final boolean byId = CollectionKey.of(gate3).byId();
+        Condition rows = rowsOf(tenant, from, to, gate3, originIdKnown);
+        // RDR-229 P3.1 stage 2b (nexus-p2m1x.17): the tag names the origin by id as well as by name, so a reader can
+        // follow a rename by id. A metadata key, not a column. The id is the registry's now, in this transaction (the
+        // rename registers its target before the retag runs); a target with no registry row is tagged by name alone.
+        Long toId = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(to))
+            .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
+        var tag = CatalogRepository.MAPPER.createObjectNode().put("origin_collection", to);
+        if (toId != null) {
+            tag.put(ORIGIN_ID_KEY, toId);
+        }
+        JSONB incoming = JSONB.jsonb(tag.toString());
         int total = 0;
-        List<String> siblings = siblingsHolding(ctx, rows);
-        for (String sibling : siblings) {
+        for (Sibling sib : siblingsHolding(ctx, rows, byId)) {
+            String sibling = sib.label();
             // Shallow merge, so every other key the move wrote (quarantined_at, quarantined_by, ...) survives.
             // COALESCE: jsonb_concat(NULL, x) is NULL, which would leave a NULL-metadata row untagged while
             // counting and auditing it as retagged. Only rows whose tag actually changes are returned.
             // Does not touch last_written_at: a retag is maintenance, never a client re-write.
-            List<String> hex = sorted(ctx.update(CHUNKS)
+            // Before gate 3 a row the stamp has not reached (NULL id) gets the sibling's id, because chunks carries a NOT VALID CHECK evaluated on
+            // every updated row, which refuses such a row; a stored id is kept, never overwritten by what the label resolves to now (DepartedWriterSpans
+            // dropped the overwriting shape). From gate 3 the row keeps its own id, selected by it.
+            var update = ctx.update(CHUNKS)
                 .set(CHUNKS.METADATA, PgVectorRepository.mergeMetadata(
-                    DSL.coalesce(CHUNKS.METADATA, DSL.val(EMPTY_OBJECT)), DSL.val(incoming), null))
-                .where(rows.and(CHUNKS.COLLECTION.eq(sibling)).and(ORIGIN_TAG.isDistinctFrom(to)))
+                    DSL.coalesce(CHUNKS.METADATA, DSL.val(EMPTY_OBJECT)), DSL.val(incoming), null));
+            List<String> hex = sorted((byId ? update : update.set(CHUNKS.COLLECTION_ID, DSL.coalesce(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, sibling))))
+                .where(rows.and(byId ? CHUNKS.COLLECTION_ID.eq(sib.id()) : CHUNKS.COLLECTION.eq(sibling))
+                    .and(ORIGIN_TAG.isDistinctFrom(to)))
                 .returningResult(ChashHex.hex(CHUNKS.CHASH)).fetch(ChashHex.hex(CHUNKS.CHASH)));
             if (hex.isEmpty()) {
                 continue;
@@ -318,14 +449,19 @@ public final class QuarantineOrigin {
      *
      * @return rows deleted
      */
-    static int deleteQuarantineCollectionRows(DSLContext ctx, String tenant, String name) {
+    static int deleteQuarantineCollectionRows(DSLContext ctx, String tenant, String name, Gate3 gate3) {
         List<String> hex = sorted(ctx.deleteFrom(CHUNKS)
-            .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(name)))
+            .where(CHUNKS.TENANT_ID.eq(tenant).and(CollectionIdReads.is(gate3, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, name)))
             .returningResult(ChashHex.hex(CHUNKS.CHASH)).fetch(ChashHex.hex(CHUNKS.CHASH)));
         if (!hex.isEmpty()) {
             CatalogRepository.insertGcAuditRow(ctx, tenant, OP_DELETE_QUARANTINE, name, ACTOR, false, hex,
                 Map.of("count", hex.size()));
         }
         return hex.size();
+    }
+
+    /** The quarantine collections that hold at least one row of {@code origin}, by name: the siblings {@link #deleteRowsOf} reaches. */
+    static List<String> siblingsHolding(DSLContext ctx, String tenant, String origin, Gate3 gate3) {
+        return siblingsHolding(ctx, rowsOf(tenant, origin, null, gate3), CollectionKey.of(gate3).byId()).stream().map(Sibling::label).toList();
     }
 }

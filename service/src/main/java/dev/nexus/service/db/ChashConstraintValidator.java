@@ -4,6 +4,7 @@ package dev.nexus.service.db;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.ChashConformanceConstraints.Row;
 import dev.nexus.service.db.ChashConformanceConstraints.Target;
 import dev.nexus.service.db.ChashConformanceConstraints.Tree;
@@ -79,8 +80,10 @@ import java.util.function.Supplier;
  * every search and index write). The pre-check reads a table only where this session already reads every row of it
  * ({@link AdminDdlSession#requireUnrestrictedView}: a superuser, BYPASSRLS, or a permissive SELECT policy with a true qual
  * that applies to the role; the {@code nexus.chunks} leaves copy {@code chunks_gate_probe_owner_read} from the parent, which
- * names the migrating role, the admin role). It then holds an ACCESS SHARE lock only. Where it does not (production's
- * {@code nexus.catalog_document_chunks}: FORCE row-level security, no owner policy) the pre-check is <b>unavailable</b>: the
+ * names the migrating role, the admin role; so does {@code nexus.catalog_document_chunks} since RDR-229 P3.1, which gives it
+ * {@code catalog_document_chunks_owner_read}). It then holds an ACCESS SHARE lock only. Where it does not (a single-role install,
+ * where P3.1's owner-read changesets skip themselves because {@code nexus_svc} inherits the migrating role, so
+ * {@code nexus.catalog_document_chunks} is FORCE row-level security with no owner policy) the pre-check is <b>unavailable</b>: the
  * job runs the VALIDATE, which is atomic and takes SHARE UPDATE EXCLUSIVE, and a {@code check_violation} (23514) is the
  * refusal, with {@code bad_rows} unknown (null) and the constraint left NOT VALID; a dry run reports {@code precheck:
  * unavailable} and does not say the table would validate. The engine holds no {@code nexus_diag} connection (that role's
@@ -258,6 +261,8 @@ public final class ChashConstraintValidator {
     private final Opener opener;
     private final TenantScope scope;
     private final Supplier<List<String>> knownTenants;
+    /** RDR-229 P3.5c: the one gate 3 signal; a refusal's bad rows are read by the collection id from gate 3. */
+    private final Gate3 gate3;
     /** Test seam: rewrites the constraint rows the plan is built from (a hand-edited catalog the migrations cannot produce). */
     private volatile java.util.function.UnaryOperator<List<Row>> planRows = r -> r;
     /** The step session in flight, so {@link #cancelRunning} can reach its statement from another thread. */
@@ -277,10 +282,20 @@ public final class ChashConstraintValidator {
      * @param knownTenants the tenants to count for ({@code TokenStore#listKnownTenants}); the default tenant is added
      */
     public ChashConstraintValidator(AdminConnection admin, TenantScope scope, Supplier<List<String>> knownTenants) {
-        this(admin, AdminDdlSession::open, scope, knownTenants);
+        this(admin, AdminDdlSession::open, scope, knownTenants, Gate3.never());
+    }
+
+    /** As above, with the one gate 3 signal: the refusal's bad rows are read and attributed by the collection id from gate 3 (RDR-229 P3.5c). */
+    public ChashConstraintValidator(AdminConnection admin, TenantScope scope, Supplier<List<String>> knownTenants, Gate3 gate3) {
+        this(admin, AdminDdlSession::open, scope, knownTenants, gate3);
     }
 
     ChashConstraintValidator(AdminConnection admin, Opener opener, TenantScope scope, Supplier<List<String>> knownTenants) {
+        this(admin, opener, scope, knownTenants, Gate3.never());
+    }
+
+    ChashConstraintValidator(AdminConnection admin, Opener opener, TenantScope scope, Supplier<List<String>> knownTenants, Gate3 gate3) {
+        this.gate3 = Objects.requireNonNull(gate3, "gate3");
         this.admin = Objects.requireNonNull(admin, "admin");
         this.opener = Objects.requireNonNull(opener, "opener");
         this.scope = scope;
@@ -738,8 +753,8 @@ public final class ChashConstraintValidator {
             s.setSession("lock_timeout", cfg.lockTimeoutMs() + "ms");
             s.setSession("statement_timeout", cfg.precheckTimeoutMs() + "ms");
             Table<?> rel = DSL.table(DSL.name(schema, relation));
-            LegacyChunkSurvey.Counts counts = LegacyChunkSurvey.counts(s.ctx(), rel, DSL.trueCondition(), cfg.precheckCap());
-            List<LegacyChunkSurvey.Bad> listed = LegacyChunkSurvey.chunks(s.ctx(), rel, DSL.trueCondition(), DETAIL_LIST_CAP);
+            LegacyChunkSurvey.Counts counts = LegacyChunkSurvey.counts(s.ctx(), rel, DSL.trueCondition(), cfg.precheckCap(), gate3);
+            List<LegacyChunkSurvey.Bad> listed = LegacyChunkSurvey.chunks(s.ctx(), rel, DSL.trueCondition(), DETAIL_LIST_CAP, gate3);
             boolean listCapped = listed.size() > DETAIL_LIST_CAP;
             if (listCapped) listed = listed.subList(0, DETAIL_LIST_CAP);
             List<LegacyChunkSurvey.Bad> withOwners = withOwners(listed);
@@ -759,12 +774,13 @@ public final class ChashConstraintValidator {
         for (LegacyChunkSurvey.Bad b : listed) {
             LegacyChunkSurvey.Owners owners;
             try {
-                owners = scope.withTenant(b.tenant(), ctx ->
-                    LegacyChunkSurvey.owners(ctx, b.tenant(), b.collection(), b.model(), HexFormat.of().parseHex(b.chashHex()), 5, gate));
+                owners = scope.withTenant(b.tenant(), ctx -> b.collectionId() != null
+                    ? LegacyChunkSurvey.ownersById(ctx, b.tenant(), b.collectionId(), b.model(), HexFormat.of().parseHex(b.chashHex()), 5, gate)
+                    : LegacyChunkSurvey.owners(ctx, b.tenant(), b.collection(), b.model(), HexFormat.of().parseHex(b.chashHex()), 5, gate, gate3));
             } catch (RuntimeException ex) {
                 owners = LegacyChunkSurvey.Owners.unknown();   // not looked up within the bound: unknown, never "no owner"
             }
-            out.add(new LegacyChunkSurvey.Bad(b.tenant(), b.collection(), b.model(), b.chashHex(), b.reason(), owners));
+            out.add(new LegacyChunkSurvey.Bad(b.tenant(), b.collection(), b.model(), b.chashHex(), b.reason(), owners, b.collectionId()));
         }
         return List.copyOf(out);
     }
@@ -797,9 +813,9 @@ public final class ChashConstraintValidator {
             try {
                 var got = scope.withTenant(tenant, ctx -> {
                     PgSession.setStatementAndLockBounds(ctx, (int) Math.min(10_000, cfg.precheckTimeoutMs()), 2_000);
-                    var c = LegacyChunkSurvey.manifestCounts(ctx, tenant, room);
+                    var c = LegacyChunkSurvey.manifestCounts(ctx, tenant, room, gate3);
                     return java.util.Map.entry(c, c.byReason().isEmpty() ? Map.<String, LegacyChunkSurvey.DocList>of()
-                        : LegacyChunkSurvey.manifestDocs(ctx, tenant, DETAIL_LIST_CAP));
+                        : LegacyChunkSurvey.manifestDocs(ctx, tenant, DETAIL_LIST_CAP, gate3));
                 });
                 LegacyChunkSurvey.Counts c = got.getKey();
                 if (!c.byReason().isEmpty()) counted.add(tenant);

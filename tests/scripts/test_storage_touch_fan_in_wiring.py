@@ -14,7 +14,9 @@ cases prove each check is caught, not merely that today's file is consistent.
 """
 from __future__ import annotations
 
+import importlib.util
 import re
+import sys
 import tomllib
 from pathlib import Path
 
@@ -27,9 +29,11 @@ REPO = Path(__file__).resolve().parents[2]
 CI_YML = REPO / ".github" / "workflows" / "ci.yml"
 CEILINGS = REPO / "tests" / "storage_touch_ceiling.toml"
 
-_FAN_IN = "-m tests._storage_touch_fan_in"
+_FAN_IN = "scripts/ci_gate_fan_in.py"
+_GATE_STEP = ("      - name: Whole-run gate (DDL/bytes fan-in, storage-touch fan-in, shard collection; every one evaluated)\n"
+              "        if: needs.changes.outputs.code == 'true'\n")
 _REPORT = "nx-storage-touch-report.json"
-_CHECKOUT_PATHS = ("tests/__init__.py", "tests/_storage_touch_fan_in.py", "tests/storage_touch_ceiling.toml")
+_CHECKOUT_PATHS = ("scripts/ci_gate_fan_in.py", "tests/__init__.py", "tests/_storage_touch_fan_in.py", "tests/storage_touch_ceiling.toml")
 
 
 def _steps(doc: dict, job: str) -> list[dict]:
@@ -98,6 +102,21 @@ def test_ci_wires_the_storage_touch_fan_in() -> None:
     assert wiring_problems(CI_YML.read_text(encoding="utf-8"), CEILINGS.read_text(encoding="utf-8")) == []
 
 
+def test_the_gate_script_runs_the_storage_touch_fan_in_for_the_workflows_suite_and_shards() -> None:
+    """The step above is the script; the script must still run the storage-touch fan-in, over the same
+    directory, suite and shard count the step names (the other half of the guarantee the old step carried)."""
+    spec = importlib.util.spec_from_file_location("ci_gate_fan_in", REPO / "scripts" / "ci_gate_fan_in.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["ci_gate_fan_in"] = module  # the script's dataclass looks its module up here
+    spec.loader.exec_module(module)
+    doc = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
+    run = str(next(s for s in _steps(doc, "pytest-gate") if _FAN_IN in str(s.get("run", "")))["run"])
+    args = module.parse_args(run.split("ci_gate_fan_in.py", 1)[1].split("${{", 1)[0].split())
+    touch = [c for c in module.build_checks(args) if "tests._storage_touch_fan_in" in c.argv]
+    assert len(touch) == 1, [c.name for c in module.build_checks(args)]
+    assert touch[0].argv[3:] == [args.reports_dir, "--suite", "python_unit", "--shards", str(args.shards)], touch[0].argv
+
+
 def test_an_armed_ceiling_is_a_number() -> None:
     section = tomllib.loads(CEILINGS.read_text(encoding="utf-8"))["python_unit"]
     if _armed(CEILINGS.read_text(encoding="utf-8")):
@@ -120,20 +139,17 @@ def test_an_armed_ceiling_is_a_number() -> None:
          "does not export NX_STORAGE_TOUCH_SWEEP=1"),
         ("${{ runner.temp }}/ddl-report/nx-storage-touch-report.json", "${{ runner.temp }}/ddl-report/other.json",
          "does not carry nx-storage-touch-report.json"),
-        ("python3 -m tests._storage_touch_fan_in", "python3 -m tests._other", "found 0"),
-        ("tests._storage_touch_fan_in ddl-reports --suite python_unit --shards 6",
-         "tests._storage_touch_fan_in ddl-reports --suite python_unit --shards 5", "but the matrix has"),
-        ("tests._storage_touch_fan_in ddl-reports --suite python_unit",
-         "tests._storage_touch_fan_in elsewhere --suite python_unit", "does not read the downloaded"),
+        ("python3 scripts/ci_gate_fan_in.py", "python3 scripts/ci_gate_other.py", "found 0"),
+        ("--reports-dir ddl-reports --suite python_unit --shards 6",
+         "--reports-dir ddl-reports --suite python_unit --shards 5", "but the matrix has"),
+        ("--reports-dir ddl-reports --suite python_unit", "--reports-dir elsewhere --suite python_unit", "does not read the downloaded"),
+        ("--reports-dir ddl-reports --suite python_unit", "--reports-dir ddl-reports --suite docs_readers", "for --suite python_unit"),
         ("            tests/_storage_touch_fan_in.py\n", "", "does not bring tests/_storage_touch_fan_in.py"),
-        ("      - name: Tenant-saving ratchet over the whole run (storage-touch fan-in)\n"
-         "        if: needs.changes.outputs.code == 'true'\n",
-         "      - name: Tenant-saving ratchet over the whole run (storage-touch fan-in)\n"
-         "        if: always()\n", "not limited to runs whose shards ran"),
-        ("      - name: Tenant-saving ratchet over the whole run (storage-touch fan-in)\n"
-         "        if: needs.changes.outputs.code == 'true'\n",
-         "      - name: Tenant-saving ratchet over the whole run (storage-touch fan-in)\n"
-         "        if: always() && needs.changes.outputs.code == 'true'\n", "after a failed verdict"),
+        ("            scripts/ci_gate_fan_in.py\n", "", "does not bring scripts/ci_gate_fan_in.py"),
+        (_GATE_STEP, _GATE_STEP.replace("if: needs.changes.outputs.code == 'true'", "if: always()"),
+         "not limited to runs whose shards ran"),
+        (_GATE_STEP, _GATE_STEP.replace("if: needs.changes.outputs.code == 'true'", "if: always() && needs.changes.outputs.code == 'true'"),
+         "after a failed verdict"),
     ],
 )
 def test_each_rot_is_caught(old: str, new: str, expect: str) -> None:

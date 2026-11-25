@@ -147,6 +147,11 @@ _CANNOT_IMPORT_NEXUS: dict[str, str] = {
         "bootstrap-safe: runs with nexus absent, so it cannot import "
         "run_bounded. See tests/test_install_layout_core_is_bootstrap_safe.py."
     ),
+    "src/nexus/_install/gc_core.py": (
+        "bootstrap-safe: runs with nexus absent (gc.sh, the installer), so it cannot import "
+        "run_bounded; its one ps call records the parent chain in the gc log. "
+        "See tests/test_install_gc_core_is_bootstrap_safe.py."
+    ),
 }
 
 #: Exact per-file count of unconverted capture+timeout subprocess calls.

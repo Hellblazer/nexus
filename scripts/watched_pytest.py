@@ -23,6 +23,11 @@ What it adds to the command:
   live and once at the end, that a poller reads in one call instead of
   guessing from a log: ``state`` is running, passed, failed, stalled,
   console_break, timeout or error.
+* The tree the run saw, for a status file used as PROOF of a green run (``scripts/push_check_gate.py``, nexus-igea9):
+  ``host`` (where it ran), ``tree`` (the sha of ``HEAD^{tree}`` in the run's directory), ``tree_dirty`` (true when a tracked file differs from HEAD
+  or any untracked, unignored file exists (at the start or at the end of the run), except a run's own ``*.json`` / ``*.log`` at
+  the root or under output/ and lab-out/) and ``summary`` (pytest's final counts line, ``131 passed, 1 skipped in 12.6s``). Outside a git repository ``tree``
+  and ``tree_dirty`` are null, which no proof accepts.
 * A notification of the final status (ntfy, the same channel Beszel alerts
   use, or any JSON webhook) when a URL is configured for the host.
 
@@ -66,6 +71,8 @@ EXIT_MAX_TOTAL: int = 126
 _RESULT = re.compile(r"\b(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b")
 _NODEID = re.compile(r"^(?:\[gw\d+\]\s+)?(\S+\.py::\S+)")
 _TAIL_LINES: int = 40
+#: pytest's final counts line (``== 131 passed, 1 skipped in 12.6s ==``): a count and a verdict word, then the timing.
+_SUMMARY = re.compile(r"\b\d+ (?:passed|failed|errors?|skipped|xfailed|xpassed|deselected)\b")
 
 
 @dataclass
@@ -82,6 +89,10 @@ class Status:
     detail: str | None = None
     log: str | None = None
     tail: list[str] = field(default_factory=list)
+    tree: str | None = None
+    tree_dirty: bool | None = None
+    summary: str | None = None
+    host: str | None = None
 
 
 class _Watch:
@@ -94,6 +105,7 @@ class _Watch:
         self.current_test: str | None = None
         self.last_result_line: str | None = None
         self.tail: deque[str] = deque(maxlen=_TAIL_LINES)
+        self.summary: str | None = None
         self._partial = ""
 
     def feed(self, text: str) -> None:
@@ -112,6 +124,8 @@ class _Watch:
     def _see(self, text: str, *, complete: bool) -> None:
         if complete:
             self.tail.append(text)
+            if _SUMMARY.search(text) and " in " in text:
+                self.summary = text.strip("= ").strip()
         match = _NODEID.match(text)
         if match is None:
             return
@@ -124,11 +138,66 @@ class _Watch:
         else:
             self.current_test = match.group(1)
 
+    def last_summary(self) -> str | None:
+        with self._lock:
+            return self.summary
+
     def snapshot(self) -> tuple[float, str | None, str | None, list[str]]:
         with self._lock:
             tail = [*self.tail, self._partial] if self._partial else list(self.tail)
             return (time.monotonic() - self.last_output, self.current_test,
                     self.last_result_line, tail[-_TAIL_LINES:])
+
+
+#: Untracked files that are not the tree: the logs and JSON status files of runs, at the root or under ``output/`` or ``lab-out/``
+#: (what a reused lab-remote copy keeps from earlier runs). Every other untracked, unignored file is part of the tree a run saw.
+_RUN_OUTPUT_DIRS = ("output/", "lab-out/")
+_RUN_OUTPUT_SUFFIXES = (".json", ".log")
+
+
+def _is_run_output(path: str) -> bool:
+    """Whether an UNTRACKED file at *path* (relative to the repository root) is the output of a run: a ``*.json`` or ``*.log``
+    at the root or anywhere under ``output/`` or ``lab-out/``."""
+    if not path.endswith(_RUN_OUTPUT_SUFFIXES):
+        return False
+    return "/" not in path or path.startswith(_RUN_OUTPUT_DIRS)
+
+
+def tree_state(cwd: str | None, ignore: tuple[Path, ...] = ()) -> tuple[str | None, bool | None]:
+    """``(tree sha, dirty)`` of the checkout at *cwd*: ``HEAD^{tree}``, and whether the tree the run saw differs from it. Dirty
+    means a TRACKED file differs from HEAD, or ANY untracked, unignored file exists, except a run's own output
+    (:func:`_is_run_output`: ``*.json`` and ``*.log`` at the root or under ``output/`` and ``lab-out/``) and the *ignore* paths (this
+    run's own log and status file). A docs-readers proof from a tree carrying an extra uncommitted doc must not count.
+    ``(None, None)`` when *cwd* is no checkout or the version-control tool cannot say."""
+    here = cwd or "."
+
+    def ask(*args: str) -> subprocess.CompletedProcess[str] | None:
+        try:
+            done = subprocess.run(["git", "-C", here, *args], capture_output=True, text=True, timeout=120, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done if done.returncode == 0 else None
+
+    tree, top = ask("rev-parse", "HEAD^{tree}"), ask("rev-parse", "--show-toplevel")
+    status = ask("status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if tree is None or top is None or status is None:
+        return None, None
+    root = Path(top.stdout.strip())
+    skip = {p.resolve() for p in ignore} | {p.resolve().with_name(p.name + ".tmp") for p in ignore}
+    skip_next = False
+    for entry in (e for e in status.stdout.split("\0") if e):
+        if skip_next:                      # the origin path of a rename or copy: the entry before it already counted
+            skip_next = False
+            continue
+        if entry[:1] in ("R", "C") or entry[1:2] in ("R", "C"):
+            skip_next = True
+        path = entry[3:]
+        if (root / path).resolve() in skip:
+            continue
+        if entry[:2] == "??" and _is_run_output(path):
+            continue
+        return tree.stdout.strip(), True
+    return tree.stdout.strip(), False
 
 
 def build_command(command: list[str], faulthandler_s: float) -> list[str]:
@@ -349,6 +418,9 @@ def run(args: argparse.Namespace, out: IO[str]) -> int:
     started = time.time()
     t0 = time.monotonic()
     status = Status(state="running", command=command, started_at=started, log=str(log_path))
+    own_files = tuple(p for p in (log_path, status_path) if p is not None)
+    status.tree, status.tree_dirty = tree_state(args.cwd, own_files)
+    status.host = platform.node() or "unknown"
     with log_path.open("w", encoding="utf-8") as log:
         watch = _Watch(log)
         proc = _spawn(command, args.cwd)
@@ -381,6 +453,11 @@ def run(args: argparse.Namespace, out: IO[str]) -> int:
     status.state, status.exit_code = state, code
     status.elapsed_s, status.last_output_age_s = time.monotonic() - t0, age
     status.current_test, status.last_result_line, status.tail = current, last_result, tail
+    status.summary = watch.last_summary()
+    # What the run saw must still be what is there: a tree that moved or was edited while it ran is not the tree it proves.
+    end_tree, end_dirty = tree_state(args.cwd, own_files)
+    if status.tree is not None and (end_tree != status.tree or end_dirty):
+        status.tree_dirty = True
     if state == "stalled":
         status.detail = f"no output for {args.stall:.0f}s; killed the process tree"
     elif state == "console_break":

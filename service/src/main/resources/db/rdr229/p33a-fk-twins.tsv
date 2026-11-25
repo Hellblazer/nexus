@@ -1,0 +1,17 @@
+# RDR-229 P3.3a (nexus-p2m1x.19): the one list of the seven id-twin foreign keys, each added NOT VALID beside its name key, and of the
+# validation move that validates it. Read by the boot-time completion check (FkTwins), by the changesets' tests and by the operator docs.
+# Columns: table, fk_columns (the referencing columns, comma separated), referenced_columns (on nexus.catalog_collections, same order),
+#          twin (the constraint name), on_delete (the name key's own action, which the twin copies), label (the validation move), name_key.
+# ON UPDATE is NO ACTION on every twin: a collection id never changes (the name key's ON UPDATE CASCADE carries a rename; the id does not move).
+# The id UNIQUE keys the twins reference are vectors-068-1's: (tenant_id, collection_id) and (tenant_id, collection_id, embedding_model).
+# aspect_extraction_queue is absent on most installs (R3): its twin and move are guarded, and its label counts as not applicable there
+# (StampLabels.NOT_APPLICABLE_WHEN_ABSENT). Row order is the order of the changesets in vectors-072-collection-id-fk-twins.xml.
+# Out of scope: chunks_collection_fk and the three child keys into nexus.chunks (P3.3c).
+table	fk_columns	referenced_columns	twin	on_delete	label	name_key
+topic_assignments	tenant_id,source_collection_id	tenant_id,collection_id	topic_assignments_source_collection_id_fk	RESTRICT	rdr229-fkvalidate-topic_assignments	topic_assignments_collection_fk
+document_aspects	tenant_id,collection_id	tenant_id,collection_id	document_aspects_collection_id_fk	RESTRICT	rdr229-fkvalidate-document_aspects	document_aspects_collection_fk
+topics	tenant_id,collection_id	tenant_id,collection_id	topics_collection_id_fk	RESTRICT	rdr229-fkvalidate-topics	topics_collection_fk
+taxonomy_meta	tenant_id,collection_id	tenant_id,collection_id	taxonomy_meta_collection_id_fk	RESTRICT	rdr229-fkvalidate-taxonomy_meta	taxonomy_meta_collection_fk
+document_highlights	tenant_id,collection_id	tenant_id,collection_id	document_highlights_collection_id_fk	RESTRICT	rdr229-fkvalidate-document_highlights	document_highlights_collection_fk
+canary_query_ring	tenant_id,collection_id,embedding_model	tenant_id,collection_id,embedding_model	canary_query_ring_collection_id_fk	CASCADE	rdr229-fkvalidate-canary_query_ring	canary_query_ring_collection_fk
+aspect_extraction_queue	tenant_id,collection_id	tenant_id,collection_id	aspect_extraction_queue_collection_id_fk	CASCADE	rdr229-fkvalidate-aspect_extraction_queue	aspect_extraction_queue_collection_fk

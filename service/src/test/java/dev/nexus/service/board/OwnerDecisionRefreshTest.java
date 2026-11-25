@@ -5,6 +5,7 @@ package dev.nexus.service.board;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -38,7 +39,8 @@ class OwnerDecisionRefreshTest {
     @Test
     void afterAHandOffARefreshKeepsTheNewOwner() {
         OwnerFixture f = firstRed();
-        f.now(OwnerFixture.T0.plus(Duration.ofHours(3)));
+        Instant handedAt = f.now.plus(Duration.ofMinutes(21));   // inside the hard cap, which a 3 hour old red would meet first
+        f.now(handedAt);
         OwnerDecision.Decision handoff = f.onDeadline();
         assertThat(OwnerFixture.bodyOf(handoff.post())).containsEntry("owner", "C").containsEntry("reason", "handoff");
         f.recordNow(handoff);
@@ -47,7 +49,7 @@ class OwnerDecisionRefreshTest {
         Map<String, Object> b = OwnerFixture.bodyOf(f.decide().post());
 
         assertThat(b).containsEntry("refresh", true).containsEntry("owner", "C").containsEntry("handoffs", 1)
-            .containsEntry("reason", "handoff").containsEntry("episode_at", OwnerFixture.T0.plus(Duration.ofHours(3)).toString());
+            .containsEntry("reason", "handoff").containsEntry("episode_at", handedAt.toString());
     }
 
     @Test

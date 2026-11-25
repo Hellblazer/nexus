@@ -94,6 +94,16 @@ class CatalogHandlerListPaginationTest {
         handler = new CatalogHandler(repo);
     }
 
+    /** Registers {@code name} for {@code tenant} (P3.1: a write under an unregistered collection is a typed 422). */
+    private void registerCollection(String tenant, String name) {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant, name);
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     @AfterAll
     void stopAll() {
         if (svcDs != null) svcDs.close();
@@ -108,6 +118,7 @@ class CatalogHandlerListPaginationTest {
         for (int i = 1; i <= N; i++) {
             String t = tumblerPrefix + "." + i;
             var doc = new java.util.LinkedHashMap<String, Object>(sharedFields);
+            if (sharedFields.get("physical_collection") instanceof String c) registerCollection(TENANT, c);
             doc.put("tumbler", t);
             doc.put("title", "Page Doc " + i);
             repo.upsertDocument(TENANT, doc);

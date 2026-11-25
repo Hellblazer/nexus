@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -10,7 +11,9 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.ManifestCheck;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
@@ -22,7 +25,7 @@ import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Query;
-import org.jooq.Record4;
+import org.jooq.Record5;
 import org.jooq.Result;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
@@ -115,6 +118,12 @@ import javax.crypto.spec.SecretKeySpec;
  * capability flags (the manifest-keyed reads the sweep's removal of POSITION and DOCUMENT keys depends on, RDR-236) are
  * constants in this binary, true by construction wherever this route exists, so the sweep does not read them from
  * {@code /version}.
+ *
+ * <p><b>RDR-229 P3.5c (nexus-p2m1x.25), item 6.</b> From gate 3 ({@link Gate3#holds()}, read once per statement, never cached) every
+ * chunk filter selects by {@code collection_id}, the manifest joins match on the id, and the collection names this class
+ * reports and carries in its cursor and token are the registry's current label of the row's id (a one-row rename leaves the
+ * row's own name stale). The keyset orders by {@code (collection_id, chash)} there. A NULL id is no collection: it is never
+ * selected and never falls back to a name. Before gate 3 every statement is the name path as it was.
  */
 public final class ChunkKeySweep {
 
@@ -172,17 +181,46 @@ public final class ChunkKeySweep {
 
     private final TenantScope scope;
     private final CensusReader census;
+    private final Gate3 gate3;
     /** Signs the {@link Resume} this instance hands out; random per instance, so a restart ends every continuation. */
     private final byte[] resumeKey = newKey();
 
     public ChunkKeySweep(TenantScope scope, PgVectorRepository vectors) {
-        this(scope, (tenant, collection, bound) -> vectors
-            .manifestLessCensusBounded(tenant, collection, 1, 0, bound).totals().getOrDefault("legacy-unmanifested", 0L));
+        this(scope, vectors, Gate3.never());
     }
 
     public ChunkKeySweep(TenantScope scope, CensusReader census) {
+        this(scope, census, Gate3.never());
+    }
+
+    public ChunkKeySweep(TenantScope scope, PgVectorRepository vectors, Gate3 gate3) {
+        this(scope, (tenant, collection, bound) -> vectors
+            .manifestLessCensusBounded(tenant, collection, 1, 0, bound).totals().getOrDefault("legacy-unmanifested", 0L), gate3);
+    }
+
+    public ChunkKeySweep(TenantScope scope, CensusReader census, Gate3 gate3) {
         this.scope = scope;
         this.census = census;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+    }
+
+    /** Gate 3 read once, for one statement, so its predicates and its select list agree; the next statement reads it again. */
+    private Gate3 gateNow() {
+        boolean holds = gate3.holds();
+        return () -> holds;
+    }
+
+    /**
+     * The collection name a row of {@code c} reports: the row's own name before gate 3, the registry's current label of its
+     * {@code collection_id} from it.
+     */
+    private static Field<String> label(boolean byId, Chunks c) {
+        return byId ? CollectionSelector.labelOf(c.TENANT_ID, c.COLLECTION_ID) : c.COLLECTION;
+    }
+
+    /** A chunk row and its manifest row name one collection: by id from gate 3 (a NULL id matches nothing), by name before. */
+    private static Condition sameCollection(boolean byId, Chunks c, CatalogDocumentChunks m) {
+        return byId ? c.COLLECTION_ID.eq(m.COLLECTION_ID) : c.COLLECTION.eq(m.COLLECTION);
     }
 
     // ---- the signed continuation --------------------------------------------------------------------------------
@@ -233,6 +271,10 @@ public final class ChunkKeySweep {
             if (cursor != null) {
                 writeString(out, cursor.collection());
                 writeString(out, cursor.chash());
+                out.writeBoolean(cursor.collectionId() != null);
+                if (cursor.collectionId() != null) {
+                    out.writeLong(cursor.collectionId());
+                }
             }
             out.writeInt(collections.size());
             for (String c : collections) {
@@ -300,8 +342,17 @@ public final class ChunkKeySweep {
         }
     }
 
-    /** A position in the sweep's order: the last {@code (collection, chash)} a batch took; {@code chash} is 64 hex. */
-    public record Cursor(String collection, String chash) {}
+    /**
+     * A position in the sweep's order: the last {@code (collection, chash)} a batch took; {@code chash} is 64 hex. From gate 3 the
+     * order is {@code (collection_id, chash)} and the cursor carries the id ({@code collectionId}), so a rename between batches
+     * does not end the sweep (the label would resolve to nothing). A cursor issued before the latch has no id ({@code null}):
+     * continued after it, the sweep restarts from the beginning, which is safe because a swept row no longer matches.
+     */
+    public record Cursor(String collection, String chash, Long collectionId) {
+        public Cursor(String collection, String chash) {
+            this(collection, chash, null);
+        }
+    }
 
     /** A collection the sweep leaves alone, why, and how many rows with a retired key it holds. */
     public record Blocked(String collection, String reason, long retiredRows) {}
@@ -423,13 +474,16 @@ public final class ChunkKeySweep {
     /** Rows with a retired key per non-bypass collection, with the wrong-width part. */
     private List<CollectionCount> retiredByCollection(DSLContext ctx, String tenant, ChunkKeyPlan plan) {
         var wrong = DSL.count().filterWhere(width(false));
-        Result<?> rows = ctx.select(CHUNKS.COLLECTION, DSL.count(), wrong)
+        boolean byId = gateNow().holds();
+        Field<String> label = label(byId, CHUNKS);
+        Result<?> rows = ctx.select(label, DSL.count(), wrong)
             .from(CHUNKS)
             .where(CHUNKS.TENANT_ID.eq(tenant))
-            .and(notBypass(CHUNKS.COLLECTION, plan))
+            .and(byId ? CHUNKS.COLLECTION_ID.isNotNull() : DSL.trueCondition())
+            .and(notBypass(label, plan))
             .and(retired(plan))
-            .groupBy(CHUNKS.COLLECTION)
-            .orderBy(CHUNKS.COLLECTION)
+            .groupBy(byId ? List.<Field<?>>of(CHUNKS.TENANT_ID, CHUNKS.COLLECTION_ID) : List.<Field<?>>of(CHUNKS.COLLECTION))
+            .orderBy(label)
             .fetch();
         List<CollectionCount> out = new ArrayList<>();
         for (var r : rows) {
@@ -475,6 +529,7 @@ public final class ChunkKeySweep {
         CatalogDocuments d = CATALOG_DOCUMENTS.as("d");
         CatalogDocumentChunks m = CATALOG_DOCUMENT_CHUNKS.as("m");
         Chunks c = CHUNKS.as("c");
+        boolean byId = gateNow().holds();   // one reading for the whole count: its joins and filters agree
         Condition liveDoc = d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull());
 
         // A legacy manifest row (labels_written false) whose label is on the chunk row only: the sweep would lose it.
@@ -482,7 +537,7 @@ public final class ChunkKeySweep {
         out.put("legacy_label_rows", (long) ctx.fetchCount(
             DSL.selectOne().from(m)
                 .join(d).on(d.TENANT_ID.eq(m.TENANT_ID).and(d.TUMBLER.eq(m.DOC_ID)))
-                .join(c).on(c.TENANT_ID.eq(m.TENANT_ID).and(c.COLLECTION.eq(m.COLLECTION)).and(c.CHASH.eq(m.CHASH)))
+                .join(c).on(c.TENANT_ID.eq(m.TENANT_ID).and(sameCollection(byId, c, m)).and(c.CHASH.eq(m.CHASH)))
                 .where(m.TENANT_ID.eq(tenant)).and(liveDoc).and(m.LABELS_WRITTEN.isFalse())
                 .and(hasAny(c.METADATA, LABEL_KEYS))));
 
@@ -498,18 +553,20 @@ public final class ChunkKeySweep {
         Field<String> rowTtl = DSL.jsonbGetAttributeAsText(c.METADATA, "ttl_days");
         out.put("keyless_ttl_rows", (long) ctx.fetchCount(
             DSL.selectOne().from(c)
-                .where(c.TENANT_ID.eq(tenant)).and(notBypass(c.COLLECTION, plan))
+                .where(c.TENANT_ID.eq(tenant)).and(notBypass(label(byId, c), plan))
                 .and(rowTtl.isNotNull()).and(rowTtl.ne("0")).and(rowTtl.ne(""))
                 .andNotExists(DSL.selectOne().from(m).join(d)
                     .on(d.TENANT_ID.eq(m.TENANT_ID).and(d.TUMBLER.eq(m.DOC_ID)))
-                    .where(m.TENANT_ID.eq(c.TENANT_ID)).and(m.COLLECTION.eq(c.COLLECTION)).and(m.CHASH.eq(c.CHASH))
+                    .where(m.TENANT_ID.eq(c.TENANT_ID)).and(sameCollection(byId, c, m)).and(m.CHASH.eq(c.CHASH))
                     .and(d.DELETED_AT.isNull())
                     .and(DSL.coalesce(hasKeyAsField(d.METADATA, "ttl_days"), DSL.inline(false)).isTrue()))));
 
         // A live document with no physical collection: its chunks have no home the manifest can name (RDR-191).
         stage.accept("precondition:homeless_documents");
         out.put("homeless_documents", (long) ctx.fetchCount(
-            DSL.selectOne().from(d).where(liveDoc).and(d.PHYSICAL_COLLECTION.eq(""))));
+            DSL.selectOne().from(d).where(liveDoc)
+                // A NULL id is no collection, and an empty name keeps a NULL id (P3.1's NULLIF rule): the same homeless set.
+                .and(byId ? d.PHYSICAL_COLLECTION_ID.isNull() : d.PHYSICAL_COLLECTION.eq(""))));
 
         // A manifest span column that is NULL while the chunk row RECORDS the matching value: the sweep would lose that
         // position. "Recorded" is the Python client's manifest_span rule, by value: make_chunk_metadata writes 0 for "not
@@ -530,7 +587,7 @@ public final class ChunkKeySweep {
                 DSL.count().filterWhere(charStart), DSL.count().filterWhere(charEnd))
             .from(m)
             .join(d).on(d.TENANT_ID.eq(m.TENANT_ID).and(d.TUMBLER.eq(m.DOC_ID)))
-            .join(c).on(c.TENANT_ID.eq(m.TENANT_ID).and(c.COLLECTION.eq(m.COLLECTION)).and(c.CHASH.eq(m.CHASH)))
+            .join(c).on(c.TENANT_ID.eq(m.TENANT_ID).and(sameCollection(byId, c, m)).and(c.CHASH.eq(m.CHASH)))
             .where(m.TENANT_ID.eq(tenant)).and(liveDoc)
             .and(lineStart.or(lineEnd).or(charStart).or(charEnd))
             .fetchOne();
@@ -603,7 +660,7 @@ public final class ChunkKeySweep {
         stage.accept("precondition:row_keys_on_live_rows");
         out.put("row_keys_on_live_rows", plan.rowKeys().isEmpty() ? 0L : (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant))
-                .and(notBypass(CHUNKS.COLLECTION, plan)).and(hasAny(CHUNKS.METADATA, plan.rowKeys()))));
+                .and(notBypass(label(byId, CHUNKS), plan)).and(hasAny(CHUNKS.METADATA, plan.rowKeys()))));
         stage.accept("precondition:quarantine_implication_violations");
         out.put("quarantine_implication_violations", plan.quarantineImplies().isEmpty() ? 0L : (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(quarantineBreach(plan))));
@@ -623,9 +680,11 @@ public final class ChunkKeySweep {
         if (collections.isEmpty()) {
             return 0L;
         }
+        Gate3 g = gateNow();
         return ctx.fetchCount(DSL.selectOne().from(CHUNKS)
-            .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.in(collections))
-            .and(notBypass(CHUNKS.COLLECTION, plan))
+            .where(CHUNKS.TENANT_ID.eq(tenant))
+            .and(CollectionSelector.collectionIn(g, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, collections))
+            .and(notBypass(label(g.holds(), CHUNKS), plan))
             .and(retired(plan)).and(width(true)));
     }
 
@@ -701,14 +760,17 @@ public final class ChunkKeySweep {
             out.add(scope.withTenant(tenant, ctx -> {
                 PgSession.setStatementAndLockBounds(ctx, BATCH_STATEMENT_MS, BATCH_LOCK_MS);
                 long s0 = System.nanoTime();
+                Gate3 g = gateNow();
+                boolean byId = g.holds();
+                Field<?> order = byId ? CHUNKS.COLLECTION_ID : CHUNKS.COLLECTION;
                 // The batch's own SELECT, without FOR UPDATE: a plain read, no row lock, no tuple stamped.
-                Result<?> rows = ctx.select(CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL, CHUNKS.METADATA)
+                Result<?> rows = ctx.select(label(byId, CHUNKS), CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL, CHUNKS.METADATA)
                     .from(CHUNKS)
                     .where(CHUNKS.TENANT_ID.eq(tenant))
-                    .and(CHUNKS.COLLECTION.eq(collection))
+                    .and(CollectionSelector.collectionIs(g, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, collection))
                     .and(width(true))
                     .and(retired(plan))
-                    .orderBy(CHUNKS.COLLECTION, CHUNKS.CHASH)
+                    .orderBy(order, CHUNKS.CHASH)
                     .limit(size)
                     .fetch();
                 return new Sample(collection, rows.size(), (System.nanoTime() - s0) / 1_000_000);
@@ -824,6 +886,17 @@ public final class ChunkKeySweep {
             blocked = resume.blocked();
             remaining = resume.remaining();
             cursor = resume.cursor();
+            if (gateNow().holds() && cursor != null && cursor.collectionId() != null) {
+                // The continuation names its collections by the labels it was issued under; the collection in progress may have
+                // been renamed since (its cursor carries the id), so its current label joins the set (RDR-229 P3.5c review).
+                final Long inProgress = cursor.collectionId();
+                String current = scope.withTenant(tenant, ctx -> ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(inProgress))
+                    .fetchOne(CATALOG_COLLECTIONS.NAME));
+                if (current != null && (only == null || only.equals(current))) {
+                    sweepable.add(current);
+                }
+            }
         }
 
         long t0 = System.nanoTime();   // the budget is for the batches, not for the checks before them
@@ -903,20 +976,30 @@ public final class ChunkKeySweep {
      */
     private Batch oneBatch(DSLContext ctx, String tenant, ChunkKeyPlan plan, Set<String> collections, int size,
                            Cursor after) {
+        dev.nexus.service.db.CollectionRegistry.exemptFromWriterCensus(ctx, "chunk-key sweep: SKIP LOCKED, waits for no lock, names no collection write");
         long s0 = System.nanoTime();
+        Gate3 g = gateNow();
+        boolean byId = g.holds();
+        // From gate 3 the keyset is the id's order and the cursor's own id is the position (never its label, which a rename between
+        // batches leaves resolving to nothing); a cursor with no id was issued under the name order, so the sweep starts over.
         Condition keyset = after == null ? DSL.trueCondition()
+            : byId ? (after.collectionId() == null ? DSL.trueCondition()
+                : DSL.row(CHUNKS.COLLECTION_ID, CHUNKS.CHASH).gt(DSL.row(DSL.val(after.collectionId()), DSL.val(cursorChash(after)))))
             : DSL.row(CHUNKS.COLLECTION, CHUNKS.CHASH).gt(DSL.row(after.collection(), cursorChash(after)));
-        Result<Record4<String, byte[], String, JSONB>> rows = ctx
-            .select(CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL, CHUNKS.METADATA)
+        Field<?> order = byId ? CHUNKS.COLLECTION_ID : CHUNKS.COLLECTION;
+        Result<Record5<String, byte[], String, JSONB, Long>> rows = ctx
+            .select(label(byId, CHUNKS), CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL, CHUNKS.METADATA, CHUNKS.COLLECTION_ID)
             .from(CHUNKS)
             .where(CHUNKS.TENANT_ID.eq(tenant))
-            .and(CHUNKS.COLLECTION.in(collections))
-            .and(notBypass(CHUNKS.COLLECTION, plan))   // whatever the caller's set says: the exemption is the batch's own
+            .and(CollectionSelector.collectionIn(g, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, collections))
+            .and(notBypass(label(byId, CHUNKS), plan))   // whatever the caller's set says: the exemption is the batch's own
             .and(width(true))
             .and(retired(plan))
             .and(keyset)
-            .orderBy(CHUNKS.COLLECTION, CHUNKS.CHASH)
+            .orderBy(order, CHUNKS.CHASH)
             .limit(size)
+            // RDR-229 P3.5a, exempt from the registry lock: SKIP LOCKED never waits for a row lock, so this sweep is no link of a lock cycle
+            // (a row a writer or verb holds is left to the next pass); it reads no registry row under a lock and stamps the id by a plain read
             .forUpdate().skipLocked()
             .fetch();
         long selectMs = (System.nanoTime() - s0) / 1_000_000;
@@ -927,11 +1010,15 @@ public final class ChunkKeySweep {
         List<Query> updates = new ArrayList<>(rows.size());
         for (var r : rows) {
             JSONB kept = keepOnly(r.value4(), allowed);
-            // The statement assigns metadata and nothing else: last_written_at is the reaper's grace anchor.
+            // The statement assigns metadata and the collection's id, nothing else: last_written_at is the reaper's
+            // grace anchor. RDR-229 P3.1 stage 2b: the id is set because chunks carries a NOT VALID CHECK evaluated on
+            // every updated row, which refuses a chunk the stamp has not reached (collection set, id NULL).
+            // From gate 3 the row is stamped, so the id is the one it was selected by and the row is found by it.
             updates.add(ctx.update(CHUNKS)
                 .set(CHUNKS.METADATA, kept)
+                .set(CHUNKS.COLLECTION_ID, byId ? DSL.val(r.value5(), CHUNKS.COLLECTION_ID) : CollectionIds.idOf(tenant, r.value1()))
                 .where(CHUNKS.TENANT_ID.eq(tenant))
-                .and(CHUNKS.COLLECTION.eq(r.value1()))
+                .and(byId ? CHUNKS.COLLECTION_ID.eq(r.value5()) : CHUNKS.COLLECTION.eq(r.value1()))
                 .and(CHUNKS.CHASH.eq(r.value2()))
                 .and(CHUNKS.EMBEDDING_MODEL.eq(r.value3())));
         }
@@ -943,7 +1030,7 @@ public final class ChunkKeySweep {
             updated += Math.max(0, n);
         }
         var lastRow = rows.get(rows.size() - 1);
-        Cursor last = new Cursor(lastRow.value1(), HexFormat.of().formatHex(lastRow.value2()));
+        Cursor last = new Cursor(lastRow.value1(), HexFormat.of().formatHex(lastRow.value2()), byId ? lastRow.value5() : null);
         return new Batch(updated, rows.size(), selectMs, updateMs, last);
     }
 

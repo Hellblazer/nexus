@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -47,6 +48,8 @@ abstract class ChunkKeysTestBase extends AtomicWriteTestBase {
         List.of("origin_collection", "quarantined_at", "quarantined_by", "reaper_quarantined_at");
     static final String TAXONOMY_PREFIX = "taxonomy" + "_".repeat(2);
 
+    /** Gate 3 for the engine under test: false unless a test latches it (the sweep then continues by collection id). */
+    protected final java.util.concurrent.atomic.AtomicBoolean latched = new java.util.concurrent.atomic.AtomicBoolean();
     protected NexusService service;
     protected PgVectorRepository vectors;
     private final HttpClient http = TestHttp.client();
@@ -58,10 +61,11 @@ abstract class ChunkKeysTestBase extends AtomicWriteTestBase {
             PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES), ROOT,
                 TenantConstants.DEFAULT_TENANT, TokenStore.ROOT_TOKEN_LABEL, TokenStore.SCOPE_ROOT, null, null);
         }
-        vectors = new PgVectorRepository(tenantScope, embedder, embedder);
-        service = new NexusService(0, ROOT, svcDs, null, vectors, null, null, null);
+        vectors = new PgVectorRepository(tenantScope, embedder, embedder, latched::get);
+        service = new NexusService(0, ROOT, svcDs, null, vectors, null, null, null, null, System::getenv, () -> false, null, null, latched::get,
+            () -> dev.nexus.service.datamove.RenameReadiness.Missing.NAME_KEY_DROP_MOVE);
         service.chunkConstraintAdmin(new ChunkConstraintAdmin(
-            new AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword())));
+            new AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()), latched::get));
         service.start();
     }
 
@@ -224,9 +228,10 @@ abstract class ChunkKeysTestBase extends AtomicWriteTestBase {
             DSL.using(su, SQLDialect.POSTGRES)
                 .insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                     CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
-                    CATALOG_DOCUMENTS.METADATA)
-                .values(tenant, tumbler, "Doc " + tumbler, contentType, physicalCollection,
-                    metadataJson == null ? null : JSONB.jsonb(metadataJson))
+                    CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CATALOG_DOCUMENTS.METADATA)
+                .values(DSL.val(tenant), DSL.val(tumbler), DSL.val("Doc " + tumbler), DSL.val(contentType),
+                    DSL.val(physicalCollection), CollectionIds.idOf(tenant, physicalCollection),
+                    DSL.val(metadataJson == null ? null : JSONB.jsonb(metadataJson)))
                 .execute();
         }
     }

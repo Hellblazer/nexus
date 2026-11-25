@@ -79,7 +79,11 @@ def _seed_owned_note(client, content: str, title: str) -> str:
         single_chunk_manifest_metadata,
     )
 
+    from tests._catalog_fixture_ops import register_seed_collections
+
     chash, manifest_metadatas = single_chunk_manifest_metadata(content)
+    # RDR-229 P3.1: put_note registers the collection before its document; this mirror does the same.
+    register_seed_collections(_COLLECTION)
     tumbler, created = catalog_store_hook_tracked(
         title=title, doc_id=chash, collection_name=_COLLECTION,
     )

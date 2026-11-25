@@ -352,7 +352,7 @@ class TestAllCandidacy:
     def test_kept_tombstoned_source_with_no_document_row_is_listed_as_a_reentry(self, runner):
         src, tgt = "docs__1-1__bge-base-en-v15-768__v1", "docs__1-1__voyage-model-a__v1"
         jobs = [_job(JOB, source=src, target=tgt, state="done", disposition="kept_tombstoned")]
-        cat = FakeCatalog([_row(src, superseded_by=tgt)], {"docs": VA}, doc_counts={}, all_doc_counts={})
+        cat = FakeCatalog([_row(src, superseded_by=tgt), _row(tgt, model=VA)], {"docs": VA}, doc_counts={}, all_doc_counts={})
         db = _engine(jobs=jobs)
         result = _invoke(runner, db, cat, ["--all"])
         assert result.exit_code == 0, result.output
@@ -362,7 +362,7 @@ class TestAllCandidacy:
     def test_kept_tombstoned_source_with_a_restored_live_document_is_a_running_reentry(self, runner):
         src, tgt = "docs__1-1__bge-base-en-v15-768__v1", "docs__1-1__voyage-model-a__v1"
         jobs = [_job(JOB, source=src, target=tgt, state="done", disposition="kept_tombstoned")]
-        cat = FakeCatalog([_row(src, superseded_by=tgt)], {"docs": VA}, doc_counts={src: 1}, all_doc_counts={src: 2})
+        cat = FakeCatalog([_row(src, superseded_by=tgt), _row(tgt, model=VA)], {"docs": VA}, doc_counts={src: 1}, all_doc_counts={src: 2})
         result = _invoke(runner, _engine(jobs=jobs), cat, ["--all"])
         assert f"re-entry of job {JOB} (running)" in result.output
 
@@ -432,7 +432,7 @@ class TestAllSkip:
     def test_a_reentry_source_can_be_skipped(self, runner):
         src, tgt = "docs__9-9__bge-base-en-v15-768__v1", "docs__9-9__voyage-model-a__v1"
         jobs = [_job(JOB, source=src, target=tgt, state="done", disposition="kept_tombstoned")]
-        cat = FakeCatalog([_row(src, superseded_by=tgt)], {"docs": VA}, doc_counts={}, all_doc_counts={})
+        cat = FakeCatalog([_row(src, superseded_by=tgt), _row(tgt, model=VA)], {"docs": VA}, doc_counts={}, all_doc_counts={})
         result = _invoke(runner, _engine(jobs=jobs), cat, ["--all", "--skip", src])
         assert result.exit_code == 0, result.output
         assert "re-entry of job" not in result.output and f"{src}: skipped (--skip)" in result.output
@@ -680,9 +680,19 @@ class TestConfirmPrompt:
 KEPT_SRC, KEPT_TGT = "docs__1-1__bge-base-en-v15-768__v1", "docs__1-1__voyage-model-a__v1"
 
 
-def _kept_tombstoned_world(*, live=0, total=0):
+def _kept_tombstoned_world(*, live=0, total=0, target_row="live"):
+    """A kept_tombstoned job and its catalog. ``target_row``: ``"live"`` (the target is registered and current),
+    ``"superseded"`` (the target was itself superseded: retired), ``"retired"`` (its lifecycle state says so) or
+    ``None`` (the target has no registry row)."""
     jobs = [_job(JOB, source=KEPT_SRC, target=KEPT_TGT, state="done", disposition="kept_tombstoned")]
-    cat = FakeCatalog([_row(KEPT_SRC, superseded_by=KEPT_TGT)], {"docs": VA},
+    rows = [_row(KEPT_SRC, superseded_by=KEPT_TGT)]
+    if target_row == "live":
+        rows.append(_row(KEPT_TGT, model=VA))
+    elif target_row == "superseded":
+        rows.append(_row(KEPT_TGT, model=VA, superseded_by="docs__1-1__voyage-model-b__v1"))
+    elif target_row == "retired":
+        rows.append(_row(KEPT_TGT, model=VA, state="retired"))
+    cat = FakeCatalog(rows, {"docs": VA},
                       doc_counts={KEPT_SRC: live} if live else {}, all_doc_counts={KEPT_SRC: total} if total else {})
     return jobs, cat
 
@@ -732,7 +742,8 @@ class TestReentryStarts:
     def test_a_stale_source_and_a_reentry_start_together(self, runner):
         stale = "docs__2-2__bge-base-en-v15-768__v1"
         jobs, _ = _kept_tombstoned_world()
-        cat = FakeCatalog([_row(stale, owner="2.2"), _row(KEPT_SRC, superseded_by=KEPT_TGT)], {"docs": VA})
+        cat = FakeCatalog([_row(stale, owner="2.2"), _row(KEPT_SRC, superseded_by=KEPT_TGT), _row(KEPT_TGT, model=VA)],
+                          {"docs": VA})
         db = _engine({stale: _plan()}, jobs=jobs)
         result = _invoke(runner, db, cat, ["--all", "--no-dry-run", "--yes"])
         assert result.exit_code == 0, result.output

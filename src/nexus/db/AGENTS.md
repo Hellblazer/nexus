@@ -32,7 +32,7 @@ removed with `POST /v1/vectors/resolve`, nexus-3t0jv.) Pinned by
 | `HttpTelemetryStore` | Relevance log + search/hook telemetry + tier writes. |
 | `HttpChashIndex` | Content-hash chunk index (RDR-086; table retired by RDR-187 — shim until the 410 flip). |
 | `HttpDocumentAspectsStore` | Structured aspect rows (RDR-089). |
-| `HttpAspectQueue` | Queue drained by the aspect-worker daemon (PG `FOR UPDATE SKIP LOCKED`). |
+| `HttpAspectQueue` | Producer side of the engine's `aspects` tuple queue (RDR-235): one task per document; the aspect worker drains it. The `aspect_extraction_queue` table and its routes are retired. |
 | `HttpDocumentHighlightsStore` | Per-document DEVONthink highlight/mention notes, keyed by catalog tumbler (RDR-139 Layer E). Dedicated table, not `document_aspects`. |
 | `HttpTupleStore` | Linda tuple space client over `/v1/tuples` (RDR-205). Service-only from birth. |
 
@@ -57,30 +57,36 @@ rung (`src/nexus/upgrade_ladder/rungs/`, registered in `registry.py`).
 Installs still carrying pre-PG local data migrate via the pinned last
 migration-capable 6.x release (the stranded-install two-hop redirect).
 
-## Collection registration precedes chunk writes (RDR-156 P0.2)
+## Collection registration precedes chunk writes (RDR-156 P0.2, RDR-204, RDR-229)
 
-Collection registration is enforced server-side at two layers:
+A collection must have a `nexus.catalog_collections` row before any chunk, taxonomy, aspect or
+highlight row names it. The engine never creates that row as a side effect of a write:
 
-1. **`PgVectorRepository.upsertChunks` (Java service)** auto-stubs the collection into
-   `nexus.catalog_collections` within the same transaction, before any chunk row is inserted.
-   For a conformant name (`<content_type>__<owner_id>__<embedding_model>__v<n>`) the parsed
-   segments are stored; for a non-conformant name a name-only stub with empty metadata fields
-   is stored.  Either way the FK is satisfied before the chunk row lands.
+1. **A write to an unregistered collection is refused**: HTTP 422, reason `unregistered_collection`
+   (`UnregisteredCollectionException`; `nexus.db.engine_reasons`). `PgVectorRepository.upsertChunks`'s
+   old auto-registration of a blank "stub" row is retired (RDR-204 Phase 1), and the three NOT-blank
+   CHECKs on `content_type`, `owner_id` and `embedding_model` (`hygiene-002-1`) make a stub row
+   impossible. The client registers first: `nx index`, `store_put` and the other writers call the
+   catalog's collection registration and use the row it returns.
 
-2. **FK constraints** `chunks_collection_fk` (`nexus.chunks` -> `catalog_collections`,
-   `fk-004-chunks-collection-registry.xml`, VALIDATEd by changeset fk-004-2) and
-   `topic_assignments_collection_fk` (`fk-002-validate.xml`).  The per-dimension
-   `chunks_384/768/1024_collection_fk` died with their tables when `vectors-004-unify-chunks.xml`
-   unified them into `nexus.chunks` (RDR-191), and `chash_index_collection_fk` is dead with
-   `chash_index` (RDR-187).
+2. **Referential integrity** is a foreign key from each referencing table to the registry.
+   `chunks_collection_fk` (`fk-004`) and `topic_assignments_collection_fk` (`fk-002`) are
+   name keys (`(tenant_id, name)`): they, and the five other name keys (`canary_query_ring`,
+   `document_aspects`, `topics`, `taxonomy_meta`, `document_highlights`), are dropped by the
+   RDR-229 name-key drop move (`NameKeyDropMove.NAME_KEYS`) once gate 3 of the completion check
+   holds, because a one-row rename cannot update the registry's `name` while they exist. The
+   `collection_id` twin keys (`(tenant_id, collection_id)`) carry the integrity from then on.
+   See `docs/architecture.md` § Collection identity. The per-dimension `chunks_384/768/1024_collection_fk`
+   died with their tables (`vectors-004`, RDR-191); `chash_index_collection_fk` with `chash_index`
+   (RDR-187).
 
-3. **Stub upgradability**: stub rows (all metadata fields `= ''`) are upgraded in-place by
-   `CatalogRepository.importCollection` via `DO UPDATE ... WHERE embedding_model='' AND
-   content_type='' AND owner_id=''`.  A re-run never clobbers a genuinely-newer live row.
+3. **Import never overwrites a live row.** `CatalogRepository.importCollection` is `ON CONFLICT
+   DO NOTHING`; a recovery bundle cannot clobber a registered collection.
 
 **Rule (Java service surface)**: Never add a chunk write path in the Java service that bypasses
-`PgVectorRepository.upsertChunks`.  This rule now governs every mode — RDR-155 P4b (2026-07-25)
-removed the Chroma dependency entirely, so there is no local-mode client write path outside it.
+`PgVectorRepository.upsertChunks`, and never add one that registers a collection implicitly. This
+governs every mode: RDR-155 P4b (2026-07-25) removed the Chroma dependency, so there is no local-mode
+client write path outside it.
 
 ## Capability-selection discipline (RDR-156 Decision 8)
 
@@ -96,13 +102,13 @@ that reaches for a heavier mechanism has to argue past them.
 
 | RDR-156 decision | Mechanism chosen | Why not heavier |
 |---|---|---|
-| chunk → collection referential integrity | **declarative FK** (`chunks_collection_fk` on `nexus.chunks`, and `topic_assignments_collection_fk`, → `catalog_collections`; both VALIDATEd) | A FK is declarative and authoritative-by-construction; no function/trigger needed. Cost is one index probe per upsert (negligible vs the embedding call). |
+| chunk → collection referential integrity | **declarative FK** (`chunks_collection_fk` on `nexus.chunks`, and `topic_assignments_collection_fk`, → `catalog_collections`; both VALIDATEd; RDR-229 replaces these name keys with `collection_id` twins and drops them after gate 3) | A FK is declarative and authoritative-by-construction; no function/trigger needed. Cost is one index probe per upsert (negligible vs the embedding call). |
 | manifest → chunk integrity (orphan detection) | **declarative FK** `catalog_document_chunks (tenant_id, collection, chash) -> nexus.chunks`, `ON UPDATE CASCADE`, deferrable on delete (RDR-191 Phase 5, `catalog-029-manifest-chunk-fk.xml`, VALIDATEd) — **SUPERSEDES this row's original 2026 entry** | RDR-156's original "A FK is impossible" reasoning held only while the chunk store was split across three dim tables (`chunks_384/768/1024`); RDR-191 Phase 4 unified them into one `nexus.chunks` table first, which made the FK expressible. `nexus.manifest_orphans(dim)` and the P2.1 read backstop this row used to name are RETIRED (RDR-191 Phase 6, nexus-o8dil.33, catalog-030) — the FK rejects the dangling state at write time, making the detection function unreachable by construction. This row is the canonical "declarative FK beats a stored function" case the capability ladder above was written to produce; it took two more RDRs to actually reach it. |
 | manifest backfill / document reconstruction | **stored function** `document_text(doc_id)` (`manifest_backfill()` RETIRED, RDR-191 Phase 6) | `document_text` replaces a generated-SQL-string artifact with a first-class DB object callable by doctor / migration validation; no triggers, no app round-trips. `manifest_backfill()`'s only reason to exist — pre-stamping `collection` before the (now-retired) orphan/verify functions' `collection IS NOT NULL` filter — died with those functions, and catalog-025's later `NOT NULL` promotion means no future row can need the stamp either. |
 | per-collection stats | **`security_invoker` view** `collection_vector_stats` | Read-only aggregate; a view under the caller's RLS is exactly right — replaces remote `count()` calls. No function needed. |
 | combined-query read shapes | **set-returning `LANGUAGE sql` functions** (`search_metadata_scoped` / `search_topic_scoped` / `search_graph_hop` / `search_aspect_scoped`) | Must take the query vector as a plan-time argument (a view can't), and stay inlinable so HNSW survives the join. Functions, not views, not triggers. |
 | soft delete (tombstone) | **plain column + partial indexes + view filters** (`deleted_at`, `live_chunks`) | **Adds ZERO triggers.** Tombstoning is an `UPDATE`, so the `ON DELETE CASCADE` chains do not fire; restore clears one column. Cascade semantics are declarative. |
-| collection registration-before-write | **app-side ordering in `upsertChunks` + the FK** (see the section above) | The FK makes the ordering load-bearing; the registration is done in the same transaction. No trigger to maintain the invariant. |
+| collection registration-before-write | **a 422 refusal in `upsertChunks` + the FK** (see the section above) | The FK makes the ordering load-bearing; the registration is done in the same transaction. No trigger to maintain the invariant. |
 
 ### The `chunks_registry` trigger — recorded NOT-worth-it (this RDR's entry)
 
@@ -136,7 +142,7 @@ choices against it:
 **NOT-worth-it list (RDR-154 Alternatives considered) — do not reach for a trigger here:**
 
 - **Dangler-logging triggers** — `allow_dangling` is intentional; danglers belong in RDR-153's batch report, not a write-path trigger.
-- **Queue state-machine guards** — already enforced by `WHERE`-guarded `UPDATE`s + `FOR UPDATE SKIP LOCKED`.
+- **Queue state-machine guards** — the tuple queues (`/v1/tuples`, RDR-205/RDR-235) own lease and attempt state engine-side; no trigger is needed.
 - **Register-as-function** — catalog register is already one atomic `FOR UPDATE` transaction.
 - **ETL upserts** — single-statement `ON CONFLICT`; no trigger needed. (A column a trigger/generated mechanism maintains must NOT be an ETL `ON CONFLICT` merge participant — see `doc_count`, dropped from the taxonomy ETL.)
 
@@ -152,3 +158,16 @@ consumers query the wrapper, never the matview.
 - **No ORM, and NO new SQLite** (root `AGENTS.md` hot rule). New persistent state is a Liquibase changeset in `service/src/main/resources/db/changelog/`, never client-side DDL and never a `sqlite3.connect`; the SQLite substrate this module once carried is DELETED (RDR-158 P4, see above).
 - **Never edit a shipped Liquibase changeset.** Schema evolution is a NEW changeset (and, for data migrations, an upgrade-ladder rung in `src/nexus/upgrade_ladder/`). Editing a shipped changeset breaks checksum validation on every installed engine past that version.
 - **Pagination must respect `_PAGE = 300`, and writes `MAX_RECORDS_PER_WRITE`** (limits table: `.claude/rules/external-service-limits.md`).
+
+## Other modules
+
+Modules the key-modules table does not describe, one line each (the module docstring has the contract). Most of the client-side plumbing here exists to reach the engine reliably; none of it holds state the engine does not.
+
+| Group | Files |
+|---|---|
+| Endpoint and credentials | `service_endpoint.py` (endpoint discovery and the production-write guard), `data_token.py` (`DataTokenManager`: self-minting short-TTL data tokens), `managed_endpoint.py` (cloud endpoint config and capability probe), `client_identity.py` (the client version the engine reads), `serving_engine_version.py` (the version of the engine this process talks to), `storage_mode.py` (backend env validation) |
+| HTTP transport | `pooled_http.py` (persistent-connection transport), `edge_refusal.py` (edge/WAF refusal rendering), `gateway_backoff.py`, `gateway_hold.py` (a gateway 503 holds every client of one config dir), `request_gate.py` (per-process request interval and count) |
+| Engine clients | `http_scratch_store.py` (T1), `http_pipeline_client.py` and `inmemory_pipeline.py` (streaming-PDF buffer and its test twin), `http_engine_status.py` (`GET /v1/status` embed counters), `t2_reads.py` (narrow T2 reads for callers outside the facade) |
+| Collections and chunks | `collection_purge.py` (the canonical collection-delete cascade), `collection_state.py` (three-state existence probe), `chash_tables.py` (the chash-bearing tables), `reconcile.py` (model/dimension routing, chunk pagers) |
+| Local Postgres | `pg_provision.py` (local cluster provisioner), `pg_bundle.py` (first-run bundle extraction), `pg_auth.py` (`pg_hba.conf`), `pg_cluster_upgrade.py` (`pg_upgrade` of older clusters), `admin_sql.py` (the local admin SQL runner), `diag_connection.py` (the only product path to a `nexus_diag` session), `svc_monitor.py` (`pg_monitor` queries), `note_uri_pairs.py` (the RDR-231 pair query) |
+| Local models | `service_bge_model.py`, `service_crossencoder_model.py`, `onnx_model_root.py` (provisioning of the engine's ONNX models), `minilm_direct.py` (MiniLM embedding function for tests and `--dry-run`) |

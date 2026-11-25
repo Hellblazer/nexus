@@ -394,8 +394,9 @@ class CollectionRehomeTest {
             .insertInto(DSL.table(DSL.name("nexus", "taxonomy_meta")),
                 DSL.field(DSL.name("tenant_id"), String.class),
                 DSL.field(DSL.name("collection"), String.class),
+                DSL.field(DSL.name("collection_id"), Long.class),
                 DSL.field(DSL.name("last_discover_doc_count"), Integer.class))
-            .values(TENANT, collection, 1)
+            .values(TENANT, collection, dev.nexus.service.db.CollectionIds.require(ctx, TENANT, collection), 1)
             .execute());
     }
 

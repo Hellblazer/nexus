@@ -44,7 +44,12 @@ def engine_t3(t2_service_env: str):
     the engine, not from an in-memory double.
     """
     from nexus.db.http_vector_client import HttpVectorClient
+    from tests._catalog_fixture_ops import register_seed_collections
 
+    # RDR-229 P3.8: a new knowledge subject is minted a c<id> label, and a client built for an explicit tenant finds no
+    # subject row to resolve it by. These tests read the note back under the subject's conformant name, as they
+    # write it, so the subject is registered under that name first, as an existing one is.
+    register_seed_collections(t3_collection_name(SUBJECT))
     client = HttpVectorClient(tenant=t2_service_env)
     inject_t3(client)
     yield client

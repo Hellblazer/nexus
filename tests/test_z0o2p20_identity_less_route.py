@@ -62,8 +62,13 @@ def _real_catalog_patches() -> dict:
     real engine catalog instead."""
     import nexus.catalog.factory as factory
     import nexus.config as config
+    import nexus.corpus as corpus
+    from tests._catalog_fixture_ops import registered_or_seeded
 
     return {
+        # RDR-229 P3.1: the engine refuses a document under an unregistered collection, and the run registers the
+        # collections it indexes into before its hook, so a run over the real catalog registers them for real.
+        "nexus.corpus.ensure_collection_registered": {"side_effect": registered_or_seeded(corpus.ensure_collection_registered)},
         "nexus.catalog.factory.make_catalog_reader": {"side_effect": factory.make_catalog_reader},
         "nexus.catalog.factory.make_catalog_writer": {"side_effect": factory.make_catalog_writer},
         # The stub returns "fake-key" for EVERY credential, including the

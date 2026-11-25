@@ -3462,7 +3462,7 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
     same v2mdd commit).
     """
     try:
-        from nexus.upgrade_ladder.registry import default_registry  # noqa: PLC0415 — deferred, CLI startup cost
+        from nexus.upgrade_ladder.registry import RUNG_RETIRE_KEYS_SWEEP, default_registry  # noqa: PLC0415 — deferred, CLI startup cost
 
         rungs = default_registry()
     except Exception as exc:  # noqa: BLE001 — must surface, not silently drop
@@ -3477,7 +3477,12 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
     # managed catalog or table reports itself not applicable instead (an interactive `nx upgrade` still
     # scans). nexus-mjmjl: and bounded on a local engine too, as in `nx doctor`: the first command after a
     # version change must not spend minutes in one rung's dry-run scan of a large local store.
-    from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY, managed_service  # noqa: PLC0415 — deferred, CLI startup cost
+    from nexus.upgrade_ladder.auto_guard import (  # noqa: PLC0415 — deferred, CLI startup cost
+        INTERACTIVE_REMEDY,
+        RETIRE_KEYS_OPERATOR_NOTE,
+        managed_service,
+        sweep_is_operator_only,
+    )
     from nexus.upgrade_ladder.unattended import bounded_reads, unattended_run  # noqa: PLC0415 — deferred, CLI startup cost
 
     # On a local engine a decline here is the bounded reads, and the session-start upgrade runs the rung anyway.
@@ -3502,6 +3507,13 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
             ):
                 # Declined this unattended check (a managed service): said once here, per version change, with the
                 # command; the session-start upgrade skips such a rung without a word.
+                if rung.name == RUNG_RETIRE_KEYS_SWEEP and sweep_is_operator_only():
+                    # An interactive `nx upgrade` from this client cannot run the sweep: do not send it there.
+                    lines.append(
+                        f"data rung '{rung.name}' not applicable on a managed deployment with mint_token "
+                        f"configured — {RETIRE_KEYS_OPERATOR_NOTE}"
+                    )
+                    continue
                 lines.append(
                     f"data rung '{rung.name}' not checked — {status.pending_detail.split('; ')[0]}; "
                     "run `nx upgrade` interactively"

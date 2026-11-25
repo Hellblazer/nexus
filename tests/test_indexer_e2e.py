@@ -122,7 +122,7 @@ def registry(tmp_path: Path, mini_repo: Path) -> RepoRegistry:
 
 
 @pytest.fixture(autouse=True)
-def _legacy_vector_backend(monkeypatch):
+def _legacy_vector_backend(monkeypatch, double_topology_mints_profile_model):
     # nexus-o06g4: these e2e tests wire a raw-Chroma EphemeralClient ``local_t3``
     # + ``mock_voyage_client`` and exercise the CLIENT-embed indexing path. Pin
     # the vector backend off the 6.0 service default (is_vector_service_mode()
@@ -131,6 +131,11 @@ def _legacy_vector_backend(monkeypatch):
     # raw chromadb rejects with "IndexError: list index out of range in upsert"
     # (normalize_insert_record_set). The service-mode indexing path is covered
     # by the unit seam-B tests + the live service smokes, not here.
+    #
+    # RDR-229 P3.1 (nexus-p2m1x.17): the run registers its collections with the
+    # engine before the catalog hook, so the double names them under the
+    # tenant's profile model (double_topology_mints_profile_model); its
+    # vectors never reach the engine.
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "local")
 
 
@@ -739,6 +744,15 @@ def test_migration_moves_prose_from_code_to_docs(
 
     # Step 1 — first index populates the catalog with README's tumbler.
     _index(rich_repo, reg, local_t3)
+
+    # Step 1b — settle the registry's collection names. RDR-229 P3.1: the run now registers its collections with the
+    # engine, so the second index's legacy rename (_migrate_legacy_collections) finds the registry row the engine's
+    # rename needs and succeeds; before, it met a 404 and kept the legacy names. The double's vectors live outside the
+    # engine, so the engine's rename does not move them: a chunk seeded under the pre-rename name would sit in a
+    # collection the registry no longer names. Run the migration here, with nothing seeded, and seed under the names
+    # it leaves (the prune below is what this test is about, not the rename).
+    _index(rich_repo, reg, local_t3)
+    info = reg.get(rich_repo)
 
     # Step 2 — read the tumbler that _catalog_hook assigned, via the
     # public reader (raw ``cat._db`` has no service-mode equivalent).

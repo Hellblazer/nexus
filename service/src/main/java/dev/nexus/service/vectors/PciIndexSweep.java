@@ -82,21 +82,30 @@ public final class PciIndexSweep implements PciIndexSet {
      * @param consecutiveFailures failed reads since the last successful one; 0 after a success
      * @param expired             true when the set is older than {@code 3 * period + readBound} and so is answering
      *                            as empty; the counts above are still the last read's
+     * @param validId             id-predicate indexes with {@code indisvalid} true (RDR-229 P3.4): the ones that serve once gate 3 has latched,
+     *                            when {@code valid} (the name-predicate indexes) falls to 0
+     * @param invalidId           id-predicate indexes with {@code indisvalid} false, an INVALID leftover of one included: a failed or in-flight id build
      */
     public record Status(boolean everRead, int valid, int invalid, int unparsed,
                          int reindexLeftover, Instant lastReadAt, Instant lastFailureAt, int consecutiveFailures,
-                         boolean expired) {
+                         boolean expired, int validId, int invalidId) {
         static final Status NEVER = new Status(false, 0, 0, 0, 0, null, null, 0, false);
+
+        /** A status with no id-predicate counts (a read of an engine, or a test, that has none). */
+        public Status(boolean everRead, int valid, int invalid, int unparsed, int reindexLeftover, Instant lastReadAt,
+                      Instant lastFailureAt, int consecutiveFailures, boolean expired) {
+            this(everRead, valid, invalid, unparsed, reindexLeftover, lastReadAt, lastFailureAt, consecutiveFailures, expired, 0, 0);
+        }
 
         Status failedAt(Instant when) {
             return new Status(everRead, valid, invalid, unparsed, reindexLeftover, lastReadAt, when,
-                consecutiveFailures + 1, expired);
+                consecutiveFailures + 1, expired, validId, invalidId);
         }
 
         Status withExpired(boolean now) {
             return now == expired ? this
                 : new Status(everRead, valid, invalid, unparsed, reindexLeftover, lastReadAt, lastFailureAt,
-                    consecutiveFailures, now);
+                    consecutiveFailures, now, validId, invalidId);
         }
     }
 
@@ -106,9 +115,9 @@ public final class PciIndexSweep implements PciIndexSet {
      * state expired marks only that state, and a failed read carries the flag forward so the expiry logs once.
      */
     private record State(PciIndexSet set, Status status, AtomicBoolean expiryLogged,
-                         Map<PciCatalog.Key, Instant> since, SortedSet<String> entries) {
+                         Map<PciCatalog.Key, Instant> since, SortedSet<String> entries, Map<String, Instant> idSince) {
         State(PciIndexSet set, Status status) {
-            this(set, status, new AtomicBoolean(), Map.of(), new TreeSet<>());
+            this(set, status, new AtomicBoolean(), Map.of(), new TreeSet<>(), Map.of());
         }
     }
 
@@ -205,6 +214,17 @@ public final class PciIndexSweep implements PciIndexSet {
         return s.set().hasValidIndex(model, tenant, collection);
     }
 
+    /** From memory, like {@link #hasValidIndex}: the id-predicate index of the last successful read (RDR-229 P3.5c). */
+    @Override
+    public boolean hasValidIdIndex(String model, String tenant, long collectionId) {
+        State s = state.get();
+        if (expired(s)) {
+            noteExpired(s);
+            return false;
+        }
+        return s.set().hasValidIdIndex(model, tenant, collectionId);
+    }
+
     /**
      * As {@link PciIndexSet#validIndex}, from memory, with the name the last read saw and since when this key has been
      * listed without a break (a set that expired and recovered counts as a new run). An expired set answers empty.
@@ -225,6 +245,24 @@ public final class PciIndexSweep implements PciIndexSet {
     }
 
     /**
+     * As {@link #validIndex}, for the id-predicate index of {@code collectionId}: its name and since when it has been listed without a break (a
+     * set that expired and recovered counts as a new run), so the plan check's first trigger fires for a new or recovered id index too.
+     */
+    @Override
+    public Optional<ValidIndex> validIdIndex(String model, String tenant, long collectionId) {
+        State s = state.get();
+        if (expired(s)) {
+            noteExpired(s);
+            return Optional.empty();
+        }
+        if (!s.set().hasValidIdIndex(model, tenant, collectionId)) {
+            return Optional.empty();
+        }
+        Instant since = s.idSince().get(PciCatalog.idKey(model, tenant, collectionId));
+        return Optional.of(new ValidIndex(PciCatalog.indexNameById(model, tenant, collectionId), since == null ? Instant.EPOCH : since));
+    }
+
+    /**
      * From memory: the anchor the last successful read saw on the valid index for this key, or empty (no such index,
      * no parseable anchor, or the set has expired). The status object reads {@code anchor.origin()} from it.
      */
@@ -236,6 +274,22 @@ public final class PciIndexSweep implements PciIndexSet {
             return Optional.empty();
         }
         return s.set().anchor(model, tenant, collection);
+    }
+
+    /** From memory, like {@link #anchor}: the anchor of the valid id-predicate index of the last successful read (RDR-229 P3.4). */
+    @Override
+    public Optional<PciCatalog.Anchor> anchorById(String model, String tenant, long collectionId) {
+        State s = state.get();
+        if (expired(s)) {
+            noteExpired(s);
+            return Optional.empty();
+        }
+        return s.set().anchorById(model, tenant, collectionId);
+    }
+
+    /** The anchor of the index the canary target measures: the id-predicate index for an id target, the name-predicate one before. */
+    Optional<PciCatalog.Anchor> anchorOf(PciCanary.Target t) {
+        return t.collectionId() != null ? anchorById(t.model(), t.tenant(), t.collectionId()) : anchor(t.model(), t.tenant(), t.collection());
     }
 
     /** The counts and times of the last successful read, the failures since, and whether it has expired. */
@@ -300,7 +354,7 @@ public final class PciIndexSweep implements PciIndexSet {
             Instant now = clock.instant();
             Status status = new Status(true, snapshot.validCount(), snapshot.invalidCount(),
                 snapshot.unparsedCount(), snapshot.reindexLeftoverCount(), now, previous.status().lastFailureAt(), 0,
-                false);
+                false, snapshot.validIdCount(), snapshot.invalidIdCount());
             // A key listed by the read before this one, which had not expired, keeps its date; any other is new now.
             boolean continuous = !expired(previous);
             Map<PciCatalog.Key, Instant> since = new HashMap<>();
@@ -308,22 +362,30 @@ public final class PciIndexSweep implements PciIndexSet {
                 Instant earlier = continuous ? previous.since().get(key) : null;
                 since.put(key, earlier == null ? now : earlier);
             }
-            SortedSet<String> entries = snapshot.validEntries();
-            state.set(new State(snapshot, status, new AtomicBoolean(), Map.copyOf(since), entries));
+            // The same rule for the id-predicate indexes, by (model, tenant, id): the plan check's "a new or recovered index is checked at once".
+            Map<String, Instant> idSince = new HashMap<>();
+            for (String key : snapshot.validIdKeys()) {
+                Instant earlier = continuous ? previous.idSince().get(key) : null;
+                idSince.put(key, earlier == null ? now : earlier);
+            }
+            SortedSet<String> entries = new TreeSet<>(snapshot.validEntries());
+            entries.addAll(snapshot.validIdEntries());   // the router's set stays name-keyed; the log of changes covers the id family too
+            state.set(new State(snapshot, status, new AtomicBoolean(), Map.copyOf(since), entries, Map.copyOf(idSince)));
             logSetChange(previous.entries(), entries);
-            if (status.unparsed() > 0 && status.valid() == 0) {
-                // Indexes named pci_ exist and none parsed: a deparse change after a PostgreSQL upgrade looks
-                // exactly like this, and routes every collection as if it had no index.
-                log.warn("event=pci_sweep valid={} invalid={} unparsed={} reindex_leftover={} "
+            if (status.unparsed() > 0 && status.valid() == 0 && status.validId() == 0) {
+                // Indexes named pci_ exist and none parsed, of either family: a deparse change after a PostgreSQL upgrade looks
+                // exactly like this, and routes every collection as if it had no index. (Valid id indexes serving after the
+                // latch, with the name indexes retired, are not this.)
+                log.warn("event=pci_sweep valid={} valid_id={} invalid={} invalid_id={} unparsed={} reindex_leftover={} "
                     + "warning=unparsed_indexes_and_no_valid_one",
-                    status.valid(), status.invalid(), status.unparsed(), status.reindexLeftover());
+                    status.valid(), status.validId(), status.invalid(), status.invalidId(), status.unparsed(), status.reindexLeftover());
             } else {
-                log.info("event=pci_sweep valid={} invalid={} unparsed={} reindex_leftover={}",
-                    status.valid(), status.invalid(), status.unparsed(), status.reindexLeftover());
+                log.info("event=pci_sweep valid={} valid_id={} invalid={} invalid_id={} unparsed={} reindex_leftover={}",
+                    status.valid(), status.validId(), status.invalid(), status.invalidId(), status.unparsed(), status.reindexLeftover());
             }
             if (previous.expiryLogged().get()) {
-                log.info("event=pci_sweep_set_recovered valid={} invalid={} unparsed={} reindex_leftover={}",
-                    status.valid(), status.invalid(), status.unparsed(), status.reindexLeftover());
+                log.info("event=pci_sweep_set_recovered valid={} valid_id={} invalid={} unparsed={} reindex_leftover={}",
+                    status.valid(), status.validId(), status.invalid(), status.unparsed(), status.reindexLeftover());
             }
             return true;
         } finally {
@@ -332,8 +394,9 @@ public final class PciIndexSweep implements PciIndexSet {
     }
 
     /**
-     * One line when the router's set changed between two reads, naming what was added and removed as
-     * {@code leaf:collection:index}; silent when nothing changed. The lists are cut at {@value #MAX_LOGGED_ENTRIES}
+     * One line when the set of valid indexes changed between two reads, naming what was added and removed as
+     * {@code leaf:collection:index} (a name-predicate index) or {@code leaf:id=<id>:index} (an id-predicate one, which
+     * serves once gate 3 has latched); silent when nothing changed. The lists are cut at {@value #MAX_LOGGED_ENTRIES}
      * entries (the first read after boot lists every index) and the counts are always exact.
      */
     private static void logSetChange(SortedSet<String> before, SortedSet<String> after) {
@@ -371,15 +434,15 @@ public final class PciIndexSweep implements PciIndexSet {
     private boolean failed(String reason, RuntimeException cause) {
         State previous = state.get();
         state.set(new State(previous.set(), previous.status().failedAt(clock.instant()), previous.expiryLogged(),
-            previous.since(), previous.entries()));
+            previous.since(), previous.entries(), previous.idSince()));
         String detail = cause == null ? "the read saw no partition leaves of nexus.chunks"
             : String.valueOf(cause.getMessage() != null ? cause.getMessage() : cause.toString());
         if (isStopping()) {
             // The shutdown hook interrupts a read in flight; that is not an incident.
             log.debug("event=pci_sweep_read_failed reason={} during=shutdown", reason);
         } else {
-            log.warn("event=pci_sweep_read_failed reason={} kept_valid={} consecutive_failures={} error=\"{}\"",
-                reason, previous.status().valid(), previous.status().consecutiveFailures() + 1, detail, cause);
+            log.warn("event=pci_sweep_read_failed reason={} kept_valid={} kept_valid_id={} consecutive_failures={} error=\"{}\"",
+                reason, previous.status().valid(), previous.status().validId(), previous.status().consecutiveFailures() + 1, detail, cause);
         }
         return false;
     }

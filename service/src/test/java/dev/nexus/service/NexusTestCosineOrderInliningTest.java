@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
@@ -139,12 +140,13 @@ class NexusTestCosineOrderInliningTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, TENANT, COLLECTION, MODEL);
             String model = PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION);
+            Long collectionId = CollectionIds.require(ctx, TENANT, COLLECTION);
             Random rnd = new Random(42L);
             for (int first = 0; first < ROWS; first += BATCH) {
-                var ins = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384);
+                var ins = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID,
+                    CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384);
                 for (int i = first; i < first + BATCH && i < ROWS; i++) {
-                    ins = ins.values(TENANT, COLLECTION, Chash.ofText("cosine-order-row-" + i).toBytes(), model,
+                    ins = ins.values(TENANT, COLLECTION, collectionId, Chash.ofText("cosine-order-row-" + i).toBytes(), model,
                         "cosine order row " + i, liveVector(rnd));
                 }
                 ins.execute();

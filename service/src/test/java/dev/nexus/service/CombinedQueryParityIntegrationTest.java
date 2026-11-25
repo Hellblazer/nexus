@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.OnnxEmbedder;
@@ -191,9 +192,12 @@ class CombinedQueryParityIntegrationTest {
         // Catalog + manifest + topic via superuser (bypasses RLS for the fixture write).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-229 P3.1: a row naming a collection carries the registry id beside it (the *_collection_id_check CHECKs).
+            Long collId = CollectionIds.require(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL);
             long topicId = DSL.using(su, SQLDialect.POSTGRES)
-                .insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
-                .values(TENANT, TOPIC, COLL, OffsetDateTime.parse("2026-01-01T00:00:00+00:00"))
+                .insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT,
+                    TOPICS.COLLECTION_ID)
+                .values(TENANT, TOPIC, COLL, OffsetDateTime.parse("2026-01-01T00:00:00+00:00"), collId)
                 .returning(TOPICS.ID)
                 .fetchOne()
                 .getId();
@@ -205,7 +209,8 @@ class CombinedQueryParityIntegrationTest {
                     .set(CATALOG_DOCUMENTS.TITLE, "Doc")
                     .set(CATALOG_DOCUMENTS.AUTHOR, c.author())
                     .set(CATALOG_DOCUMENTS.CONTENT_TYPE, c.contentType())
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL);
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, collId);
                 if (c.tombstoned()) {
                     insert = insert.set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime());
                 }
@@ -217,9 +222,10 @@ class CombinedQueryParityIntegrationTest {
                     .insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
                     .values(TENANT, c.tumbler(), 0, HexFormat.of().parseHex(c.chash()), COLL,
-                        PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL))
+                        PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL), collId)
                     .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION)
                     .doNothing()
@@ -230,10 +236,10 @@ class CombinedQueryParityIntegrationTest {
                         .insertInto(TOPIC_ASSIGNMENTS,
                             TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID,
                             TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                            TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                            TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
                         .values(TENANT, HexFormat.of().parseHex(c.chash()), topicId, COLL,
                             OffsetDateTime.parse("2026-01-01T00:00:00+00:00"),
-                            PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL))
+                            PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL), collId)
                         .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                             TOPIC_ASSIGNMENTS.TOPIC_ID)
                         .doNothing()

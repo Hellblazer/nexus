@@ -12,27 +12,31 @@ Every aura ships off. Nexus never turns one on for you.
 
 ## What ships
 
-One aura ships: `ci_develop_red`. It is for sessions in the `push-train` group (see [Loading an aura for a group](#loading-an-aura-for-a-group)) and it watches `board/ci/nexus-develop--owner`, where the engine's owner stamper posts who owns a red develop. The stamper names one owner for each red, and a next-up session behind it, by identity id and, from engine 0.1.198, also by the seat's live alias (`owner_alias`, `next_alias`), which the notice shows for someone else's red; a row with no alias shows the id. The aura writes a block to your threads entry, worded for what this session has to do:
+Two auras ship: `ci_develop_red`, and `ci_develop_nudge`, which wakes next up when the owner has not acknowledged (below). Both are off until you turn each on by name. `ci_develop_red` is for sessions in the `push-train` group (see [Loading an aura for a group](#loading-an-aura-for-a-group)) and it watches `board/ci/nexus-develop--owner`, where the engine's owner stamper posts who owns a red develop. The stamper names one owner for each red, and a next-up session behind it, by identity id and, from engine 0.1.198, also by the seat's live alias (`owner_alias`, `next_alias`), which the notice shows for someone else's red; a row with no alias shows the id. The aura writes a block to your threads entry, worded for what this session has to do:
 
 ```text
 ## aura: develop CI red
 state: Develop is red at 8b30c16, first red in your push. Diagnose it. Ack: nx ci ack 8b30c16.
 ```
 
-There are six displays. `<owner>` is the owner's alias, else its identity id: from engine 0.1.198 the row carries the owner's live alias (`owner_alias`) beside the id, and the notice shows it; a row with no alias (an older engine, or an identity with none) shows the id. Who owns the red is always decided on the ids; the alias is a name to show.
+There are ten displays. `<owner>` is the owner's alias, else its identity id: from engine 0.1.198 the row carries the owner's live alias (`owner_alias`) beside the id, and the notice shows it; a row with no alias (an older engine, or an identity with none) shows the id. Who owns the red is always decided on the ids; the alias is a name to show.
 
 | The row says | The block says | Wakes you |
 |---|---|---|
 | You own it, the red is from your push (`earliest_suspect`) | `Develop is red at <sha>, first red in your push. Diagnose it.` | yes |
 | You own it, the leader takes it (`owner_unleased`, `owner_not_live`, `owner_not_member`, `no_record`, `chain_gap`, `stamper_error`) | `Develop is red at <sha>; the leader takes it (<reason>). Diagnose it.` | yes |
 | You own it after a hand-off (`handoff`) | `Develop is red at <sha>; it was handed to you after no acknowledgement. Diagnose it.` | yes |
+| You own it after the previous owner said it is not theirs (`disclaimed`, from `nx ci ack --not-mine`) | `Develop is red at <sha>; handed to you: <previous owner> said it is not theirs. Diagnose it.` | yes |
+| Escalated because the red stayed open past the stall window (`escalated` with `stalled`), and it names you or no one | `Develop is red at <sha>, still open after N min; last activity: <who> <acknowledged\|pushed> at hh:mm UTC. Raise an ask to Sam.`, or with no sign of life `Develop is red at <sha>, still open after N min with no acknowledgement or fix push. Raise an ask to Sam.` | yes |
+| The same stall, and you gave the last sign of life | `Develop is red at <sha>, still open after N min; your last activity: <acknowledged\|pushed> at hh:mm UTC. The leader is raising it with Sam.` | no |
+| The same stall, and it names someone else | `Develop is red at <sha>; <owner> acknowledged it but it is still open after N min. The leader is raising it with Sam. Hold your pushes.` | no |
 | Escalated, and it names you or no one (`escalated`) | `Develop is red at <sha>; no one acknowledged. Raise an ask to Sam.` | yes |
-| You are next up | `Develop is red at <sha>; <owner: alias, else id> owns it. You are next up.` | yes |
+| You are next up | `Develop is red at <sha>; <owner: alias, else id> owns it. You are next up.` | no (see the nudge below) |
 | Someone else owns it | `Develop is red at <sha>; <owner: alias, else id> owns it. Hold your pushes.` | no |
 
-The first three owner displays end with the acknowledgement: the owner writes a `kind=ack` post with `sha=<the red sha>` to `board/ci/nexus-develop--owner`, with `nx tuple out` or the `tuple_out` MCP tool, and the stamper counts it when the row's sender-session stamp, mapped through the session index, names the owner. The engine never reads the row's `from`. The state line holds 200 characters, so the hint names the helper rather than the whole post: `Ack: nx ci ack <sha7>`. `nx ci ack` resolves the prefix against the tips of the current red (the shas of its owner rows), refuses a caller who is not the red's current owner, and posts the row with `from=<your identity id>`, the full sha and a fresh nonce. A hand post (`nx tuple out board/ci/nexus-develop--owner --dim kind=ack --dim sha=<the red sha> --nonce <a fresh uuid>`, or the `tuple_out` tool) is restamped by the client: `from` on an ack of a red is always the caller's own identity id, never a name, and a caller with no identity is refused. `from` is a label people read (`nx group ack-times` does not read it), and the client's stamp of it is a hint (from engine 0.1.200 the engine stamps `from` itself as the identity the sender session maps to); an ack with a session alias in it (posted by hand on 2026-11-20) still stopped the hand-off, and only `ack-times` counted it as no ack; `ack-times` now counts an ack only when its sender-session stamp maps to the owner, so an ack with no stamp counts for nobody there, as in the engine. An unacknowledged red is handed to the next up after the group's deadline (20 minutes by default), and then to Sam as an escalation.
+The first three owner displays end with the acknowledgement: the owner writes a `kind=ack` post with `sha=<the red sha>` to `board/ci/nexus-develop--owner`, with `nx tuple out` or the `tuple_out` MCP tool, and the stamper counts it when the row's sender-session stamp, mapped through the session index, names the owner. The engine never reads the row's `from`. The state line holds 200 characters, so the hint names the helper rather than the whole post: `Ack: nx ci ack <sha7>`. An owner who is not the one fixing it says so with `nx ci ack --not-mine <sha7> [--note TEXT]`, which posts a `kind=disclaim` row; the engine hands the red on at once when it reads one from the current owner (engine-service-v0.1.201 and later). `nx ci ack` resolves the prefix against the tips of the current red (the shas of its owner rows), refuses a caller who is not the red's current owner, and posts the row with `from=<your identity id>`, the full sha and a fresh nonce. A hand post (`nx tuple out board/ci/nexus-develop--owner --dim kind=ack --dim sha=<the red sha> --nonce <a fresh uuid>`, or the `tuple_out` tool) is restamped by the client: `from` on an ack of a red is always the caller's own identity id, never a name, and a caller with no identity is refused. `from` is a label people read (`nx group ack-times` does not read it), and the client's stamp of it is a hint (from engine 0.1.200 the engine stamps `from` itself as the identity the sender session maps to); an ack with a session alias in it (posted by hand on 2026-11-20) still stopped the hand-off, and only `ack-times` counted it as no ack; `ack-times` now counts an ack only when its sender-session stamp maps to the owner, so an ack with no stamp counts for nobody there, as in the engine. An unacknowledged red is handed to the next up after the group's deadline (20 minutes by default), and then to Sam as an escalation.
 
-A session wakes (the channel notice below) only on a post that starts something: a row with `refresh: false` that makes it the owner or next up, or an escalated row that names it or names no one. A refresh row, where a newer red keeps the same owner, rewrites the block and does not wake it again. A `kind=clear` post (develop is green again) removes the block.
+A session wakes (the channel notice below) only on a post that starts something: a row with `refresh: false` that makes it the owner, or an escalated row that names it or names no one. Next up is shown the red and not woken, because the owner usually acknowledges within two minutes (RDR-252 post-close audit S2). A hand-off that seats a session as owner wakes it through the owner display. A stall escalation (`escalated` with `stalled: true`) carries `open_minutes` (whole minutes since the red began, the `N` in its text) and, when there was any sign of life on the red, `stalled_sign` (`ack` or `push`), `stalled_owner` (who gave it) and `stalled_since` (when, a UTC instant shown as `hh:mm UTC`); all three are absent when there was none. It wakes the leader only, and the text names only what the engine knows: a push is never called an acknowledgement.
 
 Until the `push-train` group is formed and serves `nexus-develop`, no session loads the aura, so a session with `auras.ci_develop_red=on` sees no develop reds at all. The old `--done`-based aura is gone; `nx aura check` warns about an aura on an `--owner` subspace that is loaded by a group not serving its topic.
 
@@ -151,6 +155,12 @@ next = "body.next"
 next_alias = "body.next_alias"
 refresh = "body.refresh"
 reason = "body.reason"
+stalled = "body.stalled"                # the stall and disclaim displays read these six,
+stalled_owner = "body.stalled_owner"    # as the shipped ci_develop_red does; leave them out
+stalled_since = "body.stalled_since"    # and the copy cannot render either
+stalled_sign = "body.stalled_sign"
+open_minutes = "body.open_minutes"
+previous_owner = "body.previous_owner"
 me = "self.identity"
 
 [when]

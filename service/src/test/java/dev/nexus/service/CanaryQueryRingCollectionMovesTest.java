@@ -207,6 +207,7 @@ class CanaryQueryRingCollectionMovesTest {
         var step = ctx.insertInto(CANARY_QUERY_RING)
             .set(CANARY_QUERY_RING.TENANT_ID, tenant).set(CANARY_QUERY_RING.COLLECTION, collection)
             .set(CANARY_QUERY_RING.EMBEDDING_MODEL, model)
+            .set(CANARY_QUERY_RING.COLLECTION_ID, dev.nexus.service.db.CollectionIds.idOf(tenant, collection))
             .set(CANARY_QUERY_RING.VECTOR_DIGEST, digest(seed))
             .set(CANARY_QUERY_RING.ADDED_AT, OffsetDateTime.now());
         if (dims == 768) {

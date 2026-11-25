@@ -118,8 +118,17 @@ def test_the_pin_fell_from_the_p29_count() -> None:
     ``T3Database`` reads to mint, ``doctor_search``'s drift probe to diagnostic), 229 -> 218 on P2.2's own tree. On
     the Phase 2 integration tree P2.4 (-3) and owner-is-source (+2: the two callers of ``legacy_names.owner_stem`` in
     ``nxexp_owner.py``; the parse itself sits in the floor and is not a site) leave 217, measured by the scan
-    (``test_pins_are_the_measured_counts_by_total_class_and_shape`` checks it)."""
-    assert PARSE_SITE_PIN == 217
+    (``test_pins_are_the_measured_counts_by_total_class_and_shape`` checks it). RDR-229 P3.1 (nexus-p2m1x.17) leaves 215:
+    its four register-before-write seams and HttpCatalogClient's three manifest registrations route through the one
+    ``registration_retry.register_collection_for_write`` primitive, which the census counts once. P3.8 (nexus-p2m1x.28, -2: ``register_collection``
+    derives nothing from the name) leaves 213.
+
+    P3.6 (nexus-p2m1x.26, 2026-11-21) lowers it to 211: ``validate_collection_name`` is the label rule and reads no part
+    of a name (the ChromaDB-shape regex and the overflow hint's ``split_candidate_collection_name`` are gone), so it is no
+    longer a derived helper and its two ``T3Database`` callers (create and the rename target) left the ledger. mint
+    131 -> 129, primitive_call 179 -> 177. P3.8's fallout round raises it by one, to 212: ``entity_keys`` matches a minted
+    label's configured glob against the conformant name its registry row renders, a second label-pattern fnmatch."""
+    assert PARSE_SITE_PIN == 212
 
 
 def test_collection_attributes_is_one_type() -> None:

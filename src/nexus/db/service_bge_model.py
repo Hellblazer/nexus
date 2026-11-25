@@ -209,8 +209,9 @@ def _stream_once(url: str, dest: Path, headers: dict[str, str] | None = None) ->
         from nexus.progress.download_meter import meter_for  # noqa: PLC0415 — stdlib-only, deferred
 
         meter = None
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
         with httpx.stream(
-            "GET", url, headers=headers, follow_redirects=True, timeout=timeout
+            "GET", url, headers=headers, follow_redirects=True, timeout=timeout, verify=get_shared_ssl_context()
         ) as resp:
             resp.raise_for_status()
             # nexus-mjmjl: the model is the largest first-run download; size,
@@ -288,17 +289,22 @@ def _rest_fallback(url: str, dest: Path) -> bool:
     return True
 
 
+def file_sha256(path: Path) -> str:
+    """Hex sha256 of *path*, read in 1 MiB blocks. Shared with ``nexus.mineru_weights``."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def _verify_sha256(path: Path, expected: str, label: str) -> None:
     """Digest-check *path* against *expected*; on mismatch remove it and raise.
 
     Removing the file matters: a bad artifact left in place would pass the size
     floors and be served to the Java ONNX load, failing opaquely later.
     """
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for block in iter(lambda: fh.read(1 << 20), b""):
-            h.update(block)
-    actual = h.hexdigest()
+    actual = file_sha256(path)
     if actual != expected:
         path.unlink(missing_ok=True)
         raise RuntimeError(

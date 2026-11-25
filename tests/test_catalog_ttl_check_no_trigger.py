@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -35,6 +36,13 @@ NAMING_ALLOWED = {
     "service/src/test/java/dev/nexus/service/db/ManifestCheckAdminIntegrationBase.java",
     "tests/test_manifest_check_no_trigger.py",
     "tests/test_catalog_ttl_check_shapes.py",
+    # the RDR-229 P3.5c Java reader census lists every variable-key jsonb read by file and method, this step's admin
+    # among them (a read of its own fixed keys); a census names a site and calls nothing (nexus-p2m1x.25)
+    "scripts/rdr229_p35c_java_reader_census.py",
+    "service/src/test/resources/rdr229/p35c-java-reader-census-excluded.tsv",
+    # the per-leaf FK census (nexus-p2m1x.21) lists every engine file that holds an ADD or VALIDATE CONSTRAINT with its exact counts, these classes
+    # among them (the boot-time admin validators, kept at their 30 minute bound); it is a test of the engine classes and runs nothing
+    "service/src/test/java/dev/nexus/service/datamove/Rdr229ValidationBoundsCensusIntegrationTest.java",
     # the chunk routes' own scan lists the one class that borrows its comparison; the file name is spelled in two parts
     # because that scan reads this file too
     "tests/test_retire_" + "keys_no_trigger.py",
@@ -48,27 +56,57 @@ NAMED_ROOTS = ("src", "scripts", "conexus", ".github", "deploy")
 SERVICE_MAIN = ROOT / "service" / "src" / "main" / "java" / "dev" / "nexus" / "service"
 
 
-def _scan() -> tuple[dict[str, set[str]], dict[str, int]]:
+def _files(root: Path) -> list[Path]:
+    """The files to scan: what git tracks plus untracked files it does not ignore, so a run's own output under a
+    git-ignored directory (the selector's list or a --status file under ``output/``) is never read; without git, the
+    walk with SKIP_DIRS. The same listing as the chunk routes' no-trigger scan."""
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            capture_output=True, check=True, timeout=60,
+        ).stdout.decode("utf-8", "surrogateescape")
+    except (OSError, subprocess.SubprocessError):
+        out: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            out.extend(Path(dirpath) / f for f in filenames)
+        return out
+    return [
+        root / rel for rel in listed.split("\0")
+        if rel and not set(Path(rel).parts[:-1]) & SKIP_DIRS and (root / rel).is_file()
+    ]
+
+
+def _scan(root: Path = ROOT) -> tuple[dict[str, set[str]], dict[str, int]]:
     seen: dict[str, set[str]] = {}
     scanned: dict[str, int] = {}
-    for dirpath, dirnames, filenames in os.walk(ROOT):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        for fname in filenames:
-            path = Path(dirpath) / fname
-            if path.suffix == ".md":
+    for path in _files(root):
+        if path.suffix == ".md":
+            continue
+        try:
+            if path.stat().st_size > 3_000_000:
                 continue
-            try:
-                if path.stat().st_size > 3_000_000:
-                    continue
-                text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            rel = path.relative_to(ROOT).as_posix()
-            scanned[rel.split("/", 1)[0]] = scanned.get(rel.split("/", 1)[0], 0) + 1
-            hits = {n for n in NAMES if n in text}
-            if hits:
-                seen[rel] = hits
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        rel = path.relative_to(root).as_posix()
+        scanned[rel.split("/", 1)[0]] = scanned.get(rel.split("/", 1)[0], 0) + 1
+        hits = {n for n in NAMES if n in text}
+        if hits:
+            seen[rel] = hits
     return seen, scanned
+
+
+def test_the_scan_skips_git_ignored_output_and_reads_untracked_files(tmp_path: Path) -> None:
+    """A run's selector list under the git-ignored output/ is not read; an untracked, unignored file is (planted)."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=60)
+    (tmp_path / ".gitignore").write_text("output/\n", encoding="utf-8")
+    (tmp_path / "output").mkdir()
+    (tmp_path / "output" / "affected.txt").write_text("tests/test_" + "catalog_ttl_check_shapes.py\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "stray.py").write_text("ROUTE = 'catalog-ttl-" + "check'\n", encoding="utf-8")
+    seen, _ = _scan(tmp_path)
+    assert seen == {"src/stray.py": {"catalog-ttl-check"}}
 
 
 def test_nothing_in_the_repository_names_the_routes_but_the_engine_classes_and_their_tests() -> None:

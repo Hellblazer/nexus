@@ -30,7 +30,7 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.commands.catalog import _backfill_papers, _owner_by_name
 from nexus.commands.enrich import enrich
 from nexus.db import make_t3
-from tests._catalog_fixture_ops import ActiveCatalog
+from tests._catalog_fixture_ops import ActiveCatalog, register_seed_collections
 from tests._chunk_seed import seed_chunks_direct
 from tests.conftest import fake_credentials
 
@@ -80,6 +80,7 @@ class _World:
         self.collection = f"docs__{tag}__bge-base-en-v15-768__v1"
         self.title_a, self.title_b = f"{tag} Paper A", f"{tag} Paper B"
         self.ch = {n: _chash(f"{tag}-{n}") for n in chunks}
+        register_seed_collections(self.collection)  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
         with HttpCatalogClient() as cat:
             owner = cat.register_owner(f"{tag}-owner", "repo", repo_hash=f"{tag}-hash")
             self.a = str(cat.register(
@@ -306,6 +307,7 @@ def _paper_world(tag: str, holders: int):
         }],
     )
     tumblers: list[str] = []
+    register_seed_collections(collection)  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
     with HttpCatalogClient() as cat:
         owner = cat.register_owner(f"{tag}-owner", "repo", repo_hash=f"{tag}-hash")
         for i in range(holders):

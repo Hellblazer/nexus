@@ -5,10 +5,11 @@
 # Reap old generations. nexus-utpuw.6 (P2b). SOURCED, never executed; sets no
 # shell options — they would land in the caller's shell.
 #
-# THIS IS THE ONLY CODE IN THIS ARC THAT DELETES ANYTHING. Everything else
-# builds beside, points at, or reports on. Read the refusals before the logic.
+# THIS IS THE ONLY SWEEP IN THIS ARC. Everything else builds beside, points at,
+# or reports on (a builder that fails removes the one tree it just built, which
+# nothing can run from). Read the refusals before the logic.
 #
-# ── FOUR NEVER-DELETE RULES ──────────────────────────────────────────────────
+# ── FIVE NEVER-DELETE RULES ──────────────────────────────────────────────────
 #   (a) the generation `current` points at
 #   (b) the PREVIOUS current — rollback for free, recorded by .3
 #   (c) any generation with a live holder — .5's census
@@ -16,6 +17,9 @@
 #       (.14) the installer is exec'd from its own generation. keep-last-N
 #       usually covers this; the plan is explicit that "usually" is not a rule,
 #       so it is passed in and checked.
+#   (e) any generation whose LEASE a live interpreter holds (lease_core.py): the
+#       census cannot see a process started through `current`, one that
+#       rewrote its title, or one whose argv was cut.
 # They are ABSOLUTE, not tiebreaks: a held generation far outside keep-last-N
 # is still retained.
 #

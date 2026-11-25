@@ -33,9 +33,13 @@ _log = structlog.get_logger(__name__)
 #: ``board/ci/<topic>--owner``: the subspace the stamper posts owner rows on and an owner acknowledges on.
 OWNER_SUBSPACE = re.compile(r"board/ci/[^/]+--owner")
 
+#: The kinds of owner-subspace row a session posts and the engine reads by sender: an ack, and a disclaim (the owner's
+#: "this red is not mine", RDR-252 audit S1). Both carry the poster's identity id in ``from``.
+STAMPED_KINDS = frozenset({"ack", "disclaim"})
+
 NO_IDENTITY_MESSAGE = (
-    "this process holds no identity, so it cannot sign an ack: an ack on a board/ci owner subspace carries the "
-    "poster's identity id in `from`, never a name. Run `nx identity show` to see whether this session holds one"
+    "this process holds no identity, so it cannot sign an ack or a disclaim: a row of either kind on a board/ci owner "
+    "subspace carries the poster's identity id in `from`, never a name. Run `nx identity show` to see whether this session holds one"
 )
 
 
@@ -58,19 +62,27 @@ def identity_view(identity: str) -> Mapping[str, Any]:
     return identity_record_lookup()(identity)
 
 
-def counted_identity() -> str:
+def counted_identity(strict: bool = False) -> str:
     """The identity an ack from this process counts for, or "" when it holds none: :func:`own_identity`, except that a
     delegated identity (a ``claude -p`` child) is mapped to its parent, as the engine maps the child's session stamp
     (``BoardReads.identities``). Only a delegated child pays the record read: a seat's token record says nothing about
     its kind, so the identity service is asked, and a seat's answer (or a failed read of it) leaves the identity as it
     is. A delegated identity whose parent cannot be read is refused (``ValueError``): its own id would be a label the
-    engine does not count."""
+    engine does not count.
+
+    *strict* is for a caller that must not take a guess for an answer (``nx ci check-hold``): when the record cannot be
+    read, the token's own id is NOT returned, because for a delegated child it is the wrong id (the engine counts the
+    parent); the read failure is raised as ``ValueError`` instead. ``nx ci ack`` keeps the lenient default, so its behaviour
+    is unchanged."""
     own = own_identity()
     if not own:
         return ""
     try:
         view = identity_view(own)
-    except Exception:  # noqa: BLE001 -- unreadable: the label stays the token's own id, which is right for a seat
+    except Exception as exc:  # noqa: BLE001 -- unreadable: the label stays the token's own id, which is right for a seat
+        if strict:
+            raise ValueError(f"the identity record of {own} could not be read ({type(exc).__name__}: {exc}), so it cannot be "
+                             "told whether it is a delegated child counted as its parent") from exc
         return own
     if view.get("kind") != "delegated":
         return own
@@ -82,8 +94,8 @@ def counted_identity() -> str:
 
 
 def is_ack_write(subspace: str, dims: Mapping[str, str] | None) -> bool:
-    """True for a ``kind=ack`` row on a ``board/ci/<topic>--owner`` subspace."""
-    return bool(OWNER_SUBSPACE.fullmatch(subspace)) and (dims or {}).get("kind") == "ack"
+    """True for a ``kind=ack`` or ``kind=disclaim`` row on a ``board/ci/<topic>--owner`` subspace."""
+    return bool(OWNER_SUBSPACE.fullmatch(subspace)) and (dims or {}).get("kind") in STAMPED_KINDS
 
 
 def stamp_ack_from(subspace: str, dims: dict[str, str] | None) -> dict[str, str] | None:

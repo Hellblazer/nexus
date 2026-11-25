@@ -112,6 +112,19 @@ public final class TenantImportPlan {
     }
 
     /**
+     * Columns the file carries and the load drops, because the engine assigns them: {@code catalog_collections.collection_id}
+     * comes from the column's own sequence on every restored row (RDR-229 P3.8: no route accepts a client-supplied id, and
+     * the engine role cannot {@code setval} past one, the doctrine of every other serial key here). The column is staged
+     * and reported as skipped. P3.11: the staged value is the SOURCE id of the restore's by-id map ({@link RestoreIdFill}), kept on a
+     * stage column before the engine's drawn id replaces it; it is never loaded.
+     */
+    static final Map<String, Set<String>> SERVER_ASSIGNED = Map.of("catalog_collections", Set.of("collection_id"));
+
+    private static boolean serverAssigned(String table, String column) {
+        return SERVER_ASSIGNED.getOrDefault(table, Set.of()).contains(column);
+    }
+
+    /**
      * @param file          the file's tables (header order is ignored: the plan is in registry order)
      * @param targetColumns the live columns of every registry table the engine can load, by table name; a table
      *                      absent from the map is one the target no longer has
@@ -166,6 +179,13 @@ public final class TenantImportPlan {
             for (Column c : f.columns()) {
                 fileNames.add(c.name());
                 TargetColumn t = liveByName.get(c.name());
+                if (serverAssigned(e.name(), c.name())) {
+                    // staged, never loaded: the engine's sequence assigns it (see SERVER_ASSIGNED)
+                    if (t != null && plainType(c.type())) {
+                        retiredCols.add(c.name());
+                        continue;
+                    }
+                }
                 if (t == null) {
                     if (retiredColumn(retired, e.name(), c.name())) {
                         if (!plainType(c.type())) {
@@ -254,7 +274,13 @@ public final class TenantImportPlan {
         Set<String> names = new LinkedHashSet<>();
         for (Column c : e.primaryKey()) names.add(c.name());
         if (e.reassignedId() != null) names.add(e.reassignedId());
-        for (Reference r : e.references()) names.addAll(r.columns());
+        for (Reference r : e.references()) {
+            // An id twin under its id foreign key (RDR-229 P3.3a, P3.3c) is a reference the import computes itself
+            // (RestoreIdFill, before the insert), so a backup taken before P3.1, which lacks it, still loads. Exactly the
+            // columns RestoreIdFill computes are exempt, not every maintained column: one it does not fill stays required.
+            List<String> computed = RestoreIdFill.computedColumns(e.name());
+            for (String c : r.columns()) if (!computed.contains(c)) names.add(c);
+        }
         names.remove("tenant_id");
         return names;
     }

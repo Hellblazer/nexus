@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.PdfStubMetadataReads;
 import dev.nexus.service.db.TenantScope;
@@ -189,6 +190,7 @@ class CatalogStubMetadataRouteTest extends StubMetadataTestBase {
             org.assertj.core.api.Assertions.assertThatThrownBy(() -> dsl.insertInto(dev.nexus.service.jooq.nexus.Tables.CHUNKS)
                 .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.TENANT_ID, TENANT)
                 .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION, KNOW_A)
+                .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, KNOW_A))
                 .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.CHASH, chash)
                 .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.EMBEDDING_MODEL, MODEL_384)
                 .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.CHUNK_TEXT, "other model")
@@ -448,12 +450,14 @@ class CatalogStubMetadataRouteTest extends StubMetadataTestBase {
                     .set(CATALOG_DOCUMENTS.FILE_PATH, "/scale/" + d + (pdf ? ".pdf" : ".md"))
                     .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///scale/" + d + (pdf ? ".pdf" : ".md"))
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, KNOW_A)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, KNOW_A))
                     .set(CATALOG_DOCUMENTS.METADATA, org.jooq.JSONB.valueOf("{}")));
                 for (int r = 0; r < 8; r++) {
                     byte[] chash = new byte[32];
                     chash[0] = (byte) (d >> 8); chash[1] = (byte) d; chash[2] = (byte) r; chash[31] = 1;
                     chunks.add(dsl.insertInto(dev.nexus.service.jooq.nexus.Tables.CHUNKS)
                         .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.TENANT_ID, TENANT).set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION, KNOW_A)
+                .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, KNOW_A))
                         .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.CHASH, chash).set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.EMBEDDING_MODEL, model)
                         .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.CHUNK_TEXT, "t").set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f))
                         .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.METADATA, org.jooq.JSONB.valueOf(pdf ? STUB : HEALTHY)));
@@ -461,6 +465,7 @@ class CatalogStubMetadataRouteTest extends StubMetadataTestBase {
                         .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT).set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.DOC_ID, t)
                         .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.POSITION, r).set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, r)
                         .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.CHASH, chash).set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION, KNOW_A)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, KNOW_A))
                         .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model));
                 }
             }

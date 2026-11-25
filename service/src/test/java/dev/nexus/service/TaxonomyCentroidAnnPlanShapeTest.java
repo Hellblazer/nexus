@@ -2,12 +2,14 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.tables.records.TaxonomyCentroidsRecord;
 import dev.nexus.service.vectors.DimTables;
+import dev.nexus.service.vectors.TaxonomyAnnQueryById;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository.AnnHit;
 import org.jooq.DSLContext;
@@ -218,11 +220,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
             for (int dim : new int[] {1024, 768, 384}) {
                 PgContainerHelper.insertCollection(ctx, TENANT, supFor(dim), modelFor(dim));
                 PgContainerHelper.insertCollection(ctx, TENANT, liveFor(dim), modelFor(dim));
-                ctx.update(CATALOG_COLLECTIONS)
-                    .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "successor-of-" + supFor(dim))
-                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT))
-                    .and(CATALOG_COLLECTIONS.NAME.eq(supFor(dim)))
-                    .execute();
+                CollectionIdSeeds.supersede(ctx, TENANT, supFor(dim), "successor-of-" + supFor(dim));
             }
             // Deterministic filler positions (CLAUDE.md: seeded randomness) -- a
             // client-side seeded Random replaces the retired setseed(0.42)/random()
@@ -238,28 +236,28 @@ class TaxonomyCentroidAnnPlanShapeTest {
                 // Filler: CENTROIDS_PER_DIM independently-random vectors (never collides
                 // with the single "nearest" row seeded below — see the method javadoc).
                 var insert = ctx.insertInto(TAXONOMY_CENTROIDS,
-                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.COLLECTION_ID,
                     TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, embCol,
                     TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT);
                 for (int i = 1; i <= CENTROIDS_PER_DIM; i++) {
-                    insert = insert.values(TENANT, coll, (long) i, modelFor(dim), fillerVector(rnd, dim), "filler", 1);
+                    insert = insert.values(TENANT, coll, CollectionIds.require(ctx, TENANT, coll), (long) i, modelFor(dim), fillerVector(rnd, dim), "filler", 1);
                 }
                 insert.execute();
                 // The single nearest row: unit vector along the first axis.
                 ctx.insertInto(TAXONOMY_CENTROIDS,
-                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.COLLECTION_ID,
                         TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, embCol,
                         TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
-                    .values(TENANT, coll, (long) (CENTROIDS_PER_DIM + dim), modelFor(dim), queryVec(dim), "nearest", 1)
+                    .values(TENANT, coll, CollectionIds.require(ctx, TENANT, coll), (long) (CENTROIDS_PER_DIM + dim), modelFor(dim), queryVec(dim), "nearest", 1)
                     .execute();
                 // nexus-2k8wi: the retired collection's centroid sits EXACTLY on the query (the nearest foreign one);
                 // the live foreign collection's is a little off it.
                 ctx.insertInto(TAXONOMY_CENTROIDS,
-                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.COLLECTION_ID,
                         TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, embCol,
                         TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
-                    .values(TENANT, supFor(dim), SUP_TOPIC, modelFor(dim), queryVec(dim), "superseded", 1)
-                    .values(TENANT, liveFor(dim), LIVE_TOPIC, modelFor(dim), offAxisVec(dim), "live-foreign", 1)
+                    .values(TENANT, supFor(dim), CollectionIds.require(ctx, TENANT, supFor(dim)), SUP_TOPIC, modelFor(dim), queryVec(dim), "superseded", 1)
+                    .values(TENANT, liveFor(dim), CollectionIds.require(ctx, TENANT, liveFor(dim)), LIVE_TOPIC, modelFor(dim), offAxisVec(dim), "live-foreign", 1)
                     .execute();
                 PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
             }
@@ -270,18 +268,42 @@ class TaxonomyCentroidAnnPlanShapeTest {
             // RDR-225: the two rows sit in two model partitions (the primary key carries the model, and
             // a centroid has no registry foreign key), the mid-migration shape a re-embed passes through.
             ctx.insertInto(TAXONOMY_CENTROIDS,
-                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.COLLECTION_ID,
                     TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
                     TAXONOMY_CENTROIDS.EMBEDDING_384, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
-                .values(TENANT, COL_MIXED, 1L, MODEL_384, queryVec(384), "mixed-384", 1)
+                .values(TENANT, COL_MIXED, CollectionIds.require(ctx, TENANT, COL_MIXED), 1L, MODEL_384, queryVec(384), "mixed-384", 1)
                 .execute();
             ctx.insertInto(TAXONOMY_CENTROIDS,
-                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.COLLECTION_ID,
                     TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
                     TAXONOMY_CENTROIDS.EMBEDDING_768, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
-                .values(TENANT, COL_MIXED, 2L, MODEL_768, queryVec(768), "mixed-768", 1)
+                .values(TENANT, COL_MIXED, CollectionIds.require(ctx, TENANT, COL_MIXED), 2L, MODEL_768, queryVec(768), "mixed-768", 1)
                 .execute();
             PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
+        }
+    }
+
+    /**
+     * The call under test, as annQuery makes it. On the fresh walk the by-id overload (vectors-084) is CONTINUE-skipped, so it is the
+     * text overload; with {@code -Dnexus.test.formA.applied=true} vectors-084 is applied (the schema helper records all of the
+     * CONTINUE ids, and fails otherwise) and annQuery calls it with the registry id, so that is what is explained here. The text
+     * overload's form A body (vectors-078-9..11) loses the HNSW index at 768 and 1024 (see the vectors-084 header); this test must
+     * never go back to explaining it on a form A clone.
+     */
+    private Table<?> annFn(int dim, String collection, boolean cross) {
+        if (!Rdr229CompleteStamps.formAApplied()) {
+            return switch (dim) {
+                case 384 -> TAXONOMY_ANN_QUERY_384.call(queryVec(dim), collection, cross, 10, modelFor(dim), TENANT);
+                case 768 -> TAXONOMY_ANN_QUERY_768.call(queryVec(dim), collection, cross, 10, modelFor(dim), TENANT);
+                case 1024 -> TAXONOMY_ANN_QUERY_1024.call(queryVec(dim), collection, cross, 10, modelFor(dim), TENANT);
+                default -> throw new IllegalArgumentException("unsupported dim: " + dim);
+            };
+        }
+        try (Connection su = pg.createConnection("")) {
+            long id = CollectionIds.require(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
+            return TaxonomyAnnQueryById.call(dim, queryVec(dim), collection, cross, 10, modelFor(dim), TENANT, id);
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
         }
     }
 
@@ -375,7 +397,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_shape_usesFullHnswIndex_1024() {
-        Table<?> fn = TAXONOMY_ANN_QUERY_1024.call(queryVec(1024), COL_1024, false, 10, MODEL_1024, TENANT);
+        Table<?> fn = annFn(1024, COL_1024, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("annQuery's distance projection (1024-dim) must bind to the HNSW index"
@@ -393,7 +415,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_shape_usesFullHnswIndex_768() {
-        Table<?> fn = TAXONOMY_ANN_QUERY_768.call(queryVec(768), COL_768, false, 10, MODEL_768, TENANT);
+        Table<?> fn = annFn(768, COL_768, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("annQuery's distance projection (768-dim) must bind to the HNSW index"
@@ -409,7 +431,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_shape_usesFullHnswIndex_384() {
-        Table<?> fn = TAXONOMY_ANN_QUERY_384.call(queryVec(384), COL_384, false, 10, MODEL_384, TENANT);
+        Table<?> fn = annFn(384, COL_384, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("annQuery's distance projection (384-dim) must bind to the HNSW index"
@@ -454,17 +476,17 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_crossBranch_shape_keepsHnswIndexScan_1024() {
-        assertCrossBranchShape(1024, MODEL_1024, TAXONOMY_ANN_QUERY_1024.call(queryVec(1024), LIVE_1024, true, 10, MODEL_1024, TENANT));
+        assertCrossBranchShape(1024, MODEL_1024, annFn(1024, LIVE_1024, true));
     }
 
     @Test
     void annQuery_crossBranch_shape_keepsHnswIndexScan_768() {
-        assertCrossBranchShape(768, MODEL_768, TAXONOMY_ANN_QUERY_768.call(queryVec(768), LIVE_768, true, 10, MODEL_768, TENANT));
+        assertCrossBranchShape(768, MODEL_768, annFn(768, LIVE_768, true));
     }
 
     @Test
     void annQuery_crossBranch_shape_keepsHnswIndexScan_384() {
-        assertCrossBranchShape(384, MODEL_384, TAXONOMY_ANN_QUERY_384.call(queryVec(384), LIVE_384, true, 10, MODEL_384, TENANT));
+        assertCrossBranchShape(384, MODEL_384, annFn(384, LIVE_384, true));
     }
 
     @Test

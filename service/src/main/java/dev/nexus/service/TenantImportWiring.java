@@ -29,7 +29,7 @@ public final class TenantImportWiring {
     void register(HttpServer server, List<? extends Filter> authFilter, DataSource dataSource, Supplier<TenantExportSessions> exports,
                   Supplier<Long> schemaChangesetCount, Supplier<Collection<String>> servedModels) {
         this.sessions = new TenantImportSessions(exports, dataSource, TenantImportSessions.Config.fromEnv(System::getenv),
-            CollectionRegistry::evictTenant, this::singletonLockHeld, schemaChangesetCount);
+            CollectionRegistry.shared()::evictTenant, this::singletonLockHeld, schemaChangesetCount);
         this.sessions.servedModels(servedModels);
         server.createContext(TenantImportHandler.PATH, new TenantImportHandler(this::sessions, exports))
             .getFilters().addAll(authFilter);

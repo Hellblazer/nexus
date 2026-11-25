@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
 import org.jooq.DSLContext;
@@ -42,6 +43,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class VectorsRetentionSchemaLiquibaseTest {
 
     private static final int DIM = 1024;
+    /** vectors-068 (RDR-229 P3.1): the registry id every chunk carries beside its collection name. */
+    private static final org.jooq.Field<Long> CHUNK_COLLECTION_ID = DSL.field(DSL.name("collection_id"), Long.class);
 
     @Test
     void retentionColumn_existsWithFullDefaultAndNotNull() throws Exception {
@@ -130,10 +133,11 @@ class VectorsRetentionSchemaLiquibaseTest {
 
             // retention intentionally omitted from the column list.
             ctx.insertInto(ch.table())
-               .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel(), ch.chunkText(), ch.embedding())
-               .values(tenant, collection, chash, PgContainerHelper.collectionModel(ctx, tenant, collection),
-                       "full content, retention omitted",
-                       Vector.of(new float[DIM]))
+               .set(ch.tenantId(), tenant).set(ch.collection(), collection)
+               .set(CHUNK_COLLECTION_ID, CollectionIds.idOf(tenant, collection)).set(ch.chash(), chash)
+               .set(ch.embeddingModel(), PgContainerHelper.collectionModel(ctx, tenant, collection))
+               .set(ch.chunkText(), "full content, retention omitted")
+               .set(ch.embedding(), Vector.of(new float[DIM]))
                .execute();
 
             String stored = ctx.select(ch.retention()).from(ch.table())
@@ -156,10 +160,11 @@ class VectorsRetentionSchemaLiquibaseTest {
             PgContainerHelper.insertCollection(ctx, tenant, collection);
 
             ctx.insertInto(ch.table())
-               .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel(), ch.chunkText(),
-                        ch.embedding(), ch.retention())
-               .values(tenant, collection, chash, PgContainerHelper.collectionModel(ctx, tenant, collection), null,
-                       Vector.of(new float[DIM]), "reference-only")
+               .set(ch.tenantId(), tenant).set(ch.collection(), collection)
+               .set(CHUNK_COLLECTION_ID, CollectionIds.idOf(tenant, collection)).set(ch.chash(), chash)
+               .set(ch.embeddingModel(), PgContainerHelper.collectionModel(ctx, tenant, collection))
+               .setNull(ch.chunkText())
+               .set(ch.embedding(), Vector.of(new float[DIM])).set(ch.retention(), "reference-only")
                .execute();
 
             var row = ctx.select(ch.chunkText(), chunkTsv, ch.retention()).from(ch.table())

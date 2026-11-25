@@ -1228,6 +1228,9 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
             Map<String, Object> c = new LinkedHashMap<>();
             c.put("collection", r.cursor().collection());
             c.put("chash", r.cursor().chash());
+            if (r.cursor().collectionId() != null) {
+                c.put("collection_id", r.cursor().collectionId());   // from gate 3 (additive; I6's named list): the signature covers it, so the token must carry it back
+            }
             m.put("cursor", c);
         }
         m.put("collections", r.collections());
@@ -1459,7 +1462,14 @@ public final class ChunkKeysAdminHandler implements HttpHandler {
                     || !(cm.get("chash") instanceof String hash) || hash.length() != 64 || !isHex(hash)) {
                 throw new IllegalArgumentException("resume.cursor must be {collection, chash} with a 64-hex chash");
             }
-            cursor = new ChunkKeySweep.Cursor(col, hash);
+            Long cursorId = null;
+            if (cm.get("collection_id") != null) {
+                if (!(cm.get("collection_id") instanceof Number idn) || idn.longValue() < 0 || idn.doubleValue() != idn.longValue()) {
+                    throw new IllegalArgumentException("resume.cursor.collection_id must be a non-negative integer");
+                }
+                cursorId = idn.longValue();
+            }
+            cursor = new ChunkKeySweep.Cursor(col, hash, cursorId);
         }
         List<String> collections = stringList(r, "collections", true);
         List<ChunkKeySweep.Blocked> blocked = new ArrayList<>();

@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 Phase 3, blocking follow-up row 13 (linda, 2026-11-23; nexus-p2m1x.22): the quarantine-origin backfill. THIS FILE ONLY REGISTERS:
+    one INSERT into nexus.data_moves, so an upgrade boot rewrites nothing (the upgrade-boot write gate, nexus-f3yqd.1; DataMoveChangesetGateTest).
+
+    WHY. A quarantined chunk names its origin collection in metadata.origin_collection, by label. The quarantine movers (vectors-069, vectors-077)
+    and QuarantineOrigin.retagRowsOf also write metadata.origin_collection_id (QuarantineOrigin.ORIGIN_ID_KEY), the origin's registry id, but
+    a row quarantined before they did carries the label only. After gate 3 latches P3.5c's QuarantineOrigin.siblingNames refuses its name arm,
+    so such a row cannot be found as a restore sibling. This move writes the key on those rows while names are still exact, before the latch:
+    P3.5c's gate-3 clause in CompletionCheck keeps gate 3 false while any quarantine chunk lacks the key.
+
+    THE TEMPLATE (what each chunk runs; <driving_table> is nexus.chunks aliased t, <chunking_clause> the chunk's key range). A row is PENDING
+    when it sits in a quarantine collection, judged by the registry row's lifecycle_state ('quarantine', as QuarantineOrigin.isQuarantine;
+    never the name prefix), and its metadata has no origin_collection_id key. It sits there when its collection_id names that row or, for a
+    row the chunks stamp has not reached yet (collection_id NULL), when its collection name does. The key is set to the registry
+    collection_id of the row its origin_collection label resolves to in the row's tenant, in CollectionRegistry.labelResolutionOrder (a live
+    row first, then the highest collection_id), a JSON number as the movers write it. A label no registry row carries (a dangling tag), and a
+    row with no label at all, get the same key with JSON null: the no-id marker (elsinore, 2026-11-23), which the gate-3 clause accepts (key
+    presence only) and siblingNames reads as "no id". A label naming only a rename tombstone resolves to the tombstone's own id, which is what
+    a by-name read of that label found before the latch; restore refuses a retired origin either way, so those rows stay unrestorable, as they
+    were. origin_collection itself is left as it is. The update is a shallow merge over COALESCE(metadata, '{}'), so every other key survives;
+    it does not touch last_written_at. The pending text is the verification, as SELECT 1 FROM nexus.chunks t WHERE <pending> AND
+    (t.tenant_id = $1 OR $1 IS NULL). A row written is never pending again, so a re-run, a resumed run and a row a new engine writes are not
+    written twice.
+
+    THE ROW'S OWN ID. A row the chunks stamp has not reached is also given its collection_id, by the chunks stamp's own rule (the registry row
+    of the same tenant and name, COALESCE over an id already set; chunks_collection_fk guarantees the row). Two reasons: the worker does not
+    run moves strictly in order (it skips a paused or blocked move and goes on to the next, DataMoveWorker.runCycle), so this move can run
+    while the chunks stamp is unfinished, and a pending test on collection_id alone would then complete over the unstamped quarantine rows
+    and never write them; and chunks_collection_id_check, evaluated on every updated row, refuses an UPDATE of a row with a name and no id
+    (QuarantineOrigin.retagRowsOf sets the id for the same reason). The chunks stamp then finds those rows stamped and leaves them.
+
+    AFTER IT. Every quarantine mover in SQL (vectors-069, vectors-077) writes the key from a by-name registry lookup that chunks_collection_fk
+    keeps non-null, and QuarantineOrigin.retagRowsOf writes it with the label, so no new quarantine row lacks the key. Its label is in gate 2
+    (CompletionCheck.ReadSet.quarantineOriginBackfill), and P3.5c's gate-3 clause stays as the live backstop.
+
+    THE VALUES. Only quarantine rows are written (about 1,429 in the cloud), but dml_utils pages the whole leaf by primary key, so the cost
+    is the scan: chunk_size 5000 and sleep_ms 1000 page about 700,000 chunks rows in about 140 chunks, a few minutes, where the chunks
+    stamp's 100 rows and 20 s (it writes every row) would take about 38 hours for a move that writes almost none. statement_timeout_ms 60000,
+    as every stamp move. The verification is a filtered scan of chunks; the chunks stamp's own filtered scan measured about 3.4 s warm, but this
+    one also reads metadata (jsonb_exists) and its cost is not measured: 60 s is about 17x the stamp's figure. No on_complete:
+    the move adds no constraint. NX_DATA_MOVE_SLEEP_MS overrides the pause engine-wide.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-082-1" author="nexus-p2m1x.22">
+        <comment>Register the data move rdr229-quarantine-origin-id over nexus.chunks (RDR-229 Phase 3 blocking row 13, nexus-p2m1x.22): one INSERT into nexus.data_moves, no policy (nexus.chunks has chunks_gate_probe_owner_read), no row of chunks read or written. chunk_size 5000, sleep_ms 1000, statement_timeout_ms 60000, no on_complete. DATA EFFECT: one row added to the global registry nexus.data_moves; no existing row of any table changes at boot. The registered move, run by the engine after it serves, writes metadata.origin_collection_id on each quarantine chunk that lacks it, from the registry row its origin_collection label resolves to (JSON null where none does), and the row's own collection_id where the chunks stamp has not set it; the rollback unregisters it and does not undo a backfill that ran.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, changeset_id)
+VALUES ('rdr229-quarantine-origin-id',
+        'UPDATE <driving_table> SET collection_id = COALESCE(t.collection_id, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection)), metadata = COALESCE(t.metadata, ''{}''::jsonb) || jsonb_build_object(''origin_collection_id'', (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.metadata ->> ''origin_collection'' ORDER BY (cc.superseded_by = '''' AND cc.superseded_by_id IS NULL) DESC, cc.collection_id DESC LIMIT 1)) WHERE EXISTS (SELECT 1 FROM nexus.catalog_collections q WHERE q.tenant_id = t.tenant_id AND q.lifecycle_state = ''quarantine'' AND (q.collection_id = t.collection_id OR (t.collection_id IS NULL AND q.name = t.collection))) AND NOT COALESCE(jsonb_exists(t.metadata, ''origin_collection_id''), false) AND <chunking_clause>',
+        'nexus', 'chunks', 5000, 1000, 60000,
+        'SELECT 1 FROM nexus.chunks t WHERE EXISTS (SELECT 1 FROM nexus.catalog_collections q WHERE q.tenant_id = t.tenant_id AND q.lifecycle_state = ''quarantine'' AND (q.collection_id = t.collection_id OR (t.collection_id IS NULL AND q.name = t.collection))) AND NOT COALESCE(jsonb_exists(t.metadata, ''origin_collection_id''), false) AND (t.tenant_id = $1 OR $1 IS NULL)',
+        NULL,
+        'vectors-082-1');
+        ]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'rdr229-quarantine-origin-id'</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

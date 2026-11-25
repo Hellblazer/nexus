@@ -1,0 +1,20 @@
+{
+  "boot_work" : [ ],
+  "rdr229_completion" : {
+    "gate1" : true,
+    "gate2" : true,
+    "gate3" : false,
+    "gates_holding" : 2,
+    "gates_total" : 3,
+    "summary" : "gate 1 holds; gate 2 holds; gate 3 waits: the PCI coverage (P3.4) is not installed or could not be read (no catalog, or no registry rows visible), so nothing says the id indexes exist",
+    "gate3_why" : "the PCI coverage (P3.4) is not installed or could not be read (no catalog, or no registry rows visible), so nothing says the id indexes exist",
+    "gate3_latched" : false,
+    "id_index_invalid" : false,
+    "gate3_latch_pci_off" : false,
+    "labels_total" : 16,
+    "labels_incomplete" : [ ],
+    "checks_missing" : [ ],
+    "validate_waits" : [ ],
+    "rename_missing" : "none"
+  }
+}

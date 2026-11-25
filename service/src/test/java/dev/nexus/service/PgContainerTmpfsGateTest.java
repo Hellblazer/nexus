@@ -277,6 +277,14 @@ class PgContainerTmpfsGateTest {
         try (PostgreSQLContainer<?> c = PgContainerHelper.newContainer()) {
             c.start();
             assertRunsOnTmpfsWithTheSettingsAndTheLimit(c, PgContainerHelper.MEMORY_LIMIT_BYTES);
+            // Row 24: a parallel HNSW build takes one shared area of maintenance_work_mem in /dev/shm. At 256 MB it fails on Docker's
+            // 64 MB default ("could not resize shared memory segment ... No space left on device", measured on chas 2026-11-24) and
+            // builds here, with its workers. The statements are in the test resource pg-shm-parallel-hnsw.sql, run by psql in the container.
+            c.copyFileToContainer(org.testcontainers.utility.MountableFile.forClasspathResource("pg-shm-parallel-hnsw.sql"), "/tmp/pg-shm-parallel-hnsw.sql");
+            ExecResult build = c.execInContainer("psql", "-U", PgContainerHelper.USERNAME, "-d", PgContainerHelper.DATABASE,
+                "-v", "ON_ERROR_STOP=1", "-f", "/tmp/pg-shm-parallel-hnsw.sql");
+            assertThat(build.getExitCode()).as("a parallel HNSW build at maintenance_work_mem 256MB: %s", build.getStderr()).isZero();
+            assertThat(build.getStderr()).as("non-vacuity: the build ran parallel").contains("using 2 parallel workers");
         }
     }
 
@@ -394,8 +402,19 @@ class PgContainerTmpfsGateTest {
             assertThat(show(conn, "max_wal_size")).isEqualTo("64MB");
             assertThat(show(conn, "min_wal_size")).isEqualTo("32MB");
             assertThat(show(conn, "wal_keep_size")).isEqualTo("0");
+            // Row 24: a parallel CREATE INDEX puts its shared area in /dev/shm, sized from maintenance_work_mem; Docker's 64 MB default
+            // failed it under load ("could not resize shared memory segment"). The bound is every participant's share, with margin.
+            long maintenance = DSL.using(conn, SQLDialect.POSTGRES).select(DSL.function("pg_size_bytes", Long.class,
+                DSL.function("current_setting", String.class, DSL.val("maintenance_work_mem")))).fetchOne(0, Long.class);
+            long participants = Long.parseLong(show(conn, "max_parallel_maintenance_workers")) + 1;
+            assertThat(dev.nexus.build.PgContainerRecipe.SHM_SIZE_BYTES).as("/dev/shm covers maintenance_work_mem times every participant")
+                .isGreaterThanOrEqualTo(2 * maintenance * participants);
         }
+        ExecResult shm = c.execInContainer("sh", "-c", "df -k /dev/shm | tail -1 | awk '{print $2}'");
+        assertThat(Long.parseLong(shm.getStdout().strip()) * 1024).as("the /dev/shm the server sees")
+            .isEqualTo(dev.nexus.build.PgContainerRecipe.SHM_SIZE_BYTES);
         var inspect = c.getDockerClient().inspectContainerCmd(c.getContainerId()).exec();
+        assertThat(inspect.getHostConfig().getShmSize()).as("the container's ShmSize").isEqualTo(dev.nexus.build.PgContainerRecipe.SHM_SIZE_BYTES);
         assertThat(inspect.getHostConfig().getMemory()).isEqualTo(expectedMemory);
         assertThat(inspect.getHostConfig().getMemorySwap())
             .as("swap capped too, so the limit is not doubled by swap")

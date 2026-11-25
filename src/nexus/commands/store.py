@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import re
 import shlex
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -831,7 +831,7 @@ def _holder_hint(db: T3Database, collection: str, col_name: str, holds: Callable
     except Exception:  # noqa: BLE001 — the hint only improves a not-found answer; it must not replace it
         _log.warning("store_delete_holder_hint_failed", collection=col_name, exc_info=False)
         return ""
-    return f"; it is in {holder}: pass --collection {holder}" if holder else ""
+    return f"; it is in {holder}: pass --collection {shlex.quote(holder)}" if holder else ""
 
 
 def _delete_by_title(
@@ -1083,6 +1083,7 @@ def export_cmd(
 
     from nexus.errors import EmbeddingModelMismatch, FormatVersionError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.exporter import export_collection  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.label_filename import safe_label_filename  # noqa: PLC0415 — deferred, as export_collection above
 
     if export_all and collection:
         raise click.UsageError("Cannot specify COLLECTION together with --all.")
@@ -1104,7 +1105,7 @@ def export_cmd(
         total_exported = 0
         for info in collections_info:
             col_name: str = info["name"]
-            fname = f"{col_name}-{today}.nxexp"
+            fname = f"{safe_label_filename(col_name)}-{today}.nxexp"  # a label may hold ':', '\\', '..' (RDR-229 P3.6)
             out_path = out_dir / fname
             try:
                 result = export_collection(
@@ -1124,7 +1125,7 @@ def export_cmd(
         click.echo(f"\nTotal: {total_exported} records across {len(collections_info)} collections.")
     else:
         col_name = _resolve_bare_subject(collection, t3=db)
-        out_path = Path(output) if output else Path(f"{col_name}.nxexp")
+        out_path = Path(output) if output else Path(f"{safe_label_filename(col_name)}.nxexp")
         try:
             result = export_collection(
                 db=db,

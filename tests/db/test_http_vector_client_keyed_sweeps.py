@@ -399,6 +399,31 @@ def test_an_engine_503_that_is_not_the_gate_polls_without_waiting_for_a_retry_af
     assert clock.sleeps == []
 
 
+def _rename_busy(**headers: str) -> "sv.Reply":
+    """The engine's typed busy answer for a gc route that met a registry row a rename or supersede holds (RDR-229 P3.5a)."""
+    return sv.Reply(503, {"error": "the collection's registry row is held by a rename or supersede in progress",
+                          "reason": "rename_busy", "retry_after_seconds": 5}, headers)
+
+
+@pytest.mark.parametrize("form", sorted(_FORMS))
+def test_rename_busy_waits_retry_after_and_resends_with_the_same_key_without_polling(srv, client, clock, form):
+    path, call, _ = _FORMS[form]
+    srv.script(f"POST {path}", _rename_busy(**{"Retry-After": "3"}), sv.ok(_stored(form)))
+    assert call(client) == _stored(form)
+    assert clock.sleeps == [3.0]
+    first, second = _posts(srv, path)
+    assert first["headers"][_KEY] == second["headers"][_KEY] and first["body"] == second["body"]
+    assert _polls(srv) == [], "rename_busy means the transaction rolled back and nothing ran: no poll"
+
+
+@pytest.mark.parametrize("form", sorted(_FORMS))
+def test_rename_busy_without_retry_after_waits_5_seconds(srv, client, clock, form):
+    path, call, _ = _FORMS[form]
+    srv.script(f"POST {path}", _rename_busy(), sv.ok(_stored(form)))
+    call(client)
+    assert clock.sleeps == [5.0]
+
+
 # ── typed refusals and unchanged errors ──────────────────────────────────────
 
 

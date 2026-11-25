@@ -102,7 +102,7 @@ class _StorageBackendGuardGroup(click.Group):
         import httpx  # noqa: PLC0415 — deferred: keep CLI import surface light
 
         from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred: keep CLI import surface light
-        from nexus.collection_errors import SupersededCollectionWriteError  # noqa: PLC0415 — deferred: keep CLI import surface light
+        from nexus.collection_errors import LabelReservedError, SupersededCollectionWriteError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.config import PdfConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.entity_keys import EntityConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
@@ -119,7 +119,7 @@ class _StorageBackendGuardGroup(click.Group):
             # RDR-241 (nexus-uwggq.1.9): a catalog read was given a blank filter (a blank --collection, a
             # whitespace owner) and refused to widen into a read of the whole catalog. A usage error, not a traceback.
             raise click.UsageError(str(exc)) from exc
-        except SupersededCollectionWriteError as exc:
+        except (SupersededCollectionWriteError, LabelReservedError) as exc:
             # nexus-wwuzp: a write named a retired collection. The message
             # names the successor; a traceback buried it.
             raise click.ClickException(str(exc)) from exc

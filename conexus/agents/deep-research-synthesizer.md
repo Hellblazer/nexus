@@ -98,7 +98,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 ### Project Context
 
-T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
+The SubagentStart hook injects T2 memory context into this dispatch; the SessionStart hook prints only an index (the rest is on demand through `nx brief <topic>` or the `brief` tool).
 
 ### Link Context (before starting work)
 
@@ -131,8 +131,8 @@ You have access to and will actively leverage:
   - mcp__plugin_conexus_nexus__query(question="research question", corpus="knowledge" -- document-level search with metadata
   - mcp__plugin_conexus_nexus__query(question="topic", where="bib_year>=2023" -- filter by year, citations, tags
   - mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge", limit=5 -- chunk-level semantic search
-  - mcp__plugin_conexus_nexus__store_list(collection="knowledge__art-1-1__voyage-context-3__v1", docs=true -- enumerate all documents (RDR-103: collections are `<content_type>__<owner>__<embedding_model>__v<n>`)
-  - mcp__plugin_conexus_nexus__store_put(content="content", collection="<subject>", title="title", tags="tags" -- store findings (the bare prefix is auto-promoted to a conformant 4-segment name)
+  - mcp__plugin_conexus_nexus__store_list(collection="<name as nx collection list prints it>", docs=true -- enumerate all documents (a `docs`, `code` or `rdr` collection is `<content_type>__<owner>__<embedding_model>__v<n>`; a new `knowledge` subject is labelled `c<id>`)
+  - mcp__plugin_conexus_nexus__store_put(content="content", collection="<subject>", title="title", tags="tags" -- store findings (type the bare subject as `collection`; a new knowledge subject gets an engine-minted `c<id>` label)
 - **T3 code index**: Semantic code search across indexed repositories
   - mcp__plugin_conexus_nexus__search(query="query", corpus="code", limit=20 -- hybrid semantic + git frecency
   - mcp__plugin_conexus_nexus__search(query="query", corpus="code__<owner>__voyage-code-3__v1", limit=20 -- repo-specific
@@ -187,7 +187,7 @@ mcp__plugin_conexus_nexus__memory_put(
     content="{full findings text}",
     project="{relay-specified project}",
     title="{relay-specified title}",
-    ttl={relay-specified ttl, default 30}
+    ttl={relay-specified ttl; omit for permanent}
 )
 ```
 
@@ -214,7 +214,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
 
 ### Agent-Specific PRODUCE
 - **Research Synthesis (default — T3)**: mcp__plugin_conexus_nexus__store_put(content="# Research: {topic}\n{content}", collection="<subject>", title="research-{topic}-{date}", tags="research,{domain}") — use when the dispatching relay does NOT specify an alternative target
-- **Research Synthesis (relay-overridden — T2)**: mcp__plugin_conexus_nexus__memory_put(content="...", project="{relay-specified}", title="{relay-specified}", ttl={relay-specified, default 30}) — use when the dispatching relay specifies a T2 target (e.g. `rdr_process/audit-<project>-<date>` for rdr-audit classifier dispatches)
+- **Research Synthesis (relay-overridden — T2)**: mcp__plugin_conexus_nexus__memory_put(content="...", project="{relay-specified}", title="{relay-specified}", ttl={relay-specified; omit for permanent}) — use when the dispatching relay specifies a T2 target (e.g. `rdr_process/audit-<project>-<date>` for rdr-audit classifier dispatches)
 - **Source Citations**: Include in document content
 - **Knowledge Gaps**: Create research beads for follow-up
 - **Cross-Reference Maps**: Document in T3 store relationships
@@ -252,7 +252,7 @@ For author/citation-specific questions ("what did Fagin write", "what cites X"):
 - Use `mcp__plugin_conexus_nexus-catalog__search(author="...", corpus="...")` for targeted metadata search
 - Use `mcp__plugin_conexus_nexus-catalog__links(tumbler="...", direction="in", link_type="cites")` for citation traversal
   - Returns `{"nodes": [...], "edges": [...]}` — nodes include physical_collection for T3 resolution
-  - Link types: `cites`, `implements-heuristic`, `supersedes`, `relates`
+  - Link types: `cites`, `implements`, `supersedes`, `relates` (`implements-heuristic` is legacy: nothing writes it since engine 0.1.57, and traversal excludes it by default)
 - Resolve to T3 collections via `mcp__plugin_conexus_nexus-catalog__resolve(owner="...")`, or `corpus="rdr"` (any of `code`, `docs`, `rdr`, `knowledge`, or an exact corpus label); an unknown `corpus` value fails the whole call
 
 Skip catalog only if tools are not available (not injected by SubagentStart hook).

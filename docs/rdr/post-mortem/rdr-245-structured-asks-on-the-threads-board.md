@@ -102,4 +102,46 @@ critique asked for (S3):
 7. Gap 2: a sample of ten `context:` lines, each marked answerable from the
    line alone or not.
 
-Results: (to be appended 2026-11-23)
+Results, run 2026-11-23 23:51 PST (2026-11-24T07:51Z) over the 137 records
+of T2 project `asks` (103 titled by session id, 32 by identity, 2 batch
+records; first 2026-11-07T02:14Z, last 2026-11-24T01:54Z) and `nx ask list`
+at that time:
+
+1. Share of answers by `via`: 137 of 137 `mediator` (89, 30, 11, 5 and 2 from
+   five mediator sessions). No record has another `via`, so every answer
+   came through a session's AskUserQuestion relay, none by `nx ask answer`
+   at a terminal.
+2. Disputed answers: 0. No ask has two records at one version. Two asks
+   have records at two versions: the batch record of one mediator (two
+   batches, no choice) and `rdr244-step2-write`, answered choice 1 at
+   04:38Z and again choice 1 at 04:44Z on 2026-11-07 with the same question
+   and options. Neither changed the answer. A dispute not written as a new
+   record is not countable, as the form says.
+3. Structured share: 144 structured (135 answer records plus 9 open
+   structured asks, all in the batch) against 16 legacy `needs_sam:` lines
+   that are real asks for Sam, out of 30 legacy lines (excluded by hand:
+   `none` or `no`, state lines, lines waiting on someone else, and two
+   lines that point at structured asks already counted). 144 of 160, 90%.
+   The two counts have different time bases: the records are cumulative
+   since 2026-11-07, the legacy lines a snapshot.
+4. Median time from `asked:` to record `time`: 15.6 hours over the 113
+   records whose `asked:` parses (range -0.3 to 188.1 hours). `asked:` is a
+   date, so the time is measured from 00:00Z of that day, and the negative
+   value is a date written in a zone ahead of UTC. No baseline, as decided.
+5. Interrupt-class asks: 32 records with `blocking: yes` (2026-11-07 5,
+   11-08 5, 11-09 10, 11-10 1, 11-19 2, 11-22 6, 11-23 2, 11-24 1), about
+   1.8 a day over the 18 days, and 0 open blocking asks.
+6. Gap 3 regression: 1. `rdr244-step2-write` was asked again at a new
+   version six minutes after a `sent` record for the same id (2026-11-07,
+   before the digest showed answers); the second answer repeated the first.
+   None since.
+7. Gap 2: the board holds 9 open asks with a `context:` line, not ten, so
+   all 9 were read. 7 are answerable from the line alone (the three
+   `ati-*` asks, `myc-link-type-parity`, `myc-persist-verdicts`,
+   `myc-derived-from`, `myc-role-types`). 2 are not: `myc-routing-rdr` and
+   `myc-conflict-rdr` lean on earlier RDRs by number (131 to 133, 256; 057,
+   061) without saying what they decided, and neither says what waiting
+   costs.
+
+The two metrics the RDR could not compute as written stay uncomputed; forms
+2 and 3 are their computable stand-ins.

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import org.slf4j.Logger;
@@ -20,6 +21,10 @@ import static dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING;
  * <p>Newest first, at most {@value #READ_LIMIT} rows, under the tenant's scope as nexus_svc, so row-level security
  * confines the read to that tenant: a vector never crosses tenants. The vector is returned and nothing else about the
  * query exists to return, since the ring holds embeddings and no query text.
+ *
+ * <p>RDR-229 P3.5c (nexus-p2m1x.25): from gate 3 the ring is selected by {@code collection_id} (the registry id of the label, so a
+ * collection renamed in place keeps its ring), before it by the name column as always. {@link Gate3#holds()} is read on every load. A
+ * NULL id is no collection: an empty or unregistered label reads no ring and never falls back to a name.
  */
 public final class PciQueryRingReader {
 
@@ -38,9 +43,15 @@ public final class PciQueryRingReader {
     public record RingEntry(String model, float[] vector, OffsetDateTime addedAt) { }
 
     private final TenantScope scope;
+    private final Gate3 gate3;
 
     public PciQueryRingReader(TenantScope scope) {
+        this(scope, Gate3.never());
+    }
+
+    public PciQueryRingReader(TenantScope scope, Gate3 gate3) {
         this.scope = Objects.requireNonNull(scope, "scope");
+        this.gate3 = Objects.requireNonNull(gate3, "gate3");
     }
 
     /** The collection's ring, newest first (ties on the digest, as the writer's trim breaks them), at most ten. */
@@ -51,7 +62,8 @@ public final class PciQueryRingReader {
                 CANARY_QUERY_RING.EMBEDDING_768, CANARY_QUERY_RING.EMBEDDING_1024, CANARY_QUERY_RING.ADDED_AT)
             .from(CANARY_QUERY_RING)
             .where(CANARY_QUERY_RING.TENANT_ID.eq(tenant))
-            .and(CANARY_QUERY_RING.COLLECTION.eq(collection))
+            .and(CollectionSelector.collectionIs(gate3, tenant, CANARY_QUERY_RING.COLLECTION, CANARY_QUERY_RING.COLLECTION_ID,
+                collection))
             .orderBy(CANARY_QUERY_RING.ADDED_AT.desc(), CANARY_QUERY_RING.VECTOR_DIGEST)
             .limit(READ_LIMIT)
             .fetch(r -> {

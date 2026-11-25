@@ -15,6 +15,7 @@ body — keeping this module's imports acyclic and preserving the
 """
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import click
@@ -214,6 +215,19 @@ def collection_name_cmd(content_type: str, repo: Path | None) -> None:
     click.echo(name.label)
 
 
+def _registry_row_moved(cat, old_row: dict, new: str) -> bool:
+    """True when the engine renamed the registry row in place: *new* now holds the ``collection_id`` the source row had.
+
+    The name path leaves the source as a tombstone and gives *new* a fresh id, so the ids differ. A source row with no id
+    (an engine that predates the column) cannot match, and the verb keeps its supersede step.
+    """
+    old_id = old_row.get("collection_id")
+    if old_id is None:
+        return False
+    new_row = cat.get_collection(new)
+    return new_row is not None and new_row.get("collection_id") == old_id
+
+
 @click.command("rename-collection")
 @click.argument("old")
 @click.argument("new")
@@ -244,12 +258,15 @@ def rename_collection_cmd(
     """Rename a collection with full RDR-101 Phase 6 lifecycle.
 
     \b
-    Combines the data-plane rename (T3 native modify + T2 cascade +
-    catalog documents re-point) with the Phase 6 control-plane work
-    (collections-projection update + CollectionSuperseded event
-    emission). Operators wanting only the data plane can use
-    ``nx collection rename`` instead; this verb is the canonical
-    Phase 6 path that keeps the event log and projection in sync.
+    Runs the engine's one atomic rename (chunks, T2 stores and catalog
+    documents re-pointed together) and keeps the collections registry
+    in step. On an engine that renames the registry row in place (the
+    collection keeps its id; the old name has no row afterwards) that
+    is all there is to do. On an engine that retires the old row as a
+    superseded tombstone, this verb also marks it superseded by the new
+    name and says so. ``nx collection rename`` runs the engine rename
+    alone; this verb adds the name-conformance gate and the registry
+    check.
 
     \b
     Validation gates fire BEFORE any side effect:
@@ -386,7 +403,7 @@ def rename_collection_cmd(
             f"{source_model!r} under a name claiming {token_model!r}. "
             f"Rename to {correct_name!r} instead; if the row is the wrong "
             f"one and the vectors really are {token_model!r}, "
-            f"'nx collection rename {old} {new} --force-prefix-change' "
+            f"`nx collection rename {shlex.quote(old)} {shlex.quote(new)} --force-prefix-change` "
             f"carries the override."
         )
 
@@ -411,45 +428,55 @@ def rename_collection_cmd(
     # the operator knows what state the system is in - a half-applied
     # rename is recoverable but only if the operator has the recovery
     # plan in front of them.
+    renamed_in_place = False
     try:
-        # RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4): routed
-        # through the registration seam (ensure_collection_registered)
-        # instead of a direct writer.register_collection call -- gets
-        # the seam's early EmbeddingProfileMismatchError diagnostic this
-        # rename path previously skipped. `new` was just confirmed
-        # CollectionState.ABSENT above, so it has no catalog row yet by
-        # construction -- this call is what creates one.
-        #
-        # EXPLICIT kwargs for the conformant branch, never bare
-        # name-derivation: T3's chunks were just renamed in place
-        # (rename_collection_data_plane above) -- their embeddings are
-        # UNCHANGED, so the new row must record the model those chunks
-        # actually carry, which is what the OPERATOR TYPED into `new`'s
-        # own name segment, never a recomputed CURRENT write-intent
-        # (collection_registration_kwargs's generic derivation would
-        # substitute the latter). parse_conformant_collection_name(new)
-        # preserves the typed segments exactly like the code this
-        # replaces did. The non-conformant (--allow-legacy) branch stays
-        # on bare name-derivation (nexus-cecqy's legacy_grandfathered
-        # flag), matching register_collection's own pre-existing
-        # internal fallback for that shape.
-        from nexus.corpus import ensure_collection_registered  # noqa: PLC0415  — command-local import (nexus.corpus)
-        from nexus.catalog.rows.legacy_names import parse_conformant_collection_name  # noqa: PLC0415  — command-local import (nexus.corpus)
-        if is_conformant_collection_name(new):
-            parsed = parse_conformant_collection_name(new)
-            ensure_collection_registered(
-                new,
-                registrar=lambda: writer,
-                kwargs={
-                    "content_type": parsed["content_type"],
-                    "owner_id": parsed["owner_id"],
-                    "embedding_model": parsed["embedding_model"],
-                    "model_version": parsed["model_version"],
-                },
-            )
+        # RDR-229 P3.7: an engine whose gate 3 has latched renames the registry row in place. The collection keeps its
+        # id, the old label has no row left, and a supersede of it would 404 for a rename that fully succeeded. The
+        # engine's 200 says so (``ids_stable``), but the client's cascade call returns only the counts; the same fact is
+        # in the registry: the new label now holds the id the old one held. The name path gives the new label a fresh id.
+        renamed_in_place = _registry_row_moved(cat, old_row, new)
+        if renamed_in_place:
+            # nothing to register (the row exists under its new label) and nothing to supersede (no old row)
+            superseded_rows = 0
         else:
-            ensure_collection_registered(new, registrar=lambda: writer)
-        superseded_rows = writer.supersede_collection(old, new, reason="rename-collection")
+            # RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4): routed
+            # through the registration seam (ensure_collection_registered)
+            # instead of a direct writer.register_collection call -- gets
+            # the seam's early EmbeddingProfileMismatchError diagnostic this
+            # rename path previously skipped. `new` was just confirmed
+            # CollectionState.ABSENT above, so it has no catalog row yet by
+            # construction -- this call is what creates one.
+            #
+            # EXPLICIT kwargs for the conformant branch, never bare
+            # name-derivation: T3's chunks were just renamed in place
+            # (rename_collection_data_plane above) -- their embeddings are
+            # UNCHANGED, so the new row must record the model those chunks
+            # actually carry, which is what the OPERATOR TYPED into `new`'s
+            # own name segment, never a recomputed CURRENT write-intent
+            # (collection_registration_kwargs's generic derivation would
+            # substitute the latter). parse_conformant_collection_name(new)
+            # preserves the typed segments exactly like the code this
+            # replaces did. The non-conformant (--allow-legacy) branch stays
+            # on bare name-derivation (nexus-cecqy's legacy_grandfathered
+            # flag), matching register_collection's own pre-existing
+            # internal fallback for that shape.
+            from nexus.corpus import ensure_collection_registered  # noqa: PLC0415  — command-local import (nexus.corpus)
+            from nexus.catalog.rows.legacy_names import parse_conformant_collection_name  # noqa: PLC0415  — command-local import (nexus.corpus)
+            if is_conformant_collection_name(new):
+                parsed = parse_conformant_collection_name(new)
+                ensure_collection_registered(
+                    new,
+                    registrar=lambda: writer,
+                    kwargs={
+                        "content_type": parsed["content_type"],
+                        "owner_id": parsed["owner_id"],
+                        "embedding_model": parsed["embedding_model"],
+                        "model_version": parsed["model_version"],
+                    },
+                )
+            else:
+                ensure_collection_registered(new, registrar=lambda: writer)
+            superseded_rows = writer.supersede_collection(old, new, reason="rename-collection")
     except Exception as exc:
         click.echo(
             f"WARN: T3 was renamed {old!r} -> {new!r} but the projection "
@@ -479,21 +506,22 @@ def rename_collection_cmd(
     parts.extend(rename_summary_parts(counts))
     suffix = f" ({'; '.join(parts)})" if parts else ""
     click.echo(f"Renamed: {old} -> {new}{suffix}")
-    # nexus-cecqy: only claim the supersede when it actually marked a row.
-    # Against a CURRENT engine this always fires: renameCollectionTxn retires the
-    # old row as a superseded tombstone, and the follow-up supersede re-asserts
-    # the same target idempotently. The zero branch survives for the version-skew
-    # window — an engine still on the pre-2026-07-31 build DELETEs the old row, so
-    # the UPDATE matches nothing. Announcing the event regardless was a claim
-    # about something that had not happened.
-    if superseded_rows:
+    if renamed_in_place:
+        click.echo(
+            f"The registry row moved to {new!r} and keeps its collection id; "
+            f"{old!r} has no row of its own, so nothing was marked superseded."
+        )
+    elif superseded_rows:
         click.echo(f"Emitted CollectionSuperseded({old} -> {new})")
     else:
+        # nexus-cecqy: only claim the supersede when it actually marked a row. An engine that DELETEs the old row on
+        # rename (older than 2026-07-31) leaves the UPDATE nothing to match.
         click.echo(
             f"NOTE: no registry row was left to mark superseded, so this "
             f"rename's history is not recorded in superseded_by/superseded_at. "
-            f"The rename itself succeeded. This means the engine still deletes "
-            f"the old row on rename — upgrade it to record rename history "
+            f"The rename itself succeeded. The engine deleted the old row "
+            f"instead of retiring it or moving it in place, which only an "
+            f"older engine does: upgrade it to record rename history "
             f"(nexus-cecqy)."
         )
 

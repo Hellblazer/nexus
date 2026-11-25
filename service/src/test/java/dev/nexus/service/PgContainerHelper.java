@@ -52,7 +52,6 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 
-
 /**
  * Shared factory for per-class Testcontainers PostgreSQL containers.
  *
@@ -197,7 +196,7 @@ public final class PgContainerHelper {
     public static PostgreSQLContainer<?> startDataMove() {
         PostgreSQLContainer<?> c = newDataMoveContainer();
         c.start();
-        return c;
+        return FreshDatabases.fresh(c);
     }
 
     /**
@@ -212,7 +211,7 @@ public final class PgContainerHelper {
         command.addAll(serverArgs);
         c.setCommand(command.toArray(new String[0]));
         c.start();
-        return c;
+        return FreshDatabases.fresh(c);
     }
 
     /**
@@ -476,7 +475,16 @@ public final class PgContainerHelper {
             return startDedicated();
         }
         try {
-            return SharedCluster.acquireDatabase();
+            PostgreSQLContainer<?> clone = SharedCluster.acquireDatabase();
+            if (Rdr229CompleteStamps.formAApplied()) { // -Dnexus.test.formA.applied=true: the clone with the vectors-078 form A bodies applied
+                try (Connection su = clone.createConnection("")) {
+                    Rdr229CompleteStamps.completeAndApplyFormA(su);
+                } catch (Exception e) {
+                    clone.stop();
+                    throw new IllegalStateException("RDR-229 P3.5b form A variant of the clone failed: " + e.getMessage(), e);
+                }
+            }
+            return FreshDatabases.fresh(clone);
         } catch (SQLException e) {
             throw new IllegalStateException("nexus-yhmav shared-cluster acquire failed", e);
         }
@@ -500,7 +508,11 @@ public final class PgContainerHelper {
      *   <li>{@code TextGateProbeSingleRoleGuardIntegrationTest} -- asserts role membership
      *       edges on {@code nexus_svc} and the owner ({@code grantRoleMembership}), which would leak
      *       into every later class on a shared cluster.</li>
-     *   <li>{@code Rdr192LiveCExplainEvidenceIntegrationTest}, {@code ReadPathLeafPruningIntegrationTest} --
+     *   <li>{@code Rdr229P31SingleRoleSupersededByCheckTest} -- migrates as {@code nexus_svc} itself (the single-role
+     *       posture the registry's owner-read changeset and vectors-068-19 key on by name); the shared cluster holds
+     *       {@code nexus_svc} from the template migration and it cannot be declared exclusive and dropped.</li>
+     *   <li>{@code Rdr192LiveCExplainEvidenceIntegrationTest}, {@code ReadPathLeafPruningIntegrationTest},
+     *       {@code Rdr229P35bIdTwinIntegrationTest} --
      *       read the plans {@code auto_explain} writes to the CONTAINER's log ({@link #serverLog}); a shared
      *       cluster's log holds every class's output, and {@code ALTER ROLE nexus_svc SET auto_explain...}
      *       is cluster-wide.</li>
@@ -539,7 +551,7 @@ public final class PgContainerHelper {
     public static PostgreSQLContainer<?> startDedicated() {
         PostgreSQLContainer<?> c = newContainer();
         c.start();
-        return c;
+        return FreshDatabases.fresh(c);
     }
 
     /**
@@ -554,7 +566,7 @@ public final class PgContainerHelper {
         command.addAll(serverArgs);
         c.setCommand(command.toArray(new String[0]));
         c.start();
-        return c;
+        return FreshDatabases.fresh(c);
     }
 
     /**
@@ -578,7 +590,7 @@ public final class PgContainerHelper {
             return startDedicated();
         }
         try {
-            return SharedCluster.acquireEmptyDatabase(exclusiveRoles);
+            return FreshDatabases.fresh(SharedCluster.acquireEmptyDatabase(exclusiveRoles));
         } catch (SQLException e) {
             throw new IllegalStateException("nexus-7xfh7 shared-cluster empty-database acquire failed: " + e.getMessage(), e);
         }
@@ -618,7 +630,7 @@ public final class PgContainerHelper {
                         installTestObjectsAfterProductSchema(oc);
                     }
                 }
-                return c;
+                return FreshDatabases.fresh(c);
             } catch (Exception e) {
                 c.stop();
                 throw new IllegalStateException("nexus-0ty8z dedicated owner-migrated database failed: " + e.getMessage(), e);
@@ -632,7 +644,7 @@ public final class PgContainerHelper {
                 c.stop();
                 throw new IllegalStateException("nexus-0ty8z owner provisioning on the clone failed: " + e.getMessage(), e);
             }
-            return c;
+            return FreshDatabases.fresh(c);
         } catch (SQLException e) {
             throw new IllegalStateException("nexus-0ty8z owner-migrated acquire failed: " + e.getMessage(), e);
         }
@@ -643,9 +655,8 @@ public final class PgContainerHelper {
     public static PostgreSQLContainer<?> startDedicated(String tmpfsSize, long memoryBytes) {
         PostgreSQLContainer<?> c = newContainer(DockerImageName.parse(IMAGE), tmpfsSize, memoryBytes);
         c.start();
-        return c;
+        return FreshDatabases.fresh(c);
     }
-
 
     /**
      * Return a pooled superuser DataSource.
@@ -1087,6 +1098,14 @@ public final class PgContainerHelper {
             "databasechangelog_test_schema_usage", Map.of("schema", schema, "role", role));
     }
 
+    /** {@code REVOKE USAGE ON SCHEMA schema FROM role} (nexus-p2m1x.21), through {@code db.changelog-test-schema-usage-revoke.xml}: the undo of {@link #grantSchemaUsage}. */
+    public static void revokeSchemaUsage(Connection su, String schema, String role) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(role);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-schema-usage-revoke.xml",
+            "databasechangelog_test_schema_usage_revoke", Map.of("schema", schema, "role", role));
+    }
+
     /**
      * {@code ALTER DEFAULT PRIVILEGES IN SCHEMA schema GRANT SELECT ON TABLES TO role} (nexus-cbo4a batch 7),
      * through {@code db.changelog-test-schema-default-select-acl.xml}: jOOQ has no ALTER DEFAULT PRIVILEGES.
@@ -1404,6 +1423,23 @@ public final class PgContainerHelper {
     }
 
     /**
+     * The per-collection partial HNSW index keyed on the registry id, the predicate P3.4 rebuilds every per-collection
+     * index with (RDR-229 P3.5b, nexus-p2m1x.24): {@code CREATE INDEX index ON schema.table USING hnsw (column
+     * nexus.vector_cosine_ops) WHERE collection_id = 'collectionId'::bigint}, through
+     * {@code db.changelog-test-hnsw-index-collection-id.xml}. Not CONCURRENTLY.
+     */
+    public static void createLeafHnswIndexOnId(Connection su, String schema, String table, String index, String column,
+                                               long collectionId) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(table);
+        requireTestIdentifier(index);
+        requireEmbeddingColumn(column);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-hnsw-index-collection-id.xml",
+            "databasechangelog_test_hnsw_index_collection_id", Map.of("schema", schema, "table", table, "index", index,
+                "column", column, "collectionId", Long.toString(collectionId)));
+    }
+
+    /**
      * An HNSW index whose predicate is the compound {@code collection = 'c' AND tenant_id = 't'} (nexus-cbo4a batch
      * 11), through {@code db.changelog-test-hnsw-index-collection-tenant.xml}: a shape the PCI catalog reader must
      * count as unparsed.
@@ -1599,6 +1635,36 @@ public final class PgContainerHelper {
         runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-drop-policy.xml",
             "databasechangelog_test_drop_policy",
             Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "policy", policy));
+    }
+
+    /**
+     * {@code DROP POLICY IF EXISTS policy ON table} (RDR-229 P3.1): the idempotent form, for a test that gives a role D2's policy itself
+     * and must still pass once the product changelog creates it. Not {@code nexus_test.*}: it runs in databases that carry no such schema.
+     */
+    public static void dropPolicyIfExists(Connection conn, Table<?> table, String policy) throws Exception {
+        requireTestIdentifier(policy);
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-drop-policy-if-exists.xml",
+            "databasechangelog_test_drop_policy_if_exists",
+            Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "policy", policy));
+    }
+
+    /**
+     * {@code ALTER TABLE table VALIDATE CONSTRAINT constraint} (RDR-229 P3.1) on a superuser connection, in a database without
+     * {@code nexus_test.validate_constraint} (the data-move and empty-database containers).
+     */
+    public static void validateConstraintStandalone(Connection conn, Table<?> table, String constraintName) throws Exception {
+        requireTestIdentifier(constraintName);
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-validate-constraint.xml",
+            "databasechangelog_test_validate_constraint",
+            Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "constraint", constraintName));
+    }
+
+    /** {@code ALTER TABLE table ALTER COLUMN column DROP IDENTITY} (no typed form in jOOQ 3.20.11), through {@code db.changelog-test-drop-identity.xml}. */
+    public static void dropIdentity(Connection conn, Table<?> table, String column) throws Exception {
+        requireTestIdentifier(column);
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-drop-identity.xml",
+            "databasechangelog_test_drop_identity",
+            Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "column", column));
     }
 
     /** The four row-level-security switches of {@code ALTER TABLE}, for {@link #setRowSecurity}. */
@@ -2163,11 +2229,7 @@ public final class PgContainerHelper {
      */
     public static void ownChunks(DSLContext ctx, String tenantId, String collection, String... chashHex) {
         String docId = "own-" + collection;
-        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-            .values(tenantId, docId, "Owner " + docId, collection)
-            .onConflictDoNothing()
-            .execute();
+        CollectionIdSeeds.ownerDocument(ctx, tenantId, docId, collection);
 
         Integer maxPosition = ctx.select(org.jooq.impl.DSL.max(CATALOG_DOCUMENT_CHUNKS.POSITION))
             .from(CATALOG_DOCUMENT_CHUNKS)
@@ -2178,35 +2240,10 @@ public final class PgContainerHelper {
         if (chashHex.length == 0) {
             return;
         }
-
-        // Single multi-row INSERT (one round trip regardless of chashHex.length) —
-        // a fixture owning thousands of chashes (e.g. a dense-gate-scale fixture)
-        // must not pay one round trip per chash.
-        if (!isPartitionedLayout(ctx)) {
-            var old = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                    CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                    CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                .values(tenantId, docId, nextPosition,
-                        dev.nexus.service.db.Chash.fromHex(chashHex[0]).toBytes(), collection);
-            for (int i = 1; i < chashHex.length; i++) {
-                old = old.values(tenantId, docId, nextPosition + i,
-                        dev.nexus.service.db.Chash.fromHex(chashHex[i]).toBytes(), collection);
-            }
-            old.onConflictDoNothing().execute();
-            return;
-        }
-        String model = collectionModel(ctx, tenantId, collection);
-        var step = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-            .values(tenantId, docId, nextPosition,
-                    dev.nexus.service.db.Chash.fromHex(chashHex[0]).toBytes(), collection, model);
-        for (int i = 1; i < chashHex.length; i++) {
-            step = step.values(tenantId, docId, nextPosition + i,
-                    dev.nexus.service.db.Chash.fromHex(chashHex[i]).toBytes(), collection, model);
-        }
-        step.onConflictDoNothing().execute();
+        // Single multi-row INSERT (one round trip regardless of chashHex.length) -- a fixture owning thousands of
+        // chashes (e.g. a dense-gate-scale fixture) must not pay one round trip per chash. RDR-229 P3.1: each row
+        // carries the collection's id on an id layout (CollectionIdSeeds).
+        CollectionIdSeeds.manifestRows(ctx, tenantId, docId, collection, nextPosition, chashHex);
     }
 
     /**
@@ -2228,47 +2265,17 @@ public final class PgContainerHelper {
      * @param v          the 384-dim embedding vector
      */
     public static void insertChunk384(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
-        if (!isPartitionedLayout(ctx)) {
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                           CHUNKS.EMBEDDING_384)
-               .values(tenant, collection, chashBytes, "text", v)
-               .execute();
-            return;
-        }
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-           .values(tenant, collection, chashBytes, collectionModel(ctx, tenant, collection), "text", v)
-           .execute();
+        CollectionIdSeeds.insertChunk(ctx, tenant, collection, chashBytes, CHUNKS.EMBEDDING_384, v);
     }
 
     /** {@code nexus.chunks} seed at dim 768 — see {@link #insertChunk384} for the full contract. */
     public static void insertChunk768(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
-        if (!isPartitionedLayout(ctx)) {
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                           CHUNKS.EMBEDDING_768)
-               .values(tenant, collection, chashBytes, "text", v)
-               .execute();
-            return;
-        }
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
-           .values(tenant, collection, chashBytes, collectionModel(ctx, tenant, collection), "text", v)
-           .execute();
+        CollectionIdSeeds.insertChunk(ctx, tenant, collection, chashBytes, CHUNKS.EMBEDDING_768, v);
     }
 
     /** {@code nexus.chunks} seed at dim 1024 — see {@link #insertChunk384} for the full contract. */
     public static void insertChunk1024(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
-        if (!isPartitionedLayout(ctx)) {
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                           CHUNKS.EMBEDDING_1024)
-               .values(tenant, collection, chashBytes, "text", v)
-               .execute();
-            return;
-        }
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
-           .values(tenant, collection, chashBytes, collectionModel(ctx, tenant, collection), "text", v)
-           .execute();
+        CollectionIdSeeds.insertChunk(ctx, tenant, collection, chashBytes, CHUNKS.EMBEDDING_1024, v);
     }
 
     private static final com.fasterxml.jackson.databind.ObjectMapper CHUNK_METADATA_MAPPER =
@@ -2319,7 +2326,8 @@ public final class PgContainerHelper {
         }
         // RDR-225: every row of the call carries the collection's model; a vector whose width is not
         // that model's dimension is refused by the model partition's CHECK, as the engine's writers are.
-        final String model = isPartitionedLayout(ctx) ? collectionModel(ctx, tenant, collection) : null;
+        // RDR-229 P3.1: and, on an id layout, the collection's id (CollectionIdSeeds.Registered), resolved once.
+        final var reg = CollectionIdSeeds.Registered.of(ctx, tenant, collection);
         for (int i = 0; i < n; i++) {
             byte[] chash = dev.nexus.service.db.Chash.fromHex(chashHex.get(i)).toBytes();
             float[] v = embeddings.get(i);
@@ -2335,19 +2343,7 @@ public final class PgContainerHelper {
                 case 1024 -> CHUNKS.EMBEDDING_1024;
                 default -> throw new IllegalArgumentException("insertChunks: no embedding column of width " + v.length);
             };
-            if (model == null) {
-                ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                               col, CHUNKS.METADATA)
-                   .values(tenant, collection, chash, texts.get(i), Vector.of(v), meta)
-                   .onConflictDoNothing()
-                   .execute();
-                continue;
-            }
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                           CHUNKS.CHUNK_TEXT, col, CHUNKS.METADATA)
-               .values(tenant, collection, chash, model, texts.get(i), Vector.of(v), meta)
-               .onConflictDoNothing()
-               .execute();
+            CollectionIdSeeds.insertChunkIfAbsent(ctx, reg, tenant, collection, chash, texts.get(i), col, Vector.of(v), meta);
         }
     }
 
@@ -2421,15 +2417,7 @@ public final class PgContainerHelper {
                 "insertReferenceOnlyChunk: no embedding column of width " + embedding.length);
         };
         byte[] chash = dev.nexus.service.db.Chash.fromHex(chashHex).toBytes();
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                       CHUNKS.CHUNK_TEXT, col, CHUNKS.METADATA, CHUNKS.RETENTION)
-           .values(tenant, collection, chash, collectionModel(ctx, tenant, collection), null,
-                   Vector.of(embedding), meta, "reference-only")
-           .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL)
-           .doUpdate()
-           .set(col, org.jooq.impl.DSL.excluded(col))
-           .set(CHUNKS.METADATA, org.jooq.impl.DSL.excluded(CHUNKS.METADATA))
-           .execute();
+        CollectionIdSeeds.upsertReferenceOnlyChunk(ctx, tenant, collection, chash, col, Vector.of(embedding), meta);
     }
 
     /**
@@ -2595,6 +2583,26 @@ public final class PgContainerHelper {
             "databasechangelog_test_index_comment_clear", Map.of("schema", schema, "index", index));
     }
 
+    /**
+     * {@code ALTER TABLE nexus.table DISABLE TRIGGER trigger} (RDR-229 P3.7), through
+     * {@code db.changelog-test-trigger-disable.xml}: the control of a test that shows what a trigger changes by running the same statement
+     * without it. jOOQ has no trigger DDL. Both names go through {@link #requireTestIdentifier}; pair it with {@link #enableTrigger}.
+     */
+    public static void disableTrigger(Connection su, String table, String trigger) throws Exception {
+        requireTestIdentifier(table);
+        requireTestIdentifier(trigger);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-trigger-disable.xml",
+            "databasechangelog_test_trigger_disable", Map.of("table", table, "trigger", trigger));
+    }
+
+    /** {@code ALTER TABLE nexus.table ENABLE TRIGGER trigger}, through {@code db.changelog-test-trigger-enable.xml}; see {@link #disableTrigger}. */
+    public static void enableTrigger(Connection su, String table, String trigger) throws Exception {
+        requireTestIdentifier(table);
+        requireTestIdentifier(trigger);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-trigger-enable.xml",
+            "databasechangelog_test_trigger_enable", Map.of("table", table, "trigger", trigger));
+    }
+
     /** Which text of a product changeset {@link #replayPart} runs. */
     private enum ChangesetPart { FORWARD, ROLLBACK }
 
@@ -2622,6 +2630,25 @@ public final class PgContainerHelper {
                     + " no longer contains the substituted text: " + from);
             }
             return text.replace(from, to);
+        });
+    }
+
+    /**
+     * {@link #replayChangesetSubstituting(Connection, String, String, String, String)} for several substitutions, applied in map order; each
+     * {@code from} must occur in the text as it stands when that substitution is applied.
+     */
+    public static List<String> replayChangesetSubstituting(Connection conn, String changelog, String changesetId,
+            java.util.LinkedHashMap<String, String> substitutions) throws Exception {
+        return replayPart(conn, changelog, changesetId, ChangesetPart.FORWARD, text -> {
+            String edited = text;
+            for (var sub : substitutions.entrySet()) {
+                if (sub.getKey().isEmpty() || !edited.contains(sub.getKey())) {
+                    throw new IllegalStateException("changeset " + changesetId + " in " + changelog
+                        + " no longer contains the substituted text: " + sub.getKey());
+                }
+                edited = edited.replace(sub.getKey(), sub.getValue());
+            }
+            return edited;
         });
     }
 
@@ -3006,18 +3033,6 @@ public final class PgContainerHelper {
             DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")
                 .and(DSL.field(DSL.name("pid"), Integer.class).ne(DSL.function("pg_backend_pid", Integer.class)))
                 .and(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", String.class))));
-    }
-
-    /** The other backends of this database as a table (pid, state, wait event, the start of the query), for a failure message. */
-    public static String backendActivity(DSLContext ctx) {
-        PgLockWait.clearSnapshot(ctx);
-        return ctx.select(DSL.field(DSL.name("pid"), Integer.class), DSL.field(DSL.name("state"), String.class),
-                DSL.field(DSL.name("wait_event_type"), String.class), DSL.field(DSL.name("wait_event"), String.class),
-                DSL.left(DSL.field(DSL.name("query"), String.class), 90).as("query"))
-            .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
-            .where(DSL.field(DSL.name("pid"), Integer.class).ne(DSL.function("pg_backend_pid", Integer.class))
-                .and(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", String.class))))
-            .fetch().format();
     }
 
     /**

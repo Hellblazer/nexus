@@ -32,6 +32,7 @@ final class OwnerFixture {
     String leader = "L";
     List<String> members = new ArrayList<>(List.of("L"));
     int deadlineMinutes = 20;
+    int stallFactor = GroupView.DEFAULT_STALL_FACTOR;
     Map<String, Integer> byTopic = new LinkedHashMap<>();
     boolean served = true;
     Instant now = T0.plus(Duration.ofHours(1));
@@ -192,9 +193,25 @@ final class OwnerFixture {
         return this;
     }
 
+    /** The next row lands at {@code t}. */
+    OwnerFixture at(Instant t) {
+        clock = t.minusSeconds(10);
+        return this;
+    }
+
+    /** A {@code disclaim} row on the owner subspace, sent by the session of {@code seat}. */
+    OwnerFixture disclaim(String seat, String sha) {
+        Map<String, String> dims = new LinkedHashMap<>();
+        dims.put("from", seat);
+        dims.put("kind", "disclaim");
+        dims.put("sha", sha);
+        owners.add(new BoardRow("a" + (++seq), tick(), dims, "{}", "s" + seat));
+        return this;
+    }
+
     OwnerDecision.Input input() {
         GroupView group = served
-            ? new GroupView("push-train", leader, List.copyOf(members), deadlineMinutes, Map.copyOf(byTopic)) : null;
+            ? new GroupView("push-train", leader, List.copyOf(members), deadlineMinutes, Map.copyOf(byTopic), stallFactor) : null;
         return new OwnerDecision.Input(BASE, List.copyOf(pushes), List.copyOf(dones), List.copyOf(owners), group,
             new Identities(Map.copyOf(stamps), Map.copyOf(presence)), now);
     }

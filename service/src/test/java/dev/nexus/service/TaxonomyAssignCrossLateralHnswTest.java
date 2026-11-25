@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.HnswSettingsExtractor;
@@ -371,14 +372,16 @@ class TaxonomyAssignCrossLateralHnswTest {
                 // (fk_topic_assignments_topic_tenant needs a real topics row for
                 // whichever centroid eventually wins an argmax and gets persisted).
                 long[] topicIds = bulkInsertTopics(ctx, TENANT, coll, n);
+                // RDR-229 P3.1: a row that names a collection carries its registry id beside it.
+                final Long collId = CollectionIds.require(ctx, TENANT, coll);
                 var insert = ctx.insertInto(TAXONOMY_CENTROIDS,
-                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.COLLECTION_ID,
                     TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
                     TAXONOMY_CENTROIDS.EMBEDDING_1024,
                     TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT);
                 final String model = PgContainerHelper.collectionModel(ctx, TENANT, coll);
                 for (long topicId : topicIds) {
-                    insert = insert.values(TENANT, coll, topicId, model,
+                    insert = insert.values(TENANT, coll, collId, topicId, model,
                         clusteredVector(rnd, center, sigma), "seed-centroid", 1);
                 }
                 insert.execute();
@@ -396,6 +399,7 @@ class TaxonomyAssignCrossLateralHnswTest {
                 ctx.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, TENANT)
                     .set(CHUNKS.COLLECTION, COL_DENSE)
+                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COL_DENSE))
                     .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash))
                     .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, COL_DENSE))
                     .set(CHUNKS.CHUNK_TEXT, "lateral incremental-fixture chunk " + i)
@@ -626,6 +630,16 @@ class TaxonomyAssignCrossLateralHnswTest {
     /** Any plpgsql parameter name left in the statement after the fixture's values replaced the known ones. */
     private static final java.util.regex.Pattern LEFTOVER_PARAMETER =
         java.util.regex.Pattern.compile("\\bp_[a-z_]+\\b");
+    /** Any plpgsql local variable left in the statement after the fixture's values replaced the known ones. */
+    private static final java.util.regex.Pattern LEFTOVER_VARIABLE =
+        java.util.regex.Pattern.compile("\\bv_[a-z_]+\\b");
+    /**
+     * RDR-229 P3.5b (vectors-077-40): the assignment that resolves {@code v_cid}, the collection's registry id the cross
+     * branch matches by, once at the top of the body. The harness renders that id in the variable's place, so the
+     * assignment must be the one the body runs.
+     */
+    private static final String V_CID_ASSIGNMENT =
+        "cc.collection_id INTO v_cid FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant AND cc.name = p_collection;";
     private static final java.util.regex.Pattern TENANT_GUC_READ =
         java.util.regex.Pattern.compile("current_setting\\('nexus\\.tenant', true\\)");
 
@@ -648,13 +662,19 @@ class TaxonomyAssignCrossLateralHnswTest {
      */
     private String deployedCrossBranchStatement() throws Exception {
         String prosrc;
+        Long denseId;
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext db = DSL.using(su, SQLDialect.POSTGRES);
             PgCatalogProbes.RoutineConfigAndSource fn = PgCatalogProbes.routineConfigAndSource(
-                DSL.using(su, SQLDialect.POSTGRES), "nexus", "assign_from_chashes_1024");
+                db, "nexus", "assign_from_chashes_1024");
             assertThat(fn).as("assign_from_chashes_1024 must exist").isNotNull();
             prosrc = fn.prosrc();
+            denseId = CollectionIds.require(db, TENANT, COL_DENSE);
         }
+        // RDR-229 P3.1: the body now carries line comments that hold a ';' (vectors-069 explains the id's dual write
+        // inside the INSERT), and the statement is the text up to its own terminating ';', so the comments go first.
+        prosrc = prosrc.replaceAll("--[^\\n]*", "");
         java.util.regex.Matcher branch = FIRST_RETURN_QUERY.matcher(prosrc);
         assertThat(branch.find()).as("the deployed body has a RETURN QUERY statement:%n%s", prosrc).isTrue();
         String statement = branch.group(1).strip();
@@ -663,6 +683,13 @@ class TaxonomyAssignCrossLateralHnswTest {
             .contains("CROSS JOIN LATERAL").contains("OPERATOR(nexus.<=>)").endsWith("nearest n");
 
         DSLContext render = DSL.using(SQLDialect.POSTGRES);
+        // RDR-229 P3.5b: the branch matches by v_cid, a plpgsql variable the body assigns before the branch. With
+        // plan_cache_mode = force_custom_plan plpgsql hands the planner its value as a constant, so the faithful
+        // rendering is the id that assignment yields for this fixture, the registry id of COL_DENSE.
+        assertThat(prosrc.replaceAll("\\s+", " "))
+            .as("the deployed body resolves v_cid from the collection's registry row before the branch:%n%s", prosrc)
+            .contains("DECLARE v_cid bigint;").contains("BEGIN SELECT " + V_CID_ASSIGNMENT);
+        statement = substituteParameter(statement, "v_cid", render.renderInlined(DSL.val(denseId, org.jooq.impl.SQLDataType.BIGINT)));
         statement = substituteParameter(statement, "p_chashes", render.renderInlined(
             DSL.val(chunkChashes.toArray(String[]::new), org.jooq.impl.SQLDataType.CLOB.array())));
         statement = substituteParameter(statement, "p_collection", render.renderInlined(DSL.val(COL_DENSE)));
@@ -674,6 +701,8 @@ class TaxonomyAssignCrossLateralHnswTest {
         statement = TENANT_GUC_READ.matcher(statement).replaceAll(java.util.regex.Matcher.quoteReplacement(tenant));
         assertThat(LEFTOVER_PARAMETER.matcher(statement).find())
             .as("every function parameter in the statement was substituted:%n%s", statement).isFalse();
+        assertThat(LEFTOVER_VARIABLE.matcher(statement).find())
+            .as("every plpgsql variable in the statement was substituted:%n%s", statement).isFalse();
         return statement;
     }
 
@@ -846,9 +875,12 @@ class TaxonomyAssignCrossLateralHnswTest {
      *  instead of {@code n}. */
     private static long[] bulkInsertTopics(DSLContext ctx, String tenant, String collection, int n) {
         OffsetDateTime createdAt = OffsetDateTime.parse("2026-01-01T00:00:00Z");
-        var step = ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT);
+        // RDR-229 P3.1: a row that names a collection carries its registry id beside it.
+        final Long collId = CollectionIds.require(ctx, tenant, collection);
+        var step = ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.COLLECTION_ID,
+            TOPICS.CREATED_AT);
         for (int i = 0; i < n; i++) {
-            step = step.values(tenant, collection + "-topic-" + i, collection, createdAt);
+            step = step.values(tenant, collection + "-topic-" + i, collection, collId, createdAt);
         }
         List<Long> ids = step.returningResult(TOPICS.ID).fetch(TOPICS.ID);
         long[] out = new long[n];

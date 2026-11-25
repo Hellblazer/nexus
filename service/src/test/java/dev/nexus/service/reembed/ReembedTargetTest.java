@@ -3,6 +3,7 @@
 package dev.nexus.service.reembed;
 
 import dev.nexus.service.db.ReembedJobRepository.Job;
+import dev.nexus.service.SupersedeSeeds;
 import dev.nexus.service.db.ReembedJobRepository.Transition;
 import dev.nexus.service.reembed.TargetSelection.CollectionRow;
 import dev.nexus.service.reembed.TargetSelection.Decision;
@@ -28,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-210 Phase 6 Step 2 (bead nexus-f98bg): the target-selection decision on the registry rows a real job leaves
  * behind, with the repository calls that apply a {@code Revive}. {@code TargetSelectionTest} covers the decision on
  * hand-built rows; this class covers that the real rows ({@code listCollections}), the real supersede a cutover
- * performs, the real upsert that clears a supersession and the real {@code markRevived} agree with it. The start
+ * performs, the real upsert that clears a supersession and the real way-back start's mark ({@code startMarking}) agree with it. The start
  * route that strings these together is the next commit's; the test strings them itself.
  *
  * <p>Run: {@code -Dtest=ReembedTargetTest,TargetSelectionTest}.
@@ -54,7 +55,7 @@ class ReembedTargetTest extends ReembedFixture {
     /** What a start would do about the way back (target = the old source's model), for a job whose source is the old target. */
     private Decision wayBack(Fx fx, LockHolder holder) {
         Result found = TargetSelection.select(rows(fx), CONTENT_TYPE, owner(fx), BGE);
-        return TargetSelection.decide(found, fx.tgt(), holder);
+        return TargetSelection.decide(found, fx.tgt(), holder, id -> reader.liveSuccessorLabel(fx.tenant(), id));
     }
 
     private void applyRevive(Fx fx, Revive revive) {
@@ -70,12 +71,16 @@ class ReembedTargetTest extends ReembedFixture {
         assertThat(supersededBy(fx, fx.src())).isEqualTo(fx.tgt());
 
         Result found = TargetSelection.select(rows(fx), CONTENT_TYPE, owner(fx), BGE);
-        assertThat(found).isEqualTo(new Superseded(fx.src(), fx.tgt()));
+        assertThat(found).isInstanceOf(Superseded.class);
+        Superseded tombstone = (Superseded) found;
+        assertThat(tombstone.name()).isEqualTo(fx.src());
+        assertThat(tombstone.supersededBy()).isEqualTo(fx.tgt());
+        assertThat(tombstone.collectionId()).as("the row's id, which decide() follows to the live successor").isNotNull();
         Decision decision = wayBack(fx, null);
         assertThat(decision).isEqualTo(new Revive(fx.src()));
 
         applyRevive(fx, (Revive) decision);
-        assertThat(jobs.markRevived(fx.tenant(), fx.src(), fx.tgt())).isPresent();
+        assertThat(jobs.startMarking(fx.tenant(), fx.tgt(), fx.src(), null, false, false, true).revived()).isPresent();
 
         assertThat(supersededBy(fx, fx.src())).as("the upsert cleared the supersession").isEmpty();
         assertThat(TargetSelection.select(rows(fx), CONTENT_TYPE, owner(fx), BGE)).isEqualTo(new Live(fx.src()));
@@ -103,7 +108,7 @@ class ReembedTargetTest extends ReembedFixture {
         Decision decision = wayBack(fx, null);
         assertThat(decision).isEqualTo(new Revive(fx.src()));
         applyRevive(fx, (Revive) decision);
-        assertThat(jobs.markRevived(fx.tenant(), fx.src(), fx.tgt())).isPresent();
+        assertThat(jobs.startMarking(fx.tenant(), fx.tgt(), fx.src(), null, false, false, true).revived()).isPresent();
 
         Job marked = job(fx, aborted.jobId());
         assertThat(marked.state()).isEqualTo(ABORTED);
@@ -139,7 +144,7 @@ class ReembedTargetTest extends ReembedFixture {
     @Test
     void aSourceSupersededByAnotherNameIsRefusedNamingBoth() {
         Fx fx = pair("elsewhere");
-        assertThat(catalog.supersedeCollection(fx.tenant(), fx.src(), "somewhere-else", null)).isEqualTo(1);
+        assertThat(SupersedeSeeds.supersede(catalog, fx.tenant(), fx.src(), "somewhere-else", null)).isEqualTo(1);
 
         Decision decision = wayBack(fx, null);
 
@@ -155,6 +160,7 @@ class ReembedTargetTest extends ReembedFixture {
         Result found = TargetSelection.select(rows(fx), CONTENT_TYPE, owner(fx), MINI);
 
         assertThat(found).isEqualTo(new Live(fx.tgt()));
-        assertThat(TargetSelection.decide(found, fx.src(), null)).isEqualTo(new TargetSelection.UseLive(fx.tgt()));
+        assertThat(TargetSelection.decide(found, fx.src(), null, id -> reader.liveSuccessorLabel(fx.tenant(), id)))
+            .isEqualTo(new TargetSelection.UseLive(fx.tgt()));
     }
 }

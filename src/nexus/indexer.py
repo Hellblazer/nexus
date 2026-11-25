@@ -16,6 +16,7 @@ Per-file indexing logic lives in focused sub-modules (RDR-032):
   nexus.indexer_utils  — staleness check, credential check, shared helpers
   nexus.index_context  — IndexContext dataclass
 """
+import shlex
 import contextlib
 import os
 import sys
@@ -471,6 +472,57 @@ def _same_file(fd: int, lock_path: Path) -> bool:
     return (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino)
 
 
+def _register_run_collections(
+    targets: "tuple[tuple[str | None, str], ...]",
+) -> None:
+    """Register each ``(name, model)`` target of an index run with the engine before the run reads or files under it.
+
+    RDR-229 P3.1 (nexus-p2m1x.17): a catalog write needs a registry row, so this runs whatever the vector backend is.
+    *model* is the one the run resolved for the target (the row's, else the name's own token), so the registration
+    kwargs agree with what the run stamps by construction. A target of ``None`` is a content type with no files.
+
+    Every failure propagates in either topology, the engine as the vector backend or a client-embedding test double
+    (linda 2026-11-22: a topology that exists only in tests gets no lenient path in product code, which would hide a
+    test that skipped registration). An unreachable registry, a profile mismatch and a retired name all stop the run;
+    a retired name is refused before the upsert, which would un-retire it (nexus-wwuzp).
+    """
+    from nexus.collection_errors import LabelReservedError  # noqa: PLC0415 — deferred: keep this module's import surface as it was
+    from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+        collection_registration_kwargs,
+        ensure_collection_registered,
+        refuse_if_superseded,
+    )
+
+    for name, model in targets:
+        if name is None:
+            continue
+        # nexus-wwuzp: this registration passes explicit kwargs, so its upsert clears ``superseded_by``. After a
+        # failed Phase-4 migration (``phase4_migration_failed``) the name here can be a legacy name an earlier run
+        # already retired; read first and stop loudly rather than silently un-retire it. Chosen over a legacy-shape
+        # read-first because the hazard is this caller's own stale name, whatever its shape, and every other explicit
+        # registrar (reindex, backfill) registers on purpose.
+        refuse_if_superseded(
+            name,
+            remedy=(
+                "The repo's registry still names the collection it was "
+                "renamed away from (a Phase-4 migration or `nx collection "
+                "rename` retired it), so the run stops rather than "
+                "un-retire it. Re-run `nx index repo <repo>`: the migration "
+                "retries on each run and moves the repo onto {successor!r}. "
+                "If it stops here again, `nx catalog doctor "
+                "--collections-drift` reports the retired name and `nx "
+                "collection info {quoted_successor}` shows where the data lives."
+            ),
+        )
+        kwargs = collection_registration_kwargs(name)
+        kwargs["embedding_model"] = model
+        try:
+            ensure_collection_registered(name, kwargs=kwargs)
+        except LabelReservedError as reserved:
+            # the run names this collection from the repo's registry: the label is not the person's to change
+            raise reserved.with_fixed_label() from reserved
+
+
 def _repo_target_model(db: object, collection_name: str, *, legacy_model: str | None) -> tuple[str, bool]:
     """The model a repo run stamps *collection_name*'s chunks with and compares the
     unchanged-content skip against, and whether the catalog row was read to decide it.
@@ -906,9 +958,9 @@ def _migrate_legacy_collections(
                         "different embedding model than the one the indexer "
                         "writes; rename never re-embeds, so it is kept under "
                         "its legacy name and indexed there. To move it, "
-                        + (f"re-index it from source (nx collection reindex {legacy}), or "
+                        + (f"re-index it from source (nx collection reindex {shlex.quote(legacy)}), or "
                            if ct != "code" else "re-index it from source (nx index repo), or ")
-                        + f"re-embed it to the write model (nx collection re-embed {legacy} "
+                        + f"re-embed it to the write model (nx collection re-embed {shlex.quote(legacy)} "
                         f"--to {conformant_name.embedding_model} plans it; add --no-dry-run --yes "
                         "to run it as a job on the local engine), or "
                         "rename it to a name carrying its row's own model "
@@ -1047,7 +1099,7 @@ def _migrate_legacy_collections(
                     f"Both legacy {legacy} and conformant {conformant} "
                     f"exist; skipping rename. Operator cleanup of the "
                     f"legacy collection is recommended via "
-                    f"'nx collection delete {legacy}' once verified empty."
+                    f"`nx collection delete {shlex.quote(legacy)}` once verified empty."
                 )
             result[ct] = conformant
         else:
@@ -1428,8 +1480,10 @@ def _catalog_hook(
             # worktree path; ``resolve_path`` then produced broken
             # paths for every relative-path document under this owner
             # once the worktree was deleted.
+            # RDR-254 Gap 4: a second live clone with this folder name registers under its own name.
+            from nexus.catalog.engine_writes.repo_owner_name import repo_owner_name  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
             owner = writer.register_owner(
-                name=repo_name,
+                name=repo_owner_name(cat, name=repo_name, repo_hash=repo_hash, repo_root=main_repo),
                 owner_type="repo",
                 repo_hash=repo_hash,
                 repo_root=str(main_repo),
@@ -2652,13 +2706,15 @@ def _hold_pdfs_without_stack(
     from nexus import mineru_weights  # noqa: PLC0415 — deferred import (startup cost)
 
     if probe is not None and pdf_stack.needs_stack(extractor) and (
-        not pdf_stack.state().present or not mineru_weights.weights_cached()
+        not pdf_stack.state().present or not mineru_weights.prefetch_is_noop()
     ):
         # nexus-2k66t.4.8: the stack is absent, so settle first whether any PDF
         # needs extracting. A walk whose PDFs are all indexed and unchanged
         # must not cost the install; the PDFs the probe clears are not held.
         # F34 (nexus-7t3w1): the same holds for MinerU's pipeline weights, which
-        # the gate below fetches (about 1.2 GB) when they are missing.
+        # the gate below fetches (about 1.2 GB) when they are missing. F35: the predicate is
+        # ``prefetch_is_noop``, true exactly when that gate would do nothing (a Hugging Face cache alone
+        # is not enough: the gate would still seed nexus's copy from it).
         pdf_paths = _needing if _needing is not None else probe(pdf_paths)
         if not pdf_paths:
             pdf_stack.record_skipped([*already_held], repo=repo)
@@ -4365,7 +4421,21 @@ def _prune_deleted_files(
             # propagate it loud instead of logging a warning and quietly
             # leaving GC broken (nexus-ft04v.28 C1 was exactly that shape).
             raise
-        except Exception:  # noqa: BLE001 — best-effort; failure logged, sweep continues
+        except Exception as exc:  # noqa: BLE001 — best-effort; failure logged, sweep continues
+            from nexus.db.engine_reasons import RESTORE_ORIGIN_UNREGISTERED_REASON  # noqa: PLC0415 — deferred import
+
+            if getattr(exc, "reason", None) == RESTORE_ORIGIN_UNREGISTERED_REASON:
+                # RDR-229 P3.7 (engine 0.1.202): quarantined chunks of this collection carry the null origin marker
+                # (the origin had no registry row), so the engine refused the restore before anything moved. A typed
+                # answer, not a fault: say so once for the collection, skip its prune this pass, go on to the next.
+                engine = getattr(exc, "engine_body", None)
+                _log.warning(
+                    "gc_restore_origin_unregistered", collection=collection_name,
+                    rows=engine.get("rows") if isinstance(engine, dict) else None,
+                    note="quarantined chunks name an origin with no registry row; the engine will not restore them "
+                         "or re-create the origin from its label. This collection was NOT pruned this pass.",
+                )
+                continue
             _log.warning("gc_serverside_prune_failed", collection=collection_name,
                          exc_info=True)
             continue
@@ -5678,55 +5748,28 @@ def _run_index(
     # made the engine's profile refuse (EmbeddingProfileMismatchError: the
     # row held the row's model, not the token).
     #
-    # Release-battery finding (7.39.0 local-service gate, 35 reds): this
-    # loop runs only when the vector backend is the engine. The write path
-    # it fronts registers from INSIDE HttpVectorClient, so with
-    # NX_STORAGE_BACKEND_VECTORS opted out (a client-embedding T3 double
-    # injected by tests, the only non-service topology left) no write ever
-    # registered anything, and there is no engine-side collection to
-    # register: the name carries the double's own model token
-    # (minilm-l6-v2-384) and the engine 422s it against the tenant's real
-    # profile. Gated on the same is_vector_service_mode() that chose `db`
-    # above, so the loop and the client it registers for agree by
-    # construction.
-    from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
-        collection_registration_kwargs,
-        ensure_collection_registered,
-        refuse_if_superseded,
-    )
-    from nexus.db.http_vector_client import is_vector_service_mode as _reg_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
+    # The rule (RDR-229 P3.1, nexus-p2m1x.17): a catalog write needs a registry
+    # row, so every collection this run files documents under is registered
+    # before the hook runs, whichever backend holds the vectors. The engine
+    # refuses a document under an unregistered collection (422
+    # ``unregistered_collection``). With the engine as the vector backend the
+    # write path registers too (HttpVectorClient), and a failure here stops the
+    # run as it always has. With a client-embedding T3 double (the test-only
+    # ``NX_STORAGE_BACKEND_VECTORS`` opt-out) nothing else registers, so this is
+    # the only registration, and it meets the engine's profile check like any
+    # other: the double's collection names carry the tenant's profile model (the
+    # test substrate mints them so), never a model the profile would refuse. A
+    # failure stops the run in both topologies (an unreachable registry, a
+    # profile mismatch, a retired name): a test that skipped registration fails
+    # here, at the cause, not as a refused row deep in the reconcile commit.
 
-    if _reg_service_mode():
-        for _name, _registered_model in (
+    _register_run_collections(
+        (
             (code_collection if have_code_files else None, code_model),
             (docs_collection if have_docs_files else None, docs_model),
             (rdr_col_name, rdr_model),
-        ):
-            if _name is not None:
-                # nexus-wwuzp: this registration passes explicit kwargs, so its
-                # upsert clears ``superseded_by``. After a failed Phase-4
-                # migration (``phase4_migration_failed``) the name here can be
-                # a legacy name an earlier run already retired; read first and
-                # stop loudly rather than silently un-retiring it. Chosen over
-                # a legacy-shape read-first because the hazard is this caller's
-                # own stale name, whatever its shape, and every other explicit
-                # registrar (reindex, backfill) registers on purpose.
-                refuse_if_superseded(
-                    _name,
-                    remedy=(
-                        "The repo's registry still names the collection it was "
-                        "renamed away from (a Phase-4 migration or `nx collection "
-                        "rename` retired it), so the run stops rather than "
-                        "un-retire it. Re-run `nx index repo <repo>`: the migration "
-                        "retries on each run and moves the repo onto {successor!r}. "
-                        "If it stops here again, `nx catalog doctor "
-                        "--collections-drift` reports the retired name and `nx "
-                        "collection info {successor}` shows where the data lives."
-                    ),
-                )
-                _reg_kwargs = collection_registration_kwargs(_name)
-                _reg_kwargs["embedding_model"] = _registered_model
-                ensure_collection_registered(_name, kwargs=_reg_kwargs)
+        ),
+    )
 
     # ── Pre-index catalog registration (RDR-101 Phase 3 PR δ Stage B) ───────
     # Register catalog entries BEFORE per-file indexing so the prose

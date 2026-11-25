@@ -26,6 +26,9 @@ final class GroupInput {
     static final int MIN_DEADLINE = 5;
     static final int MAX_DEADLINE = 240;
     static final int DEFAULT_DEADLINE = 20;
+    static final int MIN_STALL_FACTOR = 1;
+    static final int MAX_STALL_FACTOR = 10;
+    static final int DEFAULT_STALL_FACTOR = 3;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<List<String>> STRINGS = new TypeReference<>() { };
@@ -72,6 +75,18 @@ final class GroupInput {
         }
         throw new IdentityException(400, "bad_deadline",
             what + " must be a whole number of minutes from " + MIN_DEADLINE + " to " + MAX_DEADLINE);
+    }
+
+    /** A whole number of deadlines from 1 to 10 (RDR-252 audit S1c). Anything else is refused. */
+    static int stallFactor(Object v) {
+        if (v instanceof Integer || v instanceof Long || v instanceof Short) {
+            long n = ((Number) v).longValue();
+            if (n >= MIN_STALL_FACTOR && n <= MAX_STALL_FACTOR) {
+                return (int) n;
+            }
+        }
+        throw new IdentityException(400, "bad_stall_factor",
+            "stall_factor must be a whole number from " + MIN_STALL_FACTOR + " to " + MAX_STALL_FACTOR);
     }
 
     /** A list of base topic names: the group-name grammar, no {@code --}, each once. */

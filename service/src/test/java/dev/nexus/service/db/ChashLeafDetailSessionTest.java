@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -60,6 +61,7 @@ class ChashLeafDetailSessionTest {
             ctx.alterTable(CHUNKS).dropConstraintIfExists("chunks_chash_octet_check").execute();
             ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraintIfExists("catalog_document_chunks_chash_octet_check").execute();
             ctx.insertInto(CHUNKS).set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, COLLECTION)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CHUNKS.CHASH, HexFormat.of().parseHex("ab".repeat(16))).set(CHUNKS.EMBEDDING_MODEL, MODEL)
                 .set(CHUNKS.EMBEDDING_768, Vector.of(new float[768])).set(CHUNKS.RETENTION, "reference-only").execute();
             PgContainerHelper.readdChashOctetChecksNotValid(su);

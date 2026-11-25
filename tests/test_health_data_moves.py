@@ -6,11 +6,17 @@ one a warning.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import nexus.data_moves_health as dmh
 import nexus.db.http_engine_status as http_status
 import nexus.health as health
 from nexus.health import HealthResult
 from nexus.data_moves_health import ID_PREFIX, REPORTER_ID, SUMMARY_LABEL, WORKER_ID, check_data_moves
+
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "data_moves_need_operator_status"
 
 
 def _entry(label: str, what: str, done: int | None = 3, total: int | None = 20) -> dict:
@@ -318,3 +324,276 @@ def test_the_prerequisite_hint_names_the_bundle_upgrade_only_while_the_bundle_la
         (row,) = [r for r in check_data_moves(status) if r.label == "Data move m1"]
         assert ("`nx upgrade` replaces that bundle" in " ".join(row.fix_suggestions)) is named
         assert "self-managed" in " ".join(row.fix_suggestions)
+
+
+# ── a move the engine says needs an operator (RDR-246, nexus-p2m1x.22) ───────────────────────────────────────
+
+
+def _paged(label: str, retries: int = 3, builds: bool = True, sqlstate: str | None = "57014",
+           step: str | None = "on_complete", bound: int | None = 1400, working: bool = False) -> dict:
+    return {
+        "label": label, "retries": retries, "last_attempt_at": "2026-11-23T10:00:00Z",
+        "next_retry_at": "2026-11-23T10:02:00Z", "sqlstate": sqlstate, "statement_timeout_ms": 1400,
+        "terminates_index_builds": builds, "step": step, "bound_ms": bound, "retry_in_progress": working,
+    }
+
+
+def _needs_operator_status(*paged: dict, boot_work: list[dict] | None = None) -> dict:
+    return {
+        "boot_work": boot_work if boot_work is not None else [
+            _classed(p["label"], f"blocked: {p['label']}: on_complete did not complete sqlstate=57014; needs an operator",
+                     None) for p in paged
+        ],
+        "data_moves_need_operator": bool(paged),
+        "data_moves_need_operator_labels": [p["label"] for p in paged],
+        "data_moves_need_operator_moves": list(paged),
+    }
+
+
+def test_a_move_that_needs_an_operator_is_a_red_row_naming_the_label_the_bound_and_both_times():
+    rows = check_data_moves(_needs_operator_status(_paged("rdr229-swap-chunks")))
+
+    row = _by_label(rows)["Data move rdr229-swap-chunks"]
+    assert row.ok is False and row.warn is False, "red, not a warning"
+    assert "needs an operator: rdr229-swap-chunks" in row.detail
+    assert "step on_complete missed its 1400 ms bound (SQLSTATE 57014)" in row.detail
+    assert "last attempt 2026-11-23T10:00:00Z" in row.detail
+    assert "next retry 2026-11-23T10:02:00Z" in row.detail
+    hint = " ".join(row.fix_suggestions)
+    assert "keeps retrying" in hint
+    assert "event=data_move_needs_operator" in hint
+    assert "ends the in-flight index builds" in hint
+    assert any("transient_retries = 0" in s and "'rdr229-swap-chunks'" in s for s in row.fix_suggestions)
+    assert len(_red(rows)) == 1, "one row for the move, not the plain blocked row as well"
+    assert _by_label(rows)[SUMMARY_LABEL].ok
+
+
+def test_a_lock_timeout_shows_its_own_bound_not_the_statement_timeout():
+    row = _by_label(check_data_moves(_needs_operator_status(_paged("m", sqlstate="55P03", bound=700))))["Data move m"]
+
+    assert "step on_complete missed its 700 ms bound (SQLSTATE 55P03)" in row.detail
+    assert "1400" not in row.detail
+
+
+def test_a_non_timeout_sqlstate_names_no_bound():
+    for sqlstate in ("40001", "08006"):
+        row = _by_label(check_data_moves(_needs_operator_status(_paged("m", sqlstate=sqlstate, bound=None))))["Data move m"]
+
+        assert f"step on_complete failed with SQLSTATE {sqlstate}" in row.detail
+        assert "bound" not in row.detail and " ms" not in row.detail
+
+
+def test_a_bound_is_not_named_when_the_engine_sends_none_even_for_a_timeout():
+    row = _by_label(check_data_moves(_needs_operator_status(_paged("m", bound=None, step=None))))["Data move m"]
+
+    assert "bound" not in row.detail and "SQLSTATE 57014" in row.detail
+
+
+def test_a_retry_in_progress_is_said_not_an_overdue_next_retry():
+    row = _by_label(check_data_moves(_needs_operator_status(_paged("m", working=True))))["Data move m"]
+
+    assert "a retry is in progress now" in row.detail
+    assert "next retry" not in row.detail
+
+
+def test_the_retry_now_hint_warns_when_the_attempt_ends_index_builds_and_not_otherwise():
+    ends = _by_label(check_data_moves(_needs_operator_status(_paged("m", builds=True))))["Data move m"]
+    plain = _by_label(check_data_moves(_needs_operator_status(_paged("m", builds=False))))["Data move m"]
+
+    reset_ends = [s for s in ends.fix_suggestions if "transient_retries = 0" in s]
+    reset_plain = [s for s in plain.fix_suggestions if "transient_retries = 0" in s]
+    assert len(reset_ends) == 1 and len(reset_plain) == 1
+    assert "fix the cause first" in reset_ends[0] and "end the in-flight index builds again" in reset_ends[0]
+    assert "fix the cause first" not in reset_plain[0]
+
+
+def test_after_a_restart_the_index_build_claim_is_hedged_until_the_engine_sees_the_move_fail():
+    """No step means this engine has not seen the move fail since it started: the flag is the move's definition, so the
+    row says an attempt "may" end index builds instead of stating it (the confirmation review of 756bb3cc0a)."""
+    unseen = _by_label(check_data_moves(_needs_operator_status(
+        _paged("m", retries=20, step=None, sqlstate=None, bound=None))))["Data move m"]
+    seen = _by_label(check_data_moves(_needs_operator_status(_paged("m"))))["Data move m"]
+
+    assert "may end in-flight index builds (this engine has not seen the move fail yet)" in unseen.detail
+    assert "each attempt ends in-flight index builds" not in unseen.detail
+    assert any("not known yet" in s for s in unseen.fix_suggestions)
+    assert "each attempt ends in-flight index builds" in seen.detail
+    assert not any("not known yet" in s for s in seen.fix_suggestions)
+
+
+def test_a_need_operator_move_without_the_index_build_claim_does_not_make_it():
+    row = _by_label(check_data_moves(_needs_operator_status(_paged("m", retries=20, builds=False))))["Data move m"]
+
+    assert row.ok is False and row.warn is False
+    assert "index builds" not in row.detail
+    assert "index builds" not in " ".join(row.fix_suggestions)
+    assert "failed 20 times in a row" in row.detail
+    assert "fix the cause first" not in " ".join(row.fix_suggestions)
+
+
+def test_the_move_is_red_whatever_state_its_entry_shows_while_a_retry_runs():
+    status = _needs_operator_status(_paged("m"), boot_work=[_entry("m", "working: m, retrying after being blocked since x")])
+
+    row = _by_label(check_data_moves(status))["Data move m"]
+
+    assert row.ok is False and row.warn is False and row.detail.startswith("needs an operator: m")
+
+
+def test_a_listed_move_whose_entry_has_gone_is_still_a_red_row():
+    status = _needs_operator_status(_paged("gone"), boot_work=[])
+
+    assert [r.label for r in _red(check_data_moves(status))] == ["Data move gone"]
+
+
+def test_a_control_move_not_in_the_list_keeps_its_plain_blocked_row():
+    status = _needs_operator_status(_paged("paged"), boot_work=[
+        _entry("paged", "blocked: paged: x; needs an operator"),
+        _entry("control", "blocked: control: waiting for a background worker slot"),
+    ])
+
+    rows = _by_label(check_data_moves(status))
+
+    assert rows["Data move paged"].detail.startswith("needs an operator: paged")
+    assert rows["Data move control"].detail.startswith("blocked: control: waiting for a background worker slot")
+    assert "needs an operator" not in rows["Data move control"].detail
+
+
+def test_an_empty_list_changes_nothing_and_an_engine_without_the_field_keeps_the_plain_row():
+    plain = {"boot_work": [_entry("m", "blocked: m: waiting for a background worker slot; needs an operator")]}
+    empty = dict(plain, data_moves_need_operator=False, data_moves_need_operator_labels=[],
+                 data_moves_need_operator_moves=[])
+
+    for status in (plain, empty):
+        row = _by_label(check_data_moves(status))["Data move m"]
+        assert row.ok is False and row.warn is False
+        assert row.detail.startswith("blocked: m: waiting for a background worker slot")
+
+
+def test_the_pg_background_warning_is_untouched_beside_a_paged_move(monkeypatch):
+    monkeypatch.setattr(dmh, "_old_bundle_pending", lambda: True)
+    status = _needs_operator_status(_paged("paged"), boot_work=[
+        _entry("paged", "blocked: paged: x; needs an operator"),
+        _classed("waiting", "blocked: waiting: pg_background is not installed", "missing_prerequisite"),
+    ])
+
+    rows = _by_label(check_data_moves(status))
+
+    assert rows["Data move waiting"].ok is False and rows["Data move waiting"].warn is True
+    assert [r.label for r in _red(check_data_moves(status))] == ["Data move paged"]
+
+
+def test_malformed_need_operator_fields_cost_nothing():
+    status = {"boot_work": [_entry("m", "blocked: m: x")], "data_moves_need_operator_moves": [
+        "junk", {"label": 3}, {"label": "m", "retries": "many", "last_attempt_at": None, "statement_timeout_ms": True},
+    ]}
+
+    row = _by_label(check_data_moves(status))["Data move m"]
+
+    assert row.ok is False and row.warn is False
+    assert "last attempt unknown" in row.detail and "next retry unknown" in row.detail
+    assert "statement_timeout_ms" not in row.detail
+
+
+def test_a_bool_is_not_a_retry_count():
+    status = {"boot_work": [_entry("m", "blocked: m: x")], "data_moves_need_operator_moves": [
+        {"label": "m", "retries": True, "bound_ms": True, "sqlstate": "57014", "step": "on_complete"},
+    ]}
+
+    row = _by_label(check_data_moves(status))["Data move m"]
+
+    assert "failed many times in a row" in row.detail
+    assert "bound" not in row.detail
+
+
+def test_the_engines_own_status_shape_is_read():
+    """The fixture is the key set and types the engine's ``/v1/status`` renders (``MoveNeedsOperatorIntegrationTest`` fails
+    when the engine's body and this file differ), so the keys the doctor reads cannot drift from the Java."""
+    fixture = json.loads((_FIXTURES / "paged.json").read_text())
+    status = dict(fixture, boot_work=[_entry("rdr229-swap-chunks", "blocked: rdr229-swap-chunks: x; needs an operator")])
+
+    rows = check_data_moves(status)
+
+    row = _by_label(rows)["Data move rdr229-swap-chunks"]
+    assert row.ok is False and row.warn is False
+    assert "step on_complete missed its 700 ms bound (SQLSTATE 55P03)" in row.detail
+    assert "last attempt 2026-11-23T10:00:00Z" in row.detail and "next retry 2026-11-23T10:02:00Z" in row.detail
+    assert "each attempt ends in-flight index builds" in row.detail
+    assert sorted(fixture["data_moves_need_operator_moves"][0]) == sorted(
+        ["label", "retries", "last_attempt_at", "next_retry_at", "sqlstate", "statement_timeout_ms",
+         "terminates_index_builds", "step", "bound_ms", "retry_in_progress"])
+
+
+# ── nexus-p2m1x.27 row 23: the name-key drop move waits for an index build; a wait is a note, then a warning, never red ──
+
+_WAIT_WHAT = (
+    "blocked: rdr229-name-key-drop: waiting for in-flight index builds to finish (1 running); none is ended and no failure "
+    "is counted; waiting for 12 m (blocked since 2026-11-24T01:00:00Z)"
+)
+_OVERDUE_WHAT = (
+    "blocked: rdr229-name-key-drop: waiting for in-flight index builds to finish (2 running); none is ended and no failure "
+    "is counted; waiting for 7 h 12 m; overdue, more than 6 h; builder pids 4101,4102"
+)
+
+
+def _no_reset(row: HealthResult) -> bool:
+    return not any("UPDATE nexus.data_moves" in s or "transient_retries" in s and "= 0" in s for s in row.fix_suggestions)
+
+
+def test_a_move_waiting_for_a_build_is_a_note_that_says_wait_and_offers_no_retry_reset():
+    status = {"boot_work": [_classed("rdr229-name-key-drop", _WAIT_WHAT, "waiting_for_builds")]}
+
+    rows = check_data_moves(status)
+
+    row = _by_label(rows)["Data move rdr229-name-key-drop"]
+    assert row.ok is True and row.warn is False
+    assert row.detail.startswith("waiting: rdr229-name-key-drop: waiting for in-flight index builds to finish (1 running)")
+    assert any("Wait" in s and "by itself" in s for s in row.fix_suggestions)
+    assert _no_reset(row), "the retry count is 0 and nothing needs it: no reset SQL"
+    assert _red(rows) == [], "a wait is not a failure"
+    assert not any(r.warn for r in rows)
+
+
+def test_a_wait_past_six_hours_is_a_warning_with_the_engines_age_count_and_pids_and_still_no_retry_reset():
+    status = {"boot_work": [_classed("rdr229-name-key-drop", _OVERDUE_WHAT, "waiting_for_builds_overdue")]}
+
+    rows = check_data_moves(status)
+
+    row = _by_label(rows)["Data move rdr229-name-key-drop"]
+    assert row.ok is False and row.warn is True and row.fatal is False
+    assert "7 h 12 m" in row.detail and "(2 running)" in row.detail and "builder pids 4101,4102" in row.detail
+    assert any("six hours" in s and "engine ends none" in s for s in row.fix_suggestions)
+    assert _no_reset(row)
+    assert _red(rows) == [], "overdue is a warning: nx doctor still exits 0"
+
+
+def test_the_wait_is_keyed_on_the_class_not_the_words():
+    # an engine that predates the class sends none: the same text is the plain red blocked row it always was
+    status = {"boot_work": [_entry("rdr229-name-key-drop", _WAIT_WHAT)]}
+
+    row = _by_label(check_data_moves(status))["Data move rdr229-name-key-drop"]
+
+    assert row.ok is False and row.warn is False
+    # and the class on a move that is not blocked changes nothing
+    failed = {"boot_work": [_classed("m", "failed: m: boom", "waiting_for_builds")]}
+    assert [r.label for r in _red(check_data_moves(failed))] == ["Data move m"]
+
+
+def test_a_paged_move_that_is_also_waiting_for_a_build_is_the_red_needs_operator_row_not_the_waiting_note():
+    """nexus-p2m1x.27 row 23: a name-key drop move latched by three counted lock timeouts and then deferred behind an index
+    build is both: its boot_work entry is classed waiting_for_builds and /v1/status still pages it. The page wins, so the
+    doctor never says "no page is raised, so there is no retry count to reset" about a move that has one to reset."""
+    label = "rdr229-name-key-drop"
+    status = _needs_operator_status(
+        _paged(label, retries=3, sqlstate="55P03", bound=900, builds=True),
+        boot_work=[_classed(label, _WAIT_WHAT, "waiting_for_builds")],
+    )
+
+    rows = check_data_moves(status)
+
+    row = _by_label(rows)[f"Data move {label}"]
+    assert row.ok is False and row.warn is False, "red: the page, not the note"
+    assert f"needs an operator: {label}" in row.detail
+    assert "step on_complete missed its 900 ms bound (SQLSTATE 55P03)" in row.detail
+    assert not any("so there is no retry count to reset" in s for s in row.fix_suggestions)
+    assert any("transient_retries = 0" in s for s in row.fix_suggestions), "the reset the page offers"
+    assert [r.label for r in _red(rows)] == [f"Data move {label}"]

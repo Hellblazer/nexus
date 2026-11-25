@@ -244,7 +244,7 @@ ranges:
   FORCE-RLS, list-partitioned (text, text, bytea) table as the engine's role,
   partition-wise and over the parent, with resume after a killed coordinator:
   every row processed exactly once (T2 nexus_rdr/246-research-2) — **Method**: Spike
-- [ ] A plain run on one `nexus.chunks` leaf, CALLed under a per-tenant session as `nexus_admin` on FORCE RLS with the per-leaf grants, processes every row of the leaf exactly once and resumes after a killed coordinator — **Status**: Unverified; the partitioned spike above ran over the parent. — **Method**: Spike, in the DataMoveWorker tests (Step 4)
+- [x] A plain run on one `nexus.chunks` leaf, CALLed under a per-tenant session as `nexus_admin` on FORCE RLS with the per-leaf grants, processes every row of the leaf exactly once and resumes after a killed coordinator — **Status**: Verified in the DataMoveWorker tests (`DataMoveWorkerIntegrationTest`): one run per leaf of a list-partitioned (model, tenant) table, none partition-wise, every row moved once under its own tenant's session, a four-column-key chunks-shaped table, and a kill mid-move resumed at the next chunk (`killedMidMove_nextBootResumesAtTheNextChunk_andEndsAsAnUninterruptedRun`). The registered moves over `nexus.chunks` (vectors-070, vectors-082) have run on installs. — **Method**: Spike, in the DataMoveWorker tests (Step 4)
 - [x] dml_utils needs Sam's ddl_utils installed first, and its install role needs
   ddl_utils_caller: the bytea change adds the first changeset that calls
   ddl_utils' constraint helpers, behind a HALT precondition — **Status**:
@@ -283,9 +283,13 @@ ranges:
   closes the JDBC connection, so the walks must not close the first
   `Liquibase` object before the last walk on that connection finishes —
   **Method**: Spike with real Liquibase in Phase 1 Step 3b
-- [ ] The cloud host's PostgreSQL loads pg_background and has spare
+- [x] The cloud host's PostgreSQL loads pg_background and has spare
   max_worker_processes — **Status**: Checked 2026-11-10, NOT available
-  today (bob's read-only check on Sam's go, SSM command 60942485, T2
+  then; installed live on 2026-11-19 (Sam's go, T2
+  conexus/operator-go-db-host-ami-bake-pg-background-2026-11-19) and the
+  db-host AMI re-baked with the module (ami-0bf126ab98a279170, pg_background
+  2.0.4; T2 nexus/finding-db-host-ami-lacks-pg-background-2026-11-21, which
+  corrects its first version). The 2026-11-10 read follows (bob's read-only check on Sam's go, SSM command 60942485, T2
   conexus/pg-background-availability-prod-2026-11-10). The host runs
   PostgreSQL 17.11 (PGDG build for Ubuntu 24.04, aarch64). Neither the nexus
   nor the conexus database has a pg_available_extensions row for it, and
@@ -297,7 +301,8 @@ ranges:
   database. That is a conexus host change on Sam's go. Raising
   max_worker_processes needs a PostgreSQL restart. Sam ruled 2026-11-15 that
   the install waits until the first job that uses it lands, or until PGDG ships
-  2.0.4 (recorded on nexus-f3yqd.2). — **Method**: Live
+  2.0.4 (recorded on nexus-f3yqd.2); the first registered moves shipped in
+  engine-service-v0.1.200, and the install was done 2026-11-19. — **Method**: Live
   read-only check
 - [x] `CREATE EXTENSION pg_background` needs a superuser, because the
   extension is not marked trusted. Locally, the engine's bundle cluster is
@@ -400,14 +405,30 @@ a *background worker* is a pg_background process in the database.
   applies the override to a run that already exists with
   `dml_utils.set_migration_run_sleep_ms`, since dml_utils keeps the value it
   was created with;
-- `statement_timeout_ms`, NOT NULL and positive, the bound on each
-  verification run and on `on_complete`;
+- `statement_timeout_ms`, NOT NULL and positive: one budget for the
+  completion transaction's re-check, shared by its table-wide run and every
+  tenant's warm run (each run gets what is left), and then a fresh bound for
+  `on_complete`, whose `lock_timeout` is min(5 s, half of it), at least 1 ms.
+  The completion transaction can so run about twice it. A registrant sizes it
+  for the sum of the tenants' warm runs: a re-check that does not fit times out
+  as a transient `RECHECK` failure and loops on the backoff, each retry
+  repeating the first pass;
+- `verify_statement_timeout_ms`, NOT NULL and positive, default 60000
+  (`datamoves-002-1`; Sam, 2026-11-21, T2
+  `nexus/sam-ruling-split-move-bounds-2026-11-21`): the statement timeout of
+  each run of the first verification pass, which runs in READ ONLY
+  transactions, takes ACCESS SHARE only and is also the warm-up (a plain scan,
+  no `pg_prewarm`; it warms only what the verification reads, so a registrant
+  whose `on_complete` reads more makes the verification read that too). A
+  registering INSERT that names no such column takes the default;
 - the verification query, NOT NULL: a SELECT that returns the old-shape rows
   still present, written with one bind parameter, the tenant: the move worker
   binds a tenant id for a per-tenant run and NULL for the table-wide run, and
   the query filters on `tenant_id = $1 OR $1 IS NULL`. It never reads
   `nexus.tenant`, so the two runs differ only in the bound value. It runs in a
-  READ ONLY transaction, so it cannot write. `$1` is its only placeholder and
+  READ ONLY transaction in the first pass, so it cannot write there; the
+  completion transaction's re-check runs the same text read-write, so there
+  the guarantee is the text's own. `$1` is its only placeholder and
   stands outside comments, string literals, dollar quotes and quoted names;
   the text holds no `?` (a jsonb test is written with `jsonb_exists` and its
   kin, a literal question mark as `chr(63)`), and no `$2` or higher. It is
@@ -537,13 +558,25 @@ move:
    holds old-shape rows and of the table-wide run. A stop is read before the
    finish, between tenants, before the table-wide run and before the completion
    transaction, and ends the finish with the move left open; a verification
-   already in flight is not cancelled, it is bounded by `statement_timeout_ms`.
+   already in flight is not cancelled, it is bounded by
+   `verify_statement_timeout_ms`.
    If every run returns no rows, it reads the row once more (a pause set now
    still stops it) and opens one transaction on the admin connection. The
    UPDATE that sets `completed_at` runs first in it and matches only a row that
    is not paused, failed, completed or superseded, so a pause or a superseding
    row committed after the last read matches nothing and nothing else runs.
-   Then `on_complete` (if any) runs in the same transaction, so a stop between
+   Then the transaction re-checks, warm, under `statement_timeout_ms` as one
+   shared budget: the verification table-wide, then once per tenant under a
+   transaction-local `nexus.tenant`, over the first pass's tenants plus those
+   the catalogs name now (`nexus.service_tokens` and, on a table partitioned one
+   tenant per leaf, the leaves); the session is checked to carry no tenant
+   before and after. A row found rolls the transaction back as
+   `VERIFICATION_NONEMPTY` (permanent); an error, a timeout or a lock wait rolls
+   it back as a `RECHECK` failure. The re-check is point-in-time: a write
+   committed after a run's snapshot can still land before `on_complete`, and a
+   tenant whose first rows appeared after the first pass's probe, on a table
+   listed by probe, with neither a token nor a leaf, is not run (only a rescan
+   could find it). Then `on_complete` (if any) runs in the same transaction, so a stop between
    them leaves neither; `on_complete`
    holds DDL that PostgreSQL runs inside a transaction (VALIDATE CONSTRAINT,
    DROP COLUMN, renames), never CREATE INDEX CONCURRENTLY or another statement
@@ -558,9 +591,12 @@ or `on_complete` that loses its connection (class 08), meets a shutdown or
 startup (57P01, 57P02, 57P03) or a busy host (class 53), and an `on_complete`
 that meets a deadlock (40P01) or a serialization failure (40001), since the
 verification only reads and the completion transaction rolls back whole, so a
-retry is safe (the verification's READ ONLY session, at the default isolation
+retry is safe (the first pass's READ ONLY session, at the default isolation
 with no `lock_timeout`, cannot meet 40001 or 55P03, so those stay permanent
-there); a verification that fails with no SQLSTATE (a fault inside the
+there); a completion re-check (stage `RECHECK`) that hits its share of
+`statement_timeout_ms`, waits out `lock_timeout` behind an ACCESS EXCLUSIVE
+holder (55P03) or meets a deadlock or serialization failure, classified as
+`on_complete`'s are, and one that finds the session carrying a tenant; a verification that fails with no SQLSTATE (a fault inside the
 engine, or a connection that still carries a tenant); a lost connection
 or a stopped engine, and any failure to open or authenticate a connection to
 the database, whatever its SQLSTATE, since a connection or credential fault is
@@ -1147,6 +1183,15 @@ launcher that upstream does not test.
   restarting host**: transient; the move is `blocked:` and the verification
   runs again on the next pass. A connection the verification cannot open is a
   connection failure, transient whatever its SQLSTATE.
+- **The completion transaction's re-check times out, waits out its lock or
+  meets a deadlock** (stage `RECHECK`): transient; the transaction rolls back
+  whole, the move is `blocked:`, and the next pass repeats the first pass and
+  the completion. A move whose re-check never fits `statement_timeout_ms`
+  loops on the backoff, so the registrant sizes it. A re-check that finds rows
+  is `failed:` with the per-tenant counts, as the first pass is. A fault in the
+  re-check that is not a database error (an engine defect) is `failed:` (stage
+  `PASS`), so it surfaces instead of retrying; only a session that carries a
+  tenant into the re-check is transient with no error.
 - **A verification run raises any other error** (a function it names does not
   exist, a table it reads is not granted, a syntax error): permanent; the move
   is `failed:` with the error, and the fix is a superseding move with a
@@ -1175,14 +1220,14 @@ launcher that upstream does not test.
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified
+- [x] All Critical Assumptions verified (the last two, the per-leaf run and the cloud install, 2026-11-24)
 - [x] bytea keys merged in Hellblazer/dml_utils (PR #1, a6cd544, 2026-11-10). Sam ruled 2026-11-16 to pin merged commits rather than wait for releases; he may tag releases later. ddl_utils is pinned at 5f088e2
 - [x] the committing procedure entry point merged in Hellblazer/dml_utils (Step 1's second PR, Hellblazer/dml_utils#2, merge commit 28b0b3aa9, 2026-11-16); nexus pinned 28b0b3aa9 until the four-column change (next item), since a6cd544 has bytea keys but no procedure. Its bloat test (RunMigrationChunksBloatTest) is green in the PR's Maven Build run 43900555823 on a tree identical to 28b0b3aa9's
 - [x] a four-column primary key supported in Hellblazer/dml_utils (Step 1's third change, Hellblazer/dml_utils#3, merge commit 9196f4b1c, 2026-11-17) before any move over nexus.chunks, the Minimum Viable Validation's move included; nexus re-pinned to 9196f4b1c (nexus-f3yqd.2.21, develop 98307288f..596d18f2a). The re-pin adds changesets 011 and 012 and changes ten runOnChange changesets (005 and nine library functions), which re-apply idempotently; no other applied changeset changed
 - [x] pg_background in the bundle on all four platforms, in a released bundle that the engine substrate pins (engine-service-v0.1.194's bundles carry pg_background 2.0)
-- [ ] ddl_utils installed ahead of dml_utils in the engine's schema setup (Step 4)
-- [ ] the superuser bootstrap creates pg_background, the three library roles and their grants: `nexus.db.pg_provision` locally (Step 4) and the db-host configuration in the cloud (Activation Step 1)
-- [ ] A Java test image with pg_background for the engine suite's data-move tests (Step 3c)
+- [x] ddl_utils installed ahead of dml_utils in the engine's schema setup (Step 4)
+- [x] the superuser bootstrap creates pg_background, the three library roles and their grants: `nexus.db.pg_provision` locally (Step 4) and the db-host configuration in the cloud (Activation Step 1, done 2026-11-19)
+- [x] A Java test image with pg_background for the engine suite's data-move tests (Step 3c)
 
 ### Minimum Viable Validation
 
@@ -1284,7 +1329,10 @@ data-move test.
   schema, SELECT on the table and every existing leaf, only when the role
   exists), the install and slot checks, the dedicated per-tenant connection
   with its SET and RESET, the tenant list, the per-tenant and table-wide
-  verification in READ ONLY transactions under `statement_timeout_ms`,
+  verification of `VerifyingFinisher` in READ ONLY transactions under
+  `verify_statement_timeout_ms`, then the completion transaction's re-check
+  under the shared `statement_timeout_ms` (tenants re-read by
+  `MoveTenants.reread`),
   `on_complete`, the per-leaf runs on a tenant-partitioned driving table with
   the leaf list from `nexus.partition_bound_value`, the failure classes (the
   recorded and raised SQLSTATE lists, told apart by the `error_id` mark taken
@@ -1327,7 +1375,9 @@ because the host has no general egress. Then `CREATE EXTENSION pg_background`
 runs as superuser in the nexus database, with the three library roles and
 their grants (Technical Design, Install sequence, step 1). The package
 version must match the bundle's pinned version. Sam ruled 2026-11-15 that it waits until
-the first job that uses it lands in an engine, or until PGDG ships 2.0.4. An
+the first job that uses it lands in an engine, or until PGDG ships 2.0.4; it
+was installed on the live host 2026-11-19 and the db-host image re-baked (see
+the Critical Assumption on the cloud host). An
 engine without it serves and reports its moves blocked (Technical Design), so
 this step lands before the first registered move is expected to run in the
 cloud.
@@ -1538,4 +1588,6 @@ the first registered move.
 - 2026-11-17: wording to landed, reviewed code (grant 3), nexus-f3yqd.2.14, .2.15 and .2.17, develop commits 8cf174765..20b338640: `on_complete` runs under `lock_timeout` min(5 s, `statement_timeout_ms` / 2), at least 1 ms, on every move, and builder termination stays chunk-family only, decided by a name match pinned to the lint's list (`ChunkFamily`, `ChunkFamilyLintPinTest`); the completion UPDATE runs first and is guarded (not paused, failed, completed or superseded), with builders ended after it matched, inside the transaction; every run executes before a non-empty verification is reported, a move with no tenant scope gets the table-wide run only, a refused verification text is a permanent failure (Stage `VERIFICATION_REFUSED`; `MoveSql` sanctioned by Sam, 2026-11-17), and a stop is read between tenants and before completion; a missing driving schema or table is permanent, a raised 42501, 42883 or class 08 is read once more after 750 ms for dml_utils' asynchronous recorder, a paused pass and a stop count no retry, and an unwritable registry reports `blocked:`; boot_work entries come from `MoveBootWork` (own admin session, every 5 s) with the `working:`, `queued:`, `blocked:`, `failed:`, `paused:`, `stalled:` and `runs complete:` classes, carry no tenant, leaf, run label, pid or server text, `stalled:` after `NX_DATA_MOVE_STALL_MINUTES`, `done` as a clamped high-water, red entries for a worker or reporter that did not start, and `grants-nexus-svc-1` revoking `nexus_svc`'s privileges on `nexus.data_moves` where it can; nx doctor rows for each.
 - 2026-11-17: verification and `on_complete` failure classes to the code of nexus-f3yqd.2.15's follow-up and its critique (decided by linda under Sam's "keep things moving" rule, reversible): a verification run is transient for its timeout, a lost connection, a shutdown, a busy host (class 53) or a fault with no SQLSTATE, and an open failure of its connection is a connection failure; any other error it raises is permanent, 42501 and 42883 included; an `on_complete` is also transient for a lost connection, a shutdown, a busy host, a deadlock or a serialization failure, since its transaction rolls back whole.
 - 2026-11-17: verification refusals to the code of nexus-f3yqd.2.19's parity follow-up (grant 3): the gate and `MoveSql` both refuse a blank text, a `/*/` and a `$` directly next to a non-ASCII character, and a standalone `$1` has no word character, `$` or non-ASCII character beside it.
+- 2026-11-21: wording to landed, reviewed code (grant 3), nexus-p2m1x.21, feature/rdr246-split-move-bounds: Sam's split-bounds ruling (T2 `nexus/sam-ruling-split-move-bounds-2026-11-21`, amending decision C `nexus/sam-ruling-rdr229-ask-c-2026-11-20`). The first verification pass runs READ ONLY under the new `verify_statement_timeout_ms` (default 60000, ACCESS SHARE only, the warm-up); the completion transaction keeps `statement_timeout_ms` and `lock_timeout`, and re-checks table-wide and per tenant (tenants re-read from `nexus.service_tokens` and the leaves) under that one budget before `on_complete`; a re-check row is `VERIFICATION_NONEMPTY`, and a re-check lock wait, timeout or deadlock is a transient `RECHECK` failure.
 - 2026-11-20: wording to reviewed code (grant 3), RDR-229 P2.10 (nexus-p2m1x.15, reviews T2 nexus/review-p2m1x15-2026-11-20-r2 and nexus/critique-p2m1x15-2026-11-20-r2): the owner-read policy also covers a tenant-scoped support table a move's template or verification joins (`catalog_collections_owner_read`, which RDR-229 D2's `vectors-065` adds and P2.10 reuses), and the boot check covers it through `DrivingTableIsolationCheck.SUPPORT_TABLES`.
+- 2026-11-24: wording to the tree at the 8.5.6 docs audit (nexus-856): the per-leaf Critical Assumption and the cloud pg_background Critical Assumption are marked verified (the leaf tests in `DataMoveWorkerIntegrationTest`; the 2026-11-19 live install and AMI re-bake), the Prerequisites that waited on Phase 1 Step 4, Step 3c and Activation Step 1 are ticked, and Activation Step 1 says it was done. No design change; status unchanged.

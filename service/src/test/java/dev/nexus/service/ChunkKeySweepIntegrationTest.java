@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -521,7 +522,8 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
             ctx.alterTable(CHUNKS).dropConstraint("chunks_chash_octet_check").execute();
             try {
                 ctx.insertInto(CHUNKS)
-                    .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, live).set(CHUNKS.CHASH, narrow)
+                    .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, live)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, live)).set(CHUNKS.CHASH, narrow)
                     .set(CHUNKS.EMBEDDING_MODEL, MODEL).set(CHUNKS.CHUNK_TEXT, "narrow")
                     .set(CHUNKS.EMBEDDING_384, dev.nexus.service.jooq.binding.Vector.of(new float[384]))
                     .set(CHUNKS.METADATA, org.jooq.JSONB.jsonb("{\"title\":\"legacy narrow\"}"))
@@ -633,7 +635,8 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
                 .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "doc.dead")
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, Chash.fromHex(hexOf(tenant, live, "c13")).toBytes())
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, live).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, live)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, live)).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
                 .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, false)
                 .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, "Gone").execute();
             ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now())
@@ -973,6 +976,35 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
 
         assertThat(third.path("resume_ignored").asBoolean()).as("an edited token fails its signature").isTrue();
         assertThat(metadataOf(tenant, taxonomy, taxonomyRows.get(0))).containsKey("title");
+    }
+
+    /**
+     * RDR-229 P3.5c (the census evidence pass): from gate 3 the sweep's cursor carries the collection id, and the signature covers it. The
+     * HTTP body used to emit only collection and chash, so a token issued after the latch failed its own signature when it came back and the
+     * sweep restarted with a WARN every time. The body now carries {@code collection_id} (additive); the token a latched call returns is a
+     * continuation.
+     */
+    @Test
+    void aLatchedResumeTokenRoundTripsOverHttp_itCarriesTheCursorsCollectionIdAndIsATakenContinuation() throws Exception {
+        String tenant = "sw-latched";
+        String token = tenantToken(tenant);
+        String live = conformant(tenant);
+        Map<String, Map<String, Object>> rows = new LinkedHashMap<>();
+        for (int i = 1; i <= 4; i++) rows.put("k" + i, legacy(keyed(tenant, live, "k" + i)));
+        seed(tenant, live, rows);
+        latched.set(true);
+        try {
+            JsonNode first = json(sweep(token, applyBody("batch_size", 1, "max_batches", 1)));
+            assertThat(first.path("resume_ignored").asBoolean()).isFalse();
+            assertThat(first.path("done").asBoolean()).as("non-vacuity: the sweep has more to do").isFalse();
+            assertThat(first.path("resume").path("cursor").path("collection_id").isNumber())
+                .as("from gate 3 the cursor names its collection by id: %s", first.path("resume")).isTrue();
+            JsonNode second = json(sweep(token, applyBody("batch_size", 1, "max_batches", 1, "resume", asMap(first.path("resume")))));
+            assertThat(second.path("resume_ignored").asBoolean()).as("the token a latched call returned is a continuation").isFalse();
+            assertThat(second.path("rows_swept").asLong()).as("and it swept the next batch: %s", second).isEqualTo(1L);
+        } finally {
+            latched.set(false);
+        }
     }
 
     @Test

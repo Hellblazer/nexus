@@ -2137,13 +2137,13 @@ class TestSharedSSLContext:
     ) -> None:
         import ssl as ssl_module
 
-        from nexus.db.t2 import _refreshable_client
+        from nexus.db.t2 import shared_ssl
 
         # Cold-cache state -- deterministic regardless of test order or
         # this module's own import history (the cache is process/module
         # -global by design, so a prior test in the same session must not
         # leave this test seeing a pre-warmed cache).
-        monkeypatch.setattr(_refreshable_client, "_shared_ssl_context", None, raising=False)
+        monkeypatch.setattr(shared_ssl, "_slot", None)
         # Pin the exact branch create_ssl_context() takes (the
         # cafile=certifi.where() default) so this test is not
         # order-dependent on whatever the ambient env happens to hold.
@@ -2178,9 +2178,9 @@ class TestSharedSSLContext:
         is what actually eliminates the redundant construction cost, and
         it is the concurrency-relevant property (one immutable object read
         by many clients, never rebuilt or mutated per-store)."""
-        from nexus.db.t2 import _refreshable_client
+        from nexus.db.t2 import shared_ssl
 
-        monkeypatch.setattr(_refreshable_client, "_shared_ssl_context", None, raising=False)
+        monkeypatch.setattr(shared_ssl, "_slot", None)
 
         stores = [_make_echo_store(base_url="http://127.0.0.1:1", _token="tok") for _ in range(3)]
 

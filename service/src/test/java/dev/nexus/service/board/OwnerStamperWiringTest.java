@@ -376,6 +376,57 @@ class OwnerStamperWiringTest {
     private static final List<String> HELD = List.of("owner/earliest_suspect");
     private static final List<String> HANDED_OFF = List.of("owner/earliest_suspect", "owner/handoff");
 
+    /**
+     * Alpha owns the red on Y. {@code stamp} (alpha's or carol's minted session) posts a {@code disclaim} on Y over the
+     * real route; returns the owner rows' kinds and reasons once the stamper has had its turn.
+     */
+    private List<String> afterADisclaimBy(String stamp) throws Exception {
+        se.env.ids.clock.set(Instant.now());
+        String t = se.tenant();
+        String client = "client-" + UUID.randomUUID();
+        seedToken(client, t, TokenStore.SCOPE_TENANT);
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        String c = se.env.seat(t, "carol");
+        se.form(t, l, a, c);
+        se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
+        se.push(t, StamperEnv.BASE, "Y", "X", "sess-carol");
+        se.done(t, StamperEnv.BASE, "Y", "failure");
+        assertThat(se.ownerRows(t, StamperEnv.BASE).getFirst().body()).containsEntry("owner", a);
+
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(OwnerStamper.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            var disclaim = postAs(client, null, mintSession(client, stamp), "/v1/tuples/out", Map.of(
+                "subspace", "board/ci/nexus-develop--owner", "keys", Map.of("topic", "nexus-develop--owner"),
+                "dims", Map.of("from", "marginalia", "kind", "disclaim", "sha", "Y"), "body", "{}",
+                "nonce", UUID.randomUUID().toString()));
+            assertThat(disclaim.statusCode()).as(disclaim.body()).isEqualTo(200);
+            // The hook runs after the response, on the request's thread, and logs its outcome when it is done: wait for that
+            // line (the observable), whichever way it went, rather than for a time.
+            var handled = eventually(
+                () -> logs.list.stream().map(e -> e.getFormattedMessage())
+                    .filter(m -> m.contains("event=board_owner_disclaim") && m.contains("tenant=" + t)).toList(),
+                lines -> !lines.isEmpty());
+            assertThat(handled).as("the hook handled the disclaim").hasSize(1);
+        } finally {
+            logger.detachAppender(logs);
+        }
+        return se.ownerRows(t, StamperEnv.BASE).stream().map(r -> r.kind() + "/" + r.get("reason")).toList();
+    }
+
+    @Test
+    void aDisclaimOverTheRealRouteFromTheOwnersSessionHandsTheRedOnAtOnce() throws Exception {
+        assertThat(afterADisclaimBy("sess-alpha")).containsExactly("owner/earliest_suspect", "owner/disclaimed");
+    }
+
+    @Test
+    void aDisclaimOverTheRealRouteFromAnotherSessionChangesNothing() throws Exception {
+        assertThat(afterADisclaimBy("sess-carol")).as("control: carol is not the owner").containsExactly("owner/earliest_suspect");
+    }
+
     @Test
     void anAckWithNoFromStampedByTheEngineStopsTheDeadline() throws Exception {
         var run = ackThenDeadline(null, Via.OWNER_TOKEN);

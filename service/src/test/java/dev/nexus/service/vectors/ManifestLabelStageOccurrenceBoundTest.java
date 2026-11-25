@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -118,6 +119,7 @@ class ManifestLabelStageOccurrenceBoundTest {
                 ctx.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, TENANT)
                     .set(CHUNKS.COLLECTION, COL)
+                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COL))
                     .set(CHUNKS.CHASH, HexFormat.of().parseHex(hex))
                     .set(CHUNKS.EMBEDDING_MODEL, MODEL)
                     .set(CHUNKS.CHUNK_TEXT, "text " + hex)
@@ -159,20 +161,23 @@ class ManifestLabelStageOccurrenceBoundTest {
 
     /** FILLER live documents, each with a chunk of its own at position 0, inserted in slices of 500 rows. */
     private static void filler(DSLContext ctx, Vector zero) {
+        final Long collectionId = CollectionIds.require(ctx, TENANT, COL);
         for (int from = 0; from < FILLER; from += 500) {
-            var chunks = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
+            var chunks = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
                 CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384);
             var docs = ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.SOURCE_URI);
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID,
+                CATALOG_DOCUMENTS.SOURCE_URI);
             var manifest = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                 CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL);
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL);
             for (int g = from; g < Math.min(from + 500, FILLER); g++) {
                 String doc = String.format("fill-%05d", g);
                 byte[] chash = Chash.ofText("occ-bound-fill-" + g).toBytes();
-                chunks = chunks.values(TENANT, COL, chash, MODEL, "filler", zero);
-                docs = docs.values(TENANT, doc, "filler", COL, "file:///" + doc + ".md");
-                manifest = manifest.values(TENANT, doc, 0, chash, COL, MODEL);
+                chunks = chunks.values(TENANT, COL, collectionId, chash, MODEL, "filler", zero);
+                docs = docs.values(TENANT, doc, "filler", COL, collectionId, "file:///" + doc + ".md");
+                manifest = manifest.values(TENANT, doc, 0, chash, COL, collectionId, MODEL);
             }
             chunks.execute();
             docs.execute();
@@ -186,6 +191,7 @@ class ManifestLabelStageOccurrenceBoundTest {
             .set(CATALOG_DOCUMENTS.TUMBLER, doc)
             .set(CATALOG_DOCUMENTS.TITLE, doc)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COL))
             .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + doc + ".md");
         if (tombstoned) {
             insert.set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now());
@@ -205,6 +211,7 @@ class ManifestLabelStageOccurrenceBoundTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(hex))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COL)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COL))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
             .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, sectionType)
             .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, true)

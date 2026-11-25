@@ -222,7 +222,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <div class="see">You might say</div>
 <div class="cmd"><pre>Index <span class="ph">&lt;PATH/TO/A-MARKDOWN-FILE.md&gt;</span> and <span class="ph">&lt;PATH/TO/A-PAPER.pdf&gt;</span> into Nexus.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude runs <code>nx index md</code> for the Markdown file and <code>nx index pdf</code> for the PDF. Every PDF goes to MinerU, which keeps layout, tables, and formulas. If you installed with <code>--slim</code>, the first PDF installs PDF support before it reads. Both documents are then in the knowledge store and in the catalog.</p>
+<p>Claude runs <code>nx index md</code> for the Markdown file and <code>nx index pdf</code> for the PDF. Every PDF goes to MinerU, which keeps layout, tables, and formulas. If you installed with <code>--slim</code>, the first PDF installs PDF support before it reads. The first PDF on any install also downloads MinerU's model weights, about 1.2 GB, once, and shows that step before it parses. Both documents are then in the knowledge store and in the catalog.</p>
 
 <h3>The catalog</h3>
 <p>Nexus adds every repository, note, and document to the catalog, and the catalog also records links between documents. A link has a type, for example <code>cites</code>, <code>implements</code>, or <code>supersedes</code>. Search finds text inside documents. The catalog answers two other questions: which documents exist, and how they are connected.</p>
@@ -383,7 +383,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <h3>Health check</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Run nx doctor and tell me if anything is wrong.</pre><button class="copy" type="button">Copy</button></div>
-<p>No line may show ✗. Read every ⚠ line. The line "Orphan uv install" means a copy of conexus installed with uv is still on disk. Right after <code>nx self install</code> that is normal, and Nexus removes the old copy at the next <code>nx self install</code>. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
+<p>No line may show ✗. Read every ⚠ line, and a <code>[ ]</code> line means that check does not apply to your setup or could not be read, so it is not a failure. After an update, lines that start with <code>Data move</code> or <code>RDR-229</code> can show ⚠ or a note while the engine finishes background work on your data. They go away without any action from you, and each line says what to do if one does not. Renaming a collection can be refused during that time. The message says what it waits for, such as a background data move to finish or an engine restart. The line "Orphan uv install" means a copy of conexus installed with uv is still on disk. Right after <code>nx self install</code> that is normal, and Nexus removes the old copy at the next <code>nx self install</code>. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
 
 <h3>Back up before you update</h3>
 <div class="see">You might say</div>
@@ -415,17 +415,21 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <div class="gloss-wrap">
 
 <details class="gloss" id="session-start"><summary>What Claude receives when a session starts</summary><div style="padding:0 14px 6px">
-<p>When you run <code>claude</code> in your project, the plugin hands Claude several blocks of text before your first message. Claude Code does not show them to you, but you can ask for them:</p>
+<p>When you run <code>claude</code> in your project, the plugin hands Claude a short block of text before your first message. Claude Code does not show it to you, but you can ask for it:</p>
 <div class="cmd"><pre>What context did the Nexus plugin give you at the start of this session?</pre><button class="copy" type="button">Copy</button></div>
+<p>The block holds rules and the state of this session. It also gives guidance that names an agent, a skill, or a tool for situations such as "something is broken" or "an answer must come from many documents". It warns you when memory cannot be reached. It ends with one line that says more is available on demand.</p>
+<p>The reference material is not in the block, because most sessions never need all of it. Claude loads a piece when the work calls for it, with <code>nx brief <span class="ph">&lt;TOPIC&gt;</span></code> or the <code>brief</code> tool. You can run the same command yourself:</p>
 <div class="tbl"><table>
-<tr><th>Block</th><th>Content</th></tr>
-<tr><td>T2 Memory</td><td>The memory entries for this project. Empty in a new project.</td></tr>
-<tr><td>Ready Beads</td><td>Open tasks from the <code>bd</code> task tracker, if the project uses it.</td></tr>
-<tr><td>nx Capabilities</td><td>A short list of the Nexus tools that Claude can use.</td></tr>
-<tr><td>Knowledge Map</td><td>The main topics in the knowledge store, with the number of documents in each.</td></tr>
+<tr><th>Topic</th><th>Content</th></tr>
+<tr><td><code>memory</code></td><td>The memory entries for this project, newest first. Empty in a new project.</td></tr>
+<tr><td><code>beads</code></td><td>Open tasks from the <code>bd</code> task tracker, if the project uses it.</td></tr>
+<tr><td><code>caps</code></td><td>Notes on the Nexus tools: search filters, paging, and the enrich commands.</td></tr>
+<tr><td><code>map</code></td><td>The main topics in the knowledge store for this repository. <code>nx context refresh</code> builds it.</td></tr>
+<tr><td><code>rdr</code></td><td>How many RDRs the project has in each status.</td></tr>
+<tr><td><code>me</code></td><td>Your own startup note, if you keep one.</td></tr>
 </table></div>
-<p>Not every project has every block. A project without the <code>bd</code> task tracker has no Ready Beads block, and a project without RDRs has no RDR block. A new install has an empty T2 Memory block and a short Knowledge Map.</p>
-<p>The blocks are what Claude chooses from. The memory block tells Claude what was decided before, so it does not decide again from zero. The capabilities block tells Claude which tools exist, so it searches the store instead of reading every file. A guidance block describes situations such as "something is broken" or "an answer must come from many documents". It names an agent, a skill, or a tool for each.</p>
+<p>Run <code>nx brief</code> with no topic to list them. A project without the <code>bd</code> task tracker has nothing under <code>beads</code>, and a new install has an empty <code>memory</code> topic and a short <code>map</code>.</p>
+<p>The topics are what Claude chooses from. The memory topic tells Claude what was decided before, so it does not decide again from zero. The map tells Claude which subjects the store holds, so it searches the store instead of reading every file.</p>
 <p>If Claude reports a block with the heading "nx Preflight: FAILED", part of the install is missing. Type <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/nx-preflight.md"><code>/conexus:nx-preflight</code></a> and it tells you which part. If the <code>nx</code> command itself is missing, that command cannot run either, so type <code>/conexus:setup</code> and answer its question.</p>
 </div></details>
 

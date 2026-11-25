@@ -1,5 +1,5 @@
 aura = "ci_develop_red"
-summary = "A red develop sha and who owns it, posted to this session's threads entry; wakes the owner and next up."
+summary = "A red develop sha and who owns it, posted to this session's threads entry; wakes the owner; next up is shown it and woken by ci_develop_nudge."
 procedure = "ci_red_notice"
 
 [load]
@@ -17,6 +17,12 @@ next = "body.next"
 next_alias = "body.next_alias"
 refresh = "body.refresh"
 reason = "body.reason"
+stalled = "body.stalled"
+stalled_owner = "body.stalled_owner"
+stalled_since = "body.stalled_since"
+stalled_sign = "body.stalled_sign"
+open_minutes = "body.open_minutes"
+previous_owner = "body.previous_owner"
 me = "self.identity"
 
 [when]

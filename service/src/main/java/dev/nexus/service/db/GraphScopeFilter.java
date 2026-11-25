@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import org.jooq.DSLContext;
+
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -30,6 +33,13 @@ import java.util.Set;
  * </ul>
  * "No scope" and {@code all} are not filters: the client sends none. A document with no collection is
  * outside a collection set ("cannot tell" is not "inside").
+ *
+ * <p><b>What a collection set matches (RDR-229 P3.5a, linda's follow-up to the census).</b> The labels on the wire stay labels. Before
+ * gate 3 a document is inside when its stored {@code physical_collection} is one of them. From gate 3 the stored name is a
+ * stale-name reader: after a one-row rename a document keeps the old name, and a filter naming the new label would miss it. So
+ * {@link CatalogRepository#graphBFS} resolves each label to its registry id ({@link #idsOf}, which orders by
+ * {@code CollectionRegistry.labelResolutionOrder}, a live row before a retired one) and matches the document's
+ * {@code physical_collection_id}; a label no row has names no collection.
  */
 public final class GraphScopeFilter {
 
@@ -97,6 +107,37 @@ public final class GraphScopeFilter {
             names.add(s);
         }
         return ofCollections(names);
+    }
+
+    /**
+     * The registry ids of a collection-set filter's labels, in {@code ctx}'s transaction; {@code null} for a subtree filter. A label
+     * no row of the tenant has contributes none (it admits nothing), and a label held by several rows takes the first in
+     * {@code labelResolutionOrder}.
+     */
+    Set<Long> idsOf(DSLContext ctx, String tenant) {
+        if (subtree != null) {
+            return null;
+        }
+        Set<Long> ids = new HashSet<>();
+        for (String label : collections) {
+            try {
+                ids.add(CollectionRegistry.shared().resolveLabel(ctx, tenant, label).collectionId());
+            } catch (UnregisteredCollectionException e) {
+                // a label with no row names no collection
+            }
+        }
+        return ids;
+    }
+
+    /**
+     * {@link #admits(String, String)} from gate 3: a collection set matches the document's {@code collectionId} against
+     * {@code ids} (from {@link #idsOf}), not its stored name; a subtree filter is as before. {@code ids == null} is the name match.
+     */
+    boolean admits(String collection, Long collectionId, Set<Long> ids, String tumbler) {
+        if (subtree == null && ids != null) {
+            return collectionId != null && ids.contains(collectionId);
+        }
+        return admits(collection, tumbler);
     }
 
     /** Whether a document in {@code collection} (catalog address {@code tumbler}) is inside the scope. */

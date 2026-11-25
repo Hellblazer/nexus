@@ -11,6 +11,8 @@ import dev.nexus.service.db.ReembedJobRepository.JobLockHeld;
 import dev.nexus.service.db.ReembedJobRepository.LockContention;
 import dev.nexus.service.db.ReembedJobRepository.Skip;
 import dev.nexus.service.db.ReembedJobRepository.Transition;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -93,8 +95,19 @@ class ReembedJobRepositoryTest {
         if (pg != null) pg.stop();
     }
 
+    /** A fresh tenant with the names this class starts jobs over registered: a job row carries both ends' registry
+     *  ids (RDR-229 P3.1), so {@code start} refuses a name the registry does not hold. */
     private String tenant() {
-        return "reembed-repo-" + seq.incrementAndGet();
+        String t = "reembed-repo-" + seq.incrementAndGet();
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            for (String name : List.of(SRC, TGT, MID, OTHER, "docs__owner__x__v1", "other-target", "other-source")) {
+                PgContainerHelper.insertCollection(ctx, t, name);
+            }
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+        return t;
     }
 
     private Job apply(String tenant, Job job, String to) {
@@ -160,6 +173,45 @@ class ReembedJobRepositoryTest {
                 });
             assertThat(repo.listByStates(t, List.of(PLANNED, RUNNING, PAUSED, CUTOVER, FAILED)))
                 .as("the refused start wrote nothing").containsExactly(holder);
+        }
+    }
+
+    /**
+     * RDR-229 P3.4 (nexus-p2m1x.22, bob's coverage census): once the id twin of the source lock exists
+     * ({@code idx_reembed_jobs_source_id_lock}, built by IdUniqueIndexPass), a start under a collection's new label after P3.7's one-row
+     * rename collides with the old-label holder on the TWIN, not the name lock. It must still be the typed refusal naming the holder,
+     * never the raw unique violation. The rename is made directly (the registry row's name changed, the holder's row keeps the old one,
+     * with session_replication_role replica so no cascade rewrites it); the twin is built as the pass builds it.
+     */
+    @Test
+    void aStartUnderARenamedLabel_collidingOnTheIdTwin_isRefusedNamingTheHolder() throws Exception {
+        String t = tenant();
+        Job holder = repo.start(t, SRC, TGT, null, false, false);
+        String renamed = "docs__owner__renamed__v1";
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+            ctx.update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME, renamed)
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t))
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(SRC)).execute();
+            ctx.createUniqueIndexIfNotExists("idx_reembed_jobs_source_id_lock").on(dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS,
+                    dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS.TENANT_ID, dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS.SOURCE_COLLECTION_ID)
+                .where(dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS.STATE.in(dev.nexus.service.datamove.ArbiterTwins.REEMBED_ACTIVE_STATES))
+                .execute();
+        }
+        try {
+            assertThatThrownBy(() -> repo.start(t, renamed, TGT, null, false, false))
+                .as("the twin refuses the second active job for the collection, and the refusal names the holder")
+                .isInstanceOfSatisfying(JobLockHeld.class, e -> assertThat(e.existingJobId()).isEqualTo(holder.jobId()));
+            assertThat(repo.listByStates(t, List.of(PLANNED, RUNNING, PAUSED, CUTOVER, FAILED)))
+                .as("the refused start wrote nothing").containsExactly(holder);
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                var ctx = DSL.using(su, SQLDialect.POSTGRES);
+                ctx.set(DSL.name("search_path"), DSL.inline("nexus")).execute();   // jOOQ renders the drop without its schema
+                ctx.dropIndexIfExists(DSL.name("idx_reembed_jobs_source_id_lock")).execute();
+            }
         }
     }
 
@@ -549,60 +601,73 @@ class ReembedJobRepositoryTest {
     }
 
     // ── revived ──────────────────────────────────────────────────────────────
+    // The mark is written by the way-back start, in its own transaction: {@code startMarking(t, earlierTarget, earlierSource, ..., true)} marks
+    // the earlier job that went earlierSource -> earlierTarget and starts the job that goes back.
+
+    /** The way back of an earlier {@code earlierSource -> earlierTarget} job, with the mark: the job it marked, if any. */
+    private Optional<Job> wayBackMarking(String t, String earlierSource, String earlierTarget) {
+        return repo.startMarking(t, earlierTarget, earlierSource, null, false, false, true).revived();
+    }
 
     @Test
-    void markRevived_marksTheMostRecentFinishedJobTheOtherWay() {
+    void startMarking_marksTheMostRecentFinishedJobTheOtherWay() {
         String t = tenant();
         // an earlier job went SRC -> TGT and finished kept_by_flag; a later one goes TGT -> SRC
         Job earlier = repo.start(t, SRC, TGT, null, true, false);
         repo.applyTransition(t, earlier.jobId(), PLANNED, null, DONE, Transition.disposition("kept_by_flag"))
             .orElseThrow();
 
-        Optional<Job> revived = repo.markRevived(t, SRC, TGT);
+        Optional<Job> revived = wayBackMarking(t, SRC, TGT);
         assertThat(revived).isPresent();
         assertThat(revived.get().jobId()).isEqualTo(earlier.jobId());
         assertThat(revived.get().disposition()).isEqualTo("revived");
         assertThat(revived.get().state()).as("state is left as it stands").isEqualTo(DONE);
 
-        assertThat(repo.markRevived(t, TGT, SRC)).as("no job went the other way").isEmpty();
-        Job live = repo.start(t, "docs__owner__x__v1", TGT, null, false, false);
-        assertThat(repo.markRevived(t, "docs__owner__x__v1", TGT))
-            .as("a job still in a lock state is not a finished one").isEmpty();
-        assertThat(repo.get(t, live.jobId()).orElseThrow().disposition()).isNull();
+        String other = tenant();   // a tenant where no job ever went the other way
+        assertThat(wayBackMarking(other, TGT, SRC)).as("no job went the other way").isEmpty();
+        Job live = repo.start(other, "docs__owner__x__v1", TGT, null, false, false);
+        assertThatThrownBy(() -> wayBackMarking(other, "docs__owner__x__v1", TGT))
+            .as("a job still in a lock state is not a finished one: its way back is refused before any mark")
+            .isInstanceOf(JobLockHeld.class);
+        assertThat(repo.get(other, live.jobId()).orElseThrow().disposition()).isNull();
     }
 
     @Test
-    void markRevived_isIdempotent_aJobAlreadyRevivedIsNotMarkedAgainNorTouched() {
+    void startMarking_isIdempotent_aJobAlreadyRevivedIsNotMarkedAgainNorTouched() {
         String t = tenant();
         Job earlier = repo.start(t, SRC, TGT, null, true, false);
         repo.applyTransition(t, earlier.jobId(), PLANNED, null, DONE, Transition.disposition("kept_by_flag"))
             .orElseThrow();
-        Job first = repo.markRevived(t, SRC, TGT).orElseThrow();
+        repo.startMarking(t, TGT, SRC, null, false, false, true).revived().orElseThrow();
+        Job first = repo.get(t, earlier.jobId()).orElseThrow();
+        // the way back finishes, so the same way can be started again
+        Job back = repo.listByStates(t, List.of(PLANNED)).get(0);
+        repo.applyTransition(t, back.jobId(), PLANNED, null, ABORTED, Transition.NONE).orElseThrow();
 
-        assertThat(repo.markRevived(t, SRC, TGT)).as("already revived: nothing to mark").isEmpty();
+        assertThat(wayBackMarking(t, SRC, TGT)).as("already revived: nothing to mark").isEmpty();
         Job after = repo.get(t, earlier.jobId()).orElseThrow();
         assertThat(after.disposition()).isEqualTo("revived");
-        assertThat(after.updatedAt()).as("the second call wrote nothing").isEqualTo(first.updatedAt());
+        assertThat(after.updatedAt()).as("the second start wrote nothing to it").isEqualTo(first.updatedAt());
     }
 
     @Test
-    void markRevived_marksAnAbortedJob_andLeavesItAborted() {
+    void startMarking_marksAnAbortedJob_andLeavesItAborted() {
         String t = tenant();
         Job earlier = repo.start(t, SRC, TGT, null, false, false);
         repo.applyTransition(t, earlier.jobId(), PLANNED, null, ABORTED, Transition.NONE).orElseThrow();
 
-        Job revived = repo.markRevived(t, SRC, TGT).orElseThrow();
+        Job revived = wayBackMarking(t, SRC, TGT).orElseThrow();
         assertThat(revived.jobId()).isEqualTo(earlier.jobId());
         assertThat(revived.disposition()).isEqualTo("revived");
         assertThat(revived.state()).isEqualTo(ABORTED);
     }
 
     @Test
-    void markRevived_doesNotMarkAFailedJob_itHoldsTheLockSoTheStartRefusesTheReviveFirst() {
+    void startMarking_doesNotMarkAFailedJob_itHoldsTheLockSoTheStartRefusesTheReviveFirst() {
         String t = tenant();
         Job failed = inState(t, FAILED);
 
-        assertThat(repo.markRevived(t, SRC, TGT)).isEmpty();
+        assertThatThrownBy(() -> wayBackMarking(t, SRC, TGT)).isInstanceOf(JobLockHeld.class);
         Job after = repo.get(t, failed.jobId()).orElseThrow();
         assertThat(after.disposition()).isNull();
         assertThat(after.state()).isEqualTo(FAILED);
@@ -611,11 +676,11 @@ class ReembedJobRepositoryTest {
     }
 
     @Test
-    void markRevived_doesNotMarkADoneWithSkipsJob_itNeverSupersededItsSource() {
+    void startMarking_doesNotMarkADoneWithSkipsJob_itNeverSupersededItsSource() {
         String t = tenant();
         Job job = apply(t, apply(t, repo.start(t, SRC, TGT, null, false, false), RUNNING), DONE_WITH_SKIPS);
 
-        assertThat(repo.markRevived(t, SRC, TGT)).isEmpty();
+        assertThat(wayBackMarking(t, SRC, TGT)).isEmpty();
         assertThat(repo.get(t, job.jobId()).orElseThrow().disposition()).isNull();
     }
 

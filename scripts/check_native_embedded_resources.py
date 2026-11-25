@@ -28,6 +28,8 @@ Fails on:
   * a vendored changelog resource the report does not name (nexus-f3yqd.2.11: the engine applies db/vendor/ddl_utils
     and db/vendor/dml_utils at boot, and a native binary without the master, the changes file, the .sql files or the
     LICENSE cannot, so every library needs all four, on every platform);
+  * an RDR-229 run-time list the report does not name (nexus-p2m1x: db/rdr229/p31-checks.tsv, p33a-fk-twins.tsv and
+    p35b-continue-changesets.txt; the binaries of engine-service v0.1.200 to v0.1.202 lacked the last two);
   * a library the platform must carry that the report does not name
     (``Platform.required``: losing libonnxruntime4j_jni or libtokenizers
     ships a binary that cannot embed text, with every forbidden-resource
@@ -163,6 +165,25 @@ def vendored_resource_problems(names: set[str]) -> list[str]:
     return problems
 
 
+# The RDR-229 lists the engine reads at run time (service/src/main/resources/db/rdr229/; resource-config.json carries the
+# matching db/rdr229/.* pattern). nexus-p2m1x: they are read through ClassLoader.getResourceAsStream, which native-image
+# does not register on its own, and resource-config.json had no pattern, so the v0.1.200 to v0.1.202 binaries lacked
+# p33a-fk-twins.tsv (FkTwins threw "is not on the classpath" and RDR-229's completion work never started) and
+# p35b-continue-changesets.txt (every collection rename read as refused, p35b_list_missing). p31-checks.tsv was embedded
+# by accident, through another reader's Class.getResourceAsStream. The two generated .sql files there are read by tests
+# and the runbook only, so they are not required.
+RDR229_RUNTIME_RESOURCES = (
+    "db/rdr229/p31-checks.tsv",
+    "db/rdr229/p33a-fk-twins.tsv",
+    "db/rdr229/p35b-continue-changesets.txt",
+)
+
+
+def rdr229_resource_problems(names: set[str]) -> list[str]:
+    """One problem per RDR-229 run-time list the report does not name."""
+    return [f"RDR-229 runtime resource not embedded: {required}" for required in RDR229_RUNTIME_RESOURCES if required not in names]
+
+
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # Maven prints `[INFO] --- jar:3.4.1:jar (default-jar) @ nexus-service ---`
 # (older Maven: maven-jar-plugin:3.4.1:jar). Anchoring on the goal name keeps
@@ -234,6 +255,7 @@ def check_report(report: object, platform: Platform) -> list[str]:
         if required not in names:
             problems.append(f"required native library not embedded: {required}")
     problems += vendored_resource_problems(names)
+    problems += rdr229_resource_problems(names)
     return problems
 
 

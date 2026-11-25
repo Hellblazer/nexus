@@ -370,7 +370,7 @@ def test_livec_census_manifest_probe_is_an_index_condition_under_rls(
             "-U", substrate_state["pg_user"], "-d", substrate_state["pg_dbname"],
             "-v", "ON_ERROR_STOP=1", "-A", "-t", "-c", q,
         ],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert plan.returncode == 0, plan.stderr
     text = plan.stdout

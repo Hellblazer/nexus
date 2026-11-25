@@ -94,7 +94,8 @@ def test_a_file_with_no_author_leaves_the_column_alone(tmp_path) -> None:
 
 def test_the_hook_registers_with_the_author_when_no_pre_flight_did(tmp_path) -> None:
     """The register leg of ``_catalog_markdown_hook`` (a caller that bypasses the public entry points)."""
-    from nexus.doc_indexer import _catalog_markdown_hook
+    # RDR-229 P3.1: registers the collection first, as the run's pre-flight does before the hook
+    from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook
 
     md = tmp_path / "6pfgb7-hook.md"
     md.write_text("---\ntitle: T\nauthor: Hook Author\n---\n\n# H\n\nBody.\n")

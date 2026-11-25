@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -778,8 +779,9 @@ class SchemaRollbackRoundTripIntegrationTest {
         return names;
     }
 
+    /** A vectors-055 function: it carries the flag and is not one of RDR-229 P3.5b's id twins (<name>_by_id, vectors-077), which carry it too. */
     private static boolean carriesExcludeSensitive(PgCatalogProbes.FunctionDefinition f) {
-        return f.arguments().contains("p_exclude_sensitive");
+        return f.arguments().contains("p_exclude_sensitive") && !f.identity().contains("_by_id(");
     }
 
     /**
@@ -1306,18 +1308,25 @@ class SchemaRollbackRoundTripIntegrationTest {
             .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
             .doNothing()
             .execute();
-        ctx.insertInto(DOCUMENT_ASPECTS,
-                DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
-                DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.EXTRAS,
-                DOCUMENT_ASPECTS.SALIENT_SENTENCES, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.DOC_ID)
-            .values(FIXTURE_TENANT, "cck6z-coll", "cck6z/doc1", OffsetDateTime.now(), "v1",
-                "cck6z-extractor", JSONB.valueOf(ASPECTS_EXTRAS_JSON), (JSONB) null,
-                "file:///cck6z/doc1", "cck6z.aspects.doc")
-            .values(FIXTURE_TENANT, "cck6z-coll", "cck6z/doc2", OffsetDateTime.now(), "v1",
-                "cck6z-extractor", (JSONB) null, JSONB.valueOf(ASPECTS_SALIENT_JSON),
-                "file:///cck6z/doc2", "cck6z.aspects.doc")
-            .execute();
+        // RDR-229 P3.1: the row that names a collection carries its registry id beside it.
+        for (var aspect : List.of(
+                new JSONB[] {JSONB.valueOf(ASPECTS_EXTRAS_JSON), null},
+                new JSONB[] {null, JSONB.valueOf(ASPECTS_SALIENT_JSON)})) {
+            boolean first = aspect[0] != null;
+            ctx.insertInto(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.TENANT_ID, FIXTURE_TENANT)
+                .set(DOCUMENT_ASPECTS.COLLECTION, "cck6z-coll")
+                .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(FIXTURE_TENANT, "cck6z-coll"))
+                .set(DOCUMENT_ASPECTS.SOURCE_PATH, first ? "cck6z/doc1" : "cck6z/doc2")
+                .set(DOCUMENT_ASPECTS.EXTRACTED_AT, OffsetDateTime.now())
+                .set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")
+                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "cck6z-extractor")
+                .set(DOCUMENT_ASPECTS.EXTRAS, aspect[0])
+                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, aspect[1])
+                .set(DOCUMENT_ASPECTS.SOURCE_URI, first ? "file:///cck6z/doc1" : "file:///cck6z/doc2")
+                .set(DOCUMENT_ASPECTS.DOC_ID, "cck6z.aspects.doc")
+                .execute();
+        }
 
         ctx.insertInto(ASPECT_PROMOTION_LOG,
                 ASPECT_PROMOTION_LOG.TENANT_ID, ASPECT_PROMOTION_LOG.FIELD_NAME,
@@ -1343,14 +1352,20 @@ class SchemaRollbackRoundTripIntegrationTest {
     /** Seeds two {@code topics} parents (the FK topic_links requires) plus one link row. */
     private static long[] seedTopicLinksFixture(Connection su) throws Exception {
         DSLContext ctx = dsl(su);
-        long topicA = ctx.insertInto(TOPICS,
-                TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
-            .values(FIXTURE_TENANT, "cck6z-topic-a", "cck6z-coll", OffsetDateTime.now())
+        long topicA = ctx.insertInto(TOPICS)
+            .set(TOPICS.TENANT_ID, FIXTURE_TENANT)
+            .set(TOPICS.LABEL, "cck6z-topic-a")
+            .set(TOPICS.COLLECTION, "cck6z-coll")
+            .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(FIXTURE_TENANT, "cck6z-coll"))
+            .set(TOPICS.CREATED_AT, OffsetDateTime.now())
             .returning(TOPICS.ID)
             .fetchOne(TOPICS.ID);
-        long topicB = ctx.insertInto(TOPICS,
-                TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
-            .values(FIXTURE_TENANT, "cck6z-topic-b", "cck6z-coll", OffsetDateTime.now())
+        long topicB = ctx.insertInto(TOPICS)
+            .set(TOPICS.TENANT_ID, FIXTURE_TENANT)
+            .set(TOPICS.LABEL, "cck6z-topic-b")
+            .set(TOPICS.COLLECTION, "cck6z-coll")
+            .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(FIXTURE_TENANT, "cck6z-coll"))
+            .set(TOPICS.CREATED_AT, OffsetDateTime.now())
             .returning(TOPICS.ID)
             .fetchOne(TOPICS.ID);
 

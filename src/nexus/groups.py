@@ -141,7 +141,12 @@ class GroupsClient:
         self._base = base_url.rstrip("/")
         self._bearer = _unavailable_on_failure(bearer if callable(bearer) else (lambda: bearer))
         self._tenant = tenant
-        self._http = http or httpx.Client(timeout=timeout)
+        if http is None:
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+
+            # The process-wide SSL context (see IdentityClient.__init__).
+            http = httpx.Client(timeout=timeout, verify=get_shared_ssl_context())
+        self._http = http
         self._identity_headers = identity_headers
         self._retry_headers = retry_headers
         self._identities = IdentityClient(self._base, self._bearer, tenant=tenant, http=self._http)

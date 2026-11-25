@@ -20,7 +20,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.aspect_readers import uri_for
-from nexus.catalog.factory import make_catalog_writer
+from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.cli import main
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
@@ -35,6 +35,10 @@ def _seed(client, src: str, title: str, body: str) -> str:
     owner = writer.register_owner("knowledge", "curator")
     source_uri = uri_for(src, title)
     assert source_uri is not None
+    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422).
+    from tests._catalog_fixture_ops import register_seed_collections
+
+    register_seed_collections(src)
     tumbler = str(writer.register(
         owner=owner, title=title, content_type="knowledge",
         physical_collection=src, source_uri=source_uri,
@@ -50,11 +54,19 @@ def _seed(client, src: str, title: str, body: str) -> str:
 
 
 def test_import_into_a_two_segment_name_lands_where_other_verbs_read(t2_service_env, tmp_path):
-    client = HttpVectorClient(tenant=t2_service_env)
+    # RDR-229 P3.8: a new subject lands in a minted label (c<id>), which only its registry row ties to the
+    # subject. The import gate and every read by subject find that row through the process client, as the CLI
+    # does; a client built under the minted tenant's own name answers no row (nexus-fryrd). The engine binds the
+    # tenant to the bearer, so the process client is this test's tenant.
+    from nexus.db.http_vector_client import get_http_vector_client
+
+    client = get_http_vector_client()
     legacy = "knowledge__sis0m5-imported"
     resolved = t3_collection_name(legacy, t3=client, for_write=True)
     assert resolved != legacy  # the condition: a name that must be promoted
-    src = f"knowledge__sis0m5-src__{resolved.split('__')[2]}__v1"
+    # RDR-229 P3.8: a new knowledge subject resolves to a label the engine minted (``c<id>``), so the model is
+    # its registry row's, never a segment of the name.
+    src = f"knowledge__sis0m5-src__{make_catalog_reader().get_collection(resolved)['embedding_model']}__v1"
     chash = _seed(client, src, "sis0m5 import note", "sis0m5 two-segment import body")
     out = tmp_path / "sis0m5.nxexp"
     export_collection(db=client, collection_name=src, output_path=out)

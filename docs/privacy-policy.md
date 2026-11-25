@@ -24,6 +24,12 @@ _Effective: 2026-11-07_
 > including a keyed network fingerprint the managed service derives from each
 > ping's source address. §3 is corrected.
 
+> **Change note (2026-11-24, conexus-momd):** the daily install ping now skips
+> itself in automated environments (test runs, continuous integration, lab
+> runs and containers), so it narrows what is collected; nothing new is sent.
+> Setting `NX_TELEMETRY=1` turns it back on inside a container. §2 describes
+> the skips.
+
 Conexus is a self-hosted MCP server and Claude Code / Claude Desktop extension that indexes content on your machine and provides semantic search and persistent memory across Claude conversations. This policy describes what data Conexus handles, where it goes, and what is never collected.
 
 ## 1. What Conexus stores
@@ -38,7 +44,7 @@ All persistent data lives on the Postgres server backing your `nexus-service` �
 - **Catalog** — document registry and typed-link graph. Served by the same `nexus-service` Postgres (local mode: on the host disk; managed-cloud mode: the operator's server). The local SQLite/JSONL catalog is deleted (RDR-158 P4) — there is no `~/.config/nexus/catalog/` store on this release.
 - **Session scratch (T1)** — ephemeral working notes shared across agents within a session. Served by `nexus-service` over Postgres, keyed to a session id (local mode: on the host disk; managed-cloud mode: the operator's server) — not in-memory ChromaDB, a substrate that is retired. Rows are cleared on session close and are swept automatically after 24 hours regardless, so scratch never accumulates as durable state.
 - **Plan library** — saved query execution plans. Stored alongside memory entries (same backend and locality).
-- **Logs** — structured operational logs at `~/.config/nexus/logs/` (rotating, 10 MB × 5). Always local to the host running the CLI/MCP process, in both local and managed-cloud mode.
+- **Logs** — structured operational logs at `~/.config/nexus/logs/` (rotating, 10 MB × 5). Always local to the host running the CLI/MCP process, in both local and managed-cloud mode. `install-gc.log` (rotates at 1 MB, one backup) records the installer's garbage-collection runs and the redacted process chain that started them.
 - **Engine logs** — the `nexus-service` writes its own operational log (local mode: on the host machine; managed-cloud mode: the operator's infrastructure). When a chunk write arrives whose chunks have no owning document, the engine logs one line per route, tenant and collection per minute (`ownerless_chunk_write_would_refuse` or `_refused`). For the first such chunk the line holds its `source_path`, `title` and `source_agent` metadata (tenant content; a URL value loses its credentials and query string), the collection name, and the request's `User-Agent` and client version. It holds no `source_uri` and no chunk text. When a chunk write carries a metadata key that a chunk row does not keep, the engine logs one line per route, tenant, collection, key set and client per minute (`chunk_metadata_key_would_refuse`). It holds the offending key names (a client's own key names, cut to a bounded list), how many chunks carried them, the collection name, the request's `User-Agent` and client version, and the first such chunk's `source_agent`. It holds no other metadata value and no chunk text. These lines are retained for as long as the deployment retains its engine logs; Conexus sets no separate period.
 
 ## 2. What Conexus sends to third parties
@@ -93,8 +99,10 @@ Each row is a feature that sends document-derived text off the machine or to a m
 
 You control which (if any) of the above are reachable by deciding whether to set the corresponding credentials.
 
+Conexus downloads software and model files from GitHub release assets (the engine, the bge model, MinerU's PDF weights) and from Hugging Face; these requests carry no content and no install identifier beyond what a normal HTTP download sends.
+
 **Daily install ping** (all modes, on by default, opt-out):
-Once every 24 hours the MCP server sends one message to the managed service at `api.conexus-nexus.com`. The message carries six values: a random install id generated on your machine, the Conexus version, the install mode, operating system, CPU type and Python version. It carries no hostname, username, file paths, collection names or content. The service stores these six values and the time it received the message. It also stores a short keyed fingerprint of the network address the message came from: the first 16 hex characters of an HMAC-SHA256 of that address, under a secret key held only by the service. The address itself is never written to the service's database. The fingerprint lets the operator see that several installs share a network source, such as one office or one home connection, without storing the address. Given a known address and the key, the operator can check whether that address sent pings, so the ping is pseudonymous, not anonymous. Rotating the key makes new fingerprints incomparable with old ones. The ping is how active installs are counted. Turn it off with `nx telemetry off` or `NX_NO_TELEMETRY=1`. It never runs from a development checkout. `nx telemetry status` shows the current setting and when the last ping was sent.
+Once every 24 hours the MCP server sends one message to the managed service at `api.conexus-nexus.com`. The message carries six values: a random install id generated on your machine, the Conexus version, the install mode, operating system, CPU type and Python version. It carries no hostname, username, file paths, collection names or content. The service stores these six values and the time it received the message. It also stores a short keyed fingerprint of the network address the message came from: the first 16 hex characters of an HMAC-SHA256 of that address, under a secret key held only by the service. The address itself is never written to the service's database. The fingerprint lets the operator see that several installs share a network source, such as one office or one home connection, without storing the address. Given a known address and the key, the operator can check whether that address sent pings, so the ping is pseudonymous, not anonymous. Rotating the key makes new fingerprints incomparable with old ones. The ping is how active installs are counted. Turn it off with `nx telemetry off` or `NX_NO_TELEMETRY=1`. It never runs from a development checkout, and it skips itself in automated environments: continuous integration, test runs, and containers. If you run Conexus in a container and want it counted, set `NX_TELEMETRY=1`. `nx telemetry status` shows the current setting and when the last ping was sent.
 
 ## 3. What Conexus never collects
 
@@ -105,15 +113,15 @@ Once every 24 hours the MCP server sends one message to the managed service at `
 
 ## 4. Data retention
 
-- Local-mode data persists on disk until you delete it. There is no automatic purge of T2 memory (`nx memory delete`), T3 collections (`nx store delete`), or the catalog (`nx catalog gc`).
+- Local-mode data persists on disk until you delete it. Nothing purges your T2 memory, T3 collections or catalog on a schedule, with these exceptions: T2 entries stored with a TTL expire; the engine's reaper moves chunks no document owns into a quarantine collection and deletes them after 14 days (see operations/engine-reaper.md); and the 24 hour scratch sweep below. `nx memory delete`, `nx store delete` and `nx catalog gc` delete on your command.
 - Managed-cloud data persists in the hosted nexus-service's Postgres under that service operator's retention policy.
 - T1 session scratch is keyed to a session id and is not durable: rows are cleared on session close and are swept automatically after 24 hours regardless, so scratch never accumulates as long-lived state.
 
 ## 5. Data export and deletion
 
 - **Export** — `nx store export <collection>` produces a `.nxexp` archive of any T3 collection. `nx memory get` returns memory entries.
-- **Delete** — `nx store delete`, `nx memory delete`, `nx catalog gc`, and the `daemon_uninstall` MCP tool with `confirm=true` and `remove_data=true` all remove data permanently (`daemon_uninstall` with `confirm=false`, the default, only describes what would be removed). `remove_data=true` wipes the nexus **config directory** (`~/.config/nexus/`, or `NEXUS_CONFIG_DIR`); it does **not** touch `~/.local/share/nexus/`, which holds the embedding-model cache and, on a pre-PG install that has not been cleaned up, a relic Chroma directory nothing reads any more. Use the Uninstall step below to remove both.
-- **Uninstall** — removing Conexus and deleting `~/.config/nexus/` plus `~/.local/share/nexus/` removes everything Conexus persisted.
+- **Delete** — `nx store delete`, `nx memory delete`, `nx catalog gc`, and the `daemon_uninstall` MCP tool with `confirm=true` and `remove_data=true` all remove data permanently (`daemon_uninstall` with `confirm=false`, the default, only describes what would be removed). `remove_data=true` wipes the nexus **config directory** (`~/.config/nexus/`, or `NEXUS_CONFIG_DIR`). `remove_data=true` also removes the model cache `~/.cache/nexus` (the ONNX models and, if you have indexed a PDF, MinerU's weights, about 1.26 GB). It does **not** touch `~/.local/share/nexus/`, which on a pre-PG install that has not been cleaned up holds a relic Chroma directory nothing reads any more. Use the Uninstall step below to remove all three.
+- **Uninstall** — removing Conexus and deleting `~/.config/nexus/`, `~/.local/share/nexus/` and `~/.cache/nexus/` removes everything Conexus persisted.
 
 ## 6. Children's privacy
 

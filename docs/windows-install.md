@@ -45,9 +45,10 @@ was not measured, it says so.
   anything is in this case at first; PDF support then installs on first use once
   the DLLs are in place. Where the line appears: interactive `nx self install` and
   `nx upgrade` print it; the Claude Code plugin setup repeats it in its done
-  message (it is the one caller that asks for PDF support by default;
-  `web/install.ps1` and `web/install.sh` pass no extras, so what they build has no
-  PDF support on any machine, and they print nothing about it); `nx upgrade --auto`
+  message. `web/install.ps1` and `web/install.sh` build with `--extras pdf`
+  unless `--slim` is given. A `--slim` run prints "PDF support was left out" and
+  the command to add it; that message is about the flag and is not the
+  missing-DLL line. `nx upgrade --auto`
   and the session-start lockstep upgrade write it to their logs only
   (`lockstep.log` for the second). The first PDF index
   stops with the link too. `nx doctor` shows "PDF support" red on an install that
@@ -343,7 +344,8 @@ the `NexusStorageService` task and `%LOCALAPPDATA%\nexus`, takes
 deletes `%USERPROFILE%\.config\nexus`, which holds the database, notes, plans
 and catalog, and `%USERPROFILE%\.cache\nexus`, which holds the search models
 (about 500 MB; in releases after 7.74.0 the engine's tokenizer library lives under
-it, in `djl`). In those releases, with
+it, in `djl`) and, once a PDF has been indexed, MinerU's model weights under
+`mineru` (about 1.26 GB). In those releases, with
 `--remove-data` it also removes the `onnxruntime-java<n>` folder in the temp
 directory (the one `TMP` names, else `TEMP`; normally `%TEMP%`) that the
 engine's last run left: the engine deletes older ones at its next start, so
@@ -582,8 +584,11 @@ that the bundle, uv's Python or `nx.exe` are blocked at the next start. The
   SessionStart hooks: on 2026-10-15 the end-to-end test failed three times in a
   row because Claude Code stopped them at their 5 and 10 second time limits while
   `uv` prepared the hook environment for the first time. Later sessions were not
-  affected. The cause is not known (nexus-3ya9d). If a first session shows no
-  nexus context, start a new session.
+  affected. The SessionStart entries now carry 35 to 60 second limits, which
+  include a 30 second cold-start allowance for `uv` (the conexus README's Hooks
+  section), so a first session should no longer lose them; this has not been
+  re-measured on Windows (nexus-3ya9d). If a first session shows no nexus
+  context, start a new session.
 - AppLocker with enforced script rules, WDAC with script enforcement on, a
   Microsoft or domain account, host sleep, and the Claude Desktop install
   dialog: not measured.

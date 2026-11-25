@@ -6,6 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.SQLDialect;
@@ -389,11 +390,10 @@ class GcRestoreRereferencedBoundedTest {
     private void insertManifestRow(Connection su, String tenant, String docId, String chashHex, String collection) {
         var dsl = DSL.using(su, SQLDialect.POSTGRES);
         // RDR-225: a manifest row carries the model of the collection (and so of the chunk) it names.
-        dsl.insertInto(CATALOG_DOCUMENT_CHUNKS,
-                CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-           .values(tenant, docId, 0, Chash.fromHex(chashHex).toBytes(), collection,
+        dsl.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+           .values(tenant, docId, 0, Chash.fromHex(chashHex).toBytes(), collection, CollectionIds.require(dsl, tenant, collection),
                 PgContainerHelper.collectionModel(dsl, tenant, collection))
            .execute();
     }

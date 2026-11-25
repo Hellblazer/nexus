@@ -186,7 +186,8 @@ def _stream_archive(fh: IO[bytes]) -> str:
     fh.seek(0)
     fh.truncate()
     digest = hashlib.sha256()
-    with httpx.stream("GET", _MODEL_DOWNLOAD_URL, follow_redirects=True) as resp:
+    from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+    with httpx.stream("GET", _MODEL_DOWNLOAD_URL, follow_redirects=True, verify=get_shared_ssl_context()) as resp:
         resp.raise_for_status()
         for chunk in resp.iter_bytes(chunk_size=65536):
             fh.write(chunk)

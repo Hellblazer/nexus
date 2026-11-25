@@ -138,9 +138,12 @@ public final class VectorHandler implements HttpHandler {
     /**
      * RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1, coordinator
      * design change): names dropped by {@link PgVectorRepository#registeredSurvivors}
-     * from a multi-collection fan-out read, comma-separated (collection names
-     * cannot contain a comma by grammar — see the conformant shape in
-     * {@code docs/collections.md}). Set ONLY when at least one name was dropped;
+     * from a multi-collection fan-out read, each name form-encoded as UTF-8 (a space is {@code +}, other bytes {@code %XX})
+     * ({@link SkippedCollectionsHeader#encode}) and the names joined with a comma. Since
+     * RDR-229 P3.6 a label may hold a space, non-ASCII letters and (should the comma
+     * ruling be relaxed) a comma, none of which a raw header value carries safely
+     * (nexus-5clu8); a legacy name of letters, digits, {@code _}, {@code -} and
+     * {@code .} encodes to itself, so an older client reads it unchanged. Set ONLY when at least one name was dropped;
      * absent otherwise. A header, never a body field, so the response body stays
      * byte-identical to before this feature existed on every route in every case
      * — the shipped 7.37.0 client unwraps a body object envelope only when
@@ -3000,7 +3003,7 @@ public final class VectorHandler implements HttpHandler {
      */
     private static void emitSkippedCollections(HttpExchange ex, List<String> skipped) {
         if (!skipped.isEmpty()) {
-            ex.getResponseHeaders().set(SKIPPED_COLLECTIONS_HEADER, String.join(",", skipped));
+            ex.getResponseHeaders().set(SKIPPED_COLLECTIONS_HEADER, SkippedCollectionsHeader.encode(skipped));
         }
     }
 

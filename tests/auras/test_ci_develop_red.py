@@ -78,6 +78,12 @@ def _row(
     sha: str = SHA,
     owner_alias: str | None = None,
     next_alias: str | None = None,
+    stalled: bool | None = None,
+    stalled_owner: str | None = None,
+    stalled_since: str | None = None,
+    stalled_sign: str | None = None,
+    open_minutes: int | None = None,
+    previous_owner: str | None = None,
 ) -> dict:
     """The arguments the aura maps from an owner row (body.owner, body.owner_alias, body.next, body.next_alias,
     body.reason, body.refresh, dims.sha) and from the session (self.identity). A null owner or next, and an alias the
@@ -92,7 +98,25 @@ def _row(
         out["owner_alias"] = owner_alias
     if next_alias is not None:
         out["next_alias"] = next_alias
+    for name, value in (("stalled", stalled), ("stalled_owner", stalled_owner), ("stalled_since", stalled_since),
+                        ("stalled_sign", stalled_sign), ("open_minutes", open_minutes),
+                        ("previous_owner", previous_owner)):
+        if value is not None:
+            out[name] = value
     return out
+
+
+#: The engine's stall escalation: reason escalated, stalled true, open_minutes since the red began, and the last sign of life
+#: (stalled_sign ack or push, with that identity and instant; all three absent when there was none).
+STALLED_SINCE = "2026-11-22T11:14:00Z"
+STALL = {"stalled": True, "stalled_owner": OTHER, "stalled_since": STALLED_SINCE, "stalled_sign": "ack", "open_minutes": 74}
+NO_SIGN = {"stalled_owner": None, "stalled_since": None, "stalled_sign": None}
+
+
+def _stalled(owner: str | None, me: str = ME, **over: object) -> dict:
+    """An escalated row of a red open 74 minutes whose last sign was OTHER's ack at 11:14 UTC; *owner* is who it names (the
+    leader)."""
+    return _row(owner, reason="escalated", me=me, **{**STALL, **over})
 
 
 def test_the_header_declares_the_owner_row_fields_and_me_and_grants_nothing() -> None:
@@ -105,6 +129,12 @@ def test_the_header_declares_the_owner_row_fields_and_me_and_grants_nothing() ->
         ("next_alias", "string", True),
         ("refresh", "boolean", False),
         ("reason", "string", False),
+        ("stalled", "boolean", True),
+        ("stalled_owner", "string", True),
+        ("stalled_since", "string", True),
+        ("stalled_sign", "string", True),
+        ("open_minutes", "integer", True),
+        ("previous_owner", "string", True),
         ("me", "string", False),
     ]
     assert h.grants == frozenset()
@@ -148,6 +178,68 @@ DISPLAYS = [
         f"Develop is red at {SHORT}; {OTHER} owns it. Hold your pushes.",
         id="escalated-names-someone-else",
     ),
+    pytest.param(
+        _row(ME, reason="disclaimed"),
+        f"Develop is red at {SHORT}; handed to you: the previous owner said it is not theirs. Diagnose it." + ACK,
+        id="owner-after-disclaim-previous-owner-unnamed",
+    ),
+    pytest.param(
+        _row(ME, reason="disclaimed", previous_owner=OTHER),
+        f"Develop is red at {SHORT}; handed to you: {OTHER} said it is not theirs. Diagnose it." + ACK,
+        id="owner-after-disclaim-names-the-previous-owner",
+    ),
+    pytest.param(
+        _stalled(ME),
+        f"Develop is red at {SHORT}, still open after 74 min; last activity: {OTHER} acknowledged at 11:14 UTC. "
+        "Raise an ask to Sam.",
+        id="stalled-the-leader-last-sign-an-ack",
+    ),
+    pytest.param(
+        _stalled(ME, stalled_sign="push", stalled_since="2026-11-22T09:05:59.5Z"),
+        f"Develop is red at {SHORT}, still open after 74 min; last activity: {OTHER} pushed at 09:05 UTC. "
+        "Raise an ask to Sam.",
+        id="stalled-the-leader-last-sign-a-push",
+    ),
+    pytest.param(
+        _stalled(None),
+        f"Develop is red at {SHORT}, still open after 74 min; last activity: {OTHER} acknowledged at 11:14 UTC. "
+        "Raise an ask to Sam.",
+        id="stalled-no-owner-named-a-member",
+    ),
+    pytest.param(
+        _stalled(ME, **NO_SIGN),
+        f"Develop is red at {SHORT}, still open after 74 min with no acknowledgement or fix push. Raise an ask to Sam.",
+        id="stalled-the-leader-no-sign",
+    ),
+    pytest.param(
+        _stalled(THIRD, me=OTHER),
+        f"Develop is red at {SHORT}, still open after 74 min; your last activity: acknowledged at 11:14 UTC. "
+        "The leader is raising it with Sam.",
+        id="stalled-the-owner-with-the-last-sign-an-ack",
+    ),
+    pytest.param(
+        _stalled(THIRD, me=OTHER, stalled_sign="push"),
+        f"Develop is red at {SHORT}, still open after 74 min; your last activity: pushed at 11:14 UTC. "
+        "The leader is raising it with Sam.",
+        id="stalled-the-owner-with-the-last-sign-a-push",
+    ),
+    pytest.param(
+        _stalled(THIRD),
+        f"Develop is red at {SHORT}, still open after 74 min; last activity: {OTHER} acknowledged at 11:14 UTC. "
+        "The leader is raising it with Sam. Hold your pushes.",
+        id="stalled-everyone-else",
+    ),
+    pytest.param(
+        _stalled(THIRD, **NO_SIGN),
+        f"Develop is red at {SHORT}, still open after 74 min with no acknowledgement or fix push. "
+        "The leader is raising it with Sam. Hold your pushes.",
+        id="stalled-everyone-else-no-sign",
+    ),
+    pytest.param(
+        _stalled(ME, open_minutes=None, stalled_since="2026-11-22T23:07:00.123456Z"),
+        f"Develop is red at {SHORT}, still open; last activity: {OTHER} acknowledged at 23:07 UTC. Raise an ask to Sam.",
+        id="stalled-open-minutes-absent",
+    ),
 ]
 
 
@@ -182,13 +274,14 @@ def test_a_row_naming_no_owner_that_is_not_escalated_holds_everyone() -> None:
     assert out["wake"] is False
 
 
-# wake: true only on refresh false, for the owner, for next up, and on an escalated row that names me or has no owner.
+# wake: true only on refresh false, for the owner, and on an escalated row that names me or has no owner. Next up is shown
+# the red and not woken (RDR-252 audit S2, nexus-igea9): a nudge row wakes it, tests/auras/test_ci_red_nudge.py.
 WAKES = [
     pytest.param(_row(ME), True, id="owner"),
     pytest.param(_row(ME, refresh=True), False, id="owner-refresh"),
     pytest.param(_row(ME, reason="handoff"), True, id="handoff-owner"),
     pytest.param(_row(ME, reason="no_record"), True, id="leader-takes-owner"),
-    pytest.param(_row(OTHER, ME), True, id="next-up"),
+    pytest.param(_row(OTHER, ME), False, id="next-up-is-shown-not-woken"),
     pytest.param(_row(OTHER, ME, refresh=True), False, id="next-up-refresh"),
     pytest.param(_row(OTHER, THIRD), False, id="everyone-else"),
     pytest.param(_row(OTHER), False, id="everyone-else-no-next"),
@@ -198,7 +291,42 @@ WAKES = [
     pytest.param(_row(None, reason="escalated"), True, id="escalated-no-owner-wakes-a-member"),
     pytest.param(_row(None, reason="escalated", refresh=True), False, id="escalated-no-owner-refresh"),
     pytest.param(_row(OTHER, reason="escalated"), False, id="escalated-names-someone-else"),
+    pytest.param(_row(ME, reason="disclaimed"), True, id="disclaimed-owner"),
+    pytest.param(_row(OTHER, ME, reason="disclaimed"), False, id="disclaimed-next-up-not-woken"),
+    pytest.param(_stalled(ME), True, id="stalled-the-leader-wakes"),
+    pytest.param(_stalled(ME, refresh=True), False, id="stalled-the-leader-refresh"),
+    pytest.param(_stalled(None), True, id="stalled-no-owner-wakes-a-member"),
+    pytest.param(_stalled(THIRD, me=OTHER), False, id="stalled-owner-not-woken"),
+    pytest.param(_stalled(None, me=OTHER), False, id="stalled-owner-not-woken-when-no-owner-named"),
+    pytest.param(_stalled(THIRD), False, id="stalled-everyone-else-not-woken"),
 ]
+
+
+def test_an_escalated_row_that_is_not_marked_stalled_keeps_the_no_one_acknowledged_text() -> None:
+    """stalled false, or absent with stalled_* fields left over, is the plain escalation: nobody acknowledged."""
+    expected = f"Develop is red at {SHORT}; no one acknowledged. Raise an ask to Sam."
+    assert _run(**_stalled(ME, stalled=False))["text"] == expected
+    assert _run(**_row(ME, reason="escalated", stalled_owner=OTHER, open_minutes=74))["text"] == expected
+
+
+def test_a_sign_with_no_identity_reads_as_no_sign_and_an_unknown_sign_too() -> None:
+    no_sign = f"Develop is red at {SHORT}, still open after 74 min with no acknowledgement or fix push. Raise an ask to Sam."
+    args = _stalled(ME)
+    del args["stalled_owner"]
+    assert _run(**args)["text"] == no_sign
+    assert _run(**_stalled(ME, stalled_sign="review"))["text"] == no_sign
+
+
+@pytest.mark.parametrize("bad", ["yesterday", "2026-13-45T25:61:61Z", "2026-11-22", "2026-11-22T24:00:00Z"])
+def test_a_stall_instant_that_does_not_parse_leaves_the_time_out_not_an_error(bad: str) -> None:
+    text = _run(**_stalled(ME, stalled_since=bad))["text"]
+    assert text == f"Develop is red at {SHORT}, still open after 74 min; last activity: {OTHER} acknowledged. Raise an ask to Sam."
+
+
+def test_the_stall_text_no_longer_claims_an_acknowledgement_it_cannot_show() -> None:
+    for args in (_stalled(ME, stalled_sign="push"), _stalled(ME, **NO_SIGN), _stalled(THIRD, me=OTHER, stalled_sign="push")):
+        text = _run(**args)["text"]
+        assert "acknowledged by" not in text and "you acknowledged" not in text, text
 
 
 @pytest.mark.parametrize(("args", "wake"), WAKES)
@@ -283,10 +411,17 @@ def test_the_notice_names_the_owner_by_id_when_the_row_has_no_alias() -> None:
     assert out["text"] == f"Develop is red at {SHORT}; {OTHER} owns it. Hold your pushes."
 
 
-def test_next_up_sees_the_owners_alias_and_still_wakes() -> None:
+def test_next_up_sees_the_owners_alias_and_is_not_woken() -> None:
     out = _run(**_row(OTHER, ME, owner_alias="halcyon", next_alias="tamsin"))
     assert out["text"] == f"Develop is red at {SHORT}; halcyon owns it. You are next up."
-    assert out["wake"] is True
+    assert out["show"] is True and out["wake"] is False
+
+
+def test_a_hand_off_that_seats_me_as_owner_wakes_through_the_owner_branch() -> None:
+    """The case that used to wake the next-up session: after a hand-off the row names it OWNER, and that wakes."""
+    out = _run(**_row(ME, reason="handoff"))
+    assert out["wake"] is True and "handed to you" in out["text"]
+    assert _run(**_row(OTHER, ME, reason="handoff"))["wake"] is False, "named next up on a hand-off row: still no wake"
 
 
 def test_an_alias_is_a_name_only_and_never_decides_who_this_session_is() -> None:
@@ -353,6 +488,12 @@ def test_the_shipped_aura_maps_the_owner_row_and_the_session_identity() -> None:
         "next_alias": ("body", "next_alias"),
         "refresh": ("body", "refresh"),
         "reason": ("body", "reason"),
+        "stalled": ("body", "stalled"),
+        "stalled_owner": ("body", "stalled_owner"),
+        "stalled_since": ("body", "stalled_since"),
+        "stalled_sign": ("body", "stalled_sign"),
+        "open_minutes": ("body", "open_minutes"),
+        "previous_owner": ("body", "previous_owner"),
         "me": ("self", "identity"),
     }
 
@@ -406,6 +547,7 @@ OWNER_TEMPLATE = {
             for name in (
                 "state", "conclusion", "workflow", "job", "sha", "run", "n", "base", "owner", "owner_alias", "next",
                 "next_alias", "reason", "suspects", "episode_at", "refresh", "handoffs", "runs", "attempt", "url",
+                "stalled", "stalled_owner", "stalled_since", "stalled_sign", "open_minutes", "previous_owner",
             )
         }
     },
@@ -426,7 +568,10 @@ def test_the_shipped_aura_is_refused_by_a_template_without_the_owner_fields() ->
 
     old_body = {k: "..." for k in ("state", "conclusion", "workflow", "job", "sha", "run", "n", "runs", "attempt", "url")}
     findings, _ = check_dictionary(_shipped(), [{**OWNER_TEMPLATE, "doc": {"body": old_body}}])
-    assert {f.key for f in findings} == {"args.owner", "args.owner_alias", "args.next", "args.next_alias", "args.refresh", "args.reason"}
+    assert {f.key for f in findings} == {
+        "args.owner", "args.owner_alias", "args.next", "args.next_alias", "args.refresh", "args.reason",
+        "args.stalled", "args.stalled_owner", "args.stalled_since", "args.stalled_sign",
+        "args.open_minutes", "args.previous_owner"}
 
 
 # -- who may post the owner row (RDR-252 "The stamper": the engine stamps ``from=engine``; round 1 B3) ----------------

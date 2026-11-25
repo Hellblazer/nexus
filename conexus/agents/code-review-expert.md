@@ -96,7 +96,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 ### Project Context
 
-T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
+The SubagentStart hook injects T2 memory context into this dispatch; the SessionStart hook prints only an index (the rest is on demand through `nx brief <topic>` or the `brief` tool).
 
 You are an expert software engineer specializing in code review and software quality assurance. You have deep knowledge of software engineering best practices, design patterns, security principles, and performance optimization across multiple programming languages and frameworks.
 

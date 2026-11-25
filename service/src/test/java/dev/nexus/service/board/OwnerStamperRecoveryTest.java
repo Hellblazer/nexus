@@ -195,58 +195,94 @@ class OwnerStamperRecoveryTest {
     }
 
     @Test
-    void aLivenessReadFailureNeverLetsTheFailSafeEscalateAnAcknowledgedRed() {
+    void anAcknowledgedRedIsHeldInsideItsStallWindowWithTheLivenessReadDownAndEscalatedAsStalledAfterIt() {
         String[] f = redOnY();
         var down = new java.util.concurrent.atomic.AtomicBoolean(true);
-        var faulty = faultyWithLiveness(down);
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        var faulty = faultyWithLiveness(down, reads);
         faulty.bind(new AckDeadlineTimer(new RecordingScheduler(), se.env.ids.clock, faulty::onDeadline));
         stamperErrorRowOnY(faulty, f);
         se.ackFrom(f[0], StamperEnv.BASE, "Y", f[1], "sess-lead");   // the row's owner, the leader, acknowledges the row's own tip: stamped from=<owner id>
-        se.env.ids.clock.advance(Duration.ofMinutes(21));
+        // Row times are the database's, so the test clock is set from the ack row's own time, never from the wall clock.
+        Instant ackAt = se.tuples.rdp(f[0], "board/ci/nexus-develop--owner", Map.of(), 10, null).stream()
+            .filter(r -> "ack".equals(r.dims().get("kind"))).findFirst().orElseThrow().createdAt().toInstant();
+        se.env.ids.clock.set(ackAt.plus(Duration.ofMinutes(21)));
         renewSeats(f);
 
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> faulty.onDeadline(f[0], StamperEnv.BASE))
-            .as("nobody can be shown live, so the ack cannot be matched: the timer retries rather than escalate")
-            .hasMessageContaining("liveness read down")
-            .satisfies(t -> assertThat(t.getSuppressed()).as("the evaluation's own fault is kept on the one thrown")
-                .anySatisfy(sup -> assertThat(sup).hasMessageContaining("deterministic boom")));
-        assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(r -> r.get("reason"))
-            .as("no escalated row with owner null woke every member").containsExactly("stamper_error");
+        faulty.onDeadline(f[0], StamperEnv.BASE);   // past the acknowledgement deadline, inside the stall window: nothing to do, no throw
 
-        down.set(false);   // the read recovers; the retry sees the ack and the red stays acknowledged
-        faulty.onDeadline(f[0], StamperEnv.BASE);
         assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(r -> r.get("reason")).containsExactly("stamper_error");
+        assertThat(reads.get()).as("the identity read is made only once an escalation is due").isZero();
+
+        se.env.ids.clock.advance(Duration.ofMinutes(45));   // 66 minutes after the ack
+        renewSeats(f);
+        faulty.onDeadline(f[0], StamperEnv.BASE);
+
+        var rows = se.ownerRows(f[0], StamperEnv.BASE);
+        assertThat(rows).extracting(r -> r.get("reason")).as("a fault no longer holds an acknowledged red open for ever")
+            .containsExactly("stamper_error", "escalated");
+        assertThat(rows.getLast().body()).containsEntry("owner", null).containsEntry("stalled", true).containsEntry("stalled_owner", f[1]);
+    }
+
+    /** A clock that follows the test clock and, while {@code failing} is set, throws from its second reading on. */
+    private static final class FlakyClock extends java.time.Clock {
+        final java.time.Clock real;
+        final java.util.concurrent.atomic.AtomicBoolean failing = new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicInteger readings = new java.util.concurrent.atomic.AtomicInteger();
+
+        FlakyClock(java.time.Clock real) {
+            this.real = real;
+        }
+
+        @Override
+        public java.time.ZoneId getZone() {
+            return real.getZone();
+        }
+
+        @Override
+        public java.time.Clock withZone(java.time.ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            if (failing.get() && readings.incrementAndGet() > 1) {
+                throw new IllegalStateException("fail-safe read down");   // the first reading is the evaluation's own
+            }
+            return real.instant();
+        }
     }
 
     @Test
-    void aFailSafeThatItselfThrowsIsRetriedByTheTimerAfterItsDelayAndEscalatesOnceItCanRun() {
+    void aFailSafeThatItselfThrowsIsRethrownWithTheEvaluationsFaultAndRetriedByTheTimerAtItsDelay() {
         String[] f = redOnY();
-        var down = new java.util.concurrent.atomic.AtomicBoolean(true);
-        var faulty = faultyWithLiveness(down);
+        var clock = new FlakyClock(se.env.ids.clock);
+        var faulty = new OwnerStamper(se.env.ids.scope, se.tuples, se.env.groups, se.env.ids.repo, clock,
+            (in, trigger) -> { throw new IllegalStateException("deterministic boom on " + trigger); });
         var sched = new RecordingScheduler();
         var timer = new AckDeadlineTimer(sched, se.env.ids.clock, faulty::onDeadline);
         faulty.bind(timer);
         stamperErrorRowOnY(faulty, f);
-        Instant episode = Instant.parse((String) se.ownerRows(f[0], StamperEnv.BASE).getFirst().get("episode_at"));
-        assertThat(timer.armedAt(f[0], StamperEnv.BASE)).isEqualTo(episode.plus(Duration.ofMinutes(20)));
-        se.ackFrom(f[0], StamperEnv.BASE, "Y", f[1], "sess-alpha");   // from=<owner id> on a session that is alpha's: it may be the owner's while the read is down, and is not once the read recovers
         se.env.ids.clock.advance(Duration.ofMinutes(21));
         renewSeats(f);
 
-        sched.deadlines().getLast().task().run();   // the timer fires; the evaluation and the fail-safe both throw
+        clock.failing.set(true);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> faulty.onDeadline(f[0], StamperEnv.BASE))
+            .as("a fail-safe that cannot run throws, and keeps the evaluation's own fault on what it throws")
+            .hasMessageContaining("fail-safe read down")
+            .satisfies(t -> assertThat(t.getSuppressed()).anySatisfy(sup -> assertThat(sup).hasMessageContaining("deterministic boom")));
 
+        clock.readings.set(0);
+        sched.deadlines().getLast().task().run();   // the timer fires; the evaluation and the fail-safe both throw
         assertThat(se.ownerRows(f[0], StamperEnv.BASE)).hasSize(1);
         assertThat(sched.deadlines().getLast().millis()).as("a retry is scheduled after the timer's delay")
             .isEqualTo(AckDeadlineTimer.RETRY.toMillis());
         assertThat(timer.armedAt(f[0], StamperEnv.BASE)).isEqualTo(se.env.ids.clock.instant().plus(AckDeadlineTimer.RETRY));
 
-        down.set(false);
+        clock.failing.set(false);
         renewSeats(f);
-        sched.deadlines().getLast().task().run();   // the retry: the ack is not the owner's, so the fail-safe escalates to the live leader
-
-        var rows = se.ownerRows(f[0], StamperEnv.BASE);
-        assertThat(rows).extracting(r -> r.get("reason")).containsExactly("stamper_error", "escalated");
-        assertThat(rows.getLast().body()).containsEntry("owner", f[1]);
+        sched.deadlines().getLast().task().run();   // the retry: the fail-safe can run, and escalates
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(r -> r.get("reason")).containsExactly("stamper_error", "escalated");
     }
 
     @Test
@@ -325,6 +361,8 @@ class OwnerStamperRecoveryTest {
     @Test
     void theFailSafeReadsLivenessOnlyWhenAnEscalationIsOwed() {
         String[] f = redOnY();
+        se.env.ids.clock.set(Instant.now());   // row times come from the database's clock: the test clock must agree with them
+        renewSeats(f);
         var down = new java.util.concurrent.atomic.AtomicBoolean(true);
         var reads = new java.util.concurrent.atomic.AtomicInteger();
         var faulty = faultyWithLiveness(down, reads);
@@ -409,7 +447,8 @@ class OwnerStamperRecoveryTest {
 
         BoardOwnerWiring wiring = restart(f[0]);
 
-        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).isEqualTo(episode.plus(Duration.ofMinutes(20)));
+        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).as("the first wake is next up's nudge, at half the deadline")
+            .isEqualTo(episode.plus(Duration.ofMinutes(10)));
     }
 
     @Test
@@ -418,17 +457,18 @@ class OwnerStamperRecoveryTest {
         se.done(f[0], StamperEnv.BASE, "Y", "failure");
         Instant episode = Instant.parse((String) se.ownerRows(f[0], StamperEnv.BASE).getFirst().get("episode_at"));
         se.env.ids.clock.advance(Duration.ofMinutes(4));
-        se.push(f[0], StamperEnv.BASE, "Z", "Y", "sess-alpha");
+        se.push(f[0], StamperEnv.BASE, "Z", "Y", "sess-carol");   // not the owner's push: no implicit ack
         se.done(f[0], StamperEnv.BASE, "Z", "failure");
         assertThat(se.ownerRows(f[0], StamperEnv.BASE).getLast().body()).containsEntry("refresh", true);
 
         BoardOwnerWiring wiring = restart(f[0]);
 
-        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).isEqualTo(episode.plus(Duration.ofMinutes(20)));
+        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).as("still the original episode's nudge time")
+            .isEqualTo(episode.plus(Duration.ofMinutes(10)));
     }
 
     @Test
-    void noDeadlineIsRevivedForAClearedAnAckedOrAnEscalatedRed() {
+    void noHandOffDeadlineIsRevivedForAClearedAnAckedOrAnEscalatedRed() {
         String[] cleared = redOnY();
         se.done(cleared[0], StamperEnv.BASE, "Y", "failure");
         se.push(cleared[0], StamperEnv.BASE, "Z", "Y", "sess-alpha");
@@ -438,7 +478,9 @@ class OwnerStamperRecoveryTest {
         String[] acked = redOnY();
         se.done(acked[0], StamperEnv.BASE, "Y", "failure");
         se.ack(acked[0], StamperEnv.BASE, "Y", "sess-alpha");
-        assertThat(restart(acked[0]).timer().armedAt(acked[0], StamperEnv.BASE)).isNull();
+        assertThat(restart(acked[0]).timer().armedAt(acked[0], StamperEnv.BASE))
+            .as("an ack ends the hand-off deadline and the nudge; the stall deadline, an hour from the ack, is what is armed")
+            .isAfter(Instant.now().plus(Duration.ofMinutes(55))).isBefore(Instant.now().plus(Duration.ofMinutes(61)));
 
         String[] escalated = redOnY();
         se.done(escalated[0], StamperEnv.BASE, "Y", "failure");

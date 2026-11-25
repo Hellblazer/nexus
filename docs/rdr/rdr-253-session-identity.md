@@ -1152,7 +1152,7 @@ session of a conversation that belongs to an unheld seat `gamma` switches the
 session to `gamma`. A `claude -p` child of `alpha` that runs `nx identity
 claim alpha --take-over` is refused.
 
-### Phase 1 (CLOSED, 2026-11-19): Identity and the state it owns
+### Phase 1 (CLOSED, 2026-11-19; wording amended through 2026-11-21): Identity and the state it owns
 
 All engine work (Steps 1 and 2) ships in one engine release, which Sam cuts.
 The client work ships after it: Steps 3 and 4 together in one conexus
@@ -1556,3 +1556,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-20: Step 6 part 2 recorded (the resume pointer; fix round 1, reviews T2 `nexus/review-step6-part2-2026-11-20-r1` and `nexus/critique-step6-part2-2026-11-20-r1`, decision T2 `nexus/decision-identity-scratch-caps-client-side-2026-11-20`): the identity scope's caps (2 KB an entry, 20 notes, a reserved slot for the resume pointer) are enforced in the client's identity-scope put, not by the engine, and the earlier text that implied an engine cap says so now; the pointer is one `resume-pointer` entry written at PreCompact and at SessionEnd with reason `clear`, printed once on `clear`, with no session-scope fallback.
 - 2026-11-20: wording matched to the reviewed resume-line fix (grant 3; bead nexus-hczdo; reviews T2 `nexus/critique-resume-line-no-lease-2026-11-20-r1`): the identity-scope store sends no T1 session token, so the `/clear` resume line prints with no lease for the new session id; the Test Plan line that said it printed nothing without one is corrected.
 - 2026-11-21: wording amended to match the reviewed GH #1679 code (grant 3; branch `feature/gh1679-stable-host-identity`, tip `a4ac5cfa3d`; reviews T2 `nexus/review-4e48325fa-gh1679-2026-11-21-r2` and `nexus/critique-4e48325fa-gh1679-2026-11-21-r2`): a binding's host is a stable machine key (`nxh1-<32 hex>`, from the macOS hardware UUID, the Linux machine id in the initial pid namespace or the Windows MachineGuid) with a hostname fallback; a key that is not this machine's is never local; a non-key name is local only on this machine's own token-file or registry proof for the holder's `(pid, startedAt)`; a cloned image or a copied identity directory under a non-key name remains possible; a `lab-remote` work ref carries the short hostname while owner records carry the key.
+- 2026-11-24: Phase 1's heading says its wording was amended after the 2026-11-19 close (Step 6 parts 2 and 3 on 2026-11-20, GH #1679 on 2026-11-21); the two-week gate on Phase 2 still counts from 2026-11-19. No design change.

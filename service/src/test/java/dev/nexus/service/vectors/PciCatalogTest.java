@@ -410,4 +410,175 @@ class PciCatalogTest {
         assertThat(((PciIndexSet) snap).anchor("m", "t", "c")).contains(anchor);
         assertThat(PciIndexSet.NONE.anchor("m", "t", "c")).isEmpty();
     }
+
+    // ---- RDR-229 P3.4 (nexus-p2m1x.22): the id predicate ----
+
+    /** The text PostgreSQL deparses for {@code WHERE collection_id = '42'} on a bigint column (PciIdIndexIntegrationTest pins it on a real server). */
+    private static final String ID_PREDICATE = "(collection_id = '42'::bigint)";
+
+    @Test
+    void parseCollectionId_readsTheDeparsedIdPredicate() {
+        assertThat(PciCatalog.parseCollectionId(ID_PREDICATE)).contains(42L);
+        assertThat(PciCatalog.parseCollectionId("(collection_id = '9223372036854775807'::bigint)")).contains(Long.MAX_VALUE);
+        assertThat(PciCatalog.parseCollectionId("(collection_id = '1'::bigint)")).contains(1L);
+    }
+
+    @Test
+    void parseCollectionId_everythingElseIsUnparsed_andTheTwoShapesNeverCross() {
+        assertThat(PciCatalog.parseCollectionId(null)).isEmpty();
+        assertThat(PciCatalog.parseCollectionId("")).isEmpty();
+        assertThat(PciCatalog.parseCollectionId("(collection_id = '42'::text)")).isEmpty();
+        assertThat(PciCatalog.parseCollectionId("(collection_id = '4x2'::bigint)")).isEmpty();
+        assertThat(PciCatalog.parseCollectionId("(collection_id = '9223372036854775808'::bigint)")).as("overflows a long").isEmpty();
+        assertThat(PciCatalog.parseCollectionId("(collection_id = '-1'::bigint)")).as("an id is positive").isEmpty();
+        assertThat(PciCatalog.parseCollectionId("((collection_id = '42'::bigint) AND (tenant_id = 't'::text))")).isEmpty();
+        assertThat(PciCatalog.parseCollectionId("(collection = 'a'::text)")).as("a name predicate is not an id one").isEmpty();
+        assertThat(PciCatalog.parseCollection(ID_PREDICATE)).as("an id predicate is not a name one").isEmpty();
+        // A collection NAMED like an id predicate stays a name.
+        assertThat(PciCatalog.parseCollection("(collection = '(collection_id = ''42''::bigint)'::text)"))
+            .contains("(collection_id = '42'::bigint)");
+    }
+
+    @Test
+    void indexNameById_hasTheBuilderShape_andNeverEqualsANameHash() {
+        String byId = PciCatalog.indexNameById("m", "t", 42L);
+
+        assertThat(byId).hasSize(28).matches("pci_[0-9a-f]{24}");
+        assertThat(PciCatalog.isBuilderName(byId)).isTrue();
+        assertThat(PciCatalog.indexNameById("m", "t", 42L)).isEqualTo(byId);
+        assertThat(PciCatalog.indexNameById("m", "t", 43L)).isNotEqualTo(byId);
+        assertThat(PciCatalog.indexNameById("m2", "t", 42L)).isNotEqualTo(byId);
+        assertThat(PciCatalog.indexNameById("m", "t2", 42L)).isNotEqualTo(byId);
+        // The id's decimal text as a NAME of the same collection: the domain tag keeps the two hashes apart.
+        assertThat(PciCatalog.indexName("m", "t", "42")).isNotEqualTo(byId);
+        // A name that spells the tag and the id cannot collide either: names hold no NUL, and the id input carries a third one.
+        assertThat(PciCatalog.indexName("m", "t", "id")).isNotEqualTo(PciCatalog.indexNameById("m", "t", 1L));
+        assertThat(PciCatalog.indexName("m", "t", "collection_id")).isNotEqualTo(byId);
+        assertThat(PciCatalog.indexName("m", "t", "collection_id 42")).isNotEqualTo(byId);
+    }
+
+    @Test
+    void indexNameById_refusesNulNullAndANonPositiveId() {
+        assertThatThrownBy(() -> PciCatalog.indexNameById("m\0x", "t", 1L)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> PciCatalog.indexNameById("m", "t\0x", 1L)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> PciCatalog.indexNameById(null, "t", 1L)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> PciCatalog.indexNameById("m", "t", 0L)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> PciCatalog.indexNameById("m", "t", -3L)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void attributedCollectionId_parsesOnlyWhenEveryConditionHolds() {
+        assertThat(PciCatalog.attributedCollectionId(GOOD_NAME, "hnsw", ID_PREDICATE, true, "on")).contains(42L);
+        assertThat(PciCatalog.attributedCollectionId("pci_foo", "hnsw", ID_PREDICATE, true, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollectionId(GOOD_NAME + "_ccnew", "hnsw", ID_PREDICATE, true, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollectionId(GOOD_NAME, "btree", ID_PREDICATE, true, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollectionId(GOOD_NAME, "hnsw", GOOD_PREDICATE, true, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollectionId(GOOD_NAME, "hnsw", ID_PREDICATE, false, "on")).isEmpty();
+        assertThat(PciCatalog.attributedCollectionId(GOOD_NAME, "hnsw", ID_PREDICATE, true, "off")).isEmpty();
+        // The name rule does not read an id predicate, so one index is never both.
+        assertThat(PciCatalog.attributedCollection(GOOD_NAME, "hnsw", ID_PREDICATE, true, "on")).isEmpty();
+    }
+
+    @Test
+    void anIdIndexCarriesItsKindAndTheIdFromItsPredicate_andIsNotANameIndex() {
+        var byId = new PciCatalog.Index(PciCatalog.indexNameById("m", "t", 42L), true, null, null, null, null, 42L);
+        var byName = new PciCatalog.Index(GOOD_NAME, true, "c");
+        var other = new PciCatalog.Index("pci_operator", true, null);
+
+        assertThat(byId.kind()).isEqualTo(PciCatalog.PredicateKind.ID);
+        assertThat(byId.idParsed()).isTrue();
+        assertThat(byId.parsed()).as("parsed() stays the name rule: no name consumer reads an id index").isFalse();
+        assertThat(byId.collection()).isNull();
+        assertThat(byId.collectionId()).isEqualTo(42L);
+        assertThat(byName.kind()).isEqualTo(PciCatalog.PredicateKind.NAME);
+        assertThat(byName.collectionId()).isNull();
+        assertThat(other.kind()).isEqualTo(PciCatalog.PredicateKind.OTHER);
+        assertThatThrownBy(() -> new PciCatalog.Index("pci_x", true, "c", null, null, null, 42L))
+            .as("a name and an id together").isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void theSnapshotKeepsTheNameAndTheIdIndexOfOneCollectionApart() {
+        String idName = PciCatalog.indexNameById("m", "t", 42L);
+        var leaf = new PciCatalog.Leaf("nexus", "l", "m", "t", java.util.List.of(
+            new PciCatalog.Index(GOOD_NAME, true, "c"),
+            new PciCatalog.Index(idName, true, null, null, null, null, 42L),
+            new PciCatalog.Index(PciCatalog.indexNameById("m", "t", 43L), false, null, null, null, null, 43L),
+            new PciCatalog.Index("pci_operator", true, null)));
+
+        PciCatalog.Snapshot snap = new PciCatalog.Snapshot(java.util.List.of(leaf));
+
+        assertThat(snap.hasValidIndex("m", "t", "c")).as("the name index").isTrue();
+        assertThat(snap.hasValidIdIndex("m", "t", 42L)).as("the id index").isTrue();
+        assertThat(snap.hasValidIdIndex("m", "t", 43L)).as("an INVALID id index").isFalse();
+        assertThat(snap.hasValidIdIndex("m", "t2", 42L)).isFalse();
+        assertThat(snap.validIdKeys()).containsExactly(PciCatalog.idKey("m", "t", 42L));
+        assertThat(snap.invalidIdKeys()).containsExactly(PciCatalog.idKey("m", "t", 43L));
+        assertThat(snap.validCount()).as("name indexes only: the router set never lists an id index").isEqualTo(1);
+        assertThat(snap.validEntries()).containsExactly("l:c:" + GOOD_NAME);
+        assertThat(snap.validIdCount()).isEqualTo(1);
+        assertThat(snap.invalidIdCount()).isEqualTo(1);
+        assertThat(snap.invalidCount()).isZero();
+        assertThat(snap.unparsedCount()).as("an id index is not an unparsed one").isEqualTo(1);
+        assertThat(PciCatalog.idKey("m", "t", 42L)).isNotEqualTo(PciCatalog.idKey("m", "t", 43L));
+    }
+
+    // ---- M4: the id attribution checks the name hash, as the builder's ownership does ----
+
+    @Test
+    void idOfBuilderIndex_acceptsOnlyTheNameTheBuilderGivesThatId() {
+        String name = PciCatalog.indexNameById("m", "t", 42L);
+
+        assertThat(PciCatalog.idOfBuilderIndex("m", "t", name, "hnsw", ID_PREDICATE, "on", false, true)).contains(42L);
+        assertThat(PciCatalog.idOfBuilderIndex("m", "t", GOOD_NAME, "hnsw", ID_PREDICATE, "on", false, true))
+            .as("an operator's pci_ index that reads an id predicate is not the builder's").isEmpty();
+        assertThat(PciCatalog.idOfBuilderIndex("m", "t", PciCatalog.indexNameById("m", "t", 43L), "hnsw", ID_PREDICATE, "on", false, true))
+            .as("another id's name").isEmpty();
+        assertThat(PciCatalog.idOfBuilderIndex("m", "other", name, "hnsw", ID_PREDICATE, "on", false, true)).as("another tenant's").isEmpty();
+        assertThat(PciCatalog.idOfBuilderIndex(null, "t", name, "hnsw", ID_PREDICATE, "on", false, true)).isEmpty();
+        // The leftover of the builder's id index: its base name is checked.
+        assertThat(PciCatalog.idOfBuilderIndex("m", "t", name + "_ccnew", "hnsw", ID_PREDICATE, "on", true, false)).contains(42L);
+        assertThat(PciCatalog.idOfBuilderIndex("m", "t", GOOD_NAME + "_ccnew", "hnsw", ID_PREDICATE, "on", true, false)).isEmpty();
+        assertThat(PciCatalog.idOfBuilderIndex("m", "t", name + "_ccnew", "hnsw", ID_PREDICATE, "on", true, true)).as("valid: not a leftover").isEmpty();
+    }
+
+    // ---- N2: the leftover of an id index's REINDEX CONCURRENTLY ----
+
+    @Test
+    void leftoverCollectionId_isAttributedOnlyToAnInvalidBuilderNamePlusCcnewOrCcold_withAnIdPredicate() {
+        for (String suffix : new String[] {"_ccnew", "_ccold", "_ccnew1", "_ccold12"}) {
+            assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME + suffix, "hnsw", ID_PREDICATE, true, "on", false)).as(suffix).contains(42L);
+        }
+        assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME + "_ccnew", "hnsw", ID_PREDICATE, true, "on", true)).as("valid: never a leftover").isEmpty();
+        assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME, "hnsw", ID_PREDICATE, true, "on", false)).as("the builder's own name").isEmpty();
+        assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME + "_ccnew", "hnsw", GOOD_PREDICATE, true, "on", false)).as("a name predicate").isEmpty();
+        assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME + "_ccnew", "btree", ID_PREDICATE, true, "on", false)).isEmpty();
+        assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME + "_ccnew", "hnsw", ID_PREDICATE, false, "on", false)).isEmpty();
+        assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME + "_ccnew", "hnsw", ID_PREDICATE, true, "off", false)).isEmpty();
+        assertThat(PciCatalog.leftoverCollection(GOOD_NAME + "_ccnew", "hnsw", ID_PREDICATE, true, "on", false))
+            .as("the name rule still reads no id predicate").isEmpty();
+    }
+
+    @Test
+    void anIdLeftoverIsALeftover_notAnIdIndex_andTheSnapshotCountsItAsAnInvalidIdIndex() {
+        var leftover = new PciCatalog.Index(GOOD_NAME + "_ccnew", false, null, null, null, null, null, 42L);
+        assertThat(leftover.leftover()).isTrue();
+        assertThat(leftover.leftoverOfId()).isEqualTo(42L);
+        assertThat(leftover.leftoverOf()).isNull();
+        assertThat(leftover.idParsed()).as("not an id index: nothing serves from it").isFalse();
+        assertThat(leftover.parsed()).isFalse();
+        assertThatThrownBy(() -> new PciCatalog.Index(GOOD_NAME + "_ccnew", true, null, null, null, null, null, 42L))
+            .as("a valid index is never a leftover").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new PciCatalog.Index("pci_x", false, "c", null, null, null, null, 42L)).isInstanceOf(IllegalArgumentException.class);
+
+        var leaf = new PciCatalog.Leaf("nexus", "l", "m", "t", java.util.List.of(
+            new PciCatalog.Index(PciCatalog.indexNameById("m", "t", 42L), true, null, null, null, null, 42L), leftover));
+        var snap = new PciCatalog.Snapshot(java.util.List.of(leaf));
+
+        assertThat(snap.reindexLeftoverCount()).isEqualTo(1);
+        assertThat(snap.validIdCount()).as("the original").isEqualTo(1);
+        assertThat(snap.invalidIdCount()).as("the leftover is an INVALID id-predicate index: id_index_invalid sees it").isEqualTo(1);
+        assertThat(snap.invalidIdKeys()).containsExactly(PciCatalog.idKey("m", "t", 42L));
+        assertThat(snap.unparsedCount()).isZero();
+    }
 }

@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -152,6 +153,7 @@ class PgVectorRepositoryContractTest {
                 "code__getbyids__voyage-code-3__v1", "code__getoffset__voyage-code-3__v1",
                 "code__getrls__voyage-code-3__v1", "code__getwheregte__voyage-code-3__v1",
                 "code__getwherene__voyage-code-3__v1", "code__getwherenonlive__voyage-code-3__v1",
+                "code__keepid-label__voyage-code-3__v1", "code__keepid-other__voyage-code-3__v1",
                 "code__listpage__voyage-code-3__v1",
                 "code__listrls__voyage-code-3__v1", "code__manifest__voyage-code-3__v1",
                 "code__manifestbroken__voyage-code-3__v1", "code__manifestrls__voyage-code-3__v1",
@@ -1683,13 +1685,60 @@ class PgVectorRepositoryContractTest {
 
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(1024);
         List<Integer> zero = tenantScope.withTenant(TENANT_A, ctx ->
-            PgVectorRepository.batchUpdateMetadata(ctx, ch, col, List.of(chash),
-                List.of(Map.of("title", "Clean")), List.of(0)));
+            PgVectorRepository.batchUpdateMetadata(ctx, ch, TENANT_A, col, List.of(chash),
+                List.of(Map.of("title", "Clean")), List.of(0), null, dev.nexus.service.datamove.Gate3.never()));
         assertThat(zero).isEmpty();
 
         Map<String, Object> meta = storedMeta(col, chash);
         assertThat(meta).doesNotContainKey("quality_gate_overridden");
         assertThat(meta.get("title")).isEqualTo("Clean");
+    }
+
+    /**
+     * RDR-229 P3.5a row 14: the metadata update keeps the id the row STORES. A row whose label a one-row rename left behind, and another
+     * collection has since taken, must keep the id of the collection it is in; the label's id fills only an unstamped row. The row here is
+     * stamped to {@code other}'s id while its name column bears {@code col}, which resolves to a different id.
+     */
+    @Test
+    void batchUpdateMetadata_keepsTheStoredCollectionId_notTheIdItsLabelResolvesTo() throws SQLException {
+        String col = "code__keepid-label__voyage-code-3__v1";
+        String other = "code__keepid-other__voyage-code-3__v1";
+        String chash = "bbbb" + "b".repeat(60);
+        repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("keep stored id probe"), List.of(Map.of("title", "Before")));
+        own(TENANT_A, col, chash);
+        long otherId;
+        long labelId;
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            otherId = dsl.select(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID)
+                .from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)
+                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(other)))
+                .fetchOne(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID);
+            labelId = dsl.select(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID)
+                .from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)
+                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(col)))
+                .fetchOne(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID);
+            int stamped = dsl.update(CHUNKS).set(CHUNKS.COLLECTION_ID, otherId)
+                .where(CHUNKS.COLLECTION.eq(col), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash))).execute();
+            assertThat(stamped).as("setup: the row is stamped to another collection's id").isEqualTo(1);
+        }
+        assertThat(otherId).as("setup: the label resolves to a different id").isNotEqualTo(labelId);
+
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(1024);
+        tenantScope.withTenant(TENANT_A, ctx ->
+            PgVectorRepository.batchUpdateMetadata(ctx, ch, TENANT_A, col, List.of(chash), List.of(Map.<String, Object>of("title", "After")), List.of(0),
+                List.of(), dev.nexus.service.datamove.Gate3.never()));
+
+        long storedId;
+        try (Connection su = pg.createConnection("")) {
+            storedId = DSL.using(su, SQLDialect.POSTGRES).select(CHUNKS.COLLECTION_ID).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(col), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetchOne(CHUNKS.COLLECTION_ID);
+        }
+        assertThat(storedId).as("the update kept the id the row stored").isEqualTo(otherId);
+        assertThat(storedMeta(col, chash).get("title")).as("and wrote the metadata").isEqualTo("After");
     }
 
     @Test
@@ -1927,6 +1976,7 @@ class PgVectorRepositoryContractTest {
                 // chash is bytea(32) now (RDR-180) — bind the decoded digest, not hex text.
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 // RDR-225: the manifest row carries its collection's model, as the chunk it points at does.
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                     PgContainerHelper.collectionModel(seed, tenant, collection))

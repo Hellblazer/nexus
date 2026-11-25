@@ -8,6 +8,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -838,6 +839,7 @@ class NoteUriRepairTest {
         try (Connection su = pg.createConnection("")) {
             DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
                 .execute();
         }

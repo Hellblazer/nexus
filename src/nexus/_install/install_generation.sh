@@ -246,6 +246,23 @@ else
     uv pip install --python "$GEN/bin/python" ${TORCH_ARGS[@]+"${TORCH_ARGS[@]}"} --overrides "$OVERRIDES" "$SPEC" >&2
 fi
 
+# ── The lease ────────────────────────────────────────────────────────────────
+# The generation's lease hook, its .pth and .nx-lease are written NOW: after the
+# packages (so site-packages is final) and BEFORE the receipt (so a generation is
+# never real without its lease). lease_core.py writes them in that order, then
+# starts the generation's own python as a child and checks that gc's probe reads
+# it as held. It prints its verdict and ALWAYS exits 0: a generation with no
+# lease is guarded by the process census exactly as before leases existed, so a
+# missing or failing lease_core (an older staged installer that did not carry it)
+# warns here and never fails the build. Its output goes to stderr: stdout is the
+# generation path alone.
+if [ -f "$_here/lease_core.py" ]; then
+    python3 "$_here/lease_core.py" install "$GEN" >&2 </dev/null \
+        || echo "install_generation: WARNING: the lease step failed; $GEN is not leased and the process census alone guards it" >&2
+else
+    echo "install_generation: WARNING: no lease_core.py beside this installer; $GEN is not leased and the process census alone guards it" >&2
+fi
+
 # The install phases above are done; the receipt below supersedes the claim.
 # ── Receipt ──────────────────────────────────────────────────────────────────
 # base_interpreter holds pyvenv.cfg's `home` value verbatim. That field is what

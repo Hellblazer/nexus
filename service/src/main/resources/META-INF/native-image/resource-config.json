@@ -6,6 +6,7 @@
       {"pattern": "db/vendor/.*\\.xml"},
       {"pattern": "db/vendor/.*\\.sql"},
       {"pattern": "db/vendor/.*/LICENSE"},
+      {"pattern": "db/rdr229/.*"},
       {"pattern": "www.liquibase.org/xml/ns/dbchangelog/.*\\.xsd"},
       {"pattern": "liquibase.build.properties"},
       {"pattern": "liquibase/.*\\.xml"},

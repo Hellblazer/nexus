@@ -57,6 +57,7 @@ class CatalogLinksDanglingEndpointHttpTest {
         }
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+            PgContainerHelper.insertCollection(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), TENANT, COLLECTION);
             PgContainerHelper.seedServiceToken(
                 DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "test-bound");
         }

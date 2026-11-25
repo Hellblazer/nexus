@@ -1,0 +1,437 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service;
+
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
+import static org.assertj.core.api.Assertions.assertThat;
+
+import dev.nexus.service.datamove.Gate3;
+import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CombinedWriteService;
+import dev.nexus.service.vectors.EmbedderRouter;
+import org.jooq.DSLContext;
+import org.jooq.Record3;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+import java.sql.Connection;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * RDR-229 P3.5c (nexus-p2m1x.25), the catalog group: the readers of {@code CatalogRepository} read the collection's id once gate 3
+ * has latched, and the name until then (RDR item 6, "Readers during the stamp").
+ *
+ * <p>Fixture. A collection is registered under label A with a document, a chunk and a manifest row, every row carrying the
+ * registry's id. The registry row is then renamed to label B by a one-row {@code UPDATE ... SET name} (what P3.7's one-row rename
+ * does), with the foreign keys onto the registry's name dropped as P3.7's name-key drop does: every other table keeps the name A, so
+ * the name and the id now disagree about the collection. The same repository instance is read with gate 3 not held (as today: the
+ * rows are found under A, not B) and with it latched (found under B, not A), latched in process with no restart. The gate is the latched, monotone value, so no test returns to
+ * the name path once latched (PciIdGate3IntegrationTest pins that the latched value stays true).
+ *
+ * <p>The scratch container is per class and the name keys are dropped once, for the whole class; every test uses its own collection.
+ */
+class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
+
+    private final AtomicBoolean latched = new AtomicBoolean();
+    private CatalogRepository gated;
+    private CombinedWriteService gatedSvc;
+
+    @BeforeAll
+    void gatedRepository() throws Exception {
+        gated = new CatalogRepository(tenantScope, latched::get, dev.nexus.service.db.RenameGuard.open());
+        gatedSvc = new CombinedWriteService(tenantScope, gated, new EmbedderRouter(embedder, "document"));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext dsl = DSL.using(su, SQLDialect.POSTGRES);
+            RegistryRenameSupport.dropForeignKeysOntoTheRegistry(dsl);
+            // the id arbiters P3.3c builds, over the partitioned parent: a latched chunk upsert needs them
+            dsl.createUniqueIndexIfNotExists("p35c_cat_chunks_id_key")
+                .on(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION_ID, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).execute();
+        }
+    }
+
+    private void renameRegistryRow(String from, String to) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            int n = DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, to)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(from)).execute();
+            assertThat(n).as("the registry row of " + from + " is renamed").isEqualTo(1);
+        }
+    }
+
+    private Long registryId(String name) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(name))
+                .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
+        }
+    }
+
+    /** A collection with one document holding one chunk and one manifest row, written through the combined write. */
+    private record Renamed(String oldLabel, String newLabel, String doc, String chash, long id) {}
+
+    private Renamed renamedCollection() throws Exception {
+        latched.set(false);  // the fixture is written before the latch; the tests then latch
+        Fx fx = fixture("rdr");
+        String chash = ch("p35c catalog " + seq.incrementAndGet());
+        var written = gatedSvc.writeManyCombined(TENANT, fx.collection(), List.of(chunk(chash, "p35c text " + chash)),
+            List.of(doc(fx.docId(), List.of(row(0, chash)))), null, false, true);
+        assertThat(chunkExists(fx.collection(), chash)).as("fixture: the chunk is stored; " + written.response()).isTrue();
+        assertThat(manifestChashes(fx.docId())).as("fixture: the manifest row is stored; " + written.response()).contains(chash);
+        long id = registryId(fx.collection());
+        String newLabel = "code__aw" + "rdrnew" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        renameRegistryRow(fx.collection(), newLabel);
+        assertThat(registryId(newLabel)).as("a rename keeps the id").isEqualTo(id);
+        return new Renamed(fx.collection(), newLabel, fx.docId(), chash, id);
+    }
+
+    private static List<String> tumblers(List<Map<String, Object>> docs) {
+        return docs.stream().map(d -> String.valueOf(d.get("tumbler"))).toList();
+    }
+
+    // ---- document listing -------------------------------------------------------------------------------------
+
+    @Test
+    void documentListingFindsTheCollectionByIdUnderItsNewLabelOnceGate3Latches() throws Exception {
+        Renamed r = renamedCollection();
+
+        latched.set(false);
+        assertThat(tumblers(gated.documentsByCollection(TENANT, r.oldLabel(), 0, 0)))
+            .as("before the latch: the name path, as today: the documents still name the old label").containsExactly(r.doc());
+        assertThat(gated.documentsByCollection(TENANT, r.newLabel(), 0, 0)).as("before the latch: the new label names no document").isEmpty();
+
+        latched.set(true);
+        var byNewLabel = gated.documentsByCollection(TENANT, r.newLabel(), 0, 0);
+        assertThat(tumblers(byNewLabel)).as("from the latch: found by id under the new label").containsExactly(r.doc());
+        assertThat(byNewLabel.get(0).get("physical_collection")).as("and shown under the registry's label, not the stale name")
+            .isEqualTo(r.newLabel());
+        assertThat(gated.documentsByCollection(TENANT, r.oldLabel(), 0, 0)).as("the old label names no registry row: no collection").isEmpty();
+    }
+
+    // ---- collection lookup ------------------------------------------------------------------------------------
+
+    @Test
+    void collectionLookupAnswersTheRenamedRowByItsLabelBeforeAndAfterTheLatch() throws Exception {
+        Renamed r = renamedCollection();
+        for (boolean gate : new boolean[] {false, true}) {
+            latched.set(gate);
+            var row = gated.getCollection(TENANT, r.newLabel());
+            assertThat(row).as("gate " + gate + ": the registry row is found under its new label").isNotNull();
+            assertThat(row.get("name")).isEqualTo(r.newLabel());
+            assertThat(((Number) row.get("collection_id")).longValue()).as("the same id").isEqualTo(r.id());
+            assertThat(gated.getCollection(TENANT, r.oldLabel())).as("gate " + gate + ": the old label names nothing").isNull();
+            assertThat(gated.collectionForTuple(TENANT, "code", r.oldLabel().split("__")[1], "minilm-l6-v2-384"))
+                .as("gate " + gate + ": the tuple resolves to the live row under its new label")
+                .extracting(m -> m.get("name")).isEqualTo(r.newLabel());
+            assertThat(gated.listCollections(TENANT, null, "live")).extracting(m -> m.get("name"))
+                .contains(r.newLabel()).doesNotContain(r.oldLabel());
+            assertThat(gated.getCollection(TENANT, r.newLabel()).get("superseded_by"))
+                .as("a live row names no successor, by superseded_by or by superseded_by_id").isEqualTo("");
+        }
+    }
+
+    // ---- the reads behind catalog routes ----------------------------------------------------------------------
+
+    @Test
+    void theReadsBehindCatalogRoutesFindTheRenamedCollectionByIdFromTheLatch() throws Exception {
+        Renamed r = renamedCollection();
+
+        latched.set(false);
+        assertThat(gated.chashesForCollection(TENANT, r.oldLabel())).as("before: by name").containsExactly(r.chash());
+        assertThat(gated.chashesForCollection(TENANT, r.newLabel())).isEmpty();
+        assertThat(gated.getManifest(TENANT, r.doc())).extracting(m -> m.get("collection")).containsExactly(r.oldLabel());
+        assertThat(gated.collectionDocCountsIncludingDeleted(TENANT)).containsKey(r.oldLabel()).doesNotContainKey(r.newLabel());
+        assertThat(gated.distinctDocCollections(TENANT)).contains(r.oldLabel()).doesNotContain(r.newLabel());
+        assertThat(gated.rehomeStatus(TENANT, r.newLabel()).remainingChunks()).isZero();
+
+        latched.set(true);
+        assertThat(gated.chashesForCollection(TENANT, r.newLabel())).as("from the latch: by id").containsExactly(r.chash());
+        assertThat(gated.chashesForCollection(TENANT, r.oldLabel())).isEmpty();
+        assertThat(gated.getManifest(TENANT, r.doc())).as("the manifest row shows the registry's label")
+            .extracting(m -> m.get("collection")).containsExactly(r.newLabel());
+        assertThat(gated.collectionDocCountsIncludingDeleted(TENANT)).containsEntry(r.newLabel(), 1L).doesNotContainKey(r.oldLabel());
+        assertThat(gated.distinctDocCollections(TENANT)).contains(r.newLabel()).doesNotContain(r.oldLabel());
+        var status = gated.rehomeStatus(TENANT, r.newLabel());
+        assertThat(status.remainingChunks()).as("the rows still naming the collection, by id").isEqualTo(1);
+        assertThat(status.remainingDocuments()).isEqualTo(1);
+        assertThat(gated.chashPositions(TENANT, List.of(r.chash()))).extracting(m -> m.get("collection"))
+            .as("a chash's holder shows the registry's label").containsExactly(r.newLabel());
+        Map<String, Object> resolved = gated.resolveChash(TENANT, r.chash(), r.newLabel());
+        assertThat(resolved).as("the chunk is found by chash and shown under the label").isNotNull();
+        assertThat(resolved.get("physical_collection")).isEqualTo(r.newLabel());
+    }
+
+    @Test
+    void deletingARenamedCollectionRemovesItsRowsByIdFromTheLatch() throws Exception {
+        Renamed r = renamedCollection();
+        latched.set(true);
+
+        Map<String, Integer> counts = gated.deleteCollection(TENANT, r.newLabel());
+
+        assertThat(counts.get("chunks")).as("the chunk, found by id").isEqualTo(1);
+        assertThat(counts.get("catalog_documents")).as("the document, found by id").isEqualTo(1);
+        assertThat(counts.get("catalog_collections")).isEqualTo(1);
+        assertThat(chunkExists(r.oldLabel(), r.chash())).isFalse();
+    }
+
+    // ---- a NULL id is no collection ---------------------------------------------------------------------------
+
+    @Test
+    void aNullIdIsNoCollectionAndNeverFallsBackToAnEmptyName() {
+        String tumbler = "aw.nullid." + seq.incrementAndGet();
+        gated.upsertDocument(TENANT, Map.of("tumbler", tumbler, "title", "no collection", "content_type", "knowledge",
+            "corpus", "knowledge", "physical_collection", "", "chunk_count", 0));
+
+        latched.set(false);
+        assertThat(tumblers(gated.documentsByCollection(TENANT, "", 0, 0))).as("today: the '' name is matched").contains(tumbler);
+        assertThat(gated.distinctDocCollections(TENANT)).doesNotContain("");
+
+        latched.set(true);
+        assertThat(gated.documentsByCollection(TENANT, "", 0, 0)).as("from the latch: a '' label resolves to no id, so no rows").isEmpty();
+        assertThat(gated.distinctDocCollections(TENANT)).as("a document with no id is under no collection").doesNotContain("");
+        assertThat(gated.collectionDocCountsIncludingDeleted(TENANT)).doesNotContainKey("");
+    }
+
+    // ---- the sensitive flag follows the chunk's stored name, not the label (review F3) -------------------------------
+
+    @Test
+    void aSensitiveChunkStillReadsSensitiveAfterAOneRowRename_andExcludeStillMissesIt() throws Exception {
+        latched.set(false);
+        String collection = "code__awsens" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        registerCollection(collection);
+        String docId = "aw.sens." + seq.incrementAndGet();
+        gated.upsertDocument(TENANT, Map.of("tumbler", docId, "title", "sensitive doc", "content_type", "code", "corpus", "code",
+            "physical_collection", collection, "chunk_count", 0, "sensitive", true));
+        String chash = ch("p35c sensitive " + seq.incrementAndGet());
+        gatedSvc.writeManyCombined(TENANT, collection, List.of(chunk(chash, "secret " + chash)),
+            List.of(doc(docId, List.of(row(0, chash)))), null, false, true);
+        assertThat(gated.resolveChash(TENANT, chash, collection).get("sensitive")).as("fixture: sensitive before the rename").isEqualTo(true);
+        String renamed = "code__awsens" + "new" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        renameRegistryRow(collection, renamed);
+
+        latched.set(true);
+
+        assertThat(gated.resolveChash(TENANT, chash, renamed).get("sensitive")).as("by chash, latched").isEqualTo(true);
+        assertThat(gated.resolveChash(TENANT, chash, renamed, true)).as("exclude: a miss").isNull();
+        assertThat(gated.resolveSpan(TENANT, renamed, chash, false).get("sensitive")).as("by span, latched").isEqualTo(true);
+        assertThat(gated.resolveSpan(TENANT, renamed, chash, true)).as("exclude: a miss").isNull();
+    }
+
+    // ---- under exclude, the by-address reads follow the id, not the chunk's stored name (invariant census) ----------
+
+    @Test
+    void underExclude_aStaleChunkNameAfterAOneRowRename_stillServesTheOpenChunkAndExcludesTheSensitiveOne() throws Exception {
+        latched.set(false);
+        Fx open = fixture("exo");
+        Fx other = fixture("exother");
+        String sensDoc = "aw.exs." + seq.incrementAndGet();
+        gated.upsertDocument(TENANT, Map.of("tumbler", sensDoc, "title", "sensitive doc", "content_type", "code", "corpus", "code",
+            "physical_collection", open.collection(), "chunk_count", 0, "sensitive", true));
+        String chOpen = ch("p35c exclude open " + seq.incrementAndGet());
+        String chSens = ch("p35c exclude sensitive " + seq.incrementAndGet());
+        gatedSvc.writeManyCombined(TENANT, open.collection(),
+            List.of(chunk(chOpen, "open " + chOpen), chunk(chSens, "secret " + chSens)),
+            List.of(doc(open.docId(), List.of(row(0, chOpen))), doc(sensDoc, List.of(row(0, chSens)))), null, false, true);
+        String renamed = "code__awexo" + "new" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        renameRegistryRow(open.collection(), renamed);
+        // The chunk rows' own name drifts from the manifest's (both stale after a one-row rename; here they also disagree), the id stays:
+        // a read that matches the chunk to its owner by stored name finds no owner and drops the open chunk from an exclude read.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.dropCatalogChunksFk(su);
+            int n = DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS).set(CHUNKS.COLLECTION, other.collection())
+                .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.COLLECTION.eq(open.collection())).execute();
+            assertThat(n).as("fixture: both chunk rows carry a name that is not their manifest's").isEqualTo(2);
+        }
+
+        latched.set(true);
+
+        assertThat(gated.resolveSpan(TENANT, renamed, chOpen, true)).as("span, exclude: the open chunk is served by id").isNotNull();
+        assertThat(gated.resolveChash(TENANT, chOpen, renamed, true)).as("chash, exclude: the open chunk is served by id").isNotNull();
+        assertThat(gated.resolveSpan(TENANT, renamed, chSens, true)).as("span, exclude: the sensitive chunk is excluded").isNull();
+        assertThat(gated.resolveChash(TENANT, chSens, renamed, true)).as("chash, exclude: the sensitive chunk is excluded").isNull();
+        assertThat(gated.resolveSpan(TENANT, renamed, chSens, false).get("sensitive")).as("and without exclude it reads sensitive").isEqualTo(true);
+    }
+
+    // ---- by-title lookups show the registry's label (review F2) ------------------------------------------------------
+
+    @Test
+    void documentsByTitleShowTheRegistryLabelFromTheLatch() throws Exception {
+        Renamed r = renamedCollection();
+        String title = "atomic-write-" + r.doc();
+
+        latched.set(false);
+        assertThat(gated.documentsByTitle(TENANT, title, null, null, null)).extracting(m -> m.get("physical_collection"))
+            .containsExactly(r.oldLabel());
+
+        latched.set(true);
+        assertThat(gated.documentsByTitle(TENANT, title, null, null, null)).as("after the latch the label, not the stale name")
+            .extracting(m -> m.get("physical_collection")).containsExactly(r.newLabel());
+    }
+
+    // ---- rehome: the id repair keeps a renamed collection's rows (review F1) ----------------------------------------
+
+    /**
+     * Both with {@code fk_catalog_chunks_chunk} in place and with it dropped (the re-home mover files the manifest rows itself, so the
+     * outcome does not depend on the key's cascade). {@code underExclude_aStaleChunkNameAfterAOneRowRename_...} drops the key for the rest
+     * of the class too, so the first case sees it only when no test has dropped it yet; the second drops it itself.
+     */
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void aRehomeOntoALabelAnotherCollectionRenamedAwayLeavesThatCollectionsRowsItsOwnId(boolean dropTheChunkKey) throws Exception {
+        if (dropTheChunkKey) {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                PgContainerHelper.dropCatalogChunksFk(su);
+            }
+        }
+        Renamed a = renamedCollection();            // A (id1) is now B; its manifest and chunk rows still name A
+        Renamed c = renamedCollection();            // C (id2) ...
+        String reusedLabel = a.oldLabel();          // ... is renamed to A's old label, which the rows of id1 still carry
+        renameRegistryRow(c.newLabel(), reusedLabel);
+        Fx source = fixture("rhsrc");
+        String sourceChash = ch("p35c rehome source " + seq.incrementAndGet());
+        gatedSvc.writeManyCombined(TENANT, source.collection(), List.of(chunk(sourceChash, "source " + sourceChash)),
+            List.of(doc(source.docId(), List.of(row(0, sourceChash)))), null, false, true);
+        latched.set(true);
+
+        gated.rehomeCollection(TENANT, source.collection(), reusedLabel);
+
+        assertThat(manifestIdsOf(a.doc())).as("the renamed collection's manifest rows keep id1, whatever name they carry")
+            .containsExactly(a.id());
+        assertThat(manifestIdsOf(source.docId())).as("the rows the cascade carried take the target's id (C's, id2)")
+            .containsExactly(c.id());
+    }
+
+    private List<Long> manifestIdsOf(String docId) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID).from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+                .fetch(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID);
+        }
+    }
+
+    // ---- a latched write over a renamed registry row (G17, linda 2026-11-23) ------------------------------------------
+
+    @Test
+    void aLatchedManifestWriteOverARenamedCollectionTakesTheChunksStoredName_andClearsTheOrphanRecordsById() throws Exception {
+        Renamed r = renamedCollection();            // the chunk is named r.oldLabel(), the registry says r.newLabel()
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNK_ORPHANED_AT)
+                .set(CHUNK_ORPHANED_AT.TENANT_ID, TENANT).set(CHUNK_ORPHANED_AT.COLLECTION, r.oldLabel())
+                .set(CHUNK_ORPHANED_AT.COLLECTION_ID, r.id()).set(CHUNK_ORPHANED_AT.CHASH, java.util.HexFormat.of().parseHex(r.chash()))
+                .set(CHUNK_ORPHANED_AT.ORPHANED_AT, java.time.OffsetDateTime.now().minusDays(3))
+                .set(CHUNK_ORPHANED_AT.EMBEDDING_MODEL, "minilm-l6-v2-384").execute();
+        }
+        latched.set(true);
+        String second = freshDoc("g17", r.newLabel());
+
+        // a manifest row for a chunk that already exists: the chunk is found by id, and the row names the chunk's stored name
+        var result = gatedSvc.writeManyCombined(TENANT, r.newLabel(), List.of(), List.of(doc(second, List.of(row(0, r.chash())))),
+            null, false, false);
+        // a replace of the first document's manifest: the orphan record is cleared by id
+        var again = gatedSvc.writeManyCombined(TENANT, r.newLabel(), List.of(), List.of(doc(r.doc(), List.of(row(0, r.chash())))),
+            null, false, false);
+
+        assertThat(result.response()).as("no 23503 from fk_catalog_chunks_chunk").containsEntry("failed_doc_ids", List.of());
+        assertThat(again.response()).containsEntry("failed_doc_ids", List.of());
+        try (Connection su = pg.createConnection("")) {
+            var d = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(d.select(CATALOG_DOCUMENT_CHUNKS.COLLECTION).from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(second))
+                .fetch(CATALOG_DOCUMENT_CHUNKS.COLLECTION)).as("the manifest row's name is the chunk's").containsExactly(r.oldLabel());
+            assertThat(d.fetchCount(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID.eq(TENANT)
+                .and(CHUNK_ORPHANED_AT.COLLECTION_ID.eq(r.id())))).as("the orphan record, matched by id, is cleared").isZero();
+            assertThat(d.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION_ID.eq(r.id()))))
+                .as("one chunk row of the collection, still").isEqualTo(1);
+        }
+    }
+
+    // ---- a latched chunk upsert over a renamed registry row ----------------------------------------------------------
+
+    @Test
+    void aLatchedCombinedWriteOverARenamedCollectionUpdatesItsChunkByIdInsteadOfInsertingASecond() throws Exception {
+        Renamed r = renamedCollection();
+        latched.set(true);
+        String doc2 = freshDoc("lw", r.newLabel());
+
+        var result = gatedSvc.writeManyCombined(TENANT, r.newLabel(), List.of(chunk(r.chash(), "rewritten text")),
+            List.of(doc(doc2, List.of(row(0, r.chash())))), null, false, true);
+
+        assertThat(result.response()).containsEntry("failed_doc_ids", List.of());
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT)
+                .and(CHUNKS.COLLECTION_ID.eq(r.id())))).as("the id key matched the existing row: still one row").isEqualTo(1);
+        }
+    }
+
+    /**
+     * RDR-229 P3.5c (census verification B): the stored-vector mismatch check reads the stored vector by the collection id from the latch. After
+     * a one-row rename the chunk's stored name is stale, so a read by the current label finds no vector and the check goes blind (a different
+     * supplied vector counted as no mismatch). The rename is the registry row's in-place rename that
+     * {@code CollectionRouteFixture.renameInPlaceBeforeTheWritesRead} performs in the gap; the stale stored name it leaves is the state here.
+     */
+    @Test
+    void theStoredVectorMismatchCheckStillSeesTheStoredVectorAfterAOneRowRename() throws Exception {
+        Renamed r = renamedCollection();
+        latched.set(true);
+        String doc2 = freshDoc("sv", r.newLabel());
+        float[] different = new float[384];
+        for (int i = 0; i < different.length; i++) different[i] = (float) Math.sin(i + 1.0);   // not what the test embedder stored
+        Map<String, Object> supplied = new java.util.LinkedHashMap<>(chunk(r.chash(), "p35c text " + r.chash()));
+        supplied.put("embedding", different);
+
+        // the combined write's own gate: the three-argument constructor stands for Gate3.never()
+        var latchedSvc = new CombinedWriteService(tenantScope, gated, new EmbedderRouter(embedder, "document"), latched::get);
+        var response = latchedSvc.appendCombined(TENANT, r.newLabel(), doc2, List.of(row(0, r.chash())), List.of(supplied), false, null,
+            "minilm-l6-v2-384").response();
+
+        assertThat(response).as("the existing chunk keeps its vector, and its disagreement with the supplied one is counted")
+            .containsEntry("vector_mismatches", 1);
+    }
+
+    /**
+     * RDR-229 P3.5c (census verification): the foreign-collection listing compares the document's collection with the manifest row's by id from
+     * the latch. A manifest row written after a one-row rename carries the new label and the document still the old one; both name the SAME
+     * collection (one id), so it is no finding. By name the same rows are a finding (non-vacuity: the unlatched listing names the document).
+     */
+    @Test
+    void theForeignCollectionListingComparesByIdFromTheLatch_aRenamedCollectionsOwnRowsAreNotForeign() throws Exception {
+        Renamed r = renamedCollection();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.dropCatalogChunksFk(su);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            int n;
+            // vectors-079 stamps a manifest row's name from its chunk until P4.1, so the diverged name (the state after P4.1, where neither the key nor
+            // the trigger exists) is written with triggers off, on this session only
+            dsl.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+            try {
+                n = dsl.update(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS)
+                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION, r.newLabel())
+                    .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT))
+                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(r.doc())).execute();
+            } finally {
+                dsl.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+            }
+            assertThat(n).as("setup: a manifest row is written under the new label").isEqualTo(1);
+        }
+        var byName = new dev.nexus.service.db.ManifestForeignCollectionReads(
+            new CatalogRepository(tenantScope, () -> false, dev.nexus.service.db.RenameGuard.open()));
+        var byId = new dev.nexus.service.db.ManifestForeignCollectionReads(gated);
+        latched.set(true);
+
+        assertThat(byName.list(TENANT, 10).documents()).as("before gate 3 the two names differ: the document is listed")
+            .extracting(d -> d.tumbler()).contains(r.doc());
+        assertThat(byId.list(TENANT, 10).documents()).as("from gate 3 both rows are the one collection: not listed")
+            .extracting(d -> d.tumbler()).doesNotContain(r.doc());
+    }
+}

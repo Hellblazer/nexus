@@ -21,6 +21,12 @@ import structlog
 from nexus._log_safe_url import log_endpoint
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import default_db_path
+from nexus.db.t2.shared_ssl import get_shared_ssl_context
+from nexus.install_holders_row import (  # noqa: F401 — moved out at the size ceiling; re-exported
+    _format_held_size,
+    _tree_bytes,
+    check_generation_holders as _check_generation_holders,
+)
 from nexus.redact import redact_credentials  # noqa: F401 — re-exported; callers import it from here
 from nexus.tuple_templates import resolve_tuple_template
 from nexus.util.nx_argv import which_off_cwd
@@ -52,8 +58,8 @@ _SOFT_WARN = "⚠"
 # database through local credentials (Storage service health, Schema
 # migrations, RLS policies, tuples.dead_tuple_ratio, tuples.sweep_freshness
 # and the three RDR-225 partition rows). A managed box renders it through
-# ``_managed_not_probeable`` (a warning, never a checkmark); a local box with
-# no pg_credentials through ``_LOCAL_MODE_NOT_CONFIGURED_DETAIL`` (also a warning).
+# ``_managed_not_probeable`` (informational, not applicable: ``[ ]``, never a checkmark and never a warning,
+# Sam 2026-11-22); a local box with no pg_credentials through ``_LOCAL_MODE_NOT_CONFIGURED_DETAIL`` (a warning).
 _MANAGED_NOT_PROBEABLE_DETAIL = (
     "managed deployment — not probeable from this client, so this check was not run: it reads the database "
     "with local admin credentials, which a managed deployment keeps with the store operator, and the "
@@ -64,22 +70,23 @@ _LOCAL_MODE_NOT_CONFIGURED_DETAIL = "service mode not configured (pg_credentials
 
 
 def _managed_not_probeable(label: str) -> HealthResult:
-    """The one rendering of "this row reads local pg_credentials and a managed deployment has none"
-    (nexus-njn1a finding 10; Sam's decision of 2026-10-28, recorded on nexus-g7ijj).
+    """The one rendering of "this row reads local pg_credentials and a managed deployment has none".
 
-    A soft warning, ``ok=False, warn=True``, never a checkmark: the check was not performed, and doctor's
-    checkmark must never render for an unperformed check. A pass here is how a gate that reads these rows
-    (``upgrade_finish._poison_probe``) would take an unverified store for a clean one. Before this the five
-    storage rows warned on every cloud box while the three partition rows, for the same fact, passed as
-    "not applicable". The reason is :data:`_MANAGED_NOT_PROBEABLE_DETAIL`, the same on all eight; recognise it
-    with :func:`is_managed_not_probeable`. A local box with no ``pg_credentials`` is a different fact (service
-    mode is not configured) and keeps its own text.
+    Sam's ruling of 2026-11-22 (T2 nexus/sam-ruling-doctor-cleanup-2026-11-22, superseding the 2026-10-28 decision
+    on nexus-g7ijj that rendered these as a warning): on a managed deployment the check does not apply to this
+    client, so the row is informational, ``ok=True, skipped=True``. It renders ``[ ]`` ("not checked", JSON status
+    ``skipped``), never a checkmark (an unperformed check must not look like a pass) and never ``⚠``, and it is
+    left out of the warning count and the verdict, so a managed box can reach a green doctor. The reason is
+    :data:`_MANAGED_NOT_PROBEABLE_DETAIL`, the same on all eight rows; recognise it with
+    :func:`is_managed_not_probeable`, which is how a gate that must not take an unverified store for a clean one
+    (``upgrade_finish._poison_probe``) still tells this row from a pass. A local box with no ``pg_credentials`` is
+    a different fact (service mode is not configured) and keeps its own text and its warning.
     """
-    return HealthResult(label=label, ok=False, warn=True, detail=_MANAGED_NOT_PROBEABLE_DETAIL)
+    return HealthResult(label=label, ok=True, skipped=True, detail=_MANAGED_NOT_PROBEABLE_DETAIL)
 
 
 def is_managed_not_probeable(row: HealthResult) -> bool:
-    """True for a row that is the managed "check not run from this client" warning, whatever its ok/warn
+    """True for a row that is the managed "check not run from this client" row, whatever its ok/warn/skipped
     rendering: the reason text is the marker, so a gate keyed on it does not depend on how the row is drawn."""
     return row.detail == _MANAGED_NOT_PROBEABLE_DETAIL
 
@@ -147,6 +154,12 @@ def format_health_for_cli(
 
         if r.fatal and not r.ok:
             failed = True
+
+    # A skipped row is ok for the exit code and carries no verdict, so a green sweep says nothing about it:
+    # count them, so a reader of the human output sees how much of the green was not checked (2026-11-22).
+    not_checked = sum(1 for r in results if r.ok and r.skipped)
+    if not_checked:
+        lines.append(f"\n{not_checked} {'row' if not_checked == 1 else 'rows'} not checked on this deployment.")
 
     if failed:
         if local_mode:
@@ -707,106 +720,6 @@ def _check_orphan_uv_install() -> list[HealthResult]:
             "the reinstall-tool.sh script in a nexus checkout's scripts directory    # same, from a checkout",
         ],
     )]
-
-
-def _check_generation_holders(
-    current, generations, *, tools: Path | None = None,
-) -> list[HealthResult]:
-    """Who is still running from an older generation. INFORMATIONAL.
-
-    Holders are a fact, not a fault: they keep running from their own tree and
-    converge at their next spawn. A row that failed on them would contradict
-    the acceptance criterion this whole arc exists to satisfy, which is that a
-    live session stops being an obstacle to installing.
-    """
-    from nexus import install_census  # noqa: PLC0415 — deferred import
-
-    snapshot = install_census.ps_snapshot()
-    held = []
-    for gen in generations:
-        if gen == current:
-            continue
-        try:
-            pids = install_census.generation_holder_pids(gen, snapshot=snapshot)
-        except Exception:  # noqa: BLE001 — a census failure is not a layout fault
-            continue
-        if pids:
-            held.append(
-                f"{gen.name}: {len(pids)} ({', '.join(str(p) for p in pids[:4])}), "
-                f"{_format_held_size(gen)} on disk"
-            )
-    # The legacy uv tree is an "older generation" too -- the oldest one there
-    # is -- and it is receipt-less, so it is never in *generations*. Ask the
-    # census for it by structure (nexus-k52g0: 9 processes on the 7.19.0 uv
-    # tree rendered as "nothing is still bound to an older generation").
-    for legacy in install_census.legacy_tree_candidates(tools=tools):
-        try:
-            pids = install_census.generation_holder_pids(legacy, snapshot=snapshot)
-        except Exception:  # noqa: BLE001 — a census failure is not a layout fault
-            continue
-        if pids:
-            held.append(
-                f"legacy uv tree {legacy}: {len(pids)} "
-                f"({', '.join(str(p) for p in pids[:4])})"
-            )
-    if not held:
-        return [HealthResult(
-            label="Holders", ok=True,
-            detail="nothing is still bound to an older generation",
-        )]
-    return [HealthResult(
-        label="Holders", ok=True,
-        detail=(
-            "still bound to an older generation, converging at their next "
-            f"spawn — {'; '.join(held)}. A held tree is never reaped while "
-            "those processes live (nexus-xn84f): end those sessions, then "
-            "`nx self gc` (or the next `nx self install`) reclaims it."
-        ),
-    )]
-
-
-#: Files the Holders row will stat per held generation before it stops and
-#: reports a lower bound. A generation is ~50k files; the cap keeps a box
-#: with many stranded trees (the case nexus-xn84f fixes) from turning doctor
-#: into a disk walk.
-_TREE_BYTES_MAX_FILES: int = 200_000
-
-
-def _tree_bytes(root: Path) -> tuple[int, bool]:
-    """``(bytes under root, complete)``, following no symlinks; ``(0, True)``
-    when unreadable. ``complete`` is False when the file cap stopped the walk,
-    so the caller renders a lower bound."""
-    total = 0
-    seen = 0
-    try:
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
-            for name in filenames:
-                seen += 1
-                if seen > _TREE_BYTES_MAX_FILES:
-                    return total, False
-                fp = os.path.join(dirpath, name)
-                try:
-                    if not os.path.islink(fp):
-                        total += os.stat(fp).st_size
-                except OSError:
-                    continue
-    except OSError:
-        return 0, True
-    return total, True
-
-
-def _format_held_size(gen: Path) -> str:
-    size, complete = _tree_bytes(gen)
-    return _format_bytes(size) if complete else f"at least {_format_bytes(size)}"
-
-
-def _format_bytes(n: int) -> str:
-    if n >= 1 << 30:
-        return f"{n / (1 << 30):.1f} GB"
-    if n >= 1 << 20:
-        return f"{n / (1 << 20):.0f} MB"
-    return f"{n} B"
 
 
 def _check_process_footprint() -> list[HealthResult]:
@@ -3288,7 +3201,7 @@ def _check_mineru_server() -> list[HealthResult]:
     # the election short-circuits on a live pid.
     if provisioned:
         try:
-            resp = _httpx.get(f"{url}/health", timeout=2.0)
+            resp = _httpx.get(f"{url}/health", timeout=2.0, verify=get_shared_ssl_context())
         except (_httpx.ConnectError, _httpx.TimeoutException):
             pass  # not up — fall through to the on-demand assessment
         else:
@@ -3466,7 +3379,7 @@ def probe_t2_schema_fingerprint(
             resolved_base_url, _token = resolve_service_endpoint()
 
         get = http_get if http_get is not None else (
-            lambda u, t: httpx.get(u, timeout=t)
+            lambda u, t: httpx.get(u, timeout=t, verify=get_shared_ssl_context())
         )
         resp = get(f"{resolved_base_url.rstrip('/')}/version", timeout)
         resp.raise_for_status()
@@ -4284,8 +4197,7 @@ def _check_static_service_token() -> list[HealthResult]:
     fingerprint = hashlib.sha256(token.encode()).hexdigest()[:8]
     armed = bool((get_credential("mint_token") or "").strip())
     try:
-        resp = httpx.get(f"{url}/v1/_whoami",
-                         headers={"Authorization": f"Bearer {token}"}, timeout=10.0)
+        resp = httpx.get(f"{url}/v1/_whoami", headers={"Authorization": f"Bearer {token}"}, timeout=10.0, verify=get_shared_ssl_context())
     except httpx.HTTPError as exc:
         return [HealthResult(label=label, ok=False, warn=True,
                              detail=f"could not verify against {host}: {type(exc).__name__}")]
@@ -4623,7 +4535,7 @@ def _check_storage_service_health(
         if http_get is not None:
             resp = http_get(url, timeout=5.0)
         else:
-            resp = _httpx.get(url, timeout=5.0)
+            resp = _httpx.get(url, timeout=5.0, verify=get_shared_ssl_context())
     except (_httpx.ConnectError, _httpx.TimeoutException, OSError) as exc:
         # Fatal: we have a confirmed endpoint and it is not responding.
         # Unlike the undiscoverable case above, here we know the address and
@@ -4834,12 +4746,32 @@ def _check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Heal
     return check_data_moves(engine_status)
 
 
+def _check_collection_ids(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]: return __import__("nexus.collection_id_health", fromlist=["check_collection_ids"]).check_collection_ids(engine_status)  # nexus-p2m1x.32 (RDR-229 P3.12): a named _check_* row, so a test that steps over the sweep's rows steps over this one; deferred, that module imports this one
+
+
+def _check_rdr229_completion(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """RDR-229 P3.1's completion check (nexus-p2m1x.17): ``nexus.rdr229_completion_health.check_rdr229_completion``. Named
+    ``_check_*`` here for the same reason as :func:`_check_data_moves`."""
+    from nexus.rdr229_completion_health import check_rdr229_completion  # noqa: PLC0415 — deferred: that module imports this one
+
+    return check_rdr229_completion(engine_status)
+
+
 def _check_recall_canary(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
     """RDR-230 recall canary (nexus-4lnn1.1.10): ``nexus.recall_canary_health.check_recall_canary``. Named ``_check_*``
     here for the same reason as :func:`_check_data_moves`."""
     from nexus.recall_canary_health import check_recall_canary  # noqa: PLC0415 — deferred: that module imports this one
 
     return check_recall_canary(engine_status)
+
+
+def _check_collection_tuples(engine_status: object = None) -> list[HealthResult]:
+    """RDR-229 P3.8 (nexus-p2m1x.28): ``nexus.collection_tuple_health.check_collection_tuples``, which names a live
+    collection tuple held by more than one registry row (it holds the engine's unique index back) and an index that waits
+    for no reason the doctor can see. Named ``_check_*`` here for the same reason as :func:`_check_data_moves`."""
+    from nexus.collection_tuple_health import check_collection_tuples  # noqa: PLC0415 — deferred: that module imports this one
+
+    return check_collection_tuples(engine_status=engine_status)
 
 
 def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
@@ -5178,203 +5110,14 @@ def _check_engine_reaper(
     )]
 
 
-_PCI_LABEL = "Per-collection indexes"
-
-#: ``per_collection_indexes.this_engine.builder_state`` values the row knows. Anything else is an engine newer than
-#: this client and reads not applicable rather than a guess.
-_PCI_BUILDER_STATES = frozenset({"ok", "auth_failed", "no_privilege", "off", "standby"})
-
-#: A pass that has been in flight this long is stuck or unusually long. There is no pass deadline (serial
-#: ``CREATE INDEX CONCURRENTLY`` builds run up to 30 minutes each), so an hour is the point at which an operator should
-#: look; a very long first pass over many collections warns too, and the detail says so.
-_PCI_PASS_STUCK_SECONDS = 3600
-
-#: The DDL sweep period when the engine does not report ``sweep_seconds`` (the setting's default, 600 s).
-_PCI_DEFAULT_SWEEP_SECONDS = 600
-
-#: Margin added to three sweep periods before a holder with no new completed pass reads as stalled: the read bound
-#: (the engine's catalog statement bound, 5 minutes by default) with room for one slow counting transaction.
-_PCI_STALL_MARGIN_SECONDS = 900
-_PCI_STALL_SECONDS_PERIODS = 3
-
-
 def _check_per_collection_indexes(
     engine_status: object = _ENGINE_STATUS_UNSET, *, now: datetime | None = None,
 ) -> list[HealthResult]:
-    """nexus-43ulx.24 (RDR-227 Day 2): are the per-collection partial HNSW indexes being built and usable?
+    """nexus-43ulx.24 (RDR-227 Day 2): ``nexus.pci_indexes_health.check_per_collection_indexes``, the per-collection partial HNSW
+    index row. Named ``_check_*`` here for the same reason as :func:`_check_data_moves`."""
+    from nexus.pci_indexes_health import check_per_collection_indexes  # noqa: PLC0415 — deferred: that module imports this one
 
-    Reads the ``per_collection_indexes`` object of ``GET /v1/status`` (nexus-43ulx.23): the read half's global
-    ``valid`` / ``invalid`` / ``unparsed`` / ``reindex_leftover`` counts, and in ``this_engine`` what this engine's
-    builder is doing
-    (``builder_state``, ``failing``, ``last_ddl_pass_at``). The same status body serves the Engine reaper row, so a
-    local and a managed engine are judged the same way (HTTP only).
-
-    * fail (hard ✗): ``builder_state`` ``auth_failed`` (the engine's admin credential was rejected, typically after a
-      ``nexus_admin`` rotation) or ``no_privilege`` (the admin role cannot create indexes on the leaves). Checked
-      before the counts, so a dead builder cannot read green on ``invalid=0``.
-    * warn: ``expired`` (the router's index set is frozen and answering as empty, so every statement walks at the
-      serving ``ef_search``), ``invalid`` > 0 or ``failing`` > 0. While this engine's builder is mid-build
-      (``this_engine.building`` is 1, or ``pass_in_progress`` is true) ``invalid`` does NOT warn: the index being built is
-      invalid by design until its ``CREATE INDEX CONCURRENTLY`` finishes, and the row says "first pass in progress" or
-      "build in progress" instead. ``expired`` and ``failing`` still warn then. On a ``standby`` engine whose last
-      catalog read is fresh (not ``expired``), ``invalid`` does not warn either: a peer holds the builder lock and the
-      invalid index may be its build in flight (this engine cannot tell a build from a failed one), so the row passes
-      with a note.
-    * warn, too: a pass in flight for more than an hour (``pass_started_at``; there is no pass deadline, so a hung
-      or very long pass is otherwise green), and a holder (``builder_state`` ``ok``) with no completed pass for three
-      sweep periods plus 15 minutes (``last_ddl_pass_at``; a holder whose every leaf is skipped by count timeouts
-      completes no pass and would otherwise read green). The period is the engine's ``sweep_seconds`` (600 when an
-      older engine does not report it). A holder that has never completed a pass warns on the same threshold, read
-      from the engine's ``process_start_time``.
-    * warn, too: ``reindex_leftover`` > 0 (nexus-rn1yd: an invalid ``_ccnew``/``_ccold`` index a failed REINDEX
-      CONCURRENTLY left behind) while ``builder_state`` is ``off``, because nothing will drop it. ``auth_failed`` and
-      ``no_privilege`` already fail and carry the count. On ``ok`` the next pass drops it and on ``standby`` a peer
-      does, so the count is shown and never a warning there.
-    * pass: ``ok`` or ``standby`` (a peer holds the builder lock) with none of those; ``off`` passes with a note that
-      builds are disabled by ``NX_SEARCH_PCI=0``.
-
-    Not applicable (ok, no warning) when the engine cannot be reached or does not report the object. A present object
-    that cannot be read, or a ``builder_state`` outside the closed vocabulary above, warns and names what it got:
-    a rotation check reads that vocabulary, and a green row over an unrecognised state would hide the one case the
-    row exists to show. A count that is not a non-negative int is read as 0, as the reaper row reads its counters.
-    """
-    label = _PCI_LABEL
-    status: dict | None
-    if engine_status is _ENGINE_STATUS_UNSET:
-        try:
-            from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
-            status = fetch_engine_status()
-        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
-            _log.debug("doctor_per_collection_indexes_probe_failed", error=str(exc))
-            status = None
-    else:
-        status = engine_status if isinstance(engine_status, dict) else None
-
-    def _na(why: str) -> list[HealthResult]:
-        return [HealthResult(label=label, ok=True, detail=f"not applicable: {why}")]
-
-    if status is None:
-        return _na("the engine's status endpoint could not be read")
-    pci = status.get("per_collection_indexes")
-    if pci is None:
-        return _na("this engine's status does not include the per-collection index object (an older engine, or "
-                   "one that is still starting)")
-    this_engine = pci.get("this_engine") if isinstance(pci, dict) else None
-    state = this_engine.get("builder_state") if isinstance(this_engine, dict) else None
-
-    def _unreadable(why: str) -> list[HealthResult]:
-        return [HealthResult(
-            label=label, ok=False, warn=True, detail=why,
-            fix_suggestions=[
-                "The engine reports a per_collection_indexes object this client does not understand: check that "
-                "the client and engine versions match (`nx doctor` reports both)",
-                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md (Day 2 Operations)",
-            ],
-        )]
-
-    if not isinstance(state, str):
-        return _unreadable("the engine's per_collection_indexes object could not be read "
-                           f"(this_engine.builder_state missing or not a string; got {repr(pci)[:80]})")
-    if state not in _PCI_BUILDER_STATES:
-        return _unreadable(f"unknown builder_state {state!r}; this client knows "
-                           f"{', '.join(sorted(_PCI_BUILDER_STATES))}")
-
-    now = now or datetime.now(UTC)
-    valid, invalid = _status_int(pci.get("valid")), _status_int(pci.get("invalid"))
-    unparsed, failing = _status_int(pci.get("unparsed")), _status_int(this_engine.get("failing"))
-    leftover = _status_int(pci.get("reindex_leftover"))
-    last_ddl = _instant(this_engine.get("last_ddl_pass_at"))
-    ddl_note = ("no DDL pass yet" if last_ddl is None
-                else f"last DDL pass {_span(max(0.0, (now - last_ddl).total_seconds()))} ago")
-    counts = (f"{valid} valid, {invalid} invalid" + (f", {unparsed} unparsed" if unparsed else "")
-              + (f", {leftover} reindex leftover" if leftover else ""))
-    expired = pci.get("expired") is True
-    building_now = _status_int(this_engine.get("building")) == 1
-    pass_in_flight = this_engine.get("pass_in_progress") is True
-    in_flight = building_now or pass_in_flight
-    pass_started = _instant(this_engine.get("pass_started_at"))
-    pass_age = None if pass_started is None else max(0.0, (now - pass_started).total_seconds())
-    if in_flight:
-        progress = ("first pass in progress" if pass_in_flight and last_ddl is None
-                    else "build in progress" if building_now else "pass in progress")
-        if pass_age is not None:
-            progress = f"{progress} for {_span(pass_age)}"
-        ddl_note = progress if last_ddl is None else f"{progress}, {ddl_note}"
-
-    if state in ("auth_failed", "no_privilege"):
-        why = ("the engine's admin credential was rejected" if state == "auth_failed"
-               else "the engine's admin role has no privilege to create indexes on the leaves")
-        return [HealthResult(
-            label=label, ok=False,
-            detail=f"builder_state {state}: {why}, so no per-collection index is being built ({counts})",
-            fix_suggestions=[
-                *(["After a nexus_admin credential rotation, restart the engine so it reads the new credential "
-                   "(`nx daemon service stop`, then `nx daemon service start` for a local engine); the engine logs "
-                   "event=pci_builder_auth_failed"] if state == "auth_failed" else
-                  ["The engine's admin role cannot create indexes on the leaves of nexus.chunks: grant it the "
-                   "privilege (it must own or be able to CREATE INDEX on the partitions), then restart the engine"]),
-                "NX_SEARCH_PCI=0 switches the builder off on purpose, and then this row passes with a note",
-                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md (Day 2 Operations)",
-            ],
-        )]
-    off_note = "; builds disabled by NX_SEARCH_PCI=0" if state == "off" else ""
-    peer_may_be_building = (state == "standby" and not expired and _instant(pci.get("last_read_at")) is not None
-                            and invalid > 0)
-    # The index being built is invalid until its build finishes; on a standby with a fresh read it may be a peer's.
-    warn_invalid = 0 if in_flight or peer_may_be_building else invalid
-
-    sweep_seconds = _status_int(pci.get("sweep_seconds")) or _PCI_DEFAULT_SWEEP_SECONDS
-    stall_seconds = _PCI_STALL_SECONDS_PERIODS * sweep_seconds + _PCI_STALL_MARGIN_SECONDS
-    stuck = pass_in_flight and pass_age is not None and pass_age > _PCI_PASS_STUCK_SECONDS
-    stalled = False
-    stall_note = ""
-    if state == "ok" and not in_flight:
-        if last_ddl is not None:
-            idle = max(0.0, (now - last_ddl).total_seconds())
-            stalled = idle > stall_seconds
-            stall_note = f"no completed DDL pass for {_span(idle)}"
-        else:
-            started = _instant(status.get("process_start_time"))
-            uptime = None if started is None else max(0.0, (now - started).total_seconds())
-            stalled = uptime is not None and uptime > stall_seconds
-            stall_note = ("no DDL pass has completed" if uptime is None
-                          else f"no DDL pass has completed in the {_span(uptime)} since the engine started")
-    # A leftover only matters here when nothing will drop it: the builder is off (auth_failed/no_privilege returned
-    # above with the count in `counts`; ok and standby drop it on a later pass).
-    warn_leftover = leftover if state == "off" else 0
-    if expired or warn_invalid or failing or stuck or stalled or warn_leftover:
-        parts = ["router index set expired (no successful catalog read for three sweep periods; every statement "
-                 "walks at the serving ef_search until a read succeeds)"] if expired else []
-        parts += [f"{n} {what}" for n, what in ((warn_invalid, "invalid"), (failing, "failing")) if n]
-        if warn_leftover:
-            parts.append(f"{warn_leftover} reindex leftover (an invalid _ccnew/_ccold index a failed REINDEX "
-                         "CONCURRENTLY left behind; the builder is off, so nothing drops it)")
-        if stuck:
-            parts.append(f"a DDL pass has been in flight for {_span(pass_age)}, more than "
-                         f"{_span(_PCI_PASS_STUCK_SECONDS)} (hung, or a very long first pass)")
-        if stalled:
-            parts.append(f"{stall_note}, more than {_PCI_STALL_SECONDS_PERIODS} sweep periods of "
-                         f"{_span(sweep_seconds)} plus {_span(_PCI_STALL_MARGIN_SECONDS)} (every leaf skipped, or the "
-                         "pass task is not running)")
-        return [HealthResult(
-            label=label, ok=False, warn=True,
-            detail=(f"{', '.join(parts)} ({counts}); builder_state {state}, {ddl_note}{off_note}"),
-            fix_suggestions=[
-                "Read the engine log for event=pci_sweep (the read half's counts, one line per sweep; "
-                "event=pci_sweep_set_expired marks a frozen set) and the builder's own lines for the collection "
-                "that fails; event=pci_reconcile_pass shows whether passes complete (ran_to_end, skipped_leaves, "
-                "max_count_ms against the 30 s count timeout)",
-                *(["A reindex leftover is dropped by the builder on its next pass: set NX_SEARCH_PCI=1, or "
-                   "DROP INDEX CONCURRENTLY it by hand (it is the invalid pci_<hash>_ccnew/_ccold index)"]
-                  if warn_leftover else []),
-                "https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md (Day 2 Operations)",
-            ],
-        )]
-    if state == "standby":
-        note = "; the invalid index may be a peer's build in flight" if peer_may_be_building else ""
-        return [HealthResult(label=label, ok=True,
-                             detail=f"{counts}; a peer engine holds the builder lock (standby){note}")]
-    return [HealthResult(label=label, ok=True, detail=f"{counts}; builder_state {state}, {ddl_note}{off_note}")]
+    return check_per_collection_indexes(engine_status, now=now)
 
 
 _LEAF_BLOAT_LABEL = "Chunks leaf bloat"
@@ -6244,14 +5987,14 @@ def _settle_setup_row(results: list[HealthResult]) -> list[HealthResult]:
 
 
 def _benign_warning(row: HealthResult) -> bool:
-    """A soft warning that says nothing is wrong: a managed deployment's row that cannot be probed from a
-    client by design (nexus-y3wuu), which warns on every cloud box. Without this a cloud box never reaches the
-    "every other row is fine" that lets the setup row stand down.
+    """A row that says nothing is wrong: a managed deployment's row that cannot be probed from a client by
+    design (nexus-y3wuu). It was a warning on every cloud box until 2026-11-22, when it became an ok, skipped
+    row; the marker is kept so a row built the old way still stands down the setup row.
 
     nexus-8qnuk: only that kind. The rows nexus-9b0ih made ok=False (two OpenCV builds, a warning off Linux
     and a failure on it; a Windows box missing the PDF runtime; a dependency-lock rebuild owed) are not benign: each names a fix the user
     still owes, and a failed setup run can be their cause, so they keep the setup warning up."""
-    return row.warn and not row.ok and is_managed_not_probeable(row)
+    return is_managed_not_probeable(row)
 
 
 def _setup_failed_row(status: dict, log: Path) -> HealthResult:
@@ -7825,9 +7568,11 @@ ORDER BY 1, 2, 3;
 """.strip()
 
 
-def _partition_rows(ok: bool, detail: str, *, warn: bool = False) -> list[HealthResult]:
+def _partition_rows(
+    ok: bool, detail: str, *, warn: bool = False, skipped: bool = False,
+) -> list[HealthResult]:
     """The same verdict on all three partition rows (not applicable, or a probe that could not run)."""
-    return [HealthResult(label=lab, ok=ok, warn=warn, detail=detail) for lab in _PARTITION_LABELS]
+    return [HealthResult(label=lab, ok=ok, warn=warn, skipped=skipped, detail=detail) for lab in _PARTITION_LABELS]
 
 
 def _sql_literal(value: str) -> str:
@@ -7854,9 +7599,9 @@ def _check_tenant_model_partitions(
     involved. These rows run on a local install only: a managed deployment has no ``pg_credentials`` here and the
     engine has no server-side equivalent (its boot check, ``ChunksIsolationCheck``, covers the RLS structure of
     both trees and nothing about token tenants or registered models), so on a managed install all three are a
-    warning, ``ok=False, warn=True`` with the shared :data:`_MANAGED_NOT_PROBEABLE_DETAIL`, because the check was
-    not run (Sam, 2026-10-28, nexus-g7ijj: a checkmark never renders for an unperformed check); the comparison is
-    conexus's read-only query (docs/runbooks/rdr-225-cloud-deploy.md). Not applicable (ok, "not applicable: ...",
+    informational, ``ok=True, skipped=True`` (``[ ]``, no warning) with the shared
+    :data:`_MANAGED_NOT_PROBEABLE_DETAIL`, because the check does not apply to this client (Sam, 2026-11-22; a
+    checkmark never renders for an unperformed check); the comparison is conexus's read-only query (docs/runbooks/rdr-225-cloud-deploy.md). Not applicable (ok, "not applicable: ...",
     never a warning) where there is nothing to compare: no ``pg_credentials`` on a local box (a virgin box),
     parents that are not partitioned (an engine that predates RDR-225), no token tenant, or no
     registered model. A finding is evaluated first; not applicable replaces only the outcome "nothing to
@@ -7871,7 +7616,7 @@ def _check_tenant_model_partitions(
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
         if not is_local_mode():
-            return _partition_rows(False, _MANAGED_NOT_PROBEABLE_DETAIL, warn=True)
+            return _partition_rows(True, _MANAGED_NOT_PROBEABLE_DETAIL, skipped=True)
         return _partition_rows(True, f"not applicable: {_LOCAL_MODE_NOT_CONFIGURED_DETAIL}")
 
     from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
@@ -8982,8 +8727,8 @@ def _check_tuple_table_bloat(
     the SAME local-only ``pg_credentials`` admin-psql path
     ``_check_migration_state``/``_check_rls_present`` already use for
     structural PG facts (LOCAL-ONLY by design, nexus-y3wuu; a managed
-    deployment has no ``pg_credentials`` here, so on one this row is a warning
-    that the check was not run, never a checkmark: nexus-njn1a finding 10). The
+    deployment has no ``pg_credentials`` here, so on one this row renders ``[ ]``
+    (skipped), no warning and never a checkmark: Sam 2026-11-22, was a warning, nexus-njn1a finding 10). The
     query targets ``pg_stat_user_tables`` directly (a system view, always
     queryable) rather than the two tables themselves, so an engine whose
     Liquibase changesets predate ``tuples-001-baseline.xml`` reports zero
@@ -9832,6 +9577,10 @@ _CLAUDE_CODE_LOG_TAIL_BYTES = 2 * 1024 * 1024
 #: verdict-less siblings).
 _CLAUDE_CODE_LOG_FILES_EXAMINED = 40
 
+#: A log whose last write is older than this is not judged (2026-11-22): a failure from weeks ago says nothing
+#: about the connection Claude Code makes today, and the row reports "no recent connection log" instead.
+_CLAUDE_CODE_LOG_MAX_AGE_SECONDS = 7 * 24 * 3600
+
 #: Claude Code truncates a project directory name at this many characters and
 #: appends ``-<hash>``.
 _CLAUDE_CODE_PROJECT_NAME_MAX = 200
@@ -9895,18 +9644,22 @@ def _read_claude_code_log(path: Path) -> list[str]:
     )
 
 
-def _claude_code_log_verdict(lines: list[str]) -> tuple[str | None, str | None, str | None]:
-    """``(verdict, failure_text, session_id)`` for one log. The LAST verdict
+def _claude_code_log_verdict(lines: list[str]) -> tuple[str | None, str | None, str | None, bool]:
+    """``(verdict, failure_text, session_id, connected)`` for one log. The LAST verdict
     wins, because Claude Code appends every reconnect to the same file: a
     ``Successfully connected`` line starts a new connection and clears what the
     previous one left, so the user's own remedy (``/mcp``) turns a
     ``did not declare`` file into a healthy one. *verdict* is ``"failed"``,
     ``"missing"``, ``"registered"`` or ``None`` (no verdict for the latest
     connection: still starting, ``not in --channels list``, or an older Claude
-    Code that logs none)."""
+    Code that logs none). *connected* is True when the log's last connection
+    outcome is ``Successfully connected`` with no failure after it: a log with
+    no channel verdict that is connected is the current state, a log that only
+    started a connection (or only filler) says nothing."""
     verdict: str | None = None
     failure: str | None = None
     session_id: str | None = None
+    connected = False
     for line in lines:
         try:
             entry = json.loads(line)
@@ -9920,18 +9673,42 @@ def _claude_code_log_verdict(lines: list[str]) -> tuple[str | None, str | None, 
         if not isinstance(message, str):
             continue
         if message.startswith("Connection failed"):
-            verdict, failure = "failed", message[:160]
+            verdict, failure, connected = "failed", message[:160], False
         elif message.startswith("Successfully connected"):
-            verdict, failure = None, None
+            verdict, failure, connected = None, None, True
         elif message.startswith("Channel notifications skipped: server did not declare claude/channel capability"):
             verdict, failure = "missing", None
         elif message.startswith("Channel notifications registered"):
             verdict, failure = "registered", None
-    return verdict, failure, session_id
+    return verdict, failure, session_id, connected
+
+
+def _newest_nexus_logs(
+    project_dirs: list[Path], *, cutoff: float, preferred: frozenset[Path] = frozenset(),
+) -> tuple[list[Path], Path | None]:
+    """``(recent, newest_stale)``: the nexus server's log files under *project_dirs* last written at or after
+    *cutoff*, newest first (at most :data:`_CLAUDE_CODE_LOG_FILES_EXAMINED`), and the most recently written of
+    those that were not. The order is the file's mtime, read once per file, not its name: a reconnect appends to
+    the file of the session's first connection, so an older-named file can hold the newest state. On equal mtimes
+    a file under one of *preferred* (the current directory's own log directories) comes first, then the later
+    name."""
+    entries: list[tuple[float, bool, str, Path]] = []
+    for p in project_dirs:
+        for d in _CLAUDE_CODE_NEXUS_LOG_DIRS:
+            for f in (p / d).glob("*.jsonl"):
+                try:
+                    mtime = f.stat().st_mtime
+                except OSError:
+                    continue
+                entries.append((mtime, p in preferred, f.name, f))
+    entries.sort(key=lambda e: (e[0], e[1], e[2]), reverse=True)
+    recent = [e[3] for e in entries if e[0] >= cutoff]
+    stale = [e[3] for e in entries if e[0] < cutoff]
+    return recent[:_CLAUDE_CODE_LOG_FILES_EXAMINED], (stale[0] if stale else None)
 
 
 def _check_claude_code_mcp_connection(
-    *, cache_root: Path | None = None, cwd: Path | None = None,
+    *, cache_root: Path | None = None, cwd: Path | None = None, now: float | None = None,
 ) -> list[HealthResult]:
     """Claude Code's own record of its latest connection to the nexus MCP
     server (nexus-w4l00 follow-on).
@@ -9950,9 +9727,19 @@ def _check_claude_code_mcp_connection(
     The file is the newest one that carries a verdict (a ``claude -p`` worker
     or subagent writes verdict-less siblings), or, when
     ``CLAUDE_CODE_SESSION_ID`` names this session, the newest of this
-    session's own files. Not applicable where no Claude Code log directory
-    exists for the current directory or one above it. *cache_root* and *cwd*
-    are test seams.
+    session's own files. Every project directory under the cache root is
+    searched, so the newest log for the nexus server is found wherever Claude
+    Code wrote it, and the logs are ranked by when they were last written (a
+    reconnect appends to the file of the session's first connection); the
+    current directory's own log directories (and those above it) win only a
+    tie, so an old failure there cannot outrank today's success elsewhere. A
+    newest file whose last connection outcome is ``Successfully connected``
+    with no channel verdict is the current state, not a file to step over; one
+    that only began a connection is stepped over. A log last written more than
+    :data:`_CLAUDE_CODE_LOG_MAX_AGE_SECONDS` ago is not judged: the row is
+    informational, "no recent connection log" (2026-11-22: a 2026-10-01 failure
+    was reported as the latest connection). Not applicable where no log exists
+    at all. *cache_root*, *cwd* and *now* (epoch seconds) are test seams.
     """
     label = _CLAUDE_CODE_MCP_CONNECTION_LABEL
     na = lambda why: [HealthResult(label=label, ok=True, detail=f"informational — {why}")]  # noqa: E731
@@ -9964,14 +9751,24 @@ def _check_claude_code_mcp_connection(
         directories = _claude_code_project_dirs(cache_root, cwd if cwd is not None else Path.cwd())
     except (OSError, RuntimeError) as exc:  # a deleted cwd, or no resolvable home
         return na(f"could not derive the Claude Code log location ({exc})")
-    files = sorted(
-        {f for p in directories for d in _CLAUDE_CODE_NEXUS_LOG_DIRS for f in (p / d).glob("*.jsonl")},
-        key=lambda f: f.name, reverse=True,
-    )[:_CLAUDE_CODE_LOG_FILES_EXAMINED]
+    cutoff = (time.time() if now is None else now) - _CLAUDE_CODE_LOG_MAX_AGE_SECONDS
+    try:
+        everywhere = [d for d in cache_root.iterdir() if d.is_dir()]
+    except OSError:
+        everywhere = []
+    preferred = frozenset(directories)
+    files, newest_stale = _newest_nexus_logs(
+        list(dict.fromkeys([*directories, *everywhere])), cutoff=cutoff, preferred=preferred,
+    )
     if not files:
-        return na("no Claude Code MCP log for the nexus server under this directory")
+        if newest_stale is None:
+            return na("no Claude Code MCP log for the nexus server")
+        return na(
+            f"no recent connection log: the newest Claude Code MCP log for the nexus server ({newest_stale.name}) "
+            f"was last written more than {_CLAUDE_CODE_LOG_MAX_AGE_SECONDS // 86400} days ago, so it is not judged"
+        )
 
-    scanned: list[tuple[Path, str | None, str | None, str | None]] = []
+    scanned: list[tuple[Path, str | None, str | None, str | None, bool]] = []
     unreadable: str | None = None
     for f in files:
         try:
@@ -9985,8 +9782,10 @@ def _check_claude_code_mcp_connection(
 
     mine = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
     candidates = [row for row in scanned if mine and row[3] == mine] or scanned
-    chosen = next((row for row in candidates if row[1] is not None), candidates[0])
-    newest, verdict, failure, _session = chosen
+    # The newest file with something to say: a verdict, or a connection that succeeded (a connected file with no
+    # channel verdict is the current state and must not be stepped over for an older file's failure).
+    chosen = next((row for row in candidates if row[1] is not None or row[4]), candidates[0])
+    newest, verdict, failure, _session, _connected = chosen
 
     if verdict == "failed":
         return [HealthResult(
@@ -10162,21 +9961,49 @@ def _check_pending_rungs() -> list[HealthResult]:
     # Each with its own reason's first clause: rdr192-manifest-backfill's says whether an older completion still
     # answers the engine's reaper gate or none is recorded and the reaper stays refused.
     # On a local engine the decline is doctor's bounded reads, not the managed rule, so the reason is left out there.
-    from nexus.upgrade_ladder.auto_guard import managed_service  # noqa: PLC0415 — deferred to avoid module-load cost
+    from nexus.upgrade_ladder.auto_guard import (  # noqa: PLC0415 — deferred to avoid module-load cost
+        RETIRE_KEYS_OPERATOR_NOTE, managed_service, sweep_is_operator_only,
+    )
 
     try:
         managed = managed_service()
     except Exception:  # noqa: BLE001 — unknown mode: names only, as before
         managed = False
-    not_checked = [
-        f"{name} ({status.pending_detail.split('; ')[0]})" if managed else name for name, status in statuses
+    declined = [
+        (name, status) for name, status in statuses
         if not status.applicable and INTERACTIVE_REMEDY in (status.pending_detail or "")
     ]
+    # Sam 2026-11-22 (T2 nexus/sam-ruling-doctor-cleanup-2026-11-22, item a): a check this client cannot run is not
+    # applicable, never a warning. retire-keys-sweep's route takes a tenant or root credential and answers 403 to the
+    # data token a client presents whenever `mint_token` is configured, so an interactive `nx upgrade` cannot clear
+    # it either: its sweep is the operator verb. The test is `sweep_is_operator_only()` (managed and `mint_armed()`)
+    # and nothing more: a managed client with a tenant or root credential, or a static data token with no
+    # `mint_token`, keeps "not checked", as does every other declined rung (rdr192-manifest-backfill included). The
+    # rung's own detect() is left alone: `upgrade_finish.pending_data_rung_callout` uses the same helper, and
+    # `nx upgrade`'s dry-run line needs none, because detect() already reads the route's 403 as not applicable.
+    sweep_na = sweep_is_operator_only()
+    na_names = [name for name, _status in declined if sweep_na and name == _ladder_registry.RUNG_RETIRE_KEYS_SWEEP]
+    not_checked = [
+        f"{name} ({status.pending_detail.split('; ')[0]})" if managed else name
+        for name, status in declined if name not in na_names
+    ]
+    na_note = (
+        f"not applicable on a managed deployment with mint_token configured: {', '.join(na_names)} "
+        f"({RETIRE_KEYS_OPERATOR_NOTE})"
+    ) if na_names else ""
     if not pending and not not_checked:
+        checked = len(statuses) - len(na_names)
+        if na_names and checked == 0:
+            # Every registered rung is one this client cannot check: nothing stands behind the row, so it is `[ ]`.
+            return [HealthResult(label="Upgrade ladder", ok=True, skipped=True, detail=na_note)]
         return [HealthResult(
             label="Upgrade ladder",
             ok=True,
-            detail="; ".join(filter(None, [f"no pending rungs ({len(statuses)} registered)", record_note])),
+            detail="; ".join(filter(None, [
+                f"no pending rungs ({checked} checked of {len(statuses)} registered)" if na_names
+                else f"no pending rungs ({len(statuses)} registered)",
+                na_note, record_note,
+            ])),
         )]
     parts: list[str] = []
     fixes: list[str] = []
@@ -10217,7 +10044,9 @@ def _check_pending_rungs() -> list[HealthResult]:
         elif not guarded("deferral_log_probe", lambda: t2_deferral_log().readable(), True):
             parts.append("the upgrade deferral log could not be read, so a rung deferring every run would not show here")
     else:
-        parts.append(f"no pending rungs among those checked ({len(statuses) - len(not_checked)} of {len(statuses)})")
+        parts.append(
+            f"no pending rungs among those checked ({len(statuses) - len(not_checked) - len(na_names)} of {len(statuses)})"
+        )
     if not_checked:
         parts.append(
             f"not checked: {', '.join(not_checked)} (each answers only from a read of every document, which "
@@ -10228,6 +10057,8 @@ def _check_pending_rungs() -> list[HealthResult]:
             "pending and records each rung it verifies, and this row then answers from the record without a read. "
             "`nx upgrade --dry-run` makes the same read to show what is pending but records nothing"
         )
+    if na_note:
+        parts.append(na_note)
     if record_note:
         parts.append(record_note)
     return [HealthResult(
@@ -10479,7 +10310,7 @@ def _check_embedding_profile() -> list[HealthResult]:
     # ``re-embed --keep-source`` this row clears with the hint (a superseded source is not drift, except one a
     # restore put a live document back in).
     from nexus.config import is_local_mode  # noqa: PLC0415 — deferred: patched in tests at the module attribute
-    from nexus.reembed_job import is_superseded, judge_off_profile_collections  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.reembed_job import blocked_report, is_superseded, judge_off_profile_collections  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     profile_model = {str(ct): str(prow["embedding_model"]) for ct, prow in by_ct.items()}
     verdict = judge_off_profile_collections(reader, rows=rows, profile=profile_model, read_jobs=True)
@@ -10497,14 +10328,12 @@ def _check_embedding_profile() -> list[HealthResult]:
     live_rows = [r for r in verdict.rows if not is_superseded(r)]
     stale = sorted(_off(r) for r in live_rows if str(r.get("name")) not in verdict.held)
     held = sorted(_held(r) for r in live_rows if str(r.get("name")) in verdict.held)
-    restored = sorted(_off(r) for r in verdict.rows if is_superseded(r))
+    restored = sorted(_off(r) for r in verdict.rows if is_superseded(r) and str(r.get("name")) not in verdict.blocked)
+    blocked_part, blocked_fix = blocked_report(verdict, _name_list)  # restored sources whose kept job cannot be re-entered
     # nexus-s08oe: with the job table (or the counts) unread the superseded rows were not judged. Say so rather
     # than let a clean 'none' stand over rows nobody looked at.
-    not_judged = (
-        f"superseded sources not judged ({verdict.unread} unread): {len(verdict.unjudged)} superseded collection(s) skipped"
-        if verdict.unjudged else ""
-    )
-    if stale or held or restored:
+    not_judged = f"superseded sources not judged ({verdict.unread} unread): {len(verdict.unjudged)} superseded collection(s) skipped" if verdict.unjudged else ""
+    if stale or held or restored or blocked_part:
         parts: list[str] = []
         fixes: list[str] = []
         if stale:
@@ -10530,6 +10359,8 @@ def _check_embedding_profile() -> list[HealthResult]:
                 f"until a re-embed moves it): {_name_list(restored)}"
             )
             fixes.append("move the restored document(s) with the kept job's re-entry: nx collection re-embed --all")
+        parts.extend(blocked_part)
+        fixes.extend(blocked_fix)
         if not_judged:
             parts.append(not_judged)
         results.append(HealthResult(
@@ -10963,8 +10794,8 @@ def _check_manifest_null_collection() -> list[HealthResult]:
             "stamped one."
         )
         fix_suggestions.append(
-            "nx index <path> --force       (re-index; the new write "
-            "requires a real collection, replacing the NULL-collection row)"
+            "nx index repo <repo-root> --force   (or `nx index md|pdf|rdr <file> --force`; "
+            "the new write requires a real collection, replacing the NULL-collection row)"
         )
     if ghost:
         detail += (
@@ -11578,7 +11409,7 @@ def _check_gc_audit_non_empty_after_purge() -> list[HealthResult]:
 #: and the design memo does not name a number at all; this was picked ad
 #: hoc from the bead-text amendment's "e.g. N hours" placeholder. Low
 #: blast radius if wrong: this is a WARN-level doctor advisory, never a
-#: gate, and its remedy (``nx index <path> --force``) is the same
+#: gate, and its remedy (``nx index repo <repo-root> --force``) is the same
 #: idempotent, safe-to-over-run operation the fence design relies on
 #: elsewhere — a false positive on a genuinely slow extraction costs one
 #: unnecessary WARNING, not a wrong action taken automatically. Revisit
@@ -11775,7 +11606,7 @@ def _fence_facts_from_documents(documents: list[Any]) -> _FenceFacts:
     candidates: list[tuple[str, datetime]] = []
     candidates_truncated = 0
     # GH #1512 (nexus-kt7f4): the owner prefix of each named candidate, so the
-    # remedy can be split by owner kind below -- `nx index <path> --force`
+    # remedy can be split by owner kind below -- `nx index repo <repo-root> --force`
     # applies to a repo file and to nothing else.
     candidate_prefix: dict[str, str] = {}
     candidate_file: dict[str, str] = {}
@@ -12025,7 +11856,7 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
         #
         # nexus-apig6: scoped to the post-anchor population and NAMED. The old
         # shape reported the whole ``reported_null`` count and prescribed an
-        # unqualified `nx index <path> --force`, which on a corpus indexed
+        # unqualified `nx index repo <repo-root> --force`, which on a corpus indexed
         # before v7.3.0 reads as "re-embed all 462 of your documents" —
         # contradicting vw594's own no-backfill decision.
         post_anchor_count = f.post_anchor_count
@@ -12064,7 +11895,7 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
         non_repo_note = (
             f" {non_repo_count} of the named document(s) belong to a non-repo "
             "owner (the knowledge store's curator owner): they have no file "
-            "path, so `nx index --force` cannot apply to them; a store put or "
+            "path, so a file re-index cannot apply to them; a store put or "
             "a bulk import wrote them before that path was fenced, and "
             "`nx catalog reconcile-fences` stamps the ones whose manifest is "
             "whole (GH #1512)."
@@ -12107,7 +11938,7 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
                 + f"{legacy_note}{undated_note}{non_repo_note}"
                 + (
                     f" {len(missing_files)} of the named repo document(s) name a file that is no longer in its "
-                    f"repo (e.g. {missing_files[0][2]}): `nx index --force` cannot re-index a file that is gone, "
+                    f"repo (e.g. {missing_files[0][2]}): `nx index repo --force` cannot re-index a file that is gone, "
                     "and `nx catalog prune-stale` removes these entries (GH #1610)."
                     if missing_files else ""
                 )
@@ -12123,15 +11954,15 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
                 for prefix in sorted({p for p, _ident, _fp in missing_files})
             ] + ([] if len(post_anchor) - non_repo_count - len(missing_files) <= 0 else (
                 [
-                    "nx index <path> --force   (re-index ONLY the named "
-                    "document(s) above — this clears the symptom, not the "
+                    "nx index repo <repo-root> --force   (re-index the repo holding "
+                    "the named document(s) above; this clears the symptom, not the "
                     "unfenced producer)",
                 ] if proven_anchor is not None else [
                     "nx --version   (a client below 7.3.0 explains this with "
                     "no regression at all)",
-                    "nx index <path> --force   (on a 7.3.0+ client, re-index "
-                    "ONLY the named document(s) above — this clears the "
-                    "symptom, not the unfenced producer)",
+                    "nx index repo <repo-root> --force   (on a 7.3.0+ client, "
+                    "re-index the repo holding the named document(s) above; "
+                    "this clears the symptom, not the unfenced producer)",
                 ]
             )),
         ))
@@ -12169,8 +12000,8 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
                 "Re-indexing ONE document tells them apart."
             ),
             fix_suggestions=[
-                "nx index <path> --force   (re-index any ONE document to "
-                "establish this install's fence baseline, then re-run doctor)",
+                "nx index md <file> --force   (or `nx index pdf|rdr <file>`; re-index any ONE "
+                "document to establish this install's fence baseline, then re-run doctor)",
             ],
         ))
 
@@ -12182,8 +12013,8 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
             names += f"; +{f.stale_total - len(f.stale_shown)} more"
         note_hint = ""
         suggestions = [
-            "nx index <path>   (a normal re-index clears the fence; "
-            "--force is not required)",
+            "nx index repo <repo-root>   (or `nx index md|pdf|rdr <file>`; a normal "
+            "re-index clears the fence, --force is not required)",
         ]
         if f.stale_notes:
             note_hint = (
@@ -12802,7 +12633,7 @@ def _next_seq_drift_rows(
             "the next registration, so these self-heal when next written to."
         ),
         fix_suggestions=[
-            "nx index <path>   (any registration into the owner floors it)",
+            "nx index repo <repo-root>   (any registration into the owner floors it)",
         ],
     )]
 
@@ -13667,15 +13498,15 @@ def run_health_checks(
         _cat = None
     results.extend(_step("_check_catalog", lambda: _check_catalog(_cat, _cat_path)))
 
-    # RDR-152 / bead nexus-gmiaf.33: storage-service checks.
-    # All three are gated internally on pg_credentials being present; they emit
-    # a single soft-warn-and-skip result when service/PG mode is not configured,
-    # so they are always safe to run.
+    # RDR-152 / bead nexus-gmiaf.33: storage-service checks, each gated on pg_credentials (one soft-warn skip without service/PG mode), so always safe to run.
     results.extend(_step("_check_storage_service_health", lambda: _check_storage_service_health()))
     results.extend(_step("_check_engine_convergence", lambda: _check_engine_convergence()))
     results.extend(_step("_check_ownerless_writes", lambda: _check_ownerless_writes(engine_status)))  # nexus-20onx
     results.extend(_step("_check_data_moves", lambda: _check_data_moves(engine_status)))  # nexus-f3yqd.2.17 (RDR-246)
     results.extend(_step("_check_pg_bundle", _check_pg_bundle))  # nexus-f3yqd.2.23: a bundle without pg_background
+    results.extend(_step("_check_rdr229_completion", lambda: _check_rdr229_completion(engine_status)))  # nexus-p2m1x.17 (RDR-229 P3.1)
+    results.extend(_step("_check_collection_ids", lambda: _check_collection_ids(engine_status)))  # nexus-p2m1x.32 (RDR-229 P3.12)
+    results.extend(_step("_check_collection_tuples", lambda: _check_collection_tuples(engine_status)))  # nexus-p2m1x.28 (RDR-229 P3.8)
     results.extend(_step("_check_engine_reaper", lambda: _check_engine_reaper(engine_status)))  # nexus-wbfpw.56
     results.extend(_step("_check_per_collection_indexes", lambda: _check_per_collection_indexes(engine_status)))  # nexus-43ulx.24
     results.extend(_step("_check_chunks_leaf_bloat", lambda: _check_chunks_leaf_bloat(engine_status, verbose=verbose)))  # nexus-dxsjc, nexus-i827c

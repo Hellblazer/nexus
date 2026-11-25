@@ -9,6 +9,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.EfSearchProbe;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.db.TenantScope;
@@ -233,7 +234,7 @@ class PciPlanAndRecallIntegrationTest {
         }
     }
 
-    /** Seed the three collections of the crowd-out and the small one, then ANALYZE the leaf. */
+    /** Seed the three collections of the crowd-out and the small one, then ANALYZE the leaf and the manifest tables. */
     private void seed() throws Exception {
         Random rnd = new Random(SEED);
         double[] q0 = normalize(gauss(rnd));
@@ -255,7 +256,13 @@ class PciPlanAndRecallIntegrationTest {
             insert(ctx, SMALL, N_SMALL, 0.45, 0.75, rnd, q0, centres, null);
 
             PgContainerHelper.installTestObjects(su);
-            PgContainerHelper.analyzeTable(su, DSL.table(DSL.name("nexus", leaf)));
+            // The leaf, and the manifest tables the search's ownership EXISTS joins (and the by-id twin's catalog_collections).
+            // Left to autoanalyze they read reltuples=0 until it runs, and the plan the canary reads then depends on whether it
+            // landed in the test's window (nexus-p2m1x.22; PciIdCanaryIntegrationTest). The deliberate index_not_used test
+            // (order 17) is unaffected: its verdict is that the small collection's own index does not exist.
+            for (String table : List.of(leaf, "catalog_documents", "catalog_document_chunks", "catalog_collections")) {
+                PgContainerHelper.analyzeTable(su, DSL.table(DSL.name("nexus", table)));
+            }
         }
         for (int i = 0; i < QUERIES; i++) {
             double[] pert = orthTo(gauss(rnd), q0);
@@ -270,10 +277,11 @@ class PciPlanAndRecallIntegrationTest {
     private void insert(DSLContext ctx, String collection, int n, double rhoLo, double rhoHi, Random rnd,
                         double[] q0, double[][] centres, Map<String, float[]> keep) {
         String[] hex = new String[n];
+        Long cid = CollectionIds.require(ctx, TENANT, collection);
         for (int from = 0; from < n; from += 500) {
             int to = Math.min(n, from + 500);
             var step = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384);
+                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.COLLECTION_ID);
             for (int i = from; i < to; i++) {
                 double rho = rhoLo + (rhoHi - rhoLo) * rnd.nextDouble();
                 double[] m = centres[rnd.nextInt(CLUSTERS)];
@@ -288,7 +296,7 @@ class PciPlanAndRecallIntegrationTest {
                 byte[] chash = sha256(TENANT + "|" + collection + "|" + i);
                 hex[i] = HexFormat.of().formatHex(chash);
                 if (keep != null) keep.put(hex[i], fv);
-                step = step.values(TENANT, collection, chash, MODEL, "t", Vector.of(fv));
+                step = step.values(TENANT, collection, chash, MODEL, "t", Vector.of(fv), cid);
             }
             step.execute();
         }

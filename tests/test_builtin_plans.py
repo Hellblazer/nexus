@@ -256,3 +256,52 @@ def test_builtin_template_scope_topic_is_never_a_bound_var(path: Path) -> None:
             "a required search binding silently zeroes every result when "
             "the text (as it always will) fails to match a real label."
         )
+
+
+_AUTHOR_FILTER_TOOLS = frozenset({"query", "search_metadata_scoped"})
+
+
+def test_the_author_filter_check_examines_a_real_author_step() -> None:
+    """Non-vacuity: the literal-author check above must have a step to examine.
+
+    find-by-author binds ``author``; if no builtin retrieval step carried one,
+    the per-template check would pass over nothing.
+    """
+    seen = 0
+    for path in _YAML_FILES:
+        steps = (yaml.safe_load(path.read_text()).get("plan_json") or {}).get("steps") or []
+        seen += sum(
+            1 for st in steps
+            if (st or {}).get("tool") in _AUTHOR_FILTER_TOOLS and "author" in ((st or {}).get("args") or {})
+        )
+    assert seen >= 1, "no builtin retrieval step carries `author`: the literal-author check is vacuous"
+
+
+@pytest.mark.skipif(
+    not _BUILTIN_DIR.exists() or not _YAML_FILES,
+    reason="conexus/plans/builtin/ dir is empty - defensive skip; expected to be populated",
+)
+@pytest.mark.parametrize("path", _YAML_FILES, ids=[p.name for p in _YAML_FILES])
+def test_builtin_template_author_filter_is_never_a_literal(path: Path) -> None:
+    """A retrieval step's ``author`` must come from a binding, never a literal.
+
+    ``author`` is a catalog filter: the engine matches it as a
+    case-insensitive substring of the catalog document's author and the
+    query takes the catalog-param path. ``debug-default`` shipped a literal
+    ``author: nexus``, which narrowed every debug answer to catalog
+    documents whose author contains "nexus" (and failed outright on an
+    install without a catalog). A caller-bound ``$author`` (find-by-author)
+    is the only legitimate use.
+    """
+    template = yaml.safe_load(path.read_text())
+    steps = (template.get("plan_json") or {}).get("steps") or []
+    for i, step in enumerate(steps):
+        step = step or {}
+        if step.get("tool") not in _AUTHOR_FILTER_TOOLS:
+            continue
+        author = (step.get("args") or {}).get("author")
+        assert author is None or (isinstance(author, str) and author.startswith("$")), (
+            f"{path.name} steps[{i}]: author={author!r} is a literal. A literal "
+            "author silently narrows every answer to one catalog author; bind "
+            "it from the question ($author) or drop it."
+        )

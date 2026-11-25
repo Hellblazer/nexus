@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -137,24 +138,25 @@ class DropTenantPartitionsIntegrationTest {
         PgContainerHelper.insertChunk384(su, tenant, c2, x, vec(384));
         PgContainerHelper.insertChunk384(su, tenant, c2, y, vec(384));
         PgContainerHelper.ownChunks(su, tenant, c1, hex(a), hex(b));
-        su.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
-                TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
-            .values(topicId, tenant, "t", c1, 0, OffsetDateTime.now(), "pending").execute();
+        su.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.COLLECTION_ID,
+                TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+            .values(topicId, tenant, "t", c1, CollectionIds.require(su, tenant, c1), 0, OffsetDateTime.now(), "pending").execute();
         su.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID,
-                TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-            .values(tenant, a, topicId, "projection", c1, OffsetDateTime.now(), CODE_3).execute();
-        su.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH,
-                CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
-            .values(tenant, c2, x, OffsetDateTime.now().minusDays(2), MINILM_384).execute();
+                TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
+                TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+            .values(tenant, a, topicId, "projection", c1, CollectionIds.require(su, tenant, c1), OffsetDateTime.now(), CODE_3).execute();
+        su.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
+                CHUNK_ORPHANED_AT.COLLECTION_ID, CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT,
+                CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
+            .values(tenant, c2, CollectionIds.require(su, tenant, c2), x, OffsetDateTime.now().minusDays(2), MINILM_384).execute();
         su.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.LABEL,
-                TAXONOMY_CENTROIDS.EMBEDDING_1024)
-            .values(tenant, c1, topicId, CODE_3, "c1", vec(1024)).execute();
+                TAXONOMY_CENTROIDS.COLLECTION_ID, TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
+                TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_1024)
+            .values(tenant, c1, CollectionIds.require(su, tenant, c1), topicId, CODE_3, "c1", vec(1024)).execute();
         su.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.LABEL,
-                TAXONOMY_CENTROIDS.EMBEDDING_384)
-            .values(tenant, c2, topicId + 1, MINILM_384, "c2", vec(384)).execute();
+                TAXONOMY_CENTROIDS.COLLECTION_ID, TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
+                TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_384)
+            .values(tenant, c2, CollectionIds.require(su, tenant, c2), topicId + 1, MINILM_384, "c2", vec(384)).execute();
     }
 
     private Connection admin() throws SQLException {

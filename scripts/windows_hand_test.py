@@ -75,16 +75,20 @@ def _workflow(workflow: Path) -> dict:
     return yaml.safe_load(workflow.read_text(encoding="utf-8"))
 
 
-def ci_step_run(name: str, workflow: Path = WORKFLOW) -> str:
-    """The ``run`` text of the workflow step called *name* (exactly one)."""
+#: The job that runs CI's Windows set. Its steps are the ones a hand run copies; another job may carry a step of
+#: the same name (the label-windows job repeats the fixup and floor steps, nexus-21kr3).
+SET_JOB: str = "conformance"
+
+
+def ci_step_run(name: str, workflow: Path = WORKFLOW, job: str = SET_JOB) -> str:
+    """The ``run`` text of the step called *name* in *job* of the workflow (exactly one)."""
     runs = [
         str(step["run"])
-        for job in (_workflow(workflow).get("jobs") or {}).values()
-        for step in job.get("steps") or []
+        for step in ((_workflow(workflow).get("jobs") or {}).get(job) or {}).get("steps") or []
         if step.get("name") == name
     ]
     if len(runs) != 1:
-        raise SystemExit(f"windows_hand_test: {len(runs)} steps named {name!r} in {workflow}, expected one")
+        raise SystemExit(f"windows_hand_test: {len(runs)} steps named {name!r} in job {job!r} of {workflow}, expected one")
     return runs[0]
 
 

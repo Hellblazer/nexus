@@ -91,6 +91,11 @@ def _server_env(output_root: Path) -> dict[str, str]:
         "MINERU_API_OUTPUT_ROOT": str(output_root),
         "MINERU_API_TASK_RETENTION_SECONDS": "300",
     })
+    # F35 (nexus-7t3w1): point the server at nexus's verified weights (MINERU_MODEL_SOURCE=local plus the
+    # nexus mineru.json) when they are in use. MinerU reads both at import, so they belong in the spawn env.
+    from nexus import mineru_weights  # noqa: PLC0415 — deferred local import — avoids import-time cost
+
+    env.update(mineru_weights.child_env())
     return env
 
 
@@ -354,6 +359,7 @@ def spawn_server_process(port: int, *, platform: str | None = None) -> subproces
     except Exception:  # noqa: BLE001 — an unknown version must not block a spawn
         _mineru_version = None
 
+    from nexus import mineru_weights  # noqa: PLC0415 — deferred local import — avoids import-time cost
     from nexus.daemon.service_registry import pid_ns_field  # noqa: PLC0415 — deferred: the lease records use the same field
 
     _write_pid_file(_pid_file_path(), {
@@ -377,6 +383,11 @@ def spawn_server_process(port: int, *, platform: str | None = None) -> subproces
         # tool environment replaced under a running server takes its libraries
         # (and every lazy import after it) away while /health still says 200.
         "executable": mineru_bin,
+        # F35 (nexus-7t3w1): the weights this server was started on, as its environment named them (the nexus
+        # root's path, or None for MinerU's own source). The environment is fixed at spawn, so the extractor
+        # cycles a server whose record differs from what child_env() gives now (a server started before the
+        # root was complete would read, and download into, the Hugging Face cache inside a page budget).
+        "weights_root": mineru_weights.weights_state(env),
     })
     return proc
 

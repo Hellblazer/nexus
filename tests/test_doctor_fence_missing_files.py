@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """GH #1610: the stale index-run fence row names repo documents whose files are gone from the repo, and its only
-repo remedy was `nx index <path> --force`, which cannot re-index a file that no longer exists.
+repo remedy was `nx index <path> --force` (no such command form; it is now `nx index repo <repo-root> --force`), which cannot re-index a file that no longer exists.
 
 The row now checks each named repo document's file against its owner's repo root (when that root is on this
 machine). A missing file is counted on its own and pointed at `nx catalog prune-stale`, which removes catalog
@@ -75,7 +75,7 @@ def test_present_files_keep_the_force_remedy_beside_the_prune(tmp_path: Path, mo
     r = _run(monkeypatch, entries, _OWNERS, {"1.22": str(repo)})
     assert "1 of the named repo document(s) name a file that is no longer in its repo" in r.detail, r.detail
     assert any(f.startswith("nx catalog prune-stale --owner 1.22") for f in r.fix_suggestions)
-    assert any("nx index <path> --force" in f for f in r.fix_suggestions), "the present file still gets --force"
+    assert any("nx index repo <repo-root> --force" in f for f in r.fix_suggestions), "the present file still gets --force"
 
 
 @pytest.mark.parametrize("roots", [{}, {"1.22": "/nonexistent/clone/not/on/this/machine"}, RuntimeError("owner roots unavailable")])
@@ -87,4 +87,4 @@ def test_a_repo_not_on_this_machine_is_not_judged_missing(monkeypatch: pytest.Mo
     r = _run(monkeypatch, entries, _OWNERS, roots)
     assert "no longer in its repo" not in r.detail, r.detail
     assert not any("prune-stale" in f for f in r.fix_suggestions)
-    assert any("nx index <path> --force" in f for f in r.fix_suggestions), "unchanged from before #1610"
+    assert any("nx index repo <repo-root> --force" in f for f in r.fix_suggestions), "unchanged from before #1610"

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.4 (nexus-p2m1x.22; linda's ruling, 2026-11-22): nexus.rdr229_gate_latch, one row per completion-check gate that has held on
+    this install. The completion check writes the row for gate 3 the first time it holds (INSERT ... ON CONFLICT DO NOTHING) and every
+    engine reads it, so a gate that has held stays held: a live gate 3 that goes false later (an id index REINDEXed or rebuilt, so INVALID
+    for a while) does not send readers back to the name path, whose indexes retire once gate 3 has latched.
+
+    Columns:
+      gate           the primary key: the gate's name ('gate3').
+      latched_at     when the check first saw the gate hold.
+      engine_version the engine release that wrote it.
+      pci_off        true when the gate latched while per-collection indexing was off (NX_SEARCH_PCI=0): no per-collection index was required
+                     then, so an engine that later runs with PCI on builds the id indexes first, as if gate 2 held, because readers are on the
+                     id either way. false (the default) when the id indexes were required.
+
+    Global table, no tenant column and no row-level security (the posture of data_moves, service_tokens and install_pings): it describes
+    the install and holds no tenant data, so it is not in the tenant export registry (that covers the RLS tables) and a tenant export or
+    import never reads or writes it. nexus_svc reads and writes it through grants-nexus-svc-1 (the runAlways loop and ALTER DEFAULT
+    PRIVILEGES, as for every other nexus_admin-owned table); the check itself writes it on the admin connection. A row from before a database
+    restore is not carried by the restore of an older backup: a restored install reads "not latched" and latches again once gate 3 holds.
+
+    Rollback is written verbatim. DDL only, no row DML.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-080-1" author="nexus-p2m1x.22">
+        <comment>Create nexus.rdr229_gate_latch, the install-wide latch of the RDR-229 completion check's gates (P3.4). DATA EFFECT: none; one empty table, no row of any other table is read or written.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE TABLE nexus.rdr229_gate_latch (
+    gate            TEXT        PRIMARY KEY,
+    latched_at      TIMESTAMPTZ NOT NULL,
+    engine_version  TEXT        NOT NULL,
+    pci_off         BOOLEAN     NOT NULL DEFAULT false
+);
+        </sql>
+        <rollback>
+            DROP TABLE IF EXISTS nexus.rdr229_gate_latch;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

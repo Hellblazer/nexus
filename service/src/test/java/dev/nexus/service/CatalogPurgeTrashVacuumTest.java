@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.impl.DSL;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -208,6 +209,7 @@ class CatalogPurgeTrashVacuumTest {
                     .set(CATALOG_DOCUMENTS.TUMBLER, docId)
                     .set(CATALOG_DOCUMENTS.TITLE, docId)
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                     .execute();
             }
         }
@@ -233,6 +235,7 @@ class CatalogPurgeTrashVacuumTest {
                     .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
                     .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashes.get(i)))
                     .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                     .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                     .execute();
             }

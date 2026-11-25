@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.zaxxer.hikari.HikariConfig;
@@ -171,19 +172,22 @@ class ReferenceOnlyChunkReadPathTest {
         try (Connection conn = ds.getConnection()) {
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
             ctx.insertInto(CATALOG_DOCUMENTS)
-               .columns(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-               .values(TENANT, "refonly-owner", "reference-only owner", COL)
+               .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+               .set(CATALOG_DOCUMENTS.TUMBLER, "refonly-owner")
+               .set(CATALOG_DOCUMENTS.TITLE, "reference-only owner")
+               .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL)
+               .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COL))
                .onConflictDoNothing()
                .execute();
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
-               .columns(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-               .values(TENANT, "refonly-owner", 0,
-                       dev.nexus.service.db.Chash.fromHex(REFONLY_CHASH).toBytes(), COL,
-                       // RDR-225: the manifest row carries the chunk's model.
-                       PgContainerHelper.collectionModel(ctx, TENANT, COL))
+               .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
+               .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "refonly-owner")
+               .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+               .set(CATALOG_DOCUMENT_CHUNKS.CHASH, dev.nexus.service.db.Chash.fromHex(REFONLY_CHASH).toBytes())
+               .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COL)
+               .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COL))
+               // RDR-225: the manifest row carries the chunk's model.
+               .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, COL))
                .onConflictDoNothing()
                .execute();
         } catch (java.sql.SQLException e) {

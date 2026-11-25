@@ -196,17 +196,23 @@ class CollectionRegistryTest {
     }
 
     @Test
-    void requireRegistered_skipsDbCheck_whenAlreadyCached() {
-        // Cache the pair WITHOUT a real row — proves requireRegistered trusts the
-        // cache and never re-checks the database once a pair is known-registered.
+    void renameIntoACachedButUnregisteredTarget_refusesWithTheTypedError() {
+        // Retired premise: a cached pair skipped the DB check. RDR-229 P3.1: ids never come from a cache, so a rename resolves the target's id from the registry in its own transaction.
         String collection = "code__cr-cached__voyage-code-3__v1";
         CollectionRegistry.markKnown(TENANT, collection,
             new CollectionRow("code", "cr-cached", "voyage-code-3", 1024, "live"));
+        assertThat(CollectionRegistry.isKnown(TENANT, collection)).isTrue();
         assertThat(rowExists(collection)).isFalse();
 
-        assertThatCode(() -> repo.renameCollection(TENANT, "cr-cached-src", collection))
-            .as("a cached (tenant, collection) pair must skip the DB existence check entirely")
-            .doesNotThrowAnyException();
+        assertThatThrownBy(() -> repo.renameCollection(TENANT, "cr-cached-src", collection))
+            .as("a cached (tenant, collection) pair with no registry row must not stand in for the row")
+            .isInstanceOf(UnregisteredCollectionException.class)
+            .hasMessageContaining(collection);
+
+        assertThat(rowExists(collection))
+            .as("the refused rename must create no catalog_collections row").isFalse();
+        assertThat(rowExists("cr-cached-src"))
+            .as("nor one for the source").isFalse();
     }
 
     // -------------------------------------------------------------------------
@@ -253,7 +259,7 @@ class CollectionRegistryTest {
         CollectionRegistry.markKnown("t1", "c2", row);
         CollectionRegistry.markKnown("t2", "c1", row);
 
-        CollectionRegistry.evictTenant("t1");
+        CollectionRegistry.shared().evictTenant("t1");
 
         assertThat(CollectionRegistry.isKnown("t1", "c1")).isFalse();
         assertThat(CollectionRegistry.isKnown("t1", "c2")).isFalse();
@@ -262,12 +268,12 @@ class CollectionRegistryTest {
         // collide with "t1" — the '|' separator is part of the prefix test).
         assertThat(CollectionRegistry.isKnown("t2", "c1")).isTrue();
         CollectionRegistry.markKnown("t1x", "c9", row);
-        CollectionRegistry.evictTenant("t1");
+        CollectionRegistry.shared().evictTenant("t1");
         assertThat(CollectionRegistry.isKnown("t1x", "c9"))
                 .as("evictTenant(\"t1\") must not evict tenant \"t1x\" via a bare prefix match")
                 .isTrue();
         // Evicting a tenant with no cached entries is a harmless no-op.
-        CollectionRegistry.evictTenant("never-known-tenant");
+        CollectionRegistry.shared().evictTenant("never-known-tenant");
     }
 
     // -------------------------------------------------------------------------
@@ -401,6 +407,7 @@ class CollectionRegistryTest {
         String name = "code__cr-race__voyage-code-3__v1";
         String target = "code__cr-race-target__voyage-code-3__v2";
         seedRegisteredWithAttributes(name, "code", "cr-race", "voyage-code-3", 1024, "live");
+        seedRegistered(target);   // RDR-229 P3.1: a tombstone names its successor by registry id
         CollectionRegistry.afterMissReadForTests = () -> catalogRepo.supersedeCollection(TENANT, name, target, "");
         CollectionRow readBeforeTheSupersede;
         try {
@@ -423,7 +430,7 @@ class CollectionRegistryTest {
         // nexus-hkh1y: evictTenant (a profile write, the tenant reset route) counts as an evict too.
         String name = "code__cr-race-tenant__voyage-code-3__v1";
         seedRegisteredWithAttributes(name, "code", "cr-race-tenant", "voyage-code-3", 1024, "live");
-        CollectionRegistry.afterMissReadForTests = () -> CollectionRegistry.evictTenant(TENANT);
+        CollectionRegistry.afterMissReadForTests = () -> CollectionRegistry.shared().evictTenant(TENANT);
         try {
             tenantScope.withTenant(TENANT, ctx -> CollectionRegistry.require(ctx, TENANT, name));
         } finally {
@@ -488,6 +495,7 @@ class CollectionRegistryTest {
         assertThat(cachedBefore.supersededBy()).isEmpty();
         assertThat(CollectionRegistry.cached(TENANT, name)).isPresent();
 
+        seedRegistered(target);   // RDR-229 P3.1: a tombstone names its successor by registry id
         catalogRepo.supersedeCollection(TENANT, name, target, "");
 
         assertThat(CollectionRegistry.cached(TENANT, name))
@@ -548,6 +556,7 @@ class CollectionRegistryTest {
         String name = "code__cr-writable-dead__voyage-code-3__v1";
         String successor = "code__cr-writable-dead__voyage-code-3__v2";
         seedRegisteredWithAttributes(name, "code", "cr-writable-dead", "voyage-code-3", 1024, "live");
+        seedRegistered(successor);   // RDR-229 P3.1: a tombstone names its successor by registry id
         catalogRepo.supersedeCollection(TENANT, name, successor, "");
 
         assertThatThrownBy(() -> tenantScope.withTenant(TENANT,
@@ -575,6 +584,7 @@ class CollectionRegistryTest {
         CollectionRegistry.lookupWritable(tenantScope, TENANT, name);
         assertThat(CollectionRegistry.isKnown(TENANT, name)).isTrue();
 
+        seedRegistered(successor);   // RDR-229 P3.1: a tombstone names its successor by registry id
         catalogRepo.supersedeCollection(TENANT, name, successor, "");
 
         assertThatThrownBy(() -> CollectionRegistry.lookupWritable(tenantScope, TENANT, name))
@@ -586,13 +596,14 @@ class CollectionRegistryTest {
     void lookupWritable_aRevivedName_isWritableAgain_becauseTheTombstoneWasNeverCached() {
         String name = "code__cr-revive__voyage-code-3__v1";
         seedRegisteredWithAttributes(name, "code", "cr-revive", "voyage-code-3", 1024, "live");
+        seedRegistered("code__cr-revive__voyage-code-3__v2");   // RDR-229 P3.1: a tombstone names its successor by registry id
         catalogRepo.supersedeCollection(TENANT, name, "code__cr-revive__voyage-code-3__v2", "");
         assertThatThrownBy(() -> CollectionRegistry.lookupWritable(tenantScope, TENANT, name))
             .isInstanceOf(CollectionSupersededException.class);
 
         // An explicit registration clears superseded_by without touching the cache.
         tenantScope.withTenant(TENANT, ctx -> ctx.update(CATALOG_COLLECTIONS)
-            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "").setNull(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT).and(CATALOG_COLLECTIONS.NAME.eq(name)))
             .execute());
 

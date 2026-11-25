@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.exception.DataAccessException;
 import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.PgCatalogProbes;
@@ -192,6 +193,24 @@ class PgVectorRepositoryGcQuarantineTest {
      * this suite, so the SQL functions' own handling of an already-existing
      * re-referenced row stays covered.
      */
+    /**
+     * RDR-229 P3.5b: a row naming a collection that has no registry row is a LEGACY row, written before P3.1 and not yet
+     * stamped, so its id is NULL. No P3.1 writer can write one (each takes the id from the registry, and a CHECK refuses a
+     * named row without one), and a row whose id names no registry row names no collection at all to a reader that reads
+     * the id: it is never the unregistered collection's row. The seeds below write the legacy shape with the named P3.1
+     * CHECKs dropped around the insert, then put them back NOT VALID with the operator's re-add ({@link #readdP31Checks}),
+     * which is how they stand on a database the stamp has not finished.
+     */
+    private static void dropP31Checks(Connection su, org.jooq.Table<?> table, String... checks) throws SQLException {
+        for (String check : checks) PgContainerHelper.dropConstraint(su, table, check);
+    }
+
+    /** The generated re-add (db/rdr229/p31-readd.sql): every dropped P3.1 CHECK back, NOT VALID, no row scanned. */
+    private static void readdP31Checks(Connection su) throws Exception {
+        PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-p31-readd.xml",
+            "databasechangelog_test_p31_readd", java.util.Map.of());
+    }
+
     private void seedManifestBypassingFk(String tenant, String docId, String chash, String collection)
             throws Exception {
         try (var conn = pg.createConnection("")) {
@@ -205,21 +224,36 @@ class PgVectorRepositoryGcQuarantineTest {
             // (it reads the collection's model to stamp the row), and the "first-ever origin" scenarios are
             // exactly the ones whose origin is unregistered. The row is written directly instead, carrying the
             // suite's model, which is the model of the chunk it will later be restored with.
-            catalogRepo.upsertDocument(tenant, Map.of(
-                "tumbler", docId,
-                "title", "GC quarantine fixture " + docId,
-                "content_type", "code",
-                "corpus", "code",
-                "physical_collection", collection
-            ));
+            // RDR-229 P3.1: nor does the document writer accept an unregistered physical collection any more (a typed
+            // 422), so the document row is written directly too. RDR-229 P3.5b: both rows are legacy rows (a NULL id),
+            // the only shape a row of a collection with no registry row can have; see dropP31Checks.
             try (var conn = pg.createConnection("")) {
+                conn.setAutoCommit(true);
+                dropP31Checks(conn, dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS,
+                    "catalog_documents_physical_collection_id_check");
+                dropP31Checks(conn, CATALOG_DOCUMENT_CHUNKS, "catalog_document_chunks_collection_id_check");
                 DSL.using(conn, SQLDialect.POSTGRES)
-                    .insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                        CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                    .values(tenant, docId, 0, java.util.HexFormat.of().parseHex(chash), 0, collection, MODEL)
+                    .insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS)
+                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TUMBLER, docId)
+                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TITLE, "GC quarantine fixture " + docId)
+                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.CONTENT_TYPE, "code")
+                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.CORPUS, "code")
+                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                    .setNull(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
                     .execute();
+                DSL.using(conn, SQLDialect.POSTGRES)
+                    .insertInto(CATALOG_DOCUMENT_CHUNKS)
+                    .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+                    .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
+                    .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                    .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+                    .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 0)
+                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                    .setNull(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                    .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+                    .execute();
+                readdP31Checks(conn);
             }
         }
         try (var conn = pg.createConnection("")) {
@@ -244,11 +278,18 @@ class PgVectorRepositoryGcQuarantineTest {
             org.jooq.DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.ensureTenantPartitions(ctx, tenant);
             PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_fk");
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                           CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
-               .values(tenant, collection, java.util.HexFormat.of().parseHex(chashHex), MODEL, "text",
-                       Vector.of(constantVector1024()))
+            // RDR-229 P3.5b: a legacy row (a NULL id), see dropP31Checks.
+            dropP31Checks(su, CHUNKS, "chunks_collection_id_check", "chunks_collection_id_not_null");
+            ctx.insertInto(CHUNKS)
+               .set(CHUNKS.TENANT_ID, tenant)
+               .set(CHUNKS.COLLECTION, collection)
+               .setNull(CHUNKS.COLLECTION_ID)
+               .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
+               .set(CHUNKS.EMBEDDING_MODEL, MODEL)
+               .set(CHUNKS.CHUNK_TEXT, "text")
+               .set(CHUNKS.EMBEDDING_1024, Vector.of(constantVector1024()))
                .execute();
+            readdP31Checks(su);
         }
     }
 
@@ -627,6 +668,7 @@ class PgVectorRepositoryGcQuarantineTest {
                 DSL.using(conn, SQLDialect.POSTGRES).insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, TENANT_A)
                     .set(CHUNKS.COLLECTION, originCol)
+                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT_A, originCol))
                     .setNull(CHUNKS.CHASH)
                     .set(CHUNKS.EMBEDDING_MODEL, MODEL)
                     .set(CHUNKS.CHUNK_TEXT, "x")
@@ -1447,7 +1489,13 @@ class PgVectorRepositoryGcQuarantineTest {
         // anywhere" ban is therefore no longer the correct pin -- re-derived
         // below to still assert the OLD guard shape is gone (containsOnlyOnce
         // + tied to the collision-sample INTO target) without going vacuous.
-        assertThat(functionDef)
+        // RDR-229 P3.5b (vectors-077-87): the copy INSERT retries once on a unique_violation of the chunks id twin, and
+        // tells the twin from any other unique index by its key columns, one array_agg over pg_attribute (a catalog
+        // probe of the violated index, not a set of chashes). That exact text is set aside, once, before the pin below.
+        String twinProbe = "pg_catalog.array_agg(a.attname::text ORDER BY a.attname)";
+        assertThat(functionDef).as("the id-twin retry's index-column probe, exactly once").containsOnlyOnce(twinProbe);
+        String withoutTwinProbe = functionDef.replace(twinProbe, "<twin-key-columns>");
+        assertThat(withoutTwinProbe)
             .as("array_agg's ONLY legitimate use in this function is building the "
                 + "N7-style cross-dim collision sample (v_collision_sample) for the "
                 + "Critical-1 guard (T2 22454) -- the OLD registration guard's "
@@ -1471,8 +1519,11 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(functionDef).as("the victim set is chosen once and read by every later statement")
             .contains("_wbfpw16_victim").containsOnlyOnce("INSERT INTO _wbfpw16_victim")
             .contains("USING _wbfpw16_victim v");
-        // "CREATE TEMP TABLE IF NOT EXISTS" is not a predicate; count only the subquery form.
-        int notExistsCount = functionDef.split("NOT EXISTS \\(", -1).length - 1;
+        // "CREATE TEMP TABLE IF NOT EXISTS" is not a predicate; count only the subquery form. RDR-229 P3.5b: the id-twin
+        // retry's test of the violated index (a NOT EXISTS over pg_class/pg_index, no manifest) is set aside, once.
+        String twinTest = "IF v_p35b_try = 2 OR NOT EXISTS (";
+        assertThat(functionDef).as("the id-twin retry's index test, exactly once").containsOnlyOnce(twinTest);
+        int notExistsCount = functionDef.replace(twinTest, "<twin-index-test>").split("NOT EXISTS \\(", -1).length - 1;
         assertThat(notExistsCount)
             .as("no inline NOT EXISTS over the manifest survives: only the emptiness check on the victim set")
             .isEqualTo(1);

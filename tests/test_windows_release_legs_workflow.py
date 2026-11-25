@@ -727,6 +727,7 @@ PHASE3_WINDOWS_MODULES = (
     "src/nexus/mcp/_win_stdin.py",
     "src/nexus/_install/generation_core.py", "src/nexus/_install/layout_core.py",
     "src/nexus/_install/gc_core.py", "src/nexus/_install/census_core.py",
+    "src/nexus/_install/lease_core.py", "src/nexus/_install/_nx_lease.py",
     "src/nexus/db/pg_provision.py", "src/nexus/db/pg_bundle.py", "src/nexus/commands/daemon.py",
     "src/nexus/daemon/storage_service_daemon.py", "src/nexus/daemon/service_registry.py",
     "src/nexus/daemon/aspect_worker_daemon.py",
@@ -735,7 +736,8 @@ PHASE3_WINDOWS_MODULES = (
 WINDOWS_TEST_SET = (
     "tests/daemon/", "tests/test_process_group_safety.py", "tests/test_session_sweep_orphan_trackers.py",
     "tests/test_win_console.py", "tests/test_winsec.py", "tests/test_winproc_core.py",
-    "tests/test_install_generation_real_windows.py", "tests/test_session_end_real_windows.py",
+    "tests/test_install_generation_real_windows.py", "tests/test_install_lease_windows.py",
+    "tests/test_session_end_real_windows.py",
     "tests/test_mcp_win_stdin.py", "tests/test_mcp_win_stdin_real_windows.py",
     "tests/test_os_trust_store.py",
     # Phase 4 (nexus-f9bgu.38 finding C): the desktop bootstrap and the uv hook launcher.
@@ -826,6 +828,7 @@ REAL_KERNEL_PATTERNS = (
     "tests.test_winproc_core.TestRealWindowsKernel",
     "tests.test_os_trust_store.TestRealWindows",
     "tests.test_install_generation_real_windows.TestRealWindows",
+    "tests.test_install_lease_windows.TestRealWindows",
     "tests.daemon.test_pid_alive_windows.TestRealWindowsKernel",
     "tests.test_session_end_real_windows.TestRealWindows",
     "tests.test_mcp_win_stdin_real_windows.TestRealWindows",
@@ -939,3 +942,34 @@ def test_every_module_the_windows_test_set_ignores_is_posix_only() -> None:
         assert module_skip.search(path.read_text(encoding="utf-8")), (
             f"{rel} is left out of the Windows test set, so it must skip its whole module on win32"
         )
+
+
+def test_the_p36_label_test_runs_against_the_real_engine_with_a_floor() -> None:
+    """nexus-21kr3: the label test is `integration` and needs the engine, so the conformance step (substrate none,
+    default addopts) would deselect it without a word. Its own job selects it and requires it to have PASSED."""
+    target = "tests/integration/test_rdr229_p36_label_windows.py"
+    conformance = next(s["run"] for s in _doc(REHEARSAL)["jobs"]["conformance"]["steps"] if "pytest" in s.get("run", ""))
+    assert target not in conformance, "the conformance step deselects integration tests; the label test runs here"
+    job = _doc(REHEARSAL)["jobs"]["label-windows"]
+    assert job["runs-on"] == LABEL
+    assert "NX_TEST_T2_SUBSTRATE" not in job.get("env", {}), "the label test needs the engine substrate"
+    steps = job["steps"]
+    build = next(s for s in steps if s.get("name") == "Build the gate jar")
+    assert "mvnw.cmd" in build["run"] and "-Pprebuilt-jooq" in build["run"], "the substrate needs the gate jar"
+    # `shell: bash` on win-release is WSL's bash.exe with no distribution (run 45032556189)
+    assert all(s.get("shell") != "bash" for s in steps) and not any("maven-cache" in s.get("uses", "") for s in steps)
+    assert "jooq-codegen" in job["needs"]
+    assert any("setup-graalvm" in s.get("uses", "") for s in steps), "the substrate needs java on PATH"
+    run = next(s["run"] for s in steps if "pytest" in s.get("run", ""))
+    assert target in run and "tests/test_chunk_seed.py" in run and "--junitxml=label-windows-junit.xml" in run
+    # the label test is integration-marked and the seed tests are not: the selection must keep both
+    assert '-m "not lint and not slow"' in run
+    floor = next(s["run"] for s in steps if "check_junit_floor.py" in s.get("run", ""))
+    assert "label-windows-junit.xml" in floor and "--min-passed 15 " in floor and "--max-skipped 0" in floor
+    test_name = re.search(r"--require-passed (\S+)", floor).group(1)
+    assert f"def {test_name}(" in (Path(__file__).parent / "integration" / Path(target).name).read_text(encoding="utf-8")
+    paths = _triggers(_doc(REHEARSAL))["push"]["paths"]
+    for path in ("src/nexus/corpus.py", "src/nexus/collection_rename.py",
+                 "service/src/main/java/dev/nexus/service/db/CollectionLabel.java",
+                 "tests/_chunk_seed.py", "tests/_catalog_fixture_ops.py"):
+        assert path in paths, path

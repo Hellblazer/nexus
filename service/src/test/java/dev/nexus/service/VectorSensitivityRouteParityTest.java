@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jooq.Field;
 import org.jooq.SQLDialect;
@@ -25,6 +26,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -61,6 +63,26 @@ class VectorSensitivityRouteParityTest {
     private static final Path MAIN = Path.of("src/main/java/dev/nexus/service");
     private static final Path VECTOR_HANDLER = MAIN.resolve("http/VectorHandler.java");
     private static final Path VECTOR_REPO = MAIN.resolve("vectors/PgVectorRepository.java");
+    /** P3.5c moved the search statements' function calls out of PgVectorRepository (its size ceiling): they are the repository's for this census. */
+    private static final Path VECTOR_SEARCH_FUNCTIONS = MAIN.resolve("vectors/SearchFunctions.java");
+
+    private static boolean isRepo(Path p) {
+        return p.equals(VECTOR_REPO) || p.equals(VECTOR_SEARCH_FUNCTIONS);
+    }
+
+    /**
+     * PgVectorRepository's source with SearchFunctions' members folded into its class body: the census reads the members of ONE top-level class,
+     * and the search statements' function calls moved out of it (P3.5c, the size ceiling) without moving out of the repository's behaviour.
+     */
+    private static String repoSource() throws java.io.IOException {
+        String repo = Files.readString(VECTOR_REPO);
+        String fn = Files.readString(VECTOR_SEARCH_FUNCTIONS);
+        Matcher decl = Pattern.compile("(?m)^(?:public\\s+)?(?:final\\s+)?class\\s+SearchFunctions\\b[^{]*\\{").matcher(fn);
+        if (!decl.find()) throw new AssertionError("SearchFunctions' class declaration not found");
+        String body = fn.substring(decl.end(), fn.lastIndexOf('}'));
+        // the repository calls them qualified (SearchFunctions.plainSearchFn(...)); the census follows unqualified calls inside one class
+        return (repo.substring(0, repo.lastIndexOf('}')) + "\n" + body + "\n}\n").replace("SearchFunctions.", "");
+    }
     private static final Pattern TEXT_COLUMN = Pattern.compile("[(,]\\s*(content|chunk_text)\\s+text\\b");
 
     PostgreSQLContainer<?> pg;
@@ -425,6 +447,11 @@ class VectorSensitivityRouteParityTest {
         CLASSIFIED_DEFINITION_READERS.put("reaper_quarantine_chunks(p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_row_limit integer, p_grace interval, p_floor_fraction double precision, p_floor_min_chunks integer, p_dry_run boolean)",
             new Classified("TABLE(moved bigint, reapable_count bigint, total_count bigint, refused boolean, remaining bigint)", Exposure.NO_TEXT,
                 "moves reapable chunks to quarantine: returns counts and a refusal flag"));
+        CLASSIFIED_DEFINITION_READERS.put("rdr229_restamp(p_table text)",
+            new Classified("text", Exposure.NO_TEXT,
+                "RDR-229 P3.1 operator step (vectors-071-1): looks for an orphan row in the table it is given, chunk tables included, "
+                + "by an EXISTS over its name and collection_id columns, and registers one nexus.data_moves row; it never selects "
+                + "chunk_text. The result is a status string built from the table name and a fixed phrase, so it carries no chunk text"));
         CLASSIFIED_DEFINITION_READERS.put("service_tokens_create_tenant_partitions()",
             new Classified("trigger", Exposure.NO_TEXT,
                 "partition maintenance: returns a count, a flag or nothing"));
@@ -437,6 +464,15 @@ class VectorSensitivityRouteParityTest {
         CLASSIFIED_DEFINITION_READERS.put("stamp_chunks_on_manifest_update()",
             new Classified("trigger", Exposure.NO_TEXT,
                 "trigger function that stamps chunk_orphaned_at; no result row"));
+        CLASSIFIED_DEFINITION_READERS.put("catalog_document_chunks_name_from_chunk()",
+            new Classified("trigger", Exposure.NO_TEXT,
+                "RDR-229 P3.7 vectors-079 trigger function: a BEFORE INSERT OR UPDATE row trigger that probes nexus.chunks by its key columns (tenant, collection, collection_id, chash, embedding_model) and sets the child row's own collection name; it never selects chunk_text and returns the child row to the trigger machinery, no result row"));
+        CLASSIFIED_DEFINITION_READERS.put("chunk_orphaned_at_name_from_chunk()",
+            new Classified("trigger", Exposure.NO_TEXT,
+                "RDR-229 P3.7 vectors-079 trigger function: a BEFORE INSERT OR UPDATE row trigger that probes nexus.chunks by its key columns (tenant, collection, collection_id, chash, embedding_model) and sets the child row's own collection name; it never selects chunk_text and returns the child row to the trigger machinery, no result row"));
+        CLASSIFIED_DEFINITION_READERS.put("topic_assignments_name_from_chunk()",
+            new Classified("trigger", Exposure.NO_TEXT,
+                "RDR-229 P3.7 vectors-079 trigger function: a BEFORE INSERT OR UPDATE row trigger that probes nexus.chunks by its key columns (tenant, collection, collection_id, chash, embedding_model) and sets the child row's own collection name; it never selects chunk_text and returns the child row to the trigger machinery, no result row"));
         CLASSIFIED_DEFINITION_READERS.put("taxonomy_coverage_counts_1024(p_collection text)",
             new Classified("TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)", Exposure.NO_TEXT,
                 "counts of live chunks and of those without a topic assignment: numbers, not text"));
@@ -473,6 +509,19 @@ class VectorSensitivityRouteParityTest {
         CLASSIFIED_DEFINITION_READERS.put("text_gate_probe_by_collection_768(p_text text, p_collections text[], p_where jsonb, p_where_path text, p_cap integer, p_embedding_model text, p_tenant text)",
             new Classified("TABLE(collection text, chash bytea)", Exposure.NO_TEXT,
                 "text gate, per collection (vectors-060, nexus-bbtc2); (collection, chash) of the rows whose text matches, no text. The chashes are ranked by text_gated_search_by_chash_<dim>, which carries p_exclude_sensitive, as the probe's are"));
+        // RDR-229 P3.5b (vectors-077-100..139): the id twins of the classified readers above, the same result with the
+        // label parameter replaced by the resolved ids; each is classified as its original is.
+        CLASSIFIED_DEFINITION_READERS.put("manifest_qualifying_hits_by_id(p_collection_ids bigint[], p_where jsonb, p_where_path text, p_manifest_where jsonb, p_manifest_path text, p_cap integer, p_embedding_model text, p_tenant text, p_query_text text, p_exclude_sensitive boolean DEFAULT false)",
+            new Classified("TABLE(hit integer, chunk_collection text, chunk_chash bytea, chunk_collection_id bigint)", Exposure.NO_TEXT,
+                "id twin of manifest_qualifying_hits: text gate over manifest chunks, returns hit, registry label, chash key and id, no text"));
+        for (String dim : List.of("384", "768", "1024")) {
+            CLASSIFIED_DEFINITION_READERS.put("text_gate_probe_" + dim + "_by_id(p_text text, p_collection_ids bigint[], p_where jsonb, p_where_path text, p_cap integer, p_embedding_model text, p_tenant text)",
+                new Classified("SETOF bytea", Exposure.NO_TEXT,
+                    "id twin of text_gate_probe_" + dim + ": the chashes whose text matches, no text; ranked by text_gated_search_by_chash_" + dim + "_by_id, which carries p_exclude_sensitive"));
+            CLASSIFIED_DEFINITION_READERS.put("text_gate_probe_by_collection_" + dim + "_by_id(p_text text, p_collection_ids bigint[], p_where jsonb, p_where_path text, p_cap integer, p_embedding_model text, p_tenant text)",
+                new Classified("TABLE(collection text, chash bytea, collection_id bigint)", Exposure.NO_TEXT,
+                    "id twin of text_gate_probe_by_collection_" + dim + ": (registry label, chash, id) of the rows whose text matches, no text"));
+        }
     }
 
     @Test
@@ -563,7 +612,7 @@ class VectorSensitivityRouteParityTest {
 
     @Test
     void theSinksExemptedForHavingNoCallerAreStillSinksReachedByNoRouteAndCalledByNoMainSource() throws Exception {
-        String repoSrc = Files.readString(VECTOR_REPO);
+        String repoSrc = repoSource();
         Set<String> sinks = ChunkTextRouteCensus.allSinks(repoSrc, textFunctionNames);
         Set<String> reachedByRoutes = new TreeSet<>();
         for (var f : findings()) {
@@ -657,7 +706,7 @@ class VectorSensitivityRouteParityTest {
 
     /** The census over the real sources; the behaviour test uses it to check it holds a recipe per derived route. */
     static List<ChunkTextRouteCensus.Finding> findings(Set<String> textFunctions) throws Exception {
-        return ChunkTextRouteCensus.census(Files.readString(VECTOR_HANDLER), Files.readString(VECTOR_REPO),
+        return ChunkTextRouteCensus.census(Files.readString(VECTOR_HANDLER), repoSource(),
                                            textFunctions, EXEMPT_SINKS.keySet());
     }
 
@@ -707,7 +756,7 @@ class VectorSensitivityRouteParityTest {
 
     @Test
     void theExemptSinksAreStillSinksAndEachIsReachedByExactlyItsNamedRoute() throws Exception {
-        Set<String> sinks = ChunkTextRouteCensus.allSinks(Files.readString(VECTOR_REPO), textFunctionNames);
+        Set<String> sinks = ChunkTextRouteCensus.allSinks(repoSource(), textFunctionNames);
         assertThat(sinks).containsAll(EXEMPT_SINKS.keySet());
         Map<String, Set<String>> routesBySink = new TreeMap<>();
         for (var f : findings()) {
@@ -750,7 +799,7 @@ class VectorSensitivityRouteParityTest {
         int files = 0;
         try (var walk = Files.walk(MAIN)) {
             for (Path p : (Iterable<Path>) walk.filter(f -> f.toString().endsWith(".java"))::iterator) {
-                if (p.equals(VECTOR_REPO)) continue;
+                if (isRepo(p)) continue;
                 files++;
                 found.addAll(ChunkTextRouteCensus.textReaders(p.getFileName().toString(),
                                                               Files.readString(p), textFunctionNames));
@@ -1122,7 +1171,7 @@ class VectorSensitivityRouteParityTest {
             String model = PgContainerHelper.collectionModel(dsl, tenant, origin);
             for (var e : text.entrySet()) {
                 dsl.insertInto(CHUNKS)
-                    .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, origin)
+                    .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, origin).set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, origin))
                     .set(CHUNKS.CHASH, HexFormat.of().parseHex(hexOf(e.getValue())))
                     .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, e.getValue())
                     .set(VectorSeeds.chunkEmbedding(384), VectorSeeds.vecXY(384, 1f, 0f))
@@ -1133,6 +1182,7 @@ class VectorSensitivityRouteParityTest {
                     .set(CATALOG_DOCUMENTS.TENANT_ID, tenant).set(CATALOG_DOCUMENTS.TUMBLER, "doc-" + owned)
                     .set(CATALOG_DOCUMENTS.TITLE, "Doc " + owned).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, origin)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, origin))
                     .set(CATALOG_DOCUMENTS.SENSITIVE, true)
                     .set(CATALOG_DOCUMENTS.DELETED_AT, owned.equals("owned-tomb") ? OffsetDateTime.now().minusDays(60) : null)
                     .execute();
@@ -1141,6 +1191,7 @@ class VectorSensitivityRouteParityTest {
                     .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
                     .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(hexOf(text.get(owned))))
                     .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, origin)
+                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, origin))
                     .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                     .execute();
             }

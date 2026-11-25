@@ -234,6 +234,47 @@ def test_write_many_control_a_live_collection_still_succeeds(_no_write_guard) ->
     assert cat.write()["chunks_written"] == 1
 
 
+# ── the delete route's 409 (RDR-229 P3.5a, linda's D3) ───────────────────────
+
+
+def _delete_409_body(**over: object) -> dict:
+    """The engine's 409 for ``POST /collections/delete`` by the id of a retired row: the ``collection_superseded`` shape plus
+    the ids, ``collection_id`` and ``successor_collection_id`` (the route boundary, ``CollectionSelectorFilter``)."""
+    body = _engine_body(collection_id=7, successor_collection_id=9)
+    body.update(over)
+    return body
+
+
+def test_the_delete_routes_409_names_the_successor_through_superseded_by() -> None:
+    err = superseded_write_error_from_body(409, _delete_409_body())
+    assert isinstance(err, SupersededCollectionWriteError)
+    assert (err.name, err.successor) == (_OLD, _NEW)
+
+
+def test_a_retired_row_with_no_successor_keeps_the_generic_409() -> None:
+    body = _delete_409_body()
+    del body["superseded_by"], body["successor_collection_id"]
+    assert superseded_write_error_from_body(409, body) is None
+
+
+def test_delete_collection_raises_the_typed_error_after_one_send(_no_write_guard) -> None:
+    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — test-local import
+
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(409, json=_delete_409_body())
+
+    client = HttpCatalogClient(base_url="http://engine.test", tenant="t", _token="x")
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(SupersededCollectionWriteError) as caught:
+        client.delete_collection(_OLD)
+    assert caught.value.successor == _NEW
+    assert isinstance(caught.value.__cause__, httpx.HTTPStatusError)
+    assert sum(1 for p in paths if p.endswith("/collections/delete")) == 1, "the refusal is final: no resend"
+
+
 # ── write_with_registration_retry ────────────────────────────────────────────
 
 

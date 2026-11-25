@@ -4,8 +4,8 @@ documents that carry none (GH #1512, nexus-kt7f4).
 
 ``nx doctor``'s "stale index-run fences" row names documents whose
 ``index_state`` was reported NULL although they were indexed after the
-install's fence baseline. For a repo file the remedy is ``nx index <path>
---force``. A document of a non-repo owner (the knowledge store's curator
+install's fence baseline. For a repo file the remedy is ``nx index repo
+<repo-root> --force``. A document of a non-repo owner (the knowledge store's curator
 owner, ``1.1.*``) has no file path: it was written by ``nx store put`` /
 ``store_put`` before that path fenced its writes (nexus-cotmr, 7.3.x), or
 by a bulk import in a migration window (998 rows on one install, all
@@ -93,7 +93,7 @@ def reconcile_fences(reader, writer, *, dry_run: bool, limit: int, echo=click.ec
         f"{verb} {counts['stamped']} of {counts['candidates']} non-repo document(s) with no fence; "
         f"{counts['refused']} refused (manifest not whole in T3), "
         f"{counts['empty_manifest']} with an empty manifest left alone; "
-        f"{counts['skipped_repo']} repo document(s) skipped (use `nx index <path> --force`, or "
+        f"{counts['skipped_repo']} repo document(s) skipped (use `nx index repo <repo-root> --force`, or "
         "`nx catalog prune-stale` for a file no longer in its repo)."
     )
     return counts

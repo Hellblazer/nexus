@@ -6,6 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.binding.VectorBinding;
@@ -390,20 +391,20 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // drift shape) — reachable by NEITHER scope symmetrically before
             // the F8d fix.
             suCtx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                             CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-                 .values(TENANT, "gate2-del-doc", "gate2 del doc", collHome).execute();
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+                 .values(TENANT, "gate2-del-doc", "gate2 del doc", collHome, CollectionIds.require(suCtx, TENANT, collHome)).execute();
             // RDR-225: chunk and manifest row both carry collDel's registered model.
             String delModel = PgContainerHelper.collectionModel(suCtx, TENANT, collDel);
-            suCtx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                             CHUNKS.CHUNK_TEXT, embeddingColumn(1024))
-                 .values(TENANT, collDel, chash.getBytes(StandardCharsets.US_ASCII), delModel, "text",
+            suCtx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
+                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, embeddingColumn(1024))
+                 .values(TENANT, collDel, CollectionIds.require(suCtx, TENANT, collDel), chash.getBytes(StandardCharsets.US_ASCII), delModel, "text",
                          allValueVector(1024, 0.1f))
                  .execute();
-            suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                             CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                             CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                             CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                 .values(TENANT, "gate2-del-doc", 0, chash.getBytes(StandardCharsets.US_ASCII), collDel, delModel)
+            suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                 .values(TENANT, "gate2-del-doc", 0, chash.getBytes(StandardCharsets.US_ASCII), collDel,
+                         CollectionIds.require(suCtx, TENANT, collDel), delModel)
                  .execute();
         }
         try (Connection su = pg.createConnection("")) {
@@ -717,6 +718,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
                 suCtx.insertInto(CHUNKS)
                      .set(CHUNKS.TENANT_ID, TENANT)
                      .set(CHUNKS.COLLECTION, quarantineColl)
+                     .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, quarantineColl))
                      .set(CHUNKS.CHASH, HexFormat.of().parseHex(pair.getKey()))
                      .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(suCtx, TENANT, quarantineColl))
                      .set(CHUNKS.CHUNK_TEXT, pair.getValue())
@@ -852,8 +854,8 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             var suCtx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(suCtx, TENANT, coll);
             suCtx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                             CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-                 .values(TENANT, "gate2-control-tombstone-doc", "control tombstone doc", coll).execute();
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+                 .values(TENANT, "gate2-control-tombstone-doc", "control tombstone doc", coll, CollectionIds.require(suCtx, TENANT, coll)).execute();
             // Genuinely a class-(b) ghost: ghostChash resolves in NO chunk
             // table anywhere (same construction as Order 90's class-(a)
             // ghost) — the owner below is tombstoned, turning this into the
@@ -864,12 +866,11 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // the constraint, insert, then re-add it NOT VALID (catalog-029-0's
             // exact shape) so it is live again (unvalidated) afterward.
             PgContainerHelper.dropCatalogChunksFk(su);
-            suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                             CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                             CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                             CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                  .values(TENANT, "gate2-control-tombstone-doc", 0,
-                         ghostChash.getBytes(StandardCharsets.US_ASCII), coll,
+                         ghostChash.getBytes(StandardCharsets.US_ASCII), coll, CollectionIds.require(suCtx, TENANT, coll),
                          PgContainerHelper.collectionModel(suCtx, TENANT, coll))
                  .execute();
             PgContainerHelper.readdCatalogChunksFkNotValid(su);
@@ -953,24 +954,24 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             String collPin768 = "knowledge__gate2-control-pin__bge-base-en-v15-768__v1";
             PgContainerHelper.insertCollection(suCtx, TENANT, collPin384);
             PgContainerHelper.insertCollection(suCtx, TENANT, collPin768);
-            suCtx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                             CHUNKS.CHUNK_TEXT, embeddingColumn(384))
-                 .values(TENANT, collPin384, pin384.getBytes(StandardCharsets.US_ASCII),
+            suCtx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
+                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, embeddingColumn(384))
+                 .values(TENANT, collPin384, CollectionIds.require(suCtx, TENANT, collPin384), pin384.getBytes(StandardCharsets.US_ASCII),
                          PgContainerHelper.collectionModel(suCtx, TENANT, collPin384), "pin", allValueVector(384, 0.1f))
                  .execute();
-            suCtx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                             CHUNKS.CHUNK_TEXT, embeddingColumn(768))
-                 .values(TENANT, collPin768, pin768.getBytes(StandardCharsets.US_ASCII),
+            suCtx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
+                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, embeddingColumn(768))
+                 .values(TENANT, collPin768, CollectionIds.require(suCtx, TENANT, collPin768), pin768.getBytes(StandardCharsets.US_ASCII),
                          PgContainerHelper.collectionModel(suCtx, TENANT, collPin768), "pin", allValueVector(768, 0.1f))
                  .execute();
-            suCtx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                             CHUNKS.CHUNK_TEXT, embeddingColumn(1024))
-                 .values(TENANT, coll, pin1024.getBytes(StandardCharsets.US_ASCII),
+            suCtx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
+                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, embeddingColumn(1024))
+                 .values(TENANT, coll, CollectionIds.require(suCtx, TENANT, coll), pin1024.getBytes(StandardCharsets.US_ASCII),
                          PgContainerHelper.collectionModel(suCtx, TENANT, coll), "pin", allValueVector(1024, 0.1f))
                  .execute();
             suCtx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                             CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-                 .values(TENANT, "gate2-control-doc", "control doc", coll).execute();
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+                 .values(TENANT, "gate2-control-doc", "control doc", coll, CollectionIds.require(suCtx, TENANT, coll)).execute();
             // Genuinely dangling: ghostChash resolves in NO chunk table, and
             // the owning document is LIVE (no deleted_at set above).
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now
@@ -979,11 +980,10 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // the constraint, insert, then re-add it NOT VALID (catalog-029-0's
             // exact shape) so it is live again (unvalidated) afterward.
             PgContainerHelper.dropCatalogChunksFk(su);
-            suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                             CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                             CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                             CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                 .values(TENANT, "gate2-control-doc", 0, ghostChash.getBytes(StandardCharsets.US_ASCII), coll,
+            suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                 .values(TENANT, "gate2-control-doc", 0, ghostChash.getBytes(StandardCharsets.US_ASCII), coll, CollectionIds.require(suCtx, TENANT, coll),
                          PgContainerHelper.collectionModel(suCtx, TENANT, coll))
                  .execute();
             PgContainerHelper.readdCatalogChunksFkNotValid(su);

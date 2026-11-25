@@ -52,6 +52,8 @@ import java.util.function.Supplier;
  *  "chash_conformance_constraints_supported":true,
  *  "catalog_manifest_foreign_collection_supported":true,
  *  "catalog_uri_segment_census_supported":true,
+ *  "catalog_rdr229_completion_counts_supported":true,
+ *  "catalog_collection_delete_by_id_supported":true,
  *  "catalog_index_run_census_supported":true,
  *  "catalog_next_seq_drift_read_supported":true,
  *  "catalog_docs_by_scheme_supported":true,
@@ -658,6 +660,31 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * RDR-229 P3.1 (nexus-p2m1x.17, review N2) capability advertisement: does {@code GET /v1/catalog/rdr229_completion_counts} answer the
+     * caller's own tenant's completion counts (registry rows, dangling and self-id tombstones, orphan and unstamped rows per NOT VALID
+     * table), which the unauthenticated {@code /v1/status} {@code rdr229_completion} field no longer carries? An engine before the change
+     * answers 404. Always present, always {@code true} on an engine carrying the change. Cloud clients see it only once the public
+     * conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendCatalogRdr229CompletionCountsCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_rdr229_completion_counts_supported\":true");
+    }
+
+    /**
+     * RDR-229 P3.5a (nexus-p2m1x.23) capability advertisement: does {@code POST /v1/catalog/collections/delete} take
+     * {@code collection_id} (a JSON integer) in place of {@code name} or {@code collection}, answer 200 with {@code collection_id}
+     * and {@code name}, refuse a retired row with 409 {@code collection_superseded} naming {@code successor_collection_id}, an id no
+     * row has with 404 {@code unknown_collection_id}, and a label held by several live rows with 409
+     * {@code collection_label_ambiguous}? An engine before the change ignores an id it was sent and answers 400 "name required" (the
+     * body names no label), so a client that deletes by id reads this flag first and refuses {@code --id} without it. Always present,
+     * always {@code true} on an engine carrying the change. Cloud clients see it only once the public conexus edge allowlists it
+     * (the {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendCatalogCollectionDeleteByIdCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_collection_delete_by_id_supported\":true");
+    }
+
+    /**
      * nexus-f3yqd capability advertisement: does {@code GET /v1/catalog/index-run/census?limit=N} answer the stale
      * index-run fences, the unstamped-document baseline and the failed documents with ownerless chunks that {@code nx
      * doctor} otherwise reads from a walk of every document?
@@ -1052,6 +1079,10 @@ public final class VersionHandler implements HttpHandler {
         appendCatalogManifestForeignCollectionCapabilityField(body);
         // RDR-229 P1.2: GET /v1/catalog/uri_segment_census (chroma:// and nx-note:// rows grouped by segment and collection).
         appendCatalogUriSegmentCensusCapabilityField(body);
+        // RDR-229 P3.1 (review N2): GET /v1/catalog/rdr229_completion_counts (the caller's own completion counts).
+        appendCatalogRdr229CompletionCountsCapabilityField(body);
+        // RDR-229 P3.5a: POST /v1/catalog/collections/delete takes collection_id (the delete contract agreed with bob, P3.12).
+        appendCatalogCollectionDeleteByIdCapabilityField(body);
         // nexus-f3yqd (R2): POST /v1/catalog/manifest/fill, the engine-side fill job.
         appendCatalogManifestFillJobCapabilityField(body);
         // nexus-f3yqd: GET /v1/catalog/index-run/census and GET /v1/catalog/owners/next_seq_drift (the doctor's bounded reads).

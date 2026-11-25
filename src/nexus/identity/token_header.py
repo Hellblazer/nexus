@@ -311,8 +311,20 @@ def retry_headers_after_401(sent: Mapping[str, str], path: str = "") -> dict[str
     if record is not None and record.token != attached:
         return {**sent, **token_contract.headers(record.token)}
     if is_send("POST", path):
+        global _DROPPED_RESENDS
+        _DROPPED_RESENDS += 1
         return {k: v for k, v in sent.items() if k != token_contract.IDENTITY_TOKEN_HEADER}
     return None
+
+
+#: How many sends this process resent without their identity token after a 401 (the branch above). A writer that wants its
+#: row stamped by that token (``nx ci record-push``) reads it before and after the write to learn the stamp was lost.
+_DROPPED_RESENDS = 0
+
+
+def dropped_resends() -> int:
+    """The number of sends this process resent without their identity token after a 401 (see :func:`retry_headers_after_401`)."""
+    return _DROPPED_RESENDS
 
 
 def request_with_identity(

@@ -97,7 +97,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 ### Project Context
 
-T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
+The SubagentStart hook injects T2 memory context into this dispatch; the SessionStart hook prints only an index (the rest is on demand through `nx brief <topic>` or the `brief` tool).
 
 ### Link Context (before starting work)
 
@@ -187,24 +187,36 @@ Incorporate or explicitly refute prior findings in your analysis. When T3 is emp
 - Check if analysis is associated with an existing bead
 - Create bead for significant analysis work: bd create "Analysis: topic" -t task
 - Update bead with key findings and conclusions
-- Close bead with analysis summary when complete
+- Do NOT close the bead: put the analysis summary in the hand-back and as a note on the bead; the caller closes it
 
 
 
 ## Persistence (before returning)
 
-You MUST persist your analysis findings BEFORE returning, **unless the dispatching relay specifies an alternative storage target** (e.g. a T2 `memory_put` destination or a T1 `scratch` target) in its Input Artifacts, Deliverable, or Operational Notes section. When the relay specifies a target, honor it and skip the T3 default.
+You MUST persist your analysis findings BEFORE returning, **unless the dispatching relay specifies an alternative storage target** (a T2 `memory_put` destination or a T3 `store_put` target) in its Input Artifacts, Deliverable, or Operational Notes section. When the relay specifies a target, honor it.
 
-**Why the default is T3**: the auto-linker creates catalog links at `store_put` time, and those links are lost if you skip the default dispatch path.
+**Why the default is T1**: interim findings go to T1 scratch, shared with the dispatching session and its other agents (the SubagentStart contract). Write to T3 only for a finding you have validated that is reusable across sessions: the auto-linker creates catalog links at `store_put` time.
 
-**Default T3 store call** (use only when the relay does not specify an alternative):
+**Default T1 call** (use when the relay does not specify an alternative):
+
+```
+mcp__plugin_conexus_nexus__scratch(
+    action="put",
+    content="# Analysis: {topic}\n\n{findings}",
+    tags="analysis,interim",
+    agent="deep-analyst"
+)
+```
+
+**T3 call** (a validated, reusable finding, or a relay-named T3 target):
 
 ```
 mcp__plugin_conexus_nexus__store_put(
     content="# Analysis: {topic}\n\n{findings}",
     collection="<subject>",
     title="analysis-deep-{topic}-{date}",
-    tags="analysis,deep-analyst,{domain}"
+    tags="analysis,deep-analyst,{domain}",
+    agent="deep-analyst"
 )
 ```
 
@@ -252,7 +264,7 @@ Store using these naming conventions:
 **CRITICAL**: Complete all data persistence BEFORE generating final response.
 
 **Sequence** (follow strictly):
-1. **Persist Analysis**: Write findings to the single tier the `<HARD-GATE>` below names — T3 `store_put` by default, or T2 `memory_put` / T1 `scratch` when the dispatching relay specifies that target. Not all three; see the HARD-GATE for the exact rule.
+1. **Persist Analysis**: Write findings to the single tier the `<HARD-GATE>` below names — T1 `scratch` by default, or T2 `memory_put` / T3 `store_put` when the dispatching relay specifies that target (T3 only for validated, reusable findings). Not all three; see the HARD-GATE for the exact rule.
 2. **Document Hypotheses**: Store hypothesis results with confidence levels
 3. **Create Relationship Maps**: Include as `--tags` in T3 store documents
 4. **Verify Persistence**: Confirm the write succeeded
@@ -314,10 +326,10 @@ You are not just an analyst but a detective, scientist, and advisor rolled into 
 
 <HARD-GATE>
 BEFORE generating your final response, you MUST persist your findings via EXACTLY ONE of:
-- `mcp__plugin_conexus_nexus__store_put` (T3 knowledge, the DEFAULT when the dispatching relay does not specify a storage target)
+- `mcp__plugin_conexus_nexus__scratch` with `action="put"` (T1 scratch, the DEFAULT when the dispatching relay does not specify a storage target: interim findings are T1, shared with the dispatching session and its other agents)
 - `mcp__plugin_conexus_nexus__memory_put` (T2 memory, use when the relay specifies a T2 project/title target)
-- `mcp__plugin_conexus_nexus__scratch` with `action="put"` (T1 scratch, use when the relay specifies a T1 target)
+- `mcp__plugin_conexus_nexus__store_put` (T3 knowledge, use only for a finding you have validated and that is reusable across sessions, or when the relay names a T3 target)
 
-If you have not yet called one of these in this session, STOP and call the appropriate one NOW based on what the dispatching relay specified. Default to `store_put` T3 when the relay is silent on target. Do NOT return without persisting. This is not optional.
+If you have not yet called one of these in this session, STOP and call the appropriate one NOW based on what the dispatching relay specified. Default to a T1 `scratch` put when the relay is silent on target. Do NOT return without persisting. This is not optional.
 </HARD-GATE>
 

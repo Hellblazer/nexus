@@ -84,9 +84,9 @@ python3 .claude/skills/site-page/sentence_scan.py web/<page>.html
 
 ## 6. Publish
 
-1. Fast-forward `develop` first; a peer pushes to the shared checkout all day.
+1. Work in your own worktree on a branch off `origin/develop` (AGENTS.md worktree rules 1 and 3: the primary keeps `develop` and is not edited), and fetch `origin/develop` first, because a peer pushes all day.
 2. New page: add the nav row to the topnav of `web/index.html` and the `.meta` rails of every other page, and a row in `README.md`'s site list.
 3. Commit by explicit path. Put the commit in its own tool call, never after a `;` in a chain that edits (a failed edit step let a commit run on 2026-09-11).
-4. `git fetch && git rebase --autostash origin/develop` (autostash carries a peer's stray uncommitted file), then `scripts/git-push-develop.sh --allowed-paths-from-range <your shas>` (add `--source HEAD` from a detached worktree): it prints the files and a digest and pushes nothing, so read that the list is only your pages, then repeat with `--allowed-paths-from-range=<digest>` to push.
+4. `git fetch && git rebase --autostash origin/develop` (autostash carries a peer's stray uncommitted file), then `scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range <your shas>`: it prints the files and a digest and pushes nothing, so read that the list is only your pages, then repeat with `--allowed-paths-from-range=<digest>` to push. A commit that changes anything under `docs/` (a `docs/exploration` essay, for one) also needs the docs-readers proof: `--proof <file>`, the `scripts/watched_pytest.py --status` file for that selection on the pushed tree (the refusal prints the command), or `--skip-docs-readers '<reason>'` on the record (`docs/contributing.md` § Git Workflow, "The push runs the checks its diff reaches"). A `web/` page alone does not need it.
 5. Pages deploys from `develop` on any push touching `web/**`. Wait for the run, then `curl -sI` the page and grep for a new id.
 6. Artifact copy for review: same file with sibling hrefs made absolute (`https://hellblazer.github.io/nexus/...`) and the GoatCounter tag removed, published with the same `url` each time.

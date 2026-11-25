@@ -116,7 +116,7 @@ def _query(bins: PgBinaries, port: int, db: str, user: str, sql: str) -> str:
     result = subprocess.run(
         [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
          "-U", user, "-d", db, "-t", "-A", "-c", sql],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", check=True,
     )
     return result.stdout.strip()
 
@@ -1723,7 +1723,7 @@ def _psql_as(bins: PgBinaries, port: int, user: str, password: str, db: str, sql
     result = subprocess.run(
         [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
          "-U", user, "-d", db, "-t", "-A", "-c", sql],
-        capture_output=True, text=True, env=env, check=False,
+        capture_output=True, text=True, encoding="utf-8", env=env, check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -1910,7 +1910,7 @@ class TestPublicSchemaGrantIsLoadBearing:
             [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(result.port),
              "-U", "nexus_admin", "-d", NEXUS_DB_NAME, "-t", "-A",
              "-c", "CREATE TABLE IF NOT EXISTS public.nx_grant_proof (id INT)"],
-            capture_output=True, text=True, env=env,
+            capture_output=True, text=True, encoding="utf-8", env=env,
         )
         assert proc.returncode != 0, (
             "Expected CREATE TABLE in public to fail for nexus_admin without "

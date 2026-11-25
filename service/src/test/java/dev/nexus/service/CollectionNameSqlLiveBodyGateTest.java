@@ -136,21 +136,51 @@ class CollectionNameSqlLiveBodyGateTest {
 
     /** The functions the RDR rewrites, each with the changelog that last defines it: the scan must resolve all three. */
     static final Map<String, String> REQUIRED_LIVE = Map.of(
-        "nexus.chash_conformance_report", "vectors-063-live-functions-read-collection-row.xml",
-        "nexus.quarantine_restore_chunks", "vectors-063-live-functions-read-collection-row.xml",
-        "nexus.reaper_expire_client_quarantine", "vectors-063-live-functions-read-collection-row.xml");
+        // RDR-229 P3.1 stage 2b: vectors-069 redefined the last two once more to set collection_id; RDR-229 P3.5b (vectors-077,
+        // nexus-p2m1x.24) redefines all three so their matches read the id and the name (a change of the matches only: the census
+        // below is unchanged because no name-parsing expression moved). RDR-229 P3.7 (vectors-083, nexus-p2m1x.27) redefines
+        // quarantine_restore_chunks once more, so its quarantine origin is matched by id from gate 3.
+        "nexus.chash_conformance_report", "vectors-077-rdr229-p35b-readers-both.xml",
+        "nexus.quarantine_restore_chunks", "vectors-083-restore-by-origin-id.xml",
+        "nexus.reaper_expire_client_quarantine", "vectors-083-restore-by-origin-id.xml");
 
-    /** Floors on the real tree (234 includes and 120 live functions: 233 at the first run, 234 at develop 118701321; catalog-051-1a added nexus.collection_tuple_lock_key, 119 to 120); a scan below them read too little. */
+    /** Floors on the real tree (234 includes and 120 live functions: 233 at the first run, 234 at develop 118701321; catalog-051-1a added nexus.collection_tuple_lock_key, 119 to 120; vectors-071-1 added nexus.rdr229_restamp, 120 to 121; RDR-229 P3.8's collections-001-1 and collections-002 added nexus.catalog_collection_tuple_duplicates_unscoped, nexus.collection_id_seq_heal and nexus.collection_id_taken, 121 to 124); a scan below them read too little. */
     static final int INCLUDES_FLOOR = 234;
     static final int LIVE_FUNCTIONS_FLOOR = 100;
 
     /**
      * The live functions the real tree resolves to (name plus signature), pinned exactly, with no live overload today: the
-     * key count equals the name count (119). A resolver that stops folding a type spelling or a DEFAULT reads 120 or 146
+     * key count equals the name count. A resolver that stops folding a type spelling or a DEFAULT reads more
      * here (stale signatures that were really dropped), so this pin is what makes the normaliser load-bearing. A function
-     * added or dropped moves it, in the same edit.
+     * added or dropped moves it, in the same edit. 120 -> 121 at RDR-229 P3.1 fix round A: vectors-071-1 adds
+     * {@code nexus.rdr229_restamp(text)}. It is a live function but not a name-parsing site: it matches move LABELS with
+     * {@code starts_with(m.label, ...)} and compares collection names only by equality against {@code catalog_collections.name}, so
+     * {@link #NAME_PARSING_CENSUS} is unchanged. 124 -> 127 at RDR-229 P3.7: vectors-079-1 adds the three child-row name trigger functions
+     * ({@code nexus.catalog_document_chunks_name_from_chunk}, {@code nexus.chunk_orphaned_at_name_from_chunk},
+     * {@code nexus.topic_assignments_name_from_chunk}). They read the chunk's STORED name column by
+     * equality and parse no name (the log line is a RAISE LOG of the names, no split_part), so the census is unchanged.
      */
-    static final int LIVE_FUNCTIONS_PIN = 120;
+    // 124 -> 162 (+3 -> 165, P3.7 vectors-079: three child-row name triggers): nexus-p2m1x.24 (RDR-229 P3.5b), vectors-077 adds 38 id twins (<name>_by_id: 37 search functions, no
+    // hybrid_search twin, and chunk_live_owners_by_id); the name functions they twin stay live until P4.1.
+    // 165 -> 168: nexus-p2m1x.24/.25, vectors-084 adds the by-id overloads of taxonomy_ann_query_<dim> (see ALLOWED_OVERLOADS), three live
+    // signatures beside the three names the key count equalled before; the name count is unchanged.
+    static final int LIVE_FUNCTIONS_PIN = 168;
+
+    /**
+     * The only live overloads: vectors-084's by-id taxonomy_ann_query_<dim> (a trailing {@code p_collection_id bigint}, the form A plan fix)
+     * beside vectors-078-9..11's text-signature ones, which stay unused until P4.1 drops them (nexus-p2m1x.35). Any other name with two
+     * live signatures still fails the gate: it means a DROP or a CREATE was not matched, or a real overload arrived (then add it here).
+     */
+    static final Map<String, List<String>> ALLOWED_OVERLOADS = Map.of(
+        "nexus.taxonomy_ann_query_384", List.of(
+            "(vector,text,boolean,integer,text,text)@vectors-078-rdr229-p35b-readers-continue.xml",
+            "(vector,text,boolean,integer,text,text,bigint)@vectors-084-rdr229-ann-query-by-id.xml"),
+        "nexus.taxonomy_ann_query_768", List.of(
+            "(vector,text,boolean,integer,text,text)@vectors-078-rdr229-p35b-readers-continue.xml",
+            "(vector,text,boolean,integer,text,text,bigint)@vectors-084-rdr229-ann-query-by-id.xml"),
+        "nexus.taxonomy_ann_query_1024", List.of(
+            "(vector,text,boolean,integer,text,text)@vectors-078-rdr229-p35b-readers-continue.xml",
+            "(vector,text,boolean,integer,text,text,bigint)@vectors-084-rdr229-ann-query-by-id.xml"));
 
     // ── model ───────────────────────────────────────────────────────────
 
@@ -658,9 +688,13 @@ class CollectionNameSqlLiveBodyGateTest {
             + " liveNames=" + names + " expressions=" + total + " functionsWithExpressions="
             + actual.keySet().stream().map(k -> k.substring(0, k.indexOf('|'))).distinct().count() + " census=" + actual);
 
-        assertThat(overloaded).as("no live overloads today: a name with two live signatures means a DROP or a CREATE was not matched, "
-            + "or a real overload arrived (then pin it and say so)").isEmpty();
-        assertThat(r.live.size()).as("live keys equal live names").isEqualTo((int) names);
+        assertThat(overloaded.keySet()).as("the live overloads are exactly ALLOWED_OVERLOADS: a name with two live signatures otherwise means "
+            + "a DROP or a CREATE was not matched, or a real overload arrived (then pin it in ALLOWED_OVERLOADS and say so)")
+            .isEqualTo(ALLOWED_OVERLOADS.keySet());
+        ALLOWED_OVERLOADS.forEach((name, signatures) -> assertThat(overloaded.get(name)).as("signatures of " + name)
+            .containsExactlyInAnyOrderElementsOf(signatures));
+        assertThat(r.live.size()).as("live keys equal live names plus the allowed extra signatures")
+            .isEqualTo((int) names + ALLOWED_OVERLOADS.values().stream().mapToInt(l -> l.size() - 1).sum());
         assertThat(r.live.size()).as("LIVE_FUNCTIONS_PIN: the exact live function count").isEqualTo(LIVE_FUNCTIONS_PIN);
         assertThat(checkCensus(actual, NAME_PARSING_CENSUS))
             .as("RDR-229 item 4: live plpgsql bodies that parse a collection name. REGRESSION = a new site; "

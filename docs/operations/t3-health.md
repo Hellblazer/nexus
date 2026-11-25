@@ -1,6 +1,6 @@
 # T3 health runbook
 
-When `nx catalog doctor` reports something concerning, this page tells you whether the report is a real problem or a known false-positive class. Each section starts with the symptom (what the doctor says) and ends with the action (do this, or ignore and add `# noise` to the noise list).
+When `nx catalog doctor` reports something concerning, this page tells you whether the report is a real problem or a known false-positive class. Each section starts with the symptom (what the doctor says) and ends with the action (do this, or ignore it: there is no noise list to add it to).
 
 The doctor is intentionally conservative: it favors WARN over silent pass. Several reported classes are operationally fine, OR are surfacing pre-existing data drift that the architecture has since obviated. Knowing which is which saves 30 minutes of forensics per investigation.
 

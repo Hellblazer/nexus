@@ -25,6 +25,7 @@ from click.testing import CliRunner
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.cli import main
+from tests._catalog_fixture_ops import register_seed_collections
 from tests._chunk_seed import seed_chunks_direct
 from tests.conftest import fake_credentials
 
@@ -64,6 +65,7 @@ class _World:
         if trashed_owner:
             names.append("c4")
         self.ch = {n: _chash(f"{tag}-{n}") for n in names}
+        register_seed_collections(self.collection)  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
         with HttpCatalogClient() as cat:
             owner = cat.register_owner(f"{tag}-owner", "repo", repo_hash=f"{tag}-hash")
             self.d = str(cat.register(

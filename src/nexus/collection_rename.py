@@ -6,8 +6,8 @@ nexus-8g79.10 (V5): hosted at the package root (peer to ``indexer``,
 RDR-103 Phase 5 conformant-shape migrator at ``indexer.py:435`` — can
 invoke without reaching up into ``nexus.commands.collection``.
 
-The function raises ``ClickException`` at T2-cascade-failure as part
-of its documented contract (CG-1, nexus-nhyh). That keeps the CLI
+The function raises ``ClickException`` when the server-side rename fails
+as part of its documented contract (CG-1, nexus-nhyh). That keeps the CLI
 surface usable; non-CLI callers can catch ``click.ClickException``
 or any other exception type as they prefer.
 """
@@ -18,6 +18,7 @@ from typing import Any
 
 import click
 
+from nexus.collection_errors import LabelReservedError
 from nexus.db.collection_state import CollectionState, probe_collection_state
 
 
@@ -58,6 +59,54 @@ def _engine_model_mismatch_detail(exc: Exception) -> str | None:
     return str(body.get("error") or COLLECTION_MODEL_MISMATCH_REASON)
 
 
+def _engine_restart_refusal(exc: Exception) -> str | None:
+    """What to say when *exc* is the engine's 409 ``rename_refused`` with ``missing: restart``, else ``None``.
+
+    The engine has a changeset it has not applied yet and refuses every rename until it restarts. Retrying does not help
+    and nothing on the client is wrong, so the usual "fix the error and retry" would send the person looking for a fault.
+    The restart is the operator's to order. Any other ``missing`` value (the engine is missing something a restart does not
+    supply, or could not read it) keeps the generic refusal text with the engine's own reason.
+    """
+    import json  # noqa: PLC0415 — stdlib, branch-local
+
+    from nexus.db.engine_reasons import RENAME_REFUSED_REASON, error_reason  # noqa: PLC0415 — deferred: error path only
+
+    response = getattr(exc, "response", None)
+    if response is None or getattr(response, "status_code", None) != 409:
+        return None
+    try:
+        body = json.loads(response.text)
+    except Exception:  # noqa: BLE001 — an unparseable body is simply not ours
+        return None
+    if error_reason(body) != RENAME_REFUSED_REASON or body.get("missing") != "restart":
+        return None
+    return (
+        "The engine has a change it has not applied yet, and renames open after its next restart. "
+        "The operator orders that restart; run the rename again once it has happened."
+    )
+
+
+def _engine_refusal_detail(exc: Exception) -> str | None:
+    """The status line and the engine's reason when *exc* is a 4xx whose JSON body carries ``error`` (nexus-02454),
+    else ``None``. ``str(HTTPStatusError)`` is only httpx's status line, so a label the engine refused read as
+    ``400 Bad Request`` with no reason. A 5xx body is the engine's own failure (the server log has it), not a reason
+    to show."""
+    import json  # noqa: PLC0415 — stdlib, branch-local
+
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if not isinstance(status, int) or not 400 <= status < 500:
+        return None
+    try:
+        body = json.loads(response.text)
+    except Exception:  # noqa: BLE001 — an unparseable body carries no reason
+        return None
+    reason = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(reason, str) or not reason:
+        return None
+    return f"{exc}: {reason}"
+
+
 def rename_collection_data_plane(
     old: str,
     new: str,
@@ -67,33 +116,26 @@ def rename_collection_data_plane(
     on_warn: Callable[[str], None] | None = None,
     check_model_token: bool = True,
 ) -> dict[str, int]:
-    """Rename a collection across T2 + T3 + catalog cascades.
+    """Rename a collection in one atomic server-side re-home.
 
-    Ordering (SIG-8 / nexus-nhyh): T2 cascade runs FIRST, T3 rename
-    runs LAST. Rationale: T2 SQL UPDATEs are reversible (operator can
-    run the inverse UPDATE or re-run rename); ChromaDB collection rename
-    is irrevocable in a single call. Running T2 first minimises
-    irrecoverable drift: if T3 fails after T2 succeeds the operator can
-    reverse T2 manually; if T2 fails no T3 rename was attempted so the
-    system is still consistent.
-
-    T2 cascade failure (nexus-nhyh / CG-1): raises ``ClickException``
-    with a non-zero exit code and an actionable error message. T2
-    cascade failures are NOT fail-open — an incomplete T2 cascade
-    leaves collection references orphaned across six indexed columns.
-    The operator must see the failure.
-
-    Catalog cascade failure: fail-open (warn + continue). The catalog is
-    a derived view; a failed catalog cascade can be repaired via
-    ``nx catalog rebuild`` without touching T3 or T2.
+    The engine's ``rename_collection_cascade`` is a single transaction
+    (``CatalogRepository.renameCollection``) over the T3 chunks, the chash
+    index, taxonomy, the aspect family, telemetry, and the catalog documents
+    and registry row. A failure leaves the collection fully unchanged and
+    raises ``ClickException`` with a non-zero exit code and an actionable
+    message: it is not fail-open. (nexus-i711w removed the client-side
+    fan-out, T2 cascade first and T3 last, that this function used to run.)
+    The engine decides the rename's path inside that transaction from its
+    gate 3 latch row (RDR-229 P3.5a), and may answer a typed 409
+    (``rename_refused``, ``rename_path_mismatch``); the client reads it as a
+    failed rename.
 
     Returns a dict with counts per cascade table so callers can render
     their own summaries.
 
-    ``on_warn`` is invoked with a string message when the catalog
-    cascade fails open. The CLI default routes it to
-    ``click.echo(..., err=True)``; callers in non-CLI contexts can
-    pass their own.
+    ``on_warn`` is the warning sink (the CLI default routes it to
+    ``click.echo(..., err=True)``); the server-side rename has no fail-open
+    leg today, so nothing calls it.
 
     nexus-8g79.10 (V5): ``t3_db`` is now required (no ``_t3()`` default).
     CLI callers pass ``_t3()`` explicitly; library callers (the
@@ -142,6 +184,13 @@ def rename_collection_data_plane(
     new_state = probe_collection_state(t3_db, new)
     if new_state is not CollectionState.ABSENT:
         raise click.ClickException(f"collection already exists: {new!r}")
+    # RDR-229 P3.6: the target is a label this call creates (an existing one was refused just above), so the label
+    # rule judges it here, ahead of the engine, which enforces the same rule and stays the authority.
+    from nexus.corpus import validate_collection_name  # noqa: PLC0415 — deferred: nexus.corpus imports back into this package
+    try:
+        validate_collection_name(new)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     counts = {
         "tax_topics": 0,
@@ -186,8 +235,15 @@ def rename_collection_data_plane(
             renamed = client.rename_collection_cascade(
                 old, new, check_model_token=False,
             )
+    except LabelReservedError:
+        raise  # the engine refused the new label whole (409 label_reserved); its message is the answer, and a retry cannot help
     except Exception as exc:
-        detail = _engine_model_mismatch_detail(exc) or str(exc)
+        restart = _engine_restart_refusal(exc)
+        if restart is not None:
+            raise click.ClickException(
+                f"service rename refused -- collection {old!r} is unchanged and nothing was renamed. {restart}"
+            ) from exc
+        detail = _engine_model_mismatch_detail(exc) or _engine_refusal_detail(exc) or str(exc)
         raise click.ClickException(
             f"service rename failed -- collection {old!r} is unchanged "
             f"(the re-home is atomic). Fix the error and retry:\n  {detail}"

@@ -105,6 +105,7 @@ from nexus.daemon.readiness import MigrationLogScanner
 from nexus.util.process_group import KILL_SIGNAL, safe_killpg
 from tests import _signal_fence
 from tests._child_process import kill_group, pid_alive, popen_in_group, stop_group
+from tests._tenant_drop import DROP_LOCK_RETRY_DELAYS_S, drop_test_tenant  # noqa: F401 - re-exported for callers
 from tests._ddl_counter import PROBE_SQL, READY_LABEL, RESTART_LABEL, START_LABEL, log_conf, mark_sql
 from tests._ddl_counter import enabled as ddl_count_enabled
 from tests._pg_ctl import check_socket_dir, pg_ctl_start, sun_path_max
@@ -261,6 +262,9 @@ THROWAWAY_FSYNC_CONF = (
     "fsync = off\n"
     "synchronous_commit = off\n"
     "full_page_writes = off\n"
+    # Diagnostics, not durability: an autovacuum that holds a lock a test's drop needs shows in pg.log (a drop that gave
+    # up on its lock waits named no holder on CI shard 4 of 2773105b83).
+    "log_autovacuum_min_duration = 0\n"
 )
 
 
@@ -2438,7 +2442,7 @@ def _psql_command(
         proc = subprocess.run(
             [str(bin_dir / "psql"), "-X", "-q", "-h", "127.0.0.1", "-p", str(pg_port),
              "-U", pg_user, "-d", _DBNAME, "-v", "ON_ERROR_STOP=1", "-c", sql],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"psql timed out after {timeout}s") from exc
@@ -2675,7 +2679,7 @@ def _boot() -> dict:
             [str(bin_dir / "psql"), "-h", "127.0.0.1", "-p", str(pg_port),
              "-U", pg_user, "-d", _DBNAME, "-v", "ON_ERROR_STOP=1",
              "-c", SERVICE_ROLES_SQL],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
         )
         if proc.returncode != 0:
             raise RuntimeError(
@@ -3796,37 +3800,6 @@ def mint_test_tenant(state: dict) -> tuple[str, str]:
     if not token:
         raise RuntimeError(f"tenant mint returned no token: {body}")
     return name, token
-
-
-def drop_test_tenant(state: dict, tenant: str) -> bool:
-    """Drop a minted tenant's partition leaves, and the rows that reference them (RDR-225).
-
-    Every tenant owns a leaf under each model partition of nexus.chunks and nexus.taxonomy_centroids, so a suite
-    that mints one per test and never removes it grows its worker's PG without bound (past 2,000 tenants the
-    engine's token insert outran its 1 s x 3 bound and answered 503 tenant_creation_busy). This calls
-    ``nexus.drop_tenant_partitions`` over the substrate's direct PG access as the owning role: the function is not
-    granted to any engine role.
-
-    Never raises: it runs in fixture teardown, where an exception would replace the test's own result. A failure
-    is logged as ``test_tenant_drop_failed`` and the call returns False.
-    """
-    try:
-        proc = _REAL_SUBPROCESS_RUN(
-            [str(Path(state["pg_bin"]) / "psql"), "-X", "-q", "-h", "127.0.0.1", "-p", str(state["pg_port"]),
-             "-U", state["pg_user"], "-d", state["pg_dbname"], "-t", "-A", "-v", "ON_ERROR_STOP=1",
-             "-v", f"tenant={tenant}", "-f", "-"],
-            input="SELECT nexus.drop_tenant_partitions(:'tenant');",
-            capture_output=True, text=True, timeout=60,
-            env={**os.environ, "PGCONNECT_TIMEOUT": "10"},
-        )
-    except Exception as exc:  # noqa: BLE001 - teardown must not mask the test's result
-        _log.warning("test_tenant_drop_failed", tenant=tenant, error=repr(exc))
-        return False
-    if proc.returncode != 0:
-        _log.warning("test_tenant_drop_failed", tenant=tenant,
-                     error=(proc.stderr or proc.stdout).strip()[-300:])
-        return False
-    return True
 
 
 @contextmanager

@@ -42,12 +42,12 @@ final class BoardReads {
     /** The live rows of {@code board/ci/<base>--<suffix>}, oldest first. */
     static List<BoardRow> rows(DSLContext ctx, String tenant, String base, String suffix) {
         List<BoardRow> out = new ArrayList<>();
-        ctx.select(TUPLES.ID, TUPLES.CREATED_AT, TUPLES.DIMS, TUPLES.BODY, TUPLES.SENDER_SESSION).from(TUPLES)
+        ctx.select(TUPLES.ID, TUPLES.CREATED_AT, TUPLES.DIMS, TUPLES.BODY, TUPLES.SENDER_SESSION, TUPLES.EXPIRES_AT).from(TUPLES)
             .where(TUPLES.TENANT_ID.eq(tenant)).and(TUPLES.SUBSPACE.eq(subspace(base, suffix)))
             .and(TUPLES.CONSUMED_AT.isNull()).and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime()))
             .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc()).limit(ROW_CAP)
             .forEach(r -> out.add(new BoardRow(java.util.HexFormat.of().formatHex(r.value1()), r.value2().toInstant(),
-                dims(r.value3() == null ? null : r.value3().data()), r.value4(), r.value5())));
+                dims(r.value3() == null ? null : r.value3().data()), r.value4(), r.value5(), r.value6().toInstant())));
         return out;
     }
 
@@ -72,7 +72,9 @@ final class BoardReads {
         if (rec.get("ack_deadline_by_topic") instanceof Map<?, ?> m) {
             m.forEach((k, v) -> byTopic.put(String.valueOf(k), ((Number) v).intValue()));
         }
-        return new GroupView(name, (String) rec.get("leader"), members, ((Number) rec.get("ack_deadline")).intValue(), byTopic);
+        int stall = rec.get("stall_factor") instanceof Number n ? n.intValue() : GroupView.DEFAULT_STALL_FACTOR;
+        return new GroupView(name, (String) rec.get("leader"), members, ((Number) rec.get("ack_deadline")).intValue(), byTopic,
+            stall);
     }
 
     /**
@@ -83,7 +85,7 @@ final class BoardReads {
                                  List<BoardRow> owners, GroupView group) {
         Set<String> stamps = new LinkedHashSet<>();
         pushes.forEach(r -> addStamp(stamps, r));
-        owners.stream().filter(r -> "ack".equals(r.kind())).forEach(r -> addStamp(stamps, r));
+        owners.stream().filter(r -> "ack".equals(r.kind()) || "disclaim".equals(r.kind())).forEach(r -> addStamp(stamps, r));
         Map<String, String> rawIdentity = new LinkedHashMap<>();
         for (String stamp : stamps) {
             identities.sessionIdentity(tenant, stamp).ifPresent(s -> rawIdentity.put(stamp, s.identity()));

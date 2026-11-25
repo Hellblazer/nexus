@@ -167,6 +167,56 @@ class TestReentryCandidacy:
         found = rj.reentry_candidates(jobs, self._rows(docs__s="docs__t"), lambda n: 1, lambda n: 2)
         assert [(r.job["job_id"], r.kind) for r in found] == [("j1", "running")]
 
+    @pytest.mark.parametrize(("target", "why"), [
+        (_row("docs__t", superseded_by="docs__u"), "its target docs__t is retired"),
+        (None, "its target docs__t is not registered"),
+        (_row("docs__t"), None),
+    ])
+    def test_a_reentry_whose_target_is_retired_or_gone_is_split_off_with_its_reason(self, target, why):
+        """Engine 0.1.202 refuses such a re-entry (409 EndRefused); ``candidates`` reports it apart, never as one."""
+        jobs = [_job("j1", "docs__s", "docs__t", "done", "kept_tombstoned")]
+        rows = [_row("docs__s", superseded_by="docs__t"), *([target] if target else [])]
+        found = rj.candidates(rows, {"docs": VA}, jobs, lambda n: 0, lambda n: 0)
+        if why is None:
+            assert [r.job["job_id"] for r in found.reentries] == ["j1"] and found.skipped_reentries == []
+        else:
+            assert found.reentries == []
+            assert [(r.job["job_id"], w) for r, w in found.skipped_reentries] == [("j1", why)]
+
+    @pytest.mark.parametrize("order", ["current-first", "retired-first"])
+    def test_a_target_label_with_a_retired_row_and_a_current_one_is_judged_by_the_current_one(self, order):
+        """A rename leaves a retired row under the old name; a later collection can take the label again. The
+        re-entry is not skipped for the retired row when the label is held by a current one, whichever row is read last."""
+        jobs = [_job("j1", "docs__s", "docs__t", "done", "kept_tombstoned")]
+        pair = [_row("docs__t"), _row("docs__t", superseded_by="docs__u")]
+        rows = [_row("docs__s", superseded_by="docs__t"), *(pair if order == "current-first" else pair[::-1])]
+        found = rj.candidates(rows, {"docs": VA}, jobs, lambda n: 0, lambda n: 0)
+        assert [r.job["job_id"] for r in found.reentries] == ["j1"] and found.skipped_reentries == []
+
+    @pytest.mark.parametrize("order", ["superseded-first", "current-first"])
+    def test_a_source_label_with_a_current_row_still_finds_the_row_its_target_superseded(self, order):
+        jobs = [_job("j1", "docs__s", "docs__t", "done", "kept_tombstoned")]
+        pair = [_row("docs__s", superseded_by="docs__t"), _row("docs__s")]
+        rows = [*(pair if order == "superseded-first" else pair[::-1]), _row("docs__t")]
+        found = rj.candidates(rows, {"docs": VA}, jobs, lambda n: 0, lambda n: 0)
+        assert [r.job["job_id"] for r in found.reentries] == ["j1"]
+
+    def test_a_running_reentry_the_engine_would_refuse_stays_off_profile_with_its_reason(self):
+        """--all skips it, but a live document nothing serves is still drift: the doctor and the hint keep it."""
+        jobs = [_job("j1", "docs__s", "docs__t", "done", "kept_tombstoned")]
+        rows = [_row("docs__s", superseded_by="docs__t"), _row("docs__t", superseded_by="docs__u")]
+        verdict = rj.judge_off_profile_rows(rows, {"docs": VA}, lambda: jobs, lambda n: 1, lambda n: 2)
+        assert [r["name"] for r in verdict.rows] == ["docs__s"]
+        assert verdict.blocked == {"docs__s": "its target docs__t is retired"}
+        assert rj.off_profile_rows(rows, {"docs": VA}, lambda: jobs, lambda n: 1, lambda n: 2) == verdict.rows
+
+    def test_a_cutover_reentry_the_engine_would_refuse_is_not_drift(self):
+        """No document row: the job would only delete the source, so it is not off-profile either way."""
+        jobs = [_job("j1", "docs__s", "docs__t", "done", "kept_tombstoned")]
+        rows = [_row("docs__s", superseded_by="docs__t")]
+        verdict = rj.judge_off_profile_rows(rows, {"docs": VA}, lambda: jobs, lambda n: 0, lambda n: 0)
+        assert verdict.rows == [] and verdict.blocked == {}
+
     def test_tombstones_still_there_and_none_live_is_not_yet(self):
         jobs = [_job("j1", "docs__s", "docs__t", "done", "kept_tombstoned")]
         assert rj.reentry_candidates(jobs, self._rows(docs__s="docs__t"), lambda n: 0, lambda n: 3) == []

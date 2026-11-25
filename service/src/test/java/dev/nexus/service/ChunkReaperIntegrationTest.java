@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.ChunkReaper.CollectionResult;
 import dev.nexus.service.ChunkReaper.Refusal;
 import dev.nexus.service.ChunkReaper.RunResult;
@@ -139,7 +140,17 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         return hexes;
     }
 
+    /** RDR-229 P3.1: the engine refuses a document under an unregistered collection, so a seed registers it first (idempotent). */
+    private void registerCollection(String tenant, String collection) {
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     private void registerNote(String tenant, String docId, String collection, Map<String, Object> metadata) {
+        registerCollection(tenant, collection);
         Map<String, Object> d = new LinkedHashMap<>();
         d.put("tumbler", docId);
         d.put("title", "reaper-" + docId);
@@ -1139,13 +1150,13 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
             for (int i = 0; i < owners; i++) {
                 String doc = "wbfpw60-owner-" + i;
                 ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-                    .values(t, doc, "Owner " + doc, c).execute();
+                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+                    .values(t, doc, "Owner " + doc, c, CollectionIds.require(ctx, t, c)).execute();
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                         CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
                         CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                    .values(t, doc, 0, chash, c, model).execute();
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                    .values(t, doc, 0, chash, c, model, CollectionIds.require(ctx, t, c)).execute();
             }
         }
         assertThat(countIn(t, c)).as("two chunks, however many manifest rows name one of them").isEqualTo(2);
@@ -3279,6 +3290,7 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
     // ── a multi-batch re-index through the REAL combined writer ──────────────
 
     private void registerDocsDocument(String tenant, String docId, String collection) {
+        registerCollection(tenant, collection);
         repo.upsertDocument(tenant, Map.of(
             "tumbler", docId, "title", "reaper-" + docId, "content_type", "docs", "corpus", "docs",
             "physical_collection", collection, "chunk_count", 0));

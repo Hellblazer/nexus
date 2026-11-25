@@ -132,6 +132,11 @@ public final class DataMoveWorker implements AutoCloseable {
     Runnable beforeSessionOpenHook;
     /** Test seam: runs after a CALL has returned and the call connection is clean, before the run's row is read again. */
     Runnable afterCallHook;
+    /**
+     * Runs when a move is recorded complete ({@code completed_at}), on the worker's thread: the completion check re-reads then
+     * (RDR-229 P3.1, {@link CompletionBootWork#onMoveCompleted}). It must not block; a throw is logged and goes no further.
+     */
+    private volatile Runnable onMoveCompleted = () -> { };
     private volatile Thread loop;
     private volatile CallConnection callConnection;
     /** The one admin session the registry is read on, kept between cycles; guarded by {@code registryLock}. */
@@ -176,6 +181,11 @@ public final class DataMoveWorker implements AutoCloseable {
             new VerifyingFinisher(), singletonLockHeld);
     }
 
+    /** Sets what runs when a move is recorded complete; see the field. A null clears it. */
+    public void onMoveCompleted(Runnable listener) {
+        this.onMoveCompleted = listener == null ? () -> { } : listener;
+    }
+
     /** The worker's in-memory view of its moves. */
     public MoveStates states() {
         return states;
@@ -213,6 +223,7 @@ public final class DataMoveWorker implements AutoCloseable {
         if (c != null) {
             c.cancel();
         }
+        finisher.cancelInFlight();   // a completion statement (a validation with no statement bound) ends too; the next boot redoes it
     }
 
     /** Waits for the worker thread to end after {@link #stop}; true when it has (or was never started). */
@@ -286,6 +297,7 @@ public final class DataMoveWorker implements AutoCloseable {
                 .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
                 .where(DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, name,
                     DSL.val(APPLICATION_NAME_PREFIX))))
+                .and(DataMoveOrphans.ours())
                 .and(DSL.not(DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, name,
                     DSL.val(applicationName)))))
                 .and(pid.ne(DSL.function("pg_backend_pid", SQLDataType.INTEGER)))
@@ -323,14 +335,18 @@ public final class DataMoveWorker implements AutoCloseable {
         for (DataMove move : open) {
             labels.add(move.label());
         }
-        states.retainOnly(labels, superseded);
+        // a move that left the open list outside finish() (superseded, or no longer open): what the finisher keeps per move goes
+        for (String gone : states.retainOnly(labels, superseded)) {
+            finisher.forget(gone);
+        }
+        failures.retainOnly(labels);
         int worked = 0;
         for (DataMove move : open) {
             if (stopped) {
                 break;
             }
             if (move.paused()) {
-                states.paused(move);
+                pausedMove(move);
                 continue;
             }
             if (!due(move)) {
@@ -421,12 +437,12 @@ public final class DataMoveWorker implements AutoCloseable {
             // the row as it is now: another move may have run for hours since the list was read
             Optional<DataMove> current = DataMoveRegistry.reload(ctx, listed.label());
             if (current.isEmpty()) {
-                states.forget(listed.label());
+                forgetMove(listed.label());
                 return;
             }
             move = current.get();
             if (move.paused()) {
-                states.paused(move);
+                pausedMove(move);
                 return;
             }
             boolean alreadyWorking = states.state(move.label()).filter(s -> s.kind() == MoveStates.Kind.WORKING).isPresent();
@@ -471,6 +487,19 @@ public final class DataMoveWorker implements AutoCloseable {
             detail, ctx));
     }
 
+    /** The move is no longer open: what the states and the failure handler keep for it goes. */
+    private void forgetMove(String label) {
+        states.forget(label);
+        failures.forget(label);
+        finisher.forget(label);
+    }
+
+    /** The move is paused: its state says so, and the finisher's per-move memory (a wait's start) does not outlive the pause. */
+    private void pausedMove(DataMove move) {
+        states.paused(move);
+        finisher.forget(move.label());
+    }
+
     /** {@link #fail} for a failure that is already built (the finisher's). */
     private boolean report(FailureHandler.Failure reported) {
         FailureHandler.Failure failure = reported.masked();   // no credential reaches the handler, a log line or a registry column
@@ -485,6 +514,8 @@ public final class DataMoveWorker implements AutoCloseable {
             d = FailureHandler.Disposition.blocked(detail + " (the failure handler failed: "
                 + FailureHandler.oneLine(e.toString()) + ")");
         }
+        // a failure of any kind ends a run of deferrals that began in an earlier pass: a wait that follows it reports its own age
+        finisher.forget(move.label());
         String sqlstate = d.sqlstate() != null ? d.sqlstate() : failure.raised() == null ? null : failure.raised().getSQLState();
         if (d.kind() == FailureHandler.Kind.FAILED) {
             MoveEvents.failed(move.label(), stage.name(), failure.tenant(), sqlstate, d.reason());
@@ -493,7 +524,12 @@ public final class DataMoveWorker implements AutoCloseable {
             // a handler that counted no retry leaves the row's count as it was
             int retries = d.retries() >= 0 ? d.retries() : move.transientRetries();
             MoveEvents.blocked(move.label(), stage.name(), failure.tenant(), retries, sqlstate, d.reason());
-            states.blocked(move, d.reason());
+            states.blocked(move, d.reason(), d.page());
+            var page = d.page();
+            if (page != null && page.entered() && states.announce(move.label())) {
+                MoveEvents.needsOperator(move.label(), page.step(), sqlstate, page.boundMs(), retries,
+                    page.terminatesIndexBuilds(), MoveRetryPolicy.pageReason(retries, page.terminatesIndexBuilds()));
+            }
         }
         return false;
     }
@@ -557,24 +593,52 @@ public final class DataMoveWorker implements AutoCloseable {
             return;
         }
         MoveFinisher.Result result = finisher.finish(new MoveFinisher.Context(move, tenants, ctx, admin, applicationName,
-            () -> stopped));
+            () -> stopped, states));
         switch (result.outcome()) {
-            case COMPLETED -> states.forget(move.label());
+            case COMPLETED -> {
+                forgetMove(move.label());
+                notifyCompleted(move);
+            }
             case FAILED -> {
                 MoveEvents.failed(move.label(), "FINISH", null, null, result.reason());
                 states.failed(move, result.reason());
             }
             case BLOCKED -> {
-                MoveEvents.blocked(move.label(), "FINISH", null, move.transientRetries(), null, result.reason());
-                states.blocked(move, result.reason());
+                if (!BuildWait.isDeferral(result)) {   // a deferral logs its own one line (BuildWait.defer)
+                    MoveEvents.blocked(move.label(), "FINISH", null, move.transientRetries(), null, result.reason());
+                }
+                states.blocked(move, result.reason(), keptPage(move));
             }
             case LEFT_OPEN -> states.runsComplete(move);
             case REPORT -> report(result.failure());
-            case PAUSED -> states.paused(result.move());
-            case GONE -> states.forget(move.label());
+            case PAUSED -> pausedMove(result.move());
+            case GONE -> forgetMove(move.label());
+            // on_complete re-opened the move (completed_at back to NULL): no completion event, no listener, no retry reset; the next pass takes it
+            case REOPENED -> forgetMove(move.label());
         }
         if (result.outcome() == MoveFinisher.Outcome.COMPLETED || result.outcome() == MoveFinisher.Outcome.LEFT_OPEN) {
             clearRetries(move, ctx);   // a clean pass resets the count; no failure reached the handler to do it
+        }
+    }
+
+    /**
+     * The page the move already carries, for a finish that blocks it without a failure (a deferral behind an index build, or any
+     * other not-now): no failure was counted, so nothing about the move's needs-an-operator state changed, and
+     * {@link MoveStates} clears the page of a blocked report that brings none. The move's count is unchanged and its early latch
+     * is still held, so the state, {@code /v1/status} and {@code nx doctor} keep it; {@code entered} is false, so nothing is
+     * announced again. Null when the move holds no page.
+     */
+    private FailureHandler.PageInfo keptPage(DataMove move) {
+        return states.state(move.label()).filter(MoveStates.State::needsOperator)
+            .map(s -> new FailureHandler.PageInfo(true, false, s.step(), s.boundMs(), s.terminatesIndexBuilds())).orElse(null);
+    }
+
+    private void notifyCompleted(DataMove move) {
+        try {
+            onMoveCompleted.run();
+        } catch (RuntimeException e) {   // a listener is the engine's, never the worker's failure
+            log.warn("event=data_move_completed_listener_failed label={} cause=\"{}\"", move.label(),
+                FailureHandler.oneLine(e.toString()));
         }
     }
 
@@ -630,12 +694,12 @@ public final class DataMoveWorker implements AutoCloseable {
         // a pause, a superseding row, a failure or a completion set since the pass began: no further CALL starts
         Optional<DataMove> current = DataMoveRegistry.reload(ctx, listed.label());
         if (current.isEmpty()) {
-            states.forget(listed.label());
+            forgetMove(listed.label());
             return false;
         }
         DataMove move = current.get();
         if (move.paused()) {
-            states.paused(move);
+            pausedMove(move);
             return false;
         }
         if (existing != null && existing.cancelledAt() != null) {

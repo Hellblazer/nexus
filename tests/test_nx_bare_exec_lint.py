@@ -712,6 +712,9 @@ _TREE_ALLOWED: dict[tuple[str, str, str], str] = {
     # -- the argv is an absolute path to an interpreter or an installed binary ------
     ("nexus/_install/layout_core.py", "declared_console_scripts_detail", "unresolved-spawn-argv"):
         "head is the generation's own venv interpreter, an absolute path (bootstrap-safe module)",
+    ("nexus/_install/lease_core.py", "self_test", "unresolved-spawn-argv"):
+        "head is <generation>/bin/python (Scripts/python.exe), built from the absolute generation path and "
+        "checked to be a file first (bootstrap-safe module)",
     ("nexus/_session_end_launcher.py", "_spawn_detached_cleanup", "unresolved-spawn-argv"):
         "head is sys.executable, absolute (module runs before nexus imports; see its docstring)",
     ("nexus/commands/index.py", "_spawn_deferred_labeling", "unresolved-spawn-argv"):
@@ -725,8 +728,12 @@ _TREE_ALLOWED: dict[tuple[str, str, str], str] = {
         "subprocess.Popen handed to service_registry.popen_outliving_host_job (nexus-dmhxw); the "
         "head is _resolve_mineru_api_bin: an interpreter or source-tree sibling, or which_off_cwd",
     # -- POSIX-only branches: the program does not exist on Windows -------------------
-    ("nexus/_install/census_core.py", "ps_snapshot", "unresolved-spawn-argv"):
+    ("nexus/_install/census_core.py", "_take_snapshot", "unresolved-spawn-argv"):
         "ps runs on the non-win32 arm only (the win32 arm returns first); bootstrap-safe module",
+    ("nexus/_install/gc_core.py", "_ancestry", "unresolved-spawn-argv"):
+        "ps for gc's record of its parent chain; returns [] on win32 before any spawn; bootstrap-safe module",
+    ("nexus/_install/gc_core.py", "_ancestry", "bare-argv0"):
+        "the same ps argv, built only past _ancestry's win32 return",
     ("nexus/commands/dt.py", "open_cmd", "unresolved-spawn-argv"):
         "macOS `open`, behind the _is_darwin() gate at the top of the command",
     # -- the argv is resolved on the line above, or in the caller, by a name the scan --
@@ -736,7 +743,7 @@ _TREE_ALLOWED: dict[tuple[str, str, str], str] = {
     ("nexus/_install/generation_core.py", "build_generation", "bare-argv0"):
         "install is spliced into the argv of the _run call that follows (_run resolves it)",
     ("nexus/_install/census_core.py", "<module>", "bare-argv0"):
-        "PS_COMMAND, spawned only by ps_snapshot's non-win32 arm (see below)",
+        "PS_COMMAND, spawned only by _take_snapshot's non-win32 arm (see below)",
     ("nexus/commands/dt.py", "open_cmd", "bare-argv0"):
         "macOS `open`, behind the _is_darwin() gate",
     ("nexus/aspect_extractor.py", "_run_claude_isolated", "bare-argv0"):

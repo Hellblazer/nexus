@@ -14,8 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus import indexer
-from tests._catalog_fixture_ops import ActiveCatalog, documents_by_file_path
+from tests._catalog_fixture_ops import ActiveCatalog, catalog_hook_seeded, documents_by_file_path
 from tests.integration.test_6pfgb8_23_register_stamps import _git_identity as _git_identity  # noqa: F401 - autouse fixture
 from tests.integration.test_rdr223_pdf_journey import _COLLECTION
 
@@ -63,7 +62,9 @@ def _repo(tmp_path: Path) -> list[tuple[Path, str, str]]:
 
 
 def _hook(root: Path, files, head: str) -> None:
-    indexer._catalog_hook(repo=root, repo_name="r3ax49", repo_hash=REPO_HASH, head_hash=head, indexed_files=files)
+    # RDR-229 P3.1: the engine refuses a document under an unregistered collection, so the collections are registered
+    # first, as ``_run_index`` does before it calls the hook.
+    catalog_hook_seeded(repo=root, repo_name="r3ax49", repo_hash=REPO_HASH, head_hash=head, indexed_files=files)
 
 
 def _entry(rel: str):
@@ -175,7 +176,7 @@ def _only_row(path: Path):
 
 @pytest.mark.parametrize("resolved", [False, True], ids=["update-branch", "resolved-onto-existing-branch"])
 def test_the_markdown_hook_keeps_curated_tags_and_category(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resolved: bool) -> None:
-    from nexus.doc_indexer import _catalog_markdown_hook
+    from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook  # RDR-229 P3.1: registers the collection first
 
     corpus = f"3ax49-md-keep-{'resolved' if resolved else 'update'}"
     md = tmp_path / "keep.md"
@@ -200,7 +201,7 @@ def test_the_markdown_hook_keeps_curated_tags_and_category_when_the_resolved_row
     hook has no held meta to apply the fill-only rule to, so the update carries no tags and no category at all
     (the PDF hook's fallback does the same): a curated value must survive, and the rest of the stamp is written."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
-    from nexus.doc_indexer import _catalog_markdown_hook
+    from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook  # RDR-229 P3.1: registers the collection first
 
     corpus = "3ax49-md-keep-resolve-raises"
     md = tmp_path / "keep-unread.md"
@@ -232,7 +233,7 @@ def test_the_markdown_hook_keeps_curated_tags_and_category_when_the_resolved_row
 def test_the_markdown_hook_fills_empty_tags_and_category(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resolved: bool, empty,
 ) -> None:
-    from nexus.doc_indexer import _catalog_markdown_hook
+    from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook  # RDR-229 P3.1: registers the collection first
 
     corpus = f"3ax49-md-fill-{'resolved' if resolved else 'update'}"
     md = tmp_path / f"fill-{'none' if empty is None else repr(empty).strip(chr(39))}.md"
@@ -275,7 +276,7 @@ def test_the_pdf_hook_keeps_curated_tags_and_category(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resolved: bool, content_type: str,
 ) -> None:
     from nexus.catalog.http_catalog_client import HttpCatalogClient
-    from nexus.pipeline_stages import _catalog_pdf_hook
+    from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: registers the collection first
 
     corpus = f"3ax49-pdf-keep-{content_type}-{'resolved' if resolved else 'update'}"
     pdf = tmp_path / "keep.pdf"
@@ -299,7 +300,7 @@ def test_the_pdf_hook_fills_empty_tags_and_category(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resolved: bool, empty,
 ) -> None:
     from nexus.catalog.http_catalog_client import HttpCatalogClient
-    from nexus.pipeline_stages import _catalog_pdf_hook
+    from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: registers the collection first
 
     corpus = f"3ax49-pdf-fill-{'resolved' if resolved else 'update'}"
     pdf = tmp_path / f"fill-{'none' if empty is None else repr(empty).strip(chr(39))}.pdf"

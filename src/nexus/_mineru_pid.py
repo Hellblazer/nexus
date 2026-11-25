@@ -93,7 +93,8 @@ def server_identified(info: dict) -> bool:
     import httpx  # noqa: PLC0415 — deferred: library modules import this one cheaply
 
     try:
-        resp = httpx.get(f"http://127.0.0.1:{port}/health", timeout=_HEALTH_PROBE_TIMEOUT_S)
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+        resp = httpx.get(f"http://127.0.0.1:{port}/health", timeout=_HEALTH_PROBE_TIMEOUT_S, verify=get_shared_ssl_context())
         return resp.status_code == 200 and health_body_is_mineru(resp.json())
     except (httpx.HTTPError, ValueError):
         return False

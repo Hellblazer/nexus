@@ -77,7 +77,9 @@ class FakeImportEngine:
         self.load_polls = load_polls
         #: commits answered 503 restore_busy before one is accepted
         self.busy_commits = busy_commits
-        self.report = report if report is not None else {"tables": [], "soft_references": [], "skipped_tables": {}, "skipped_columns": []}
+        self.report = report if report is not None else {
+            "tables": [], "soft_references": [], "skipped_tables": {}, "skipped_columns": [], "collections_relabelled": [],
+        }
         self.notes = notes or []
         self.script: list[Callable[[IReq], Reply | None]] = []
         self.log: list[IReq] = []

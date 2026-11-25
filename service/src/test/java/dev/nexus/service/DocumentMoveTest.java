@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
@@ -331,16 +332,16 @@ class DocumentMoveTest {
     void seedAspect(String collection, String docId, String path, String marker) {
         su(ctx -> ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                 DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
-            .values(TENANT, collection, path, OffsetDateTime.now(), marker, "docling", docId, "file:///" + path)
+                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
+            .values(TENANT, collection, path, OffsetDateTime.now(), marker, "docling", docId, "file:///" + path, CollectionIds.require(ctx, TENANT, collection))
             .execute());
     }
 
     void seedHighlight(String collection, String docId) {
         su(ctx -> ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
                 DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
-                DOCUMENT_HIGHLIGHTS.INGESTED_AT)
-            .values(TENANT, docId, collection, "file:///hl/" + docId, "highlight", OffsetDateTime.now())
+                DOCUMENT_HIGHLIGHTS.INGESTED_AT, DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
+            .values(TENANT, docId, collection, "file:///hl/" + docId, "highlight", OffsetDateTime.now(), CollectionIds.require(ctx, TENANT, collection))
             .execute());
     }
 
@@ -901,16 +902,19 @@ class DocumentMoveTest {
     // ═════════════════════════════════════════════════════════════════════════════
 
     @Test
-    void collectionsWithoutAnOwnerOrContentType_areNotSiblings_evenUnderDifferentModels() {
+    void collectionsWithoutAContentTypeAreNotSiblings_andTheOwnerIsReadFromTheRowNotTheCache() {
         // The columns are NOT NULL, so a null cannot be read from the table; the registry cache is the
         // seam that can hand the check a row with one (CollectionRegistry#markKnown is its test door).
         Fx fx = pair("nullowner");
         try {
+            // nexus-afkjy: the owners come from the rows, so a cached owner (here a null) no longer decides; the pair's
+            // real owners agree, and the move is not refused as non-siblings.
             CollectionRegistry.markKnown(TENANT, fx.src(), new CollectionRow("knowledge", null, BGE, 768, "live", ""));
             CollectionRegistry.markKnown(TENANT, fx.tgt(), new CollectionRow("knowledge", null, MINI, 384, "live", ""));
-            assertThatThrownBy(() -> moveSvc.moveDocsCombined(TENANT, fx.src(), fx.tgt(), List.of(), List.of(), Map.of()))
-                .as("two null owners are equal to Objects.equals and are still not siblings")
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("model siblings");
+            assertThat(String.valueOf(catchThrowable(
+                    () -> moveSvc.moveDocsCombined(TENANT, fx.src(), fx.tgt(), List.of(), List.of(), Map.of()))))
+                .as("a cached null owner is not read; the rows' owners agree")
+                .doesNotContain("model siblings");
 
             CollectionRegistry.markKnown(TENANT, fx.src(), new CollectionRow(null, "o", BGE, 768, "live", ""));
             CollectionRegistry.markKnown(TENANT, fx.tgt(), new CollectionRow(null, "o", MINI, 384, "live", ""));

@@ -45,6 +45,25 @@ final class MoveReasons {
      */
     static final String MISSING_PREREQUISITE = "missing_prerequisite";
 
+    /**
+     * The {@code reason_class} of the name-key drop move while its completion waits for an in-flight index build
+     * ({@link BuildWait}; nexus-p2m1x.27): nothing is wrong and nothing needs doing, the move continues by itself once no build
+     * runs. {@code nx doctor} shows a note, not a failure.
+     */
+    static final String WAITING_FOR_BUILDS = "waiting_for_builds";
+
+    /**
+     * {@link #WAITING_FOR_BUILDS} once the wait has gone on past {@link BuildWait#OVERDUE_AFTER}: still no failure, no page and no
+     * build ended, but a build that long is worth a look, so {@code nx doctor} shows a warning that names the age, the count and the
+     * builders' pids.
+     */
+    static final String WAITING_FOR_BUILDS_OVERDUE = "waiting_for_builds_overdue";
+
+    private static final Pattern DEFERRAL_OVERDUE = Pattern.compile(";\\s*overdue\\s*;");
+    private static final Pattern DEFERRAL_RUNNING = Pattern.compile("running=(\\d+)");
+    private static final Pattern DEFERRAL_MINUTES = Pattern.compile("deferred_minutes=(\\d+)");
+    private static final Pattern DEFERRAL_PIDS = Pattern.compile("pids=([0-9,]+)");
+
     /** The one name whose "is not installed" is a missing prerequisite: the extension the library install checks first. */
     private static final String PREREQUISITE_EXTENSION = "pg_background";
 
@@ -58,6 +77,9 @@ final class MoveReasons {
     static String classOf(String reason) {
         if (reason == null || reason.isBlank()) {
             return null;
+        }
+        if (reason.strip().startsWith(BuildWait.REASON_PREFIX)) {
+            return DEFERRAL_OVERDUE.matcher(reason).find() ? WAITING_FOR_BUILDS_OVERDUE : WAITING_FOR_BUILDS;
         }
         String body = reason.strip();
         Matcher retry = RETRY.matcher(body);
@@ -106,7 +128,7 @@ final class MoveReasons {
      * ({@code <label>/<tenant>[/<leaf>]}) and PostgreSQL's message, which can echo a row. Only the first survives: a
      * recognised phrase is kept (or rebuilt from its safe parts: an SQLSTATE, a role name, a changeset id), a retry count and
      * "needs an operator" are carried over, and anything else becomes a fixed sentence that points at the engine log, where
-     * the whole reason is logged.
+     * the whole reason is logged. The one backend id it carries is the pids of an overdue {@link BuildWait} deferral (linda 2026-11-24).
      */
     static String publicForm(String reason) {
         if (reason == null || reason.isBlank()) {
@@ -127,16 +149,56 @@ final class MoveReasons {
         if (needsOperator) {
             body = body.substring(0, operator.start());
         }
+        boolean indexBuilds = body.contains("; " + MoveRetryPolicy.INDEX_BUILDS_NOTE);
+        if (indexBuilds) {   // a fixed note the retry policy adds: kept, and the run's own text is read without it
+            body = body.replace("; " + MoveRetryPolicy.INDEX_BUILDS_NOTE, "");
+        }
         out.append(phrase(body));
+        if (indexBuilds) {
+            out.append("; ").append(MoveRetryPolicy.INDEX_BUILDS_NOTE);
+        }
         if (needsOperator || text.contains("needs an operator")) {
             out.append("; needs an operator");
         }
         return out.toString();
     }
 
+    /**
+     * The public form of a {@link BuildWait} deferral, rebuilt from its numbers: how many builds run, how long the wait has gone on and,
+     * past {@link BuildWait#OVERDUE_AFTER}, the builders' pids (linda 2026-11-24: the one backend id {@code /v1/status} carries, so
+     * an operator can find the build; a number, nothing a tenant wrote).
+     */
+    private static String deferral(String text) {
+        Matcher running = DEFERRAL_RUNNING.matcher(text);
+        Matcher minutes = DEFERRAL_MINUTES.matcher(text);
+        StringBuilder out = new StringBuilder("waiting for in-flight index builds to finish");
+        if (running.find()) {
+            out.append(" (").append(running.group(1)).append(" running)");
+        }
+        out.append("; none is ended and no failure is counted");
+        if (minutes.find()) {
+            out.append("; waiting for ").append(duration(Long.parseLong(minutes.group(1))));
+        }
+        if (DEFERRAL_OVERDUE.matcher(text).find()) {
+            out.append("; overdue, more than ").append(BuildWait.OVERDUE_AFTER.toHours()).append(" h");
+            Matcher pids = DEFERRAL_PIDS.matcher(text);
+            if (pids.find()) {
+                out.append("; builder pids ").append(pids.group(1));
+            }
+        }
+        return out.toString();
+    }
+
+    private static String duration(long minutes) {
+        return minutes >= 60 ? (minutes / 60) + " h " + (minutes % 60) + " m" : minutes + " m";
+    }
+
     private static String phrase(String text) {
         String lower = text.toLowerCase(Locale.ROOT);
         String state = sqlstate(text);
+        if (text.startsWith(BuildWait.REASON_PREFIX)) {
+            return deferral(text);
+        }
         Matcher role = LIBRARY_ROLE.matcher(text);
         Matcher notInstalled = NOT_INSTALLED.matcher(text);
         if (lower.contains("waiting for a background worker slot")) {
@@ -197,6 +259,9 @@ final class MoveReasons {
         if (lower.contains("verification connection carries nexus.tenant")) {
             return "the table-wide verification connection carried a tenant setting, so it was not trusted";
         }
+        if (lower.startsWith("adoption timed out at ")) {
+            return text;   // the bound in ms, a leaf count and what to do: no collection, tenant or index is named
+        }
         if (lower.startsWith("on_complete of ") && lower.contains("did not complete")) {
             return "on_complete did not complete" + state;
         }
@@ -225,6 +290,15 @@ final class MoveReasons {
             return "the pass could not run (see the engine log)";
         }
         return "stopped for a reason kept in the engine log" + state;
+    }
+
+    /** The five-character SQLSTATE a reason carries ({@code sqlstate=57014}), or null: a code, so safe on {@code /v1/status}. */
+    static String sqlstateOf(String reason) {
+        if (reason == null) {
+            return null;
+        }
+        Matcher m = SQLSTATE.matcher(reason);
+        return m.find() ? m.group(1) : null;
     }
 
     /** {@code " sqlstate=XXXXX"} when the reason carries one, else empty. */

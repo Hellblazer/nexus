@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -185,7 +187,7 @@ class DepartedWriterSpansBatchTest {
 
         int cleared = tenantScope.withTenant(TENANT, ctx ->
             DepartedWriterSpans.clear(ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(),
-                TENANT, gone));
+                TENANT, gone, Gate3.never()));
 
         assertThat(cleared).as("chunk rows updated").isEqualTo(n);
         assertThat(statements.updatesOfChunks()).as("one UPDATE per batch of %d chashes", DepartedWriterSpans.BATCH)
@@ -214,7 +216,7 @@ class DepartedWriterSpansBatchTest {
 
         int cleared = tenantScope.withTenant(TENANT, ctx ->
             DepartedWriterSpans.clear(ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(),
-                TENANT, gone));
+                TENANT, gone, Gate3.never()));
 
         assertThat(cleared).isEqualTo(chashes);
         assertThat(statements.updatesOfChunks()).as("1200 tuples do not fit one statement").isEqualTo(2);
@@ -236,7 +238,7 @@ class DepartedWriterSpansBatchTest {
         assertThatThrownBy(() -> {
             try (Connection conn = svcDs.getConnection()) {
                 assertThat(conn.getAutoCommit()).isTrue();
-                DepartedWriterSpans.clear(DSL.using(conn, SQLDialect.POSTGRES), TENANT, gone);
+                DepartedWriterSpans.clear(DSL.using(conn, SQLDialect.POSTGRES), TENANT, gone, Gate3.never());
             }
         }).isInstanceOf(IllegalStateException.class).hasMessageContaining("open transaction");
 
@@ -259,6 +261,7 @@ class DepartedWriterSpansBatchTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, doc)
                 .set(CATALOG_DOCUMENTS.TITLE, doc)
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, coll)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, coll))
                 .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now().minusDays(60))
                 .execute();
             String model = PgContainerHelper.collectionModel(d, TENANT, coll);
@@ -266,9 +269,12 @@ class DepartedWriterSpansBatchTest {
                 CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                 CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                 CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END,
-                CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END);
+                CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID);
+            Long collectionId = CollectionIds.require(d, TENANT, coll);
             for (int i = 0; i < hex.size(); i++) {
-                insert = insert.values(TENANT, doc, i, bytes(hex.get(i)), coll, model, 500, 510, 5000, 5100);
+                insert = insert.values(TENANT, doc, i, bytes(hex.get(i)), coll, model, 500, 510, 5000, 5100,
+                    collectionId);
             }
             insert.execute();
         } catch (java.sql.SQLException e) {
@@ -290,7 +296,7 @@ class DepartedWriterSpansBatchTest {
 
         int cleared = tenantScope.withTenant(TENANT, ctx ->
             DepartedWriterSpans.clearBeforeTrashPurge(
-                ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(), TENANT, threshold));
+                ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(), TENANT, threshold, Gate3.never()));
 
         assertThat(cleared).isEqualTo(n);
         assertThat(statements.updatesOfChunks()).as("one UPDATE per batch of %d chashes", DepartedWriterSpans.BATCH)
@@ -342,7 +348,7 @@ class DepartedWriterSpansBatchTest {
 
         int cleared = tenantScope.withTenant(TENANT, ctx ->
             DepartedWriterSpans.clearBeforeTrashPurge(
-                ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(), TENANT, threshold));
+                ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(), TENANT, threshold, Gate3.never()));
 
         assertThat(cleared).as("chunk rows updated in both collections").isEqualTo(6);
         assertThat(statements.updatesOfChunks()).as("one UPDATE per collection").isEqualTo(2);
@@ -350,6 +356,117 @@ class DepartedWriterSpansBatchTest {
         assertThat(rowSpanKeys(COLL2, inSecond).values()).as("second collection")
             .allSatisfy(k -> assertThat(k).isEmpty());
         catalog.purgeTrash(TENANT, 30);
+    }
+
+    // ── RDR-229 P3.5c: the id arm, from gate 3, over a collection whose registry row was renamed ─────────────────────
+    // guarded() is fail-open: a SQL error in the id arm would be logged and swallowed and no span ever cleared. Every assertion
+    // below counts cleared rows, so a swallowed error reads as 0 and fails.
+
+    private boolean foreignKeysDropped;
+
+    private void renameRegistryRow(String from, String to) {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext d = DSL.using(su, SQLDialect.POSTGRES);
+            if (!foreignKeysDropped) {
+                dev.nexus.service.RegistryRenameSupport.dropForeignKeysOntoTheRegistry(d);
+                foreignKeysDropped = true;
+            }
+            dev.nexus.service.RegistryRenameSupport.rename(d, TENANT, from, to);
+        } catch (java.sql.SQLException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    private Long registryId(String name) {
+        return tenantScope.withTenant(TENANT, ctx -> CollectionIds.require(ctx, TENANT, name));
+    }
+
+    private String registerAndRename(String tag) {
+        String from = "knowledge__span-id-" + tag + "__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, from);
+        } catch (java.sql.SQLException e) {
+            throw new AssertionError(e);
+        }
+        return from;
+    }
+
+    @Test
+    void latchedClear_overARenamedCollection_clearsByIdWhatTheNewLabelWouldNeverMatch() {
+        String tag = "i" + seq.incrementAndGet();
+        String old = registerAndRename(tag);
+        List<String> hex = chunks(old, tag, 5);
+        liveHolder(old, hex);
+        Long id = registryId(old);
+        String renamed = old + "-renamed";
+        renameRegistryRow(old, renamed);
+        List<DepartedWriterSpans.Gone> gone = new ArrayList<>();
+        for (String h : hex) gone.add(new DepartedWriterSpans.Gone(renamed, bytes(h), null, null, null, null, id));
+
+        int cleared = tenantScope.withTenant(TENANT, ctx -> DepartedWriterSpans.clear(ctx, TENANT, gone, () -> true));
+
+        assertThat(cleared).as("by id; the chunk rows still name the old label, so a name match would find none").isEqualTo(5);
+        assertThat(rowSpanKeys(old, hex).values()).allSatisfy(k -> assertThat(k).isEmpty());
+    }
+
+    @Test
+    void latchedClear_overMoreThanBatchChashes_keepsItsStatementsAtMostBatchEach() {
+        String tag = "l" + seq.incrementAndGet();
+        int n = 2 * DepartedWriterSpans.BATCH + 50;
+        List<String> hex = chunks(tag, n);
+        liveHolder(hex);
+        Long id = registryId(COLL);
+        List<DepartedWriterSpans.Gone> gone = new ArrayList<>();
+        for (String h : hex) gone.add(new DepartedWriterSpans.Gone(COLL, bytes(h), null, null, null, null, id));
+        var statements = new Statements();
+
+        int cleared = tenantScope.withTenant(TENANT, ctx ->
+            DepartedWriterSpans.clear(ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(),
+                TENANT, gone, () -> true));
+
+        assertThat(cleared).isEqualTo(n);
+        assertThat(statements.updatesOfChunks()).isEqualTo(3);
+        assertThat(rowSpanKeys(hex).values()).allSatisfy(k -> assertThat(k).isEmpty());
+    }
+
+    @Test
+    void latchedTrashPurgeClear_overARenamedCollection_clearsByIdAndLeavesTheSoleHolderAlone() {
+        catalog.purgeTrash(TENANT, 30);   // no other scenario's aged tombstone is a candidate
+        String tag = "r" + seq.incrementAndGet();
+        String old = registerAndRename(tag);
+        List<String> hex = chunks(old, tag, 4);
+        List<String> alone = chunks(old, tag + "-alone", 2);
+        agedWriter(old, "aged-" + tag, new ArrayList<>(concat(hex, alone)));
+        liveHolder(old, hex);
+        renameRegistryRow(old, old + "-renamed");
+        var threshold = DSL.currentOffsetDateTime().sub(new YearToSecond(new YearToMonth(0, 0), new DayToSecond(30)));
+
+        int cleared = tenantScope.withTenant(TENANT, ctx ->
+            DepartedWriterSpans.clearBeforeTrashPurge(ctx, TENANT, threshold, () -> true));
+
+        assertThat(cleared).as("the four chunks a live document also holds").isEqualTo(4);
+        assertThat(rowSpanKeys(old, hex).values()).allSatisfy(k -> assertThat(k).isEmpty());
+        assertThat(rowSpanKeys(old, alone).values()).as("no other holder: not the clear's")
+            .allSatisfy(k -> assertThat(k).isEqualTo(SPAN_KEYS));
+        catalog.purgeTrash(TENANT, 30);
+    }
+
+    @Test
+    void latchedClear_ofASpanWhoseCollectionHasNoId_isLoggedAndCounted_neverKeptSilently() {
+        String tag = "u" + seq.incrementAndGet();
+        List<String> hex = chunks(tag, 2);
+        liveHolder(hex);
+        long before = DepartedWriterSpans.unresolvedSpans();
+        var gone = List.of(new DepartedWriterSpans.Gone("knowledge__no-such-collection__minilm-l6-v2-384__v1", bytes(hex.get(0)), null, null, null, null),
+            new DepartedWriterSpans.Gone("", bytes(hex.get(1)), null, null, null, null));
+
+        int cleared = tenantScope.withTenant(TENANT, ctx -> DepartedWriterSpans.clear(ctx, TENANT, gone, () -> true));
+
+        assertThat(cleared).as("neither span has a collection id: nothing is cleared").isZero();
+        assertThat(DepartedWriterSpans.unresolvedSpans() - before).as("both are counted").isEqualTo(2);
+        assertThat(rowSpanKeys(hex).values()).as("and the chunk rows keep their spans").allSatisfy(k -> assertThat(k).isEqualTo(SPAN_KEYS));
     }
 
     private static List<String> concat(List<String> a, List<String> b) {

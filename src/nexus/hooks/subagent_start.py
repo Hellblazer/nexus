@@ -350,8 +350,8 @@ _CATALOG_LINKING = (
     "sub-chunk;\n"
     'fallback "L-L" or "C:S-E" (positional, may go stale). chash via search '
     "chunk_text_hash.\n\n"
-    "Link types: cites, implements, implements-heuristic, supersedes, quotes, "
-    "relates, comments.\n\n"
+    "Link types: cites, implements, supersedes, quotes, relates, comments "
+    "(implements-heuristic only on edges older than engine 0.1.57).\n\n"
     "For full plan execution call nx_answer.\n"
 )
 

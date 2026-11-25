@@ -165,7 +165,13 @@ class IdentityClient:
         self._base = base_url.rstrip("/")
         self._bearer = bearer if callable(bearer) else (lambda: bearer)
         self._tenant = tenant
-        self._http = http or httpx.Client(timeout=timeout)
+        if http is None:
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+
+            # The process-wide SSL context: the MCP identity lease builds one of these periodically, and a
+            # per-client context re-reads the CA bundle from an install generation that may be gone (2026-11-21).
+            http = httpx.Client(timeout=timeout, verify=get_shared_ssl_context())
+        self._http = http
 
     @classmethod
     def from_config(cls, *, timeout: float = DEFAULT_TIMEOUT_S) -> "IdentityClient":

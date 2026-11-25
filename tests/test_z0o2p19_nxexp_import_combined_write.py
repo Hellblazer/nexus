@@ -54,6 +54,7 @@ from nexus.exporter import (
     import_collection,
 )
 from tests._chunk_seed import seed_chunks_direct
+from tests._catalog_fixture_ops import register_seed_collections
 
 _MODEL = "bge-base-en-v15-768"
 _DIM = 768
@@ -412,6 +413,7 @@ def test_only_a_document_this_file_left_unfinished_is_resumed_any_other_that_own
     f = tmp_path / "resume.nxexp"
     _write_nxexp(f, dst, records)
     # The earlier state: the document owns its first two chunks, with the fence in `state`.
+    register_seed_collections(dst)
     doc = str(cat.register(owner=owner, title="resume.py", content_type="code",
                            physical_collection=dst, source_uri=uri))
     cat.write_manifest_many(
@@ -630,6 +632,7 @@ def test_the_exported_vector_replaces_a_stored_one_including_a_chash_another_doc
                          "line_start": 5},
                         {"chunk_text_hash": lone}],
                        embeddings=[_vec(1).tolist(), _vec(2).tolist()])
+    register_seed_collections(dst)
     doc_x = str(cat.register(owner=owner, title="x.py", content_type="code", physical_collection=dst,
                              source_uri=f"file:///z0o2p19/{dst}/x.py"))
     cat.write_manifest(doc_x, [{"chash": shared, "position": 0}], collection=dst)
@@ -771,7 +774,7 @@ def test_gate_xr789_shaped_import_owns_chunks_already_stored_ownerless_across_se
     cat = make_catalog_writer()
     owner = cat.register_owner("knowledge", "curator")
     dst = f"code__z0o2p19slug-2ad2825c__{_MODEL}__v1"
-    cat.register_collection(dst, content_type="code", owner_id="z0o2p19slug-2ad2825c", embedding_model=_MODEL)
+    cat.register_collection(dst, content_type="code", owner_id="z0o2p19slug-2ad2825c", embedding_model=_MODEL, model_version="v1")
     live = str(cat.register(owner=owner, title="live legacy", content_type="code", physical_collection=dst,
                             source_uri=f"file:///z0o2p19/{dst}/live.py"))
     dead = str(cat.register(owner=owner, title="dead legacy", content_type="code", physical_collection=dst,
@@ -818,6 +821,7 @@ def _a_dead_run_left(cat, dst: str, name: str, state: str, file_hash: str, n_own
     uri = f"file:///z0o2p19/{dst}/{name}.py"
     texts = [f"z0o2p19 {name} chunk {i}" for i in range(4)]
     chashes = [_chash(t) for t in texts]
+    register_seed_collections(dst)
     doc = str(cat.register(owner=owner, title=f"{name}.py", content_type="code",
                            physical_collection=dst, source_uri=uri))
     cat.write_manifest_many(
@@ -885,6 +889,7 @@ def test_two_owner_groups_that_resolve_to_one_document_are_one_document_with_the
     owner = cat.register_owner("knowledge", "curator")
     dst, src = _coll("twogroups"), _coll("twogroups-src")
     uri_a = f"file:///z0o2p19/{src}/two.py"
+    register_seed_collections(src)
     cat.register(owner=owner, title="two.py", content_type="code", physical_collection=src, source_uri=uri_a)
     qualified = f"nxexp://{dst}/{uri_a}"
     texts = [f"z0o2p19 two groups chunk {i}" for i in range(6)]
@@ -1000,6 +1005,7 @@ def test_the_snapshot_minus_written_sweep_list_runs_through_trailing_sweeps_agai
     owner = cat.register_owner("knowledge", "curator")
     dst = _coll("trailsweep")
     uri = f"file:///z0o2p19/{dst}/big.py"
+    register_seed_collections(dst)
     doc = str(cat.register(owner=owner, title="big.py", content_type="code",
                            physical_collection=dst, source_uri=uri))
     rng = np.random.default_rng(650)
@@ -1163,6 +1169,7 @@ def test_a_document_that_already_existed_is_never_removed(
     _write_nxexp(f, dst, records)
     owner = exporter_mod._resolve_import_owner_tumbler(dst, reader, writer)
     for uri in expected:                        # registered beforehand, so the import only FINDS them
+        register_seed_collections(dst)
         writer.register(owner=owner, title=uri, content_type="code", physical_collection=dst, source_uri=uri)
     assert sorted(_documents_present(reader, expected)) == sorted(expected)
     minted = _record_minted(monkeypatch)
@@ -1421,6 +1428,7 @@ def test_a_quiescent_source_keeps_the_key_and_its_registration_witness() -> None
 def _native_pdf(cat, owner, coll: str, name: str, key: str, texts: list[str]) -> str:
     """A natively indexed, complete pdf document owning *texts* at positions 0..n-1."""
     uri = f"file:///mjikf/{coll}/{name}.pdf"
+    register_seed_collections(coll)
     doc = str(cat.register(owner=owner, title=name, content_type="pdf", physical_collection=coll,
                            source_uri=uri))
     chashes = [_chash(t) for t in texts]

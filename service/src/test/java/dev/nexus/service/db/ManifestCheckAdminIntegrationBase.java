@@ -112,6 +112,9 @@ abstract class ManifestCheckAdminIntegrationBase {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // RDR-229 P3.1: a manifest row that names a collection carries its registry id, so the tenant's row of the
+            // collection exists before the replica role turns the foreign keys off
+            PgContainerHelper.insertCollection(ctx, tenant, "mci-collection");
             ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
             var insert = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
                 .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
@@ -119,6 +122,7 @@ abstract class ManifestCheckAdminIntegrationBase {
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash(doc))
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, "mci-collection")
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, "mci-collection"))
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
                 // NOT NULL, and the BEFORE INSERT default trigger is off under replica: a check that is not about
                 // chunk_index leaves it equal to position, one that is overrides it below

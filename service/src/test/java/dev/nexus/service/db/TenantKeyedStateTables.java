@@ -32,7 +32,7 @@ final class TenantKeyedStateTables {
         + "pg_stat_user_tables, replaced as a whole on every read, so a leaf that is gone (its name carries a hash "
         + "of the tenant), as after a tenant reset, drops out at the next read; the status route serves counts "
         + "only";
-    private static final String RESULT = "a field of an immutable per-call value (result, parameter, outcome or "
+    static final String RESULT = "a field of an immutable per-call value (result, parameter, outcome or "
         + "exception) built for one request or one pass and dropped with it; no long-lived structure holds it";
     private static final String COUNTER = "a process-wide counter or flag since boot, or a pass counter; not keyed "
         + "by tenant, and a data reset does not reset counters";
@@ -95,6 +95,12 @@ final class TenantKeyedStateTables {
         keyed.put("TupleWaitRegistry.perClaimantParked", TUPLE_WAITS);   // a count of live parks; aborting forces zero
         keyed.put("TokenCache.map", TOKEN_CACHE);
         keyed.put("CollectionRegistry.KNOWN", COLLECTIONS);
+        // RDR-229 P3.5a (nexus-p2m1x.23): the id index beside the label index, filled and dropped with it. The two instance
+        // fields are the maps one registry reads: the process-wide registry's alias KNOWN and KNOWN_BY_ID (evicted by the one
+        // evictor), and a registry a test builds with new owns an isolated pair that no tenant reset reaches.
+        keyed.put("CollectionRegistry.KNOWN_BY_ID", COLLECTIONS);
+        keyed.put("CollectionRegistry.known", COLLECTIONS);
+        keyed.put("CollectionRegistry.knownById", COLLECTIONS);
         keyed.put("CatalogRepository.ghostSweepCheckedTenants", GHOST_SWEEP);
         keyed.put("MintRateLimiter.credentials", MINT_RATE);
         keyed.put("MintRateLimiter.CredentialState.tenants", MINT_RATE);
@@ -129,13 +135,15 @@ final class TenantKeyedStateTables {
         notKeyed.put("NexusService.chunkKeysSweepForTests", TEST_HOOK);
         notKeyed.put("CollectionTupleLock.Tuple.tenantId", "one component of a tuple a caller passes to take a per-tuple "
             + "advisory lock for that transaction; never stored, so a tenant reset has nothing to drop");
+        notKeyed.put("RestoreIdFill.Filled.map", "one restore load's source-to-target id map, a value returned from a table's fill and dropped when the load ends (RDR-229 P3.11); never cached");
+        notKeyed.put("RestoreIdFill.Filled.relabelled", "one restore load's relabels, a value returned from the registry's fill and reported once (RDR-229 P3.11); never cached");
         notKeyed.put("TenantImportSessions.servedModels", "the router's served-model supplier; holds no tenant's data");
         notKeyed.put("NexusService.chunkKeysCredentialLiveForTests", TEST_HOOK);
         notKeyed.put("EngineJobs.maxRuntime", "the wall-clock cap a job is started with (a configured duration, "
             + "settable by a test): no tenant's data");
         for (String f : List.of("NexusService.tenantScope", "TaxonomyCentroidRepository.tenantScope",
             "PgVectorRepository.tenantScope", "ReaperRepository.tenantScope", "WhoamiHandler.tenantScope",
-            "RemapRepository.tenantScope", "CombinedWriteService.tenantScope", "TaxonomyRepository.tenantScope",
+            "RemapRepository.tenantScope", "CombinedWriteService.tenantScope", "TaxonomyRepository.tenantScope", "TaxonomyAnalytics.tenantScope",
             "TupleRepository.tenantScope", "TelemetryRepository.tenantScope", "LadderRepository.tenantScope",
             "PlanRepository.tenantScope", "MemoryRepository.tenantScope", "PipelineRepository.tenantScope",
             "CatalogRepository.tenantScope", "CatalogLinksRepository.tenantScope", "ChashRepository.tenantScope", "AspectRepository.tenantScope",
@@ -180,6 +188,11 @@ final class TenantKeyedStateTables {
         notKeyed.put("CatalogMoves.FoldPlan.aliased", RESULT);   // RDR-254: the fold read for one owner move
         notKeyed.put("CatalogMoves.FoldPlan.withHighlights", RESULT);   // RDR-254: the fold read for one owner move
         notKeyed.put("CatalogDocReads.MetaFilter.equalities", RESULT);
+        notKeyed.put("RenameOutcome.counts", RESULT);   // RDR-229 P3.5a: one rename's per-table counts
+        notKeyed.put("CollectionSelectors.Route.slots", "a row of the route table, fixed when the class loads "
+            + "(RDR-229 P3.5a): which request fields of one route name a collection; holds no tenant");
+        notKeyed.put("CollectionSelectors.Slot.labelFields", "a row of the route table, fixed when the class loads "
+            + "(RDR-229 P3.5a): the names one collection field is read under; holds no tenant");
         notKeyed.put("CatalogDocReads.MetaFilter.bounds", RESULT);
         notKeyed.put("CatalogSensitiveLocatorReads.Page.documents", RESULT);
         notKeyed.put("PdfStubMetadataReads.Page.collections", RESULT);   // nexus-f3yqd: one stub-metadata call's collections
@@ -194,6 +207,12 @@ final class TenantKeyedStateTables {
         notKeyed.put("MoveBootWork.Snapshot.open", DATA_MOVE_REPORT);
         notKeyed.put("MoveBootWork.Snapshot.failed", DATA_MOVE_REPORT);
         notKeyed.put("MoveBootWork.Snapshot.progress", DATA_MOVE_REPORT);
+        TenantKeyedStateTablesRdr229.fillCompletionCheck(notKeyed);   // RDR-229 P3.1 (nexus-p2m1x.17): the boot-time completion check is engine-wide
+        TenantKeyedStateTablesRdr229.fillLeafIndexPass(notKeyed);   // RDR-229 P3.3b (nexus-p2m1x.20): the per-leaf id unique-index pass is engine-wide
+        TenantKeyedStateTablesRdr229.fillIdUniqueIndexPass(notKeyed);   // RDR-229 P3.4 (nexus-p2m1x.22): the id-keyed index pass is engine-wide
+        TenantKeyedStateTablesRdr229.fillBuildWait(notKeyed);   // RDR-229 P3.7 (nexus-p2m1x.27): the drop move's wait for index builds is engine-wide
+        TenantKeyedStateTablesRdr229.fillP35c(notKeyed);   // RDR-229 P3.5c (nexus-p2m1x.25): the id-keyed readers' per-call state and two counters
+        TenantKeyedStateTablesRdr229.fillRegistryRowReads(notKeyed);   // RDR-229 P3.5a (nexus-p2m1x.23): per-transaction registry-row read records
         // nexus-f3yqd.2.18: the engine's own database passwords, set once at startup; the engine's, so no tenant's
         notKeyed.put("SecretMask.SECRETS", "the engine's own database passwords (the admin and the application role), added once "
             + "at startup; process-wide credentials of the engine, never a tenant's, and nothing a tenant's reset has to clear");
@@ -203,6 +222,9 @@ final class TenantKeyedStateTables {
         notKeyed.put("DataMoveWorker.loop", DATA_MOVE_HANDLE);
         notKeyed.put("DataMoveWorker.callConnection", DATA_MOVE_CALL);
         notKeyed.put("CallConnection.running", DATA_MOVE_CALL);
+        notKeyed.put("VerifyingFinisher.inFlight", "the backend pid of the validation in flight (a move with no statement bound runs its "
+            + "on_complete before its claim) and the engine's own admin values, kept so a stop can cancel it; no per-tenant state, "
+            + "cleared when the statement ends");
         notKeyed.put("LeafCatalog.TenantLeaf.tenant", PRINCIPAL);
         notKeyed.put("MoveTenants.TENANT_ID", JOOQ_COLUMN);
         notKeyed.put("FailureHandler.Failure.tenant", PRINCIPAL);
@@ -277,6 +299,11 @@ final class TenantKeyedStateTables {
         notKeyed.put("CatalogRepository.ImportCollectionsResult.stateCorrected", "a component of one ETL collection "
             + "import's result, the names of the new rows that call imported as quarantine although they carried live "
             + "(RDR-229 P2.5), built for that request and returned in its response; nothing keeps it between requests");
+        notKeyed.put("CatalogRepository.ImportCollectionsResult.refused", "a component of one ETL collection "
+            + "import's result, the labels that call refused (RDR-229 item 10), built for that request and returned in "
+            + "its response; nothing keeps it between requests");
+        notKeyed.put("ImportLabelRefusals.byName", "the labels one import call refused, by label, built inside that "
+            + "call and dropped with it; nothing keeps it between requests");
         notKeyed.put("ChunkConstraintAdmin.TenantProbe.tenant", "a component of one table-wide probe row (the "
             + "tenant name beside its counts), built for that request and dropped with its response");
         for (String f : List.of("ChunkKeyPlan.allowed", "ChunkKeyPlan.rowKeys", "ChunkKeyPlan.bypassPrefixes",
@@ -334,6 +361,23 @@ final class TenantKeyedStateTables {
         notKeyed.put("TenantCreationBusyException.tenant", "payload of an exception thrown to one caller");
         notKeyed.put("UnregisteredCollectionException.tenant", "payload of an exception thrown to one caller");
         notKeyed.put("CollectionSupersededException.tenant", "payload of an exception thrown to one caller (nexus-mp8ys)");
+        notKeyed.put("UnknownCollectionIdException.tenant", "payload of an exception thrown to one caller (RDR-229 P3.5a)");
+        notKeyed.put("CollectionSelectorFilter.Resolver.tenant", "the tenant of one request: the resolver is built per request and dies with it (RDR-229 P3.5a)");
+        notKeyed.put("CollectionSelectorFilter.Resolver.expected", "the ids one request named, by label: the resolver is built per request and dies with it (RDR-229 P3.5a)");
+        notKeyed.put("CollectionSelectorFilter.afterResolve", TEST_HOOK);
+        notKeyed.put("CollectionSelectorFilter.beforeTransactionRead", TEST_HOOK);
+        notKeyed.put("CollectionSelectorFilter.afterTransactionRead", TEST_HOOK);
+        notKeyed.put("CollectionSelectorFilter.unconsumedSink", TEST_HOOK);
+        notKeyed.put("ExpectedCollectionIds.Carrier.ids", "the ids the request on this thread named, by label: set by the route boundary just before the handler and removed in a finally, so no request outlives it and nothing is keyed by tenant (RDR-229 P3.5a)");
+        notKeyed.put("ExpectedCollectionIds.Carrier.consumed", "the labels the request on this thread has read by id in its own transaction; dies with the request's carrier (RDR-229 P3.5a)");
+        notKeyed.put("ExpectedCollectionIds.Carrier.readByTransaction", "census only (a test turns it on): the labels each transaction of the request read, by the transaction's jOOQ configuration; dies with the request's carrier (RDR-229 P3.5a)");
+        notKeyed.put("ExpectedCollectionIds.Carrier.historyTransactions", "census only: the transactions of the request that declared a history write; dies with the request's carrier (RDR-229 P3.5a)");
+        notKeyed.put("StrictWriterCensus.FOUND", "census only (off unless -Dnexus.writer.census is set): the guarded-table writes that ran in a transaction with no registry read, as 'table @ frame' strings; a test reads it and nothing is keyed by tenant (RDR-229 P3.5a)");
+        notKeyed.put("ExpectedCollectionIds.Carrier.findings", "census only: the write transactions of the request that read none of its named ids; dies with the request's carrier (RDR-229 P3.5a)");
+        notKeyed.put("CollectionRegistry.writeReadHookForTests", TEST_HOOK);
+        notKeyed.put("DeadlockRetry.retryListenerForTests", TEST_HOOK);
+        notKeyed.put("CollectionSelectorFilter.censusSink", TEST_HOOK);
+        notKeyed.put("CollectionRetiredIdException.tenant", "payload of an exception thrown to one caller (RDR-229 P3.5a)");
         notKeyed.put("ReembedRunner.tenantSource", "a supplier of the tenant list, re-read from service_tokens at "
             + "the start of every runner pass; the runner keeps nothing per tenant between passes");
         notKeyed.put("ReembedHandler.servedModels", "a supplier of the models the embedder router serves, an "
@@ -354,6 +398,12 @@ final class TenantKeyedStateTables {
         notKeyed.put("NexusService.aspectQueueDrain", "the drain object bound once at boot; it keeps its state in a "
             + "per-run tally that dies with the run");
         notKeyed.put("StatusHandler.aspectQueue", "a supplier of the install-wide drain result; not keyed by tenant");
+        notKeyed.put("StatusHandler.catalogEpoch", "a supplier of whether the install's role can read the cluster facts the catalog epoch hashes (RDR-229 P3.11); one install-wide boolean, not keyed by tenant");
+        notKeyed.put("CompletionBootWork.DbReader.latchWriteFailingSince", "when the gate 3 latch write first failed to take its lock in the current run of failures (RDR-229 P3.5a), for the elapsed figure in the WARN; one install-wide instant, not keyed by tenant");
+        notKeyed.put("RenameNoOpActivity.NOOPS", "a process-wide count of per-store renames answered as the one-row no-op (RDR-229 P3.5a), read only by tests; one counter, not keyed by tenant");
+        notKeyed.put("CatalogEpoch.NULL_LOGGED", "a once-per-process latch for the WARN that a pg_control member read NULL (RDR-229 P3.11); one install-wide flag, not keyed by tenant");
+        notKeyed.put("StatusHandler.collectionTupleIndex", "a supplier of whether the install-wide live-tuple index exists (RDR-229 P3.8); not keyed by tenant");
+        notKeyed.put("StatusHandler.liveLabelIndex", "a supplier of whether the install-wide live-label index exists and is valid (RDR-229 P3.12); not keyed by tenant");
         notKeyed.put("AspectQueueDrain.TENANT", "the tenant_id column of the retired queue table, a jOOQ field "
             + "constant; no state");
         notKeyed.put("AspectQueueDrain.Snapshot.rowsByTenant", "one census read of the retired queue table, "
@@ -479,6 +529,7 @@ final class TenantKeyedStateTables {
             "CatalogRepository.afterMovePreconditionHookForTests",
             "CatalogRepository.beforeReadHookForTests",
             "CatalogRepository.noteUriRepairHookForTests",
+            "CatalogRepository.noteUriCensusedHookForTests",
             "ReembedJobRepository.lockRetryHookForTests",
             "ReembedRunner.phaseHookForTests",
             "NexusService.reembedServedModelsForTests",
@@ -671,6 +722,7 @@ final class TenantKeyedStateTables {
             "PciIndexSweep.State.expiryLogged",
             "PciIndexSweep.State.set",
             "PciIndexSweep.State.since",
+            "PciIndexSweep.State.idSince",
             "PciIndexSweep.state",
             "PciPlanCheck.armsSeen",
             "PciReconciler.Planned.actions",
@@ -737,6 +789,27 @@ final class TenantKeyedStateTables {
             notKeyed.put(f, WAITER_LOCAL);
         }
         notKeyed.put("PciReconciler.failures", PCI_OFF);
+        // nexus-p2m1x.22 (RDR-229 P3.4): the id-predicate half's memory. The planned keys are replaced whole by each pass that saw
+        // every leaf (and dropped to unknown by one that did not); the gate and the per-pass plan values are not kept.
+        notKeyed.put("PciIdBuilds.readers", "whether this engine's id readers are present (IdReaders.PRESENT, which P3.5c flips) as a supplier, bound once at boot; a callback, no data");
+        notKeyed.put("PciIdBuilds.pciOffLatch", "whether the gate 3 latch row says it latched while PCI was off, as a supplier bound once at boot; a callback, no data");
+        // RDR-229 P3.5a: W2's route classification and gc seam, W1's client-label carrier.
+        notKeyed.put("CollectionSelectors.EXEMPT", "the route table's exempt routes and the reason for each, a constant built once; no tenant");
+        notKeyed.put("GcCollectionReads.beforeMoveForTests", "a test seam run before a gc move, null in production; a callback, no data");
+        notKeyed.put("ExpectedCollectionIds.Carrier.clientLabels", "the labels one request itself sent beside its ids, held for that "
+            + "request's thread only and cleared at its end; no tenant state");
+        notKeyed.put("CompletionBootWork.DbReader.coverage", TenantKeyedStateTablesRdr229.COMPLETION_ENGINE_WIDE + "the last PCI coverage read, reused for at most ten minutes once gate 3 has latched "
+            + "(it holds id keys: model, tenant and collection id), in memory only and replaced by the next read");
+        notKeyed.put("CompletionBootWork.DbReader.coverageAt", "when that coverage was read (a time); no tenant state");
+        notKeyed.put("PciIdBuilds.gate3", "the completion check's gate 3 as a supplier, bound once at boot; a callback, no data");
+        notKeyed.put("PciGate3Coverage.unindexed", PCI_OFF + "; the last near-latch scan's keys (model, tenant, collection id) of collections at the build threshold with no index, replaced whole by each scan and dropped after ten minutes");
+        notKeyed.put("PciGate3Coverage.Found.keys", PCI_OFF);
+        notKeyed.put("PciIdBuilds.gate2", "the completion check's gate 2 as a supplier, bound once at boot; a callback, no data");
+        notKeyed.put("PciReconcilePlanner.Plan.actions", RESULT);
+        notKeyed.put("PciCatalog.Snapshot.validIds", PCI_OFF);
+        notKeyed.put("PciCatalog.Snapshot.invalidIds", PCI_OFF);
+        notKeyed.put("CompletionBootWork.DbReader.gate3Extras", "the further gate 3 conditions, fixed at construction "
+            + "(IdUniqueIndexPass.allValid, wired in Main); callbacks, no tenant state");
         // nexus-4lnn1.1.1 (RDR-230): the DDL half's last look at each index (its anchor, size and counts) and at
         // each leaf's statistics, kept per engine in memory and lost on restart like the failures map above. The
         // The Reads fields are one counting transaction's result, applied once it commits. They live in
@@ -765,6 +838,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("PciPlanCheck.lastSampled", PCI_OFF);
         notKeyed.put("PciCatalog.Snapshot.valid", PCI_OFF);
         notKeyed.put("PciCatalog.Snapshot.anchors", PCI_OFF);
+        notKeyed.put("PciCatalog.Snapshot.idAnchors", PCI_OFF);   // the same, for the id-predicate indexes, keyed by (model, tenant, id)
         notKeyed.put("PciCatalog.LeafBuilder.tenant", PCI_OFF);
         // nexus-4lnn1.1.4 (RDR-230): the recall canary's schedule and results, per engine in memory, lost on restart;
         // keyed by index name (which carries the tenant's hash) and written only by the builder-lock holder's pass.
@@ -780,7 +854,15 @@ final class TenantKeyedStateTables {
             "PciCanary.Result.redSample",
             "PciCanary.Result.redQueries",
             "PciReconciler.Tally.droppedIndexes",
-            "PciReconciler.Tally.builtTargets")) {
+            "PciReconciler.Tally.builtTargets",
+            // the id canary's ring keys: one pass's (model, tenant, id) to label, from the leaf counting transactions, dropped with the pass
+            "PciReconciler.Tally.idLabels",
+            "PciReconciler.Planned.idLabels",
+            // the latch the id canary's statements read: a supplier over the reconciler's own gate 3 latch, no tenant state
+            "PciCanaryLatch.source",
+            "PciReconciler.canaryLatch",
+            "PciQueryRing.gate3",
+            "PciReindexPhase.idCanary")) {
             notKeyed.put(f, PCI_OFF);
         }
         // nexus-4lnn1.1.5 (RDR-230 Technical Design 7): the maintenance snapshot (counts on /v1/status, entries on
@@ -801,7 +883,7 @@ final class TenantKeyedStateTables {
         for (String f : List.of(
             "GroupView.members", "GroupView.deadlineByTopic", "OwnerDecision.Input.pushes", "OwnerDecision.Input.dones",
             "OwnerDecision.Input.owners", "OwnerDecision.Post.body", "BoardRow.dims", "Identities.identityOfStamp",
-            "Identities.presence")) {
+            "Identities.presence", "OwnerDecision.Ctx.chain", "OwnerDecision.Ctx.redTips", "OwnerDecision.Ctx.redAt")) {
             notKeyed.put(f, evaluation);
         }
         notKeyed.put("OwnerStamper.timer", "the stamper's reference to the one AckDeadlineTimer, bound once at boot; "

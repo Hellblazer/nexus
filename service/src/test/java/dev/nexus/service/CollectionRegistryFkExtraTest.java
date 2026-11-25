@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.DSLContext;
 import org.jooq.Table;
 import org.jooq.exception.DataAccessException;
@@ -88,6 +89,13 @@ class CollectionRegistryFkExtraTest {
     private static final List<Table<?>> ALL_FOUR_FK_TABLES = List.of(
             DOCUMENT_ASPECTS, TOPICS, TAXONOMY_META, DOCUMENT_HIGHLIGHTS);
 
+    /**
+     * RDR-229 P3.1: a row that names a collection carries the registry's id beside the name (a CHECK). The seeds that
+     * name a collection no registry row backs (the unregistered, orphan and cross-tenant cases) give it an id the
+     * registry never issued, so the CHECK passes and the FK on (tenant_id, collection) stays the constraint under test.
+     */
+    private static final Long UNISSUED_ID = Long.MAX_VALUE;
+
     private static final String TENANT_A = "crfkx-tenant-a";
     private static final String TENANT_B = "crfkx-tenant-b";
 
@@ -124,9 +132,9 @@ class CollectionRegistryFkExtraTest {
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                         DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
                     .values(TENANT_A, "unreg-aspect-col", "/p/a.md", OffsetDateTime.now(), "v1", "test",
-                        "asp-unreg-doc", "file:///p/a.md")
+                        "asp-unreg-doc", "file:///p/a.md", UNISSUED_ID)
                     .execute());
             assertThat(ex.getMessage())
                 .as("document_aspects_collection_fk must reject unregistered collection")
@@ -141,8 +149,8 @@ class CollectionRegistryFkExtraTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
-                        TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
-                    .values(TENANT_A, "topic-x", "unreg-topic-col", 0, OffsetDateTime.now(), "pending")
+                        TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.COLLECTION_ID)
+                    .values(TENANT_A, "topic-x", "unreg-topic-col", 0, OffsetDateTime.now(), "pending", UNISSUED_ID)
                     .execute());
             assertThat(ex.getMessage())
                 .as("topics_collection_fk must reject unregistered collection")
@@ -156,8 +164,8 @@ class CollectionRegistryFkExtraTest {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
-                ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
-                    .values(TENANT_A, "unreg-meta-col")
+                ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
+                    .values(TENANT_A, "unreg-meta-col", UNISSUED_ID)
                     .execute());
             assertThat(ex.getMessage())
                 .as("taxonomy_meta_collection_fk must reject unregistered collection")
@@ -176,8 +184,8 @@ class CollectionRegistryFkExtraTest {
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "hl-doc-unreg");
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
-                        DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
-                    .values(TENANT_A, "hl-doc-unreg", "file:///hl-doc-unreg", "unreg-hl-col", OffsetDateTime.now())
+                        DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT, DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
+                    .values(TENANT_A, "hl-doc-unreg", "file:///hl-doc-unreg", "unreg-hl-col", OffsetDateTime.now(), UNISSUED_ID)
                     .execute());
             assertThat(ex.getMessage())
                 .as("document_highlights_collection_fk must reject unregistered non-null collection")
@@ -199,9 +207,9 @@ class CollectionRegistryFkExtraTest {
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "ctrl-aspect-doc");
             ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                     DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
                 .values(TENANT_A, "ctrl-aspect-col", "/p/ctrl.md", OffsetDateTime.now(), "v1", "test",
-                    "ctrl-aspect-doc", "file:///p/ctrl.md")
+                    "ctrl-aspect-doc", "file:///p/ctrl.md", CollectionIds.require(ctx, TENANT_A, "ctrl-aspect-col"))
                 .execute();
             int count = ctx.selectCount().from(DOCUMENT_ASPECTS)
                 .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT_A))
@@ -219,8 +227,8 @@ class CollectionRegistryFkExtraTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, TENANT_A, "ctrl-topic-col");
             ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
-                    TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
-                .values(TENANT_A, "topic-ctrl", "ctrl-topic-col", 0, OffsetDateTime.now(), "pending")
+                    TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.COLLECTION_ID)
+                .values(TENANT_A, "topic-ctrl", "ctrl-topic-col", 0, OffsetDateTime.now(), "pending", CollectionIds.require(ctx, TENANT_A, "ctrl-topic-col"))
                 .execute();
             int count = ctx.selectCount().from(TOPICS)
                 .where(TOPICS.TENANT_ID.eq(TENANT_A))
@@ -291,9 +299,9 @@ class CollectionRegistryFkExtraTest {
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "restrict-aspect-doc");
             ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                     DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
                 .values(TENANT_A, "restrict-aspect-col", "/p/r.md", OffsetDateTime.now(), "v1", "test",
-                    "restrict-aspect-doc", "file:///p/r.md")
+                    "restrict-aspect-doc", "file:///p/r.md", CollectionIds.require(ctx, TENANT_A, "restrict-aspect-col"))
                 .execute();
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.deleteFrom(CATALOG_COLLECTIONS)
@@ -316,9 +324,9 @@ class CollectionRegistryFkExtraTest {
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "restrict-aspect-after-doc");
             ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                     DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
                 .values(TENANT_A, "restrict-aspect-after", "/p/after.md", OffsetDateTime.now(), "v1", "test",
-                    "restrict-aspect-after-doc", "file:///p/after.md")
+                    "restrict-aspect-after-doc", "file:///p/after.md", CollectionIds.require(ctx, TENANT_A, "restrict-aspect-after"))
                 .execute();
             ctx.deleteFrom(DOCUMENT_ASPECTS)
                 .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT_A))
@@ -350,9 +358,9 @@ class CollectionRegistryFkExtraTest {
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                         DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
                     .values(TENANT_A, "xtenant-aspect-col-b", "/p/x.md", OffsetDateTime.now(), "v1", "test",
-                        "xtenant-aspect-doc", "file:///p/x.md")
+                        "xtenant-aspect-doc", "file:///p/x.md", CollectionIds.require(ctx, TENANT_B, "xtenant-aspect-col-b"))
                     .execute());
             assertThat(ex.getMessage())
                 .as("composite FK must reject cross-tenant collection reference in document_aspects")
@@ -388,6 +396,8 @@ class CollectionRegistryFkExtraTest {
             // manual, nexus-cbo4a batch 10).
             for (int i = 0; i < ALL_FOUR_FK_TABLES.size(); i++) {
                 ctx.alterTable(ALL_FOUR_FK_TABLES.get(i)).dropConstraintIfExists(ALL_FOUR_FK_NAMES.get(i)).execute();
+                // RDR-229 P3.3a: and the id twin beside it, which refuses the unissued id the orphan rows below carry
+                P33aTwinFixtures.dropTwin(ctx, ALL_FOUR_FK_TABLES.get(i).getName());
             }
 
             // Seed orphan rows referencing collections NOT in catalog_collections.
@@ -403,17 +413,17 @@ class CollectionRegistryFkExtraTest {
             PgContainerHelper.insertCatalogDocument(ctx, T, "bf-aspect-doc");
             ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                     DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
-                .values(T, "bf-colA", "/a/1.md", OffsetDateTime.now(), "v1", "test", "bf-aspect-doc", "file:///a/1.md")
-                .values(T, "bf-colA", "/a/2.md", OffsetDateTime.now(), "v1", "test", "bf-aspect-doc", "file:///a/2.md")
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
+                .values(T, "bf-colA", "/a/1.md", OffsetDateTime.now(), "v1", "test", "bf-aspect-doc", "file:///a/1.md", UNISSUED_ID)
+                .values(T, "bf-colA", "/a/2.md", OffsetDateTime.now(), "v1", "test", "bf-aspect-doc", "file:///a/2.md", UNISSUED_ID)
                 .execute();
             ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
-                    TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
-                .values(T, "tA", "bf-colA", 0, OffsetDateTime.now(), "pending")
-                .values(T, "tC", "bf-colC", 0, OffsetDateTime.now(), "pending")
+                    TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.COLLECTION_ID)
+                .values(T, "tA", "bf-colA", 0, OffsetDateTime.now(), "pending", UNISSUED_ID)
+                .values(T, "tC", "bf-colC", 0, OffsetDateTime.now(), "pending", UNISSUED_ID)
                 .execute();
-            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
-                .values(T, "bf-colD")
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
+                .values(T, "bf-colD", UNISSUED_ID)
                 .execute();
             // Parent docs for the highlight rows (doc-rooted fk-001 FK). bf-hl-2 (the prior
             // NULL-collection seed row) is GONE: hygiene-001 step 3 makes collection NOT
@@ -423,9 +433,9 @@ class CollectionRegistryFkExtraTest {
             PgContainerHelper.insertCatalogDocument(ctx, T, "bf-hl-1");
             PgContainerHelper.insertCatalogDocument(ctx, T, "bf-hl-3");
             ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
-                    DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
-                .values(T, "bf-hl-1", "file:///bf-hl-1", "bf-colE", OffsetDateTime.now())
-                .values(T, "bf-hl-3", "file:///bf-hl-3", "", OffsetDateTime.now())
+                    DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT, DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
+                .values(T, "bf-hl-1", "file:///bf-hl-1", "bf-colE", OffsetDateTime.now(), UNISSUED_ID)
+                .values(T, "bf-hl-3", "file:///bf-hl-3", "", OffsetDateTime.now(), (Long) null)
                 .execute();
 
             assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
@@ -492,9 +502,9 @@ class CollectionRegistryFkExtraTest {
             assertReconcileLoadBearing(su, ctx, DOCUMENT_ASPECTS, FK_DOC_ASPECTS, T, ORPHAN_COL,
                 () -> ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                         DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
                     .values(T, ORPHAN_COL, "/p1b/o.md", OffsetDateTime.now(), "v1", "test",
-                        "p1b-aspects-doc", "file:///p1b/o.md")
+                        "p1b-aspects-doc", "file:///p1b/o.md", UNISSUED_ID)
                     .execute(),
                 () -> runBackfillStub(ctx, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, null));
         }
@@ -509,8 +519,8 @@ class CollectionRegistryFkExtraTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             assertReconcileLoadBearing(su, ctx, TOPICS, FK_TOPICS, T, ORPHAN_COL,
                 () -> ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
-                        TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
-                    .values(T, "topic-p1b", ORPHAN_COL, 0, OffsetDateTime.now(), "pending")
+                        TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.COLLECTION_ID)
+                    .values(T, "topic-p1b", ORPHAN_COL, 0, OffsetDateTime.now(), "pending", UNISSUED_ID)
                     .execute(),
                 () -> runBackfillStub(ctx, TOPICS.TENANT_ID, TOPICS.COLLECTION, null));
         }
@@ -524,8 +534,8 @@ class CollectionRegistryFkExtraTest {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             assertReconcileLoadBearing(su, ctx, TAXONOMY_META, FK_TAX_META, T, ORPHAN_COL,
-                () -> ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
-                    .values(T, ORPHAN_COL)
+                () -> ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
+                    .values(T, ORPHAN_COL, UNISSUED_ID)
                     .execute(),
                 () -> runBackfillStub(ctx, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, null));
         }
@@ -556,8 +566,8 @@ class CollectionRegistryFkExtraTest {
             // hygiene-001 step 3: source_uri is NOT NULL now too.
             assertReconcileLoadBearing(su, ctx, DOCUMENT_HIGHLIGHTS, FK_DOC_HL, T, ORPHAN_COL,
                 () -> ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
-                        DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
-                    .values(T, "hl-doc-p1b", "file:///hl-doc-p1b", ORPHAN_COL, OffsetDateTime.now())
+                        DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT, DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
+                    .values(T, "hl-doc-p1b", "file:///hl-doc-p1b", ORPHAN_COL, OffsetDateTime.now(), UNISSUED_ID)
                     .execute(),
                 () -> runBackfillStub(ctx, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.COLLECTION,
                     DOCUMENT_HIGHLIGHTS.COLLECTION.isNotNull().and(DOCUMENT_HIGHLIGHTS.COLLECTION.ne(""))));
@@ -634,6 +644,7 @@ class CollectionRegistryFkExtraTest {
             Runnable orphanInsert, Runnable reconcileInsert) throws Exception {
         // FK absent (dropped by GROUP F); seed an orphan row while it is absent.
         ctx.alterTable(table).dropConstraintIfExists(fkName).execute();
+        P33aTwinFixtures.dropTwin(ctx, table.getName());   // RDR-229 P3.3a: the id twin enforces the unissued id the orphan row carries
         orphanInsert.run();
         assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))

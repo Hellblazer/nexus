@@ -27,7 +27,7 @@ from nexus.catalog import note_ttl
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.catalog.store_hook import imported_note_meta
 from nexus.corpus import t3_collection_name
-from nexus.db.http_vector_client import HttpVectorClient, _post
+from nexus.db.http_vector_client import HttpVectorClient, _post, get_http_vector_client
 from nexus.mcp.core import store_put
 from tests._catalog_fixture_ops import ActiveCatalog, documents_by_title
 from tests._chunk_seed import _lit, _pg_state, _psql_superuser, ambient_tenant, seed_chunks_direct
@@ -60,7 +60,10 @@ class _World:
         kwargs = {"ttl": ttl} if ttl else {}
         with patch("nexus.mcp.core._get_t3", return_value=self.client):
             store_put(content=body, collection=self.subject, title=title, **kwargs)
-        self.collection = t3_collection_name(self.subject, t3=self.client)
+        # RDR-229 P3.8: the subject's collection is a minted label (c<id>), found only through its registry row;
+        # a client built under the minted tenant's name answers no row (nexus-fryrd), so the read goes through the
+        # process client, as the CLI's does (the engine binds the tenant to the bearer).
+        self.collection = t3_collection_name(self.subject, t3=get_http_vector_client())
         # This file covers the legacy TTL rules, which read the facts a pre-Step-1 client stamped on the
         # note's chunk row (RDR-236 Phase 4 Step 1: a current client writes the CHUNK keys only).
         entry = self._entry(title)

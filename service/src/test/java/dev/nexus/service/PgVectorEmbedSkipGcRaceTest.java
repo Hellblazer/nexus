@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -330,6 +331,7 @@ class PgVectorEmbedSkipGcRaceTest {
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLLECTION)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                     PgContainerHelper.collectionModel(seed, TENANT, COLLECTION))
                 .execute();

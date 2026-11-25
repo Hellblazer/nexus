@@ -5,7 +5,7 @@ package dev.nexus.service.db;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.Row3;
-import org.jooq.Row13;
+import org.jooq.Row14;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 
@@ -32,7 +32,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
  *
  * <p>The row key is the table's primary key, {@code (tenant_id, doc_id, position)}. A row's payload is every
  * other column the replace wrote, {@link #PAYLOAD_COLUMNS}: chash, chunk_index, the four span columns, collection,
- * embedding_model, the three section labels and labels_written. An UPDATE writes every payload column from the
+ * collection_id (RDR-229 P3.1), embedding_model, the three section labels and labels_written. An UPDATE writes every payload column from the
  * incoming row, NULLs included, exactly as the insert did, so a kept row comes out what a delete and re-insert
  * would have left. {@code ManifestReplaceDiffTest} fails when the table gains or loses a column this class does
  * not list, and changes each payload column of a row to check the diff writes it.
@@ -62,8 +62,8 @@ final class ManifestReplace {
 
     /** The payload columns of a manifest row: every column of the table except its primary key. */
     static final java.util.Set<String> PAYLOAD_COLUMNS = java.util.Set.of("chash", "chunk_index", "line_start",
-        "line_end", "char_start", "char_end", "collection", "embedding_model", "section_title", "section_type",
-        "page_number", "labels_written");
+        "line_end", "char_start", "char_end", "collection", "collection_id", "embedding_model", "section_title",
+        "section_type", "page_number", "labels_written");
 
     /** Test hook: when set, {@link #replace} declines every replace, so a test can run the old path in one JVM. */
     static volatile boolean declineForTests;
@@ -79,7 +79,7 @@ final class ManifestReplace {
 
     /** One stored row of the document. */
     private record Stored(int position, byte[] chash, Integer chunkIndex, Integer lineStart, Integer lineEnd,
-                          Integer charStart, Integer charEnd, String collection, String embeddingModel,
+                          Integer charStart, Integer charEnd, String collection, Long collectionId, String embeddingModel,
                           String sectionTitle, String sectionType, Integer pageNumber, boolean labelsWritten) {
         String hex() {
             return HexFormat.of().formatHex(chash);
@@ -95,7 +95,7 @@ final class ManifestReplace {
      *         insert, which refuses a bad row exactly as it always did
      */
     static List<DepartedWriterSpans.Gone> replace(DSLContext ctx, String tenant, String docId, String collection,
-                                                  List<Map<String, Object>> rows) {
+                                                  List<Map<String, Object>> rows, dev.nexus.service.datamove.Gate3 gate3) {
         if (declineForTests) return null;
         List<Incoming> incoming = new ArrayList<>(rows.size());
         Map<Integer, Incoming> byPosition = new HashMap<>(Math.max(16, rows.size() * 2));
@@ -116,13 +116,26 @@ final class ManifestReplace {
         // every row is kept, so a retired collection still refuses the write.
         final String embeddingModel = rows.isEmpty() ? null
             : CollectionRegistry.requireWritable(ctx, tenant, collection).embeddingModel();
+        // RDR-229 P3.1: the registry's id, read in this transaction; a stored row that lacks it (the stamp has not
+        // reached it) differs from the incoming one and is rewritten with it.
+        final Long collectionId = rows.isEmpty() ? null : CollectionIds.require(ctx, tenant, collection);
+        if (rows.isEmpty()) {
+            // RDR-229 P3.5a (review C2): an empty manifest is not a no-op. It deletes the document's stored manifest rows below and
+            // clears the departed-writer spans of their chunks, by label, so it takes the write transaction's registry check
+            // too: a request by id whose id is gone is 404 and a retired id 409, and a label request locks the row it resolves to.
+            // It never refused an unregistered label or a retired name (it removes rows and files none), and still does not.
+            CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection);
+        }
+        // G17: a manifest row's name column is the referenced chunk's stored name, which a one-row rename leaves (see ManifestChunkNames)
+        final Map<String, String> chunkNames = gate3.holds()
+            ? ManifestChunkNames.of(ctx, tenant, collectionId, incoming.stream().map(Incoming::chashHex).toList()) : Map.of();
 
         List<Stored> stored = new ArrayList<>();
         for (Record r : ctx.select(CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                     CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.LINE_START,
                     CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START,
                     CATALOG_DOCUMENT_CHUNKS.CHAR_END, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE,
                     CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER,
                     CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)
                 .from(CATALOG_DOCUMENT_CHUNKS)
@@ -134,7 +147,7 @@ final class ManifestReplace {
                 r.get(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX), r.get(CATALOG_DOCUMENT_CHUNKS.LINE_START),
                 r.get(CATALOG_DOCUMENT_CHUNKS.LINE_END), r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_START),
                 r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_END), r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION),
-                r.get(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL), r.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE),
+                r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID), r.get(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL), r.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE),
                 r.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE), r.get(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER),
                 r.get(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)));
         }
@@ -148,7 +161,7 @@ final class ManifestReplace {
             Incoming in = byPosition.get(old.position());
             if (in == null) {
                 toDelete.add(old);
-            } else if (!same(old, in, collection, embeddingModel)) {
+            } else if (!same(old, in, collection, collectionId, embeddingModel, gate3)) {
                 toUpdate.add(in);
                 updatedFrom.add(old);
             }
@@ -162,8 +175,11 @@ final class ManifestReplace {
 
         List<DepartedWriterSpans.Gone> before = new ArrayList<>(stored.size());
         for (Stored old : stored) {
-            before.add(new DepartedWriterSpans.Gone(old.collection(), old.chash(), old.lineStart(), old.lineEnd(),
-                old.charStart(), old.charEnd()));
+            // RDR-229 P3.5c: from gate 3 a stored row of this collection is shown under the caller's label (a rename leaves its own
+            // name stale) and carries its id, so the departed-span clear keys by id
+            String label = gate3.holds() && Objects.equals(old.collectionId(), collectionId) ? collection : old.collection();
+            before.add(new DepartedWriterSpans.Gone(label, old.chash(), old.lineStart(), old.lineEnd(),
+                old.charStart(), old.charEnd(), old.collectionId()));
         }
 
         // The chunk rows of every row about to be deleted or rewritten, locked in key order in one pass, before
@@ -190,11 +206,11 @@ final class ManifestReplace {
                 .execute();
         }
         if (!toUpdate.isEmpty()) {
-            update(ctx, tenant, docId, collection, embeddingModel, toUpdate);
+            update(ctx, tenant, docId, collection, collectionId, embeddingModel, toUpdate, chunkNames);
         }
         if (!toInsert.isEmpty()) {
             CatalogRepository.insertManifestChunkRows(ctx, tenant, docId, collection, toInsert,
-                CatalogRepository.ManifestInsertMode.PLAIN);
+                CatalogRepository.ManifestInsertMode.PLAIN, gate3);
         }
 
         // The record of every chunk key the new set lists, in this document's collection: what the old path's INSERT
@@ -205,21 +221,27 @@ final class ManifestReplace {
         // stamp's fourth column never differs from the clear's three.
         if (!incoming.isEmpty()) {
             List<Row3<String, String, byte[]>> listed = new ArrayList<>();
+            List<Row3<String, Long, byte[]>> listedById = new ArrayList<>();
             Set<String> seen = new HashSet<>();
             for (Incoming in : incoming) {
-                if (seen.add(in.chashHex())) listed.add(DSL.row(tenant, collection, HexFormat.of().parseHex(in.chashHex())));
+                if (!seen.add(in.chashHex())) continue;
+                listed.add(DSL.row(tenant, collection, HexFormat.of().parseHex(in.chashHex())));
+                listedById.add(DSL.row(tenant, collectionId, HexFormat.of().parseHex(in.chashHex())));
             }
-            clearRecords(ctx, listed);
+            // from gate 3 the orphan records are matched by the collection's id: their name is the chunk's stored one, not this label
+            if (gate3.holds()) clearRecordsById(ctx, listedById); else clearRecords(ctx, listed);
         }
         return before;
     }
 
-    private static boolean same(Stored old, Incoming in, String collection, String embeddingModel) {
+    private static boolean same(Stored old, Incoming in, String collection, Long collectionId, String embeddingModel,
+                                dev.nexus.service.datamove.Gate3 gate3) {
         return old.hex().equals(in.chashHex())
             && Objects.equals(old.chunkIndex(), in.chunkIndex())
             && Objects.equals(old.lineStart(), in.lineStart()) && Objects.equals(old.lineEnd(), in.lineEnd())
             && Objects.equals(old.charStart(), in.charStart()) && Objects.equals(old.charEnd(), in.charEnd())
-            && Objects.equals(old.collection(), collection) && Objects.equals(old.embeddingModel(), embeddingModel)
+            && (gate3.holds() || Objects.equals(old.collection(), collection)) && Objects.equals(old.collectionId(), collectionId)
+            && Objects.equals(old.embeddingModel(), embeddingModel)
             && Objects.equals(old.sectionTitle(), in.sectionTitle())
             && Objects.equals(old.sectionType(), in.sectionType())
             && Objects.equals(old.pageNumber(), in.pageNumber())
@@ -234,11 +256,11 @@ final class ManifestReplace {
     }
 
     /** One UPDATE ... FROM (VALUES ...): every payload column from the incoming row, so one statement-level trigger run. */
-    private static void update(DSLContext ctx, String tenant, String docId, String collection, String embeddingModel,
-                               List<Incoming> changed) {
+    private static void update(DSLContext ctx, String tenant, String docId, String collection, Long collectionId,
+                               String embeddingModel, List<Incoming> changed, Map<String, String> chunkNames) {
         @SuppressWarnings("unchecked")
-        Row13<Integer, byte[], Integer, Integer, Integer, Integer, Integer, String, String, String, String, Integer,
-            Boolean>[] values = changed.stream().map(in -> DSL.row(
+        Row14<Integer, byte[], Integer, Integer, Integer, Integer, Integer, String, Long, String, String, String,
+            Integer, Boolean>[] values = changed.stream().map(in -> DSL.row(
                 DSL.val(in.position(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(HexFormat.of().parseHex(in.chashHex()), SQLDataType.BLOB).cast(SQLDataType.BLOB),
                 DSL.val(in.chunkIndex(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
@@ -246,16 +268,17 @@ final class ManifestReplace {
                 DSL.val(in.lineEnd(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(in.charStart(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(in.charEnd(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
-                DSL.val(collection, SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
+                DSL.val(ManifestChunkNames.nameFor(chunkNames, in.chashHex(), collection), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
+                DSL.val(collectionId, SQLDataType.BIGINT).cast(SQLDataType.BIGINT),
                 DSL.val(embeddingModel, SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
                 DSL.val(in.sectionTitle(), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
                 DSL.val(in.sectionType(), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
                 DSL.val(in.pageNumber(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(in.labelsWritten(), SQLDataType.BOOLEAN).cast(SQLDataType.BOOLEAN)))
-            .toArray(Row13[]::new);
+            .toArray(Row14[]::new);
         var v = DSL.values(values).asTable("v", "position", "chash", "chunk_index", "line_start", "line_end",
-            "char_start", "char_end", "collection", "embedding_model", "section_title", "section_type",
-            "page_number", "labels_written");
+            "char_start", "char_end", "collection", "collection_id", "embedding_model", "section_title",
+            "section_type", "page_number", "labels_written");
         ctx.update(CATALOG_DOCUMENT_CHUNKS)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, v.field("chash", byte[].class))
             .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, v.field("chunk_index", Integer.class))
@@ -264,6 +287,7 @@ final class ManifestReplace {
             .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START, v.field("char_start", Integer.class))
             .set(CATALOG_DOCUMENT_CHUNKS.CHAR_END, v.field("char_end", Integer.class))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, v.field("collection", String.class))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, v.field("collection_id", Long.class))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, v.field("embedding_model", String.class))
             .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, v.field("section_title", String.class))
             .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, v.field("section_type", String.class))
@@ -273,6 +297,16 @@ final class ManifestReplace {
             .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
                 .and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(v.field("position", Integer.class))))
             .execute();
+    }
+
+    /** {@link #clearRecords} keyed by {@code (tenant, collection_id, chash)} (RDR-229 P3.5c, from gate 3). */
+    private static void clearRecordsById(DSLContext ctx, List<Row3<String, Long, byte[]>> keys) {
+        var key = DSL.row(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION_ID, CHUNK_ORPHANED_AT.CHASH);
+        var locked = ctx.selectOne().from(CHUNK_ORPHANED_AT).where(key.in(keys))
+            .orderBy(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION_ID, CHUNK_ORPHANED_AT.CHASH)
+            .forUpdate()
+            .fetch();
+        if (!locked.isEmpty()) ctx.deleteFrom(CHUNK_ORPHANED_AT).where(key.in(keys)).execute();
     }
 
     /** Deletes the orphaning records of {@code keys}, the rows locked first in key order (the stamp upserts' order). */

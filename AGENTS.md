@@ -16,6 +16,7 @@ scripts/reinstall-tool.sh                # install nx CLI locally (preserves ext
 uv run pytest -n auto                    # full unit suite (no API keys needed; auto-capped); hand full suites: rule 13
 uv run pytest                            # serial fallback (debugging only)
 uv run pytest -m lint                    # O(repo) meta-tests (out of hot loop, PR-gated in CI)
+uv run pytest -n auto $(uv run python scripts/select_affected_tests.py --base origin/develop)   # before a push: the tests your diff can affect
 uv run pytest -m integration             # E2E (requires .env from .env.example)
 uv sync && scripts/reinstall-tool.sh && nx --version    # after edits
 ```
@@ -32,7 +33,7 @@ Three storage tiers, by lifetime. **ChromaDB is not a live substrate in any mode
 - **T2** — nine domain stores behind a `T2Database` facade, all HTTP clients over the engine's PG tables. Persistent notes, plans, taxonomy, telemetry, chash, aspects, aspect queue, DEVONthink highlights, tuples.
 - **T3** — `HttpVectorClient` over the nexus-service `/v1/vectors` (pgvector) in both modes: local = bundled PG17+pgvector embedding bge-768 by default, or Voyage when `NX_VOYAGE_API_KEY` reaches the service (nexus-umm29 carve-out; one posture per boot, see RDR-210); cloud = managed service + Voyage always. Permanent knowledge (`nx store`, `nx search`).
 
-T1 rules ([full contract](docs/agents/t1-sub-agent-contract.md); rule of record `docs/rdr/joint/JDR-001-t1-three-scopes.md`): Agent-tool sub-agents share the parent's T1; `claude -p` sub-processes default to `owned` and opt in with `share_t1=True`. Cross-process findings and durable write-back go to T2 (`memory_put`).
+T1 rules ([full contract](docs/agents/t1-sub-agent-contract.md); rule of record `docs/rdr/joint/JDR-001-t1-three-scopes.md`): Agent-tool sub-agents share the parent's T1; `claude -p` sub-processes get their own T1 session lease (`owned`); `share_t1=True` is retired and raises `RuntimeError` (RDR-155 P4b, `src/nexus/operators/dispatch.py`). Cross-process findings and durable write-back go to T2 (`memory_put`).
 
 Collection prefixes coexist in one T3 database. Always `__` (double underscore) as separator (the RDR-103 name grammar). Conformant collection-name shape is `<content_type>__<owner_id>__<embedding_model>__v<n>`, e.g. `code__1-1__voyage-code-3__v1` (the owner segment is the owner tumbler's first two segments joined by a hyphen):
 
@@ -41,6 +42,8 @@ Collection prefixes coexist in one T3 database. Always `__` (double underscore) 
 | `code__*` | `voyage-code-3` | `source_uri` (file path) | `chunk_text_hash` (full 64-hex; 32 bytes stored — RDR-180) |
 | `docs__*`, `rdr__*` | `voyage-context-3` (CCE) | `source_uri` (file path) | `chunk_text_hash` (full 64-hex) |
 | `knowledge__*` | `voyage-context-3` | `source_uri` then `title` (fallback for MCP-stored notes) | `chunk_text_hash` (full 64-hex) |
+
+Every registry row has a `collection_id` since 8.5.6; routes accept the id or the label, a rename changes the label only, and a new knowledge subject is registered by attributes and gets an engine-minted `c<id>` label.
 
 **Catalog/T3 split (RDR-108, widths per RDR-180)**: Catalog Documents are graph nodes addressed by tumblers; T3 chunks are content-addressed by the FULL `sha256(chunk_text)` (64 hex on the wire, 32 bytes stored). Document structure lives in the catalog `document_chunks` manifest, never in chunk metadata; identical chunk text in one collection collapses to one T3 row by design. [Full text](docs/agents/catalog-t3-split.md).
 
@@ -109,6 +112,7 @@ These always-on rules are repeated here because no file read triggers them:
 6. **A NEW WORKTREE RUNS `scripts/build-gate-jar.sh` BEFORE ITS FIRST SUBSTRATE-BACKED TEST** (Quick start; a setup-error wall also means rule 5's shared-memory exhaustion or a jar rewritten mid-run).
 7. **Before pushing, ask whether a run someone is waiting on is in flight.** Read checks with `gh api repos/Hellblazer/nexus/commits/<sha>/check-runs`; never `gh run watch`, never a polling loop (secondary rate limit). Once your develop push lands, read that sha's CI conclusion before stacking more work or cutting a release branch on it; a red is a finding to diagnose before the next push.
 8. **Push unchanged**: two steps from INSIDE the worktree (it reads HEAD from cwd): `scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range <sha>...` prints the files your commits touch and a digest and pushes nothing (exit 7); read the list, then repeat the command with `--allowed-paths-from-range=<digest>` (the digest is on the pasteable line it printed) to push. The audit cannot catch a foreign file inside your own commit, so your read of the printed list is the check; a file added after you read it changes the digest and refuses. Every setting is a flag, so the command starts with the script path and needs no `NX_PUSH_*=` prefix. `PUSH_REFUSED_LOCK_HELD` names the holder; `--skip-lock '<reason>'` is the named escape. **Batch develop pushes**: develop CI runs two runs at a time (by run-number parity) and a third push waits, so hold green commits and push them together, alone only for a develop red or a peer who is waiting.
+   While a develop red is open, `scripts/git-push-develop.sh` asks `nx ci check-hold`: the red's owner or the pusher of a suspect may push, anyone else must pass `--red-fix <reason>`. `nx ci ack <sha>` acknowledges a red, `nx ci ack --not-mine --note <who has it>` disclaims it. The script also runs `scripts/push_check_gate.py`: the checks the diff reaches, run against the tip's tree, refuse the push on a red. A docs/ diff needs a proof of the docs-reader tests (`--proof <status file>`).
 9. **Whoever pushes to `develop` fast-forwards the primary in the same breath:** `git merge --ff-only origin/develop` there. If the primary is dirty, do NOT force it; say so on the bus.
 10. **Never hand-run `nx index repo` from a worktree.**
 11. **Serena:** a session that did not START in the worktree must never use a Serena write tool (it can silently write the primary). Use Edit/Write with absolute worktree paths, then `git status --short`.

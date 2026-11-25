@@ -62,6 +62,28 @@ public final class DeadlockRetry {
      */
     private static final AtomicLong RETRY_ATTEMPTS = new AtomicLong();
 
+    private static volatile String lastRetriedContext;
+
+    /** Test seam: called with the context of every retry; null in production. A test installs its own for its own length. */
+    private static volatile java.util.function.Consumer<String> retryListenerForTests;
+
+    /**
+     * Test-only: install (or clear with {@code null}) a listener of every retry. A concurrency test behind this belt asserts through its
+     * own listener that no retry happened where the lock order should prevent a deadlock: the belt turns a 40P01 into a clean answer, so
+     * statuses alone cannot see one, and {@link #retryAttemptCount()} is moved by every other class's traffic in the JVM.
+     */
+    public static void setRetryListenerForTests(java.util.function.Consumer<String> listener) {
+        retryListenerForTests = listener;
+    }
+
+    /**
+     * The context label of the most recent retry, or null: a test that must show ITS transaction did not deadlock compares this with its
+     * own context, which a retry of some other transaction in the JVM cannot spoil the way it spoils {@link #retryAttemptCount()}.
+     */
+    public static String lastRetriedContext() {
+        return lastRetriedContext;
+    }
+
     /** @return total retry attempts issued by {@link #run} so far, process-wide. */
     public static long retryAttemptCount() {
         return RETRY_ATTEMPTS.get();
@@ -95,6 +117,11 @@ public final class DeadlockRetry {
             } catch (RuntimeException ex) {
                 if (isDeadlock(ex) && ++attempt < MAX_ATTEMPTS) {
                     RETRY_ATTEMPTS.incrementAndGet();
+                    lastRetriedContext = context;
+                    java.util.function.Consumer<String> listener = retryListenerForTests;
+                    if (listener != null) {
+                        listener.accept(context);
+                    }
                     log.warn("event=deadlock_retry context={} attempt={} maxAttempts={}",
                             context, attempt, MAX_ATTEMPTS);
                     backoff(attempt);

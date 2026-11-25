@@ -85,6 +85,18 @@ class HttpUtilPartitionErrorsTest {
             .isEqualTo(new String[] {null, "a, b"});
     }
 
+    /** RDR-229 P3.7 (linda 2026-11-23): a restore of null-marker chunks is a typed 409 naming the label and the number of rows. The exception may be wrapped. */
+    @Test
+    void aRestoreOfMarkerRows_is409_restoreOriginUnregistered_namingTheLabelAndTheRows() throws Exception {
+        var ex = send(new RuntimeException("restore failed", new dev.nexus.service.db.RestoreOriginUnregisteredException("knowledge__old__minilm-l6-v2-384__v1", 3)));
+        assertThat(ex.status).isEqualTo(409);
+        JsonNode body = MAPPER.readTree(ex.body());
+        assertThat(body.get("reason").asText()).isEqualTo("restore_origin_unregistered");
+        assertThat(body.get("label").asText()).isEqualTo("knowledge__old__minilm-l6-v2-384__v1");
+        assertThat(body.get("rows").asLong()).isEqualTo(3L);
+        assertThat(body.get("error").asText()).contains("knowledge__old__minilm-l6-v2-384__v1").contains("stay quarantined");
+    }
+
     @Test
     void theDimensionCheck_staysTheCallerError409_withItsConstraintName() throws Exception {
         var ex = send(new SQLException(DIMENSION_CHECK, "23514"));

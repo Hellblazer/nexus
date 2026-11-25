@@ -123,13 +123,12 @@ class TestSig6FromCatalogDeterministicOrdering:
         # carrying the opt-in marker — simulates post embedding-model-
         # upgrade state for a repo that deliberately opted into
         # --corpus knowledge.
-        for name in (
-            f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v1",
-            f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v2",
-        ):
+        # RDR-229 P3.8: the engine refuses two live collections on one tuple, so each generation registers at
+        # its own model_version, the one its name carries.
+        for version in ("v1", "v2"):
             cat.register_collection(
-                name, content_type="knowledge", owner_id=owner_id,
-                embedding_model=_KNOWLEDGE_MODEL, model_version="v1",
+                f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__{version}", content_type="knowledge", owner_id=owner_id,
+                embedding_model=_KNOWLEDGE_MODEL, model_version=version,
                 display_name="nx-corpus-knowledge-opt-in",
             )
 
@@ -153,13 +152,10 @@ class TestSig6FromCatalogDeterministicOrdering:
         owner = cat.ensure_owner_for_repo(repo)
         owner_id = str(owner).replace(".", "-")
 
-        for name in (
-            f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v1",
-            f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v2",
-        ):
+        for version in ("v1", "v2"):  # RDR-229 P3.8: one live collection a tuple, so each at its own version
             cat.register_collection(
-                name, content_type="knowledge", owner_id=owner_id,
-                embedding_model=_KNOWLEDGE_MODEL, model_version="v1",
+                f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__{version}", content_type="knowledge", owner_id=owner_id,
+                embedding_model=_KNOWLEDGE_MODEL, model_version=version,
             )
 
         winners = {from_catalog(repo, cat=cat).docs_collection for _ in range(20)}

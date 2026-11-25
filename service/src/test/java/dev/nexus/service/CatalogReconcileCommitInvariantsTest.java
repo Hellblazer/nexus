@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CatalogRepository.ReconcileCommitException;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -29,6 +30,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * tumbler, a lost insert race, and the minting drift test against {@code claimNextSeq}'s contract.
  */
 class CatalogReconcileCommitInvariantsTest extends CatalogReconcileTestBase {
+
+    /** RDR-229 P3.1: a document names its collection by registry id, so every collection this class stages is registered for each fresh tenant. */
+    @Override
+    String newTenant() {
+        String t = super.newTenant();
+        try (java.sql.Connection su = pg.createConnection("")) {
+            for (String name : java.util.List.of("code__seed", "knowledge__a", "knowledge__b", "knowledge__rc048cc__minilm-l6-v2-384__v1", "knowledge__rc048cm__minilm-l6-v2-384__v1")) {
+                PgContainerHelper.insertCollection(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), t, name);
+            }
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+        return t;
+    }
 
     @BeforeAll
     void boot() throws Exception {
@@ -304,6 +319,7 @@ class CatalogReconcileCommitInvariantsTest extends CatalogReconcileTestBase {
                 .set(CATALOG_DOCUMENTS.TENANT_ID, t).set(CATALOG_DOCUMENTS.TUMBLER, OWNER + ".50")
                 .set(CATALOG_DOCUMENTS.TITLE, "race.py").set(CATALOG_DOCUMENTS.FILE_PATH, "elsewhere/race.py")
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///r/race.py").set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "code__seed")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(t, "code__seed"))
                 .execute();
             // the racer's row is uncommitted, so the commit does not see a live row and plans an insert that then waits on the key
             CompletableFuture<Map<String, Object>> commit = CompletableFuture.supplyAsync(

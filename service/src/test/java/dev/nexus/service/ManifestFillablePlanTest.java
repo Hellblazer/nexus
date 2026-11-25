@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.ManifestFill;
 import dev.nexus.service.db.ManifestFillableCount;
 import org.jooq.DSLContext;
@@ -69,7 +70,8 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
                 docs.add(dsl.insertInto(CATALOG_DOCUMENTS)
                     .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
                     .set(CATALOG_DOCUMENTS.TITLE, "doc " + d).set(CATALOG_DOCUMENTS.FILE_PATH, path)
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "prose")
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLL)).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "prose")
                     .set(CATALOG_DOCUMENTS.INDEXED_AT, OffsetDateTime.parse(DOC_AT))
                     .set(CATALOG_DOCUMENTS.METADATA, JSONB.valueOf("{}")));
                 for (int r = 0; r < ROWS_PER_DOC; r++) {
@@ -81,7 +83,8 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
                             ? "{\"title\":\"" + title + "\",\"indexed_at\":\"" + OK_AT + "\"}"
                             : "{\"title\":\"" + title + "\",\"indexed_at\":\"" + OK_AT + "\",\"section_title\":\"S\"}";
                     chunks.add(dsl.insertInto(CHUNKS)
-                        .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, COLL).set(CHUNKS.CHASH, chash(d, r))
+                        .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, COLL)
+                        .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLL)).set(CHUNKS.CHASH, chash(d, r))
                         .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, "stub")
                         .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f))
                         .set(CHUNKS.METADATA, JSONB.valueOf(meta)));
@@ -89,7 +92,8 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
                         .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, tumbler)
                         .set(CATALOG_DOCUMENT_CHUNKS.POSITION, r).set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, r)
                         .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash(d, r))
-                        .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLL).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
+                        .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLL)
+                        .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLL)).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                         .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, labelsWritten && r != fullRows);
                     manifest.add(r < fullRows
                         ? m.set(CATALOG_DOCUMENT_CHUNKS.LINE_START, r * 10 + 1).set(CATALOG_DOCUMENT_CHUNKS.LINE_END, r * 10 + 9)
@@ -134,7 +138,7 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS)).as("the volume the plan is read at")
                 .isEqualTo(DOCS * ROWS_PER_DOC);
-            var statement = ManifestFillableCount.query(ctx, TENANT, kind, 1000);
+            var statement = ManifestFillableCount.query(ctx, TENANT, kind, 1000, dev.nexus.service.datamove.Gate3.never());
             String plan = PgContainerHelper.explainPlanInlined(ctx, statement);
             String analysed = PgContainerHelper.explainPlanWith(ctx, statement,
                 PgContainerHelper.ExplainOptions.ANALYZE_BUFFERS);
@@ -214,7 +218,7 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
      * Non-vacuity: with the pins off the same seed gives the planner's own plan, which hashes the whole manifest for the
      * co-owner test (a sequential scan of {@code other_holder}), so the assert above is about the pins.
      */
-    private void assertTheBatchStatementsAreIndexProbes(boolean labelsWritten) throws Exception {
+    private void assertTheBatchStatementsAreIndexProbes(boolean labelsWritten, dev.nexus.service.datamove.Gate3 gate3) throws Exception {
         seed(MIXED_FULL_ROWS, labelsWritten);
         boolean sawTheUnpinnedHash = false;
         for (var kind : ManifestFillableCount.Kind.values()) {
@@ -224,15 +228,15 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
                 assertThat(window).as(what + ": the window\n" + window).contains("Limit").contains("Index Scan")
                     .doesNotContain("Seq Scan").doesNotContain("Sort");
                 var last = windowEnd(kind, after, 100);
-                String count = planOf(true, false, ctx -> ManifestFill.fillableByCollection(ctx, TENANT, kind, after, last));
-                String update = planOf(true, false, ctx -> ManifestFill.updateStatement(ctx, TENANT, kind, after, last, false));
+                String count = planOf(true, false, ctx -> ManifestFill.fillableByCollection(ctx, TENANT, kind, after, last, gate3));
+                String update = planOf(true, false, ctx -> ManifestFill.updateStatement(ctx, TENANT, kind, after, last, false, gate3));
                 for (String plan : List.of(count, update)) {
                     assertThat(plan).as(what + ": the co-owner test is an index probe\n" + plan)
                         .contains("idx_catalog_chunks_chash")
                         .doesNotContain("Seq Scan")
                         .doesNotContain("Hash ").doesNotContain("Merge ");
                 }
-                String own = planOf(false, false, ctx -> ManifestFill.fillableByCollection(ctx, TENANT, kind, after, last));
+                String own = planOf(false, false, ctx -> ManifestFill.fillableByCollection(ctx, TENANT, kind, after, last, gate3));
                 sawTheUnpinnedHash |= Pattern.compile("Seq Scan on catalog_document_chunks\\s+other_holder").matcher(own).find();
             }
         }
@@ -241,11 +245,21 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
 
     @Test
     void aBatchUnderThePins_probesTheChashIndexAndStopsItsWindow_labelsPending() throws Exception {
-        assertTheBatchStatementsAreIndexProbes(false);
+        assertTheBatchStatementsAreIndexProbes(false, dev.nexus.service.datamove.Gate3.never());
     }
 
     @Test
     void aBatchUnderThePins_probesTheChashIndexAndStopsItsWindow_labelsMostlyWritten() throws Exception {
-        assertTheBatchStatementsAreIndexProbes(true);
+        assertTheBatchStatementsAreIndexProbes(true, dev.nexus.service.datamove.Gate3.never());
+    }
+
+    /**
+     * RDR-229 P3.5c (linda): from gate 3 the manifest-to-chunk join matches on {@code collection_id}, not the collection name, so a one-row
+     * rename (a stale stored name on the chunk) cannot unpair a manifest row from its chunk. The batch statements stay index probes, no
+     * sequential scan, no hash or merge, over the same seed.
+     */
+    @Test
+    void aBatchFromTheLatch_joinsTheChunkByTheCollectionIdAndStaysAnIndexProbe() throws Exception {
+        assertTheBatchStatementsAreIndexProbes(true, (dev.nexus.service.datamove.Gate3) () -> true);
     }
 }

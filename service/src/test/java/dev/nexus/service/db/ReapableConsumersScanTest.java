@@ -69,6 +69,14 @@ class ReapableConsumersScanTest {
         // p_grace passes straight through to chunk_is_reapable, production passes NULL, the sweep gate is still taken.
         SQL_CONSUMERS.put("vectors-030-model-tenant-partition-functions.xml#nexus.reaper_quarantine_chunks",
             "same as vectors-024's: grace is injected by tests only; production passes NULL, no setting, no clamp needed");
+        // RDR-229 P3.1 stage 2b (vectors-069) redefines the function once more to set the quarantine sibling's collection_id; the grace
+        // handling and the sweep gate are vectors-030's, untouched.
+        SQL_CONSUMERS.put("vectors-069-collection-id-dual-write-functions.xml#nexus.reaper_quarantine_chunks",
+            "same as vectors-030's: only the collection_id writes changed; grace is injected by tests only, production passes NULL");
+        // RDR-229 P3.5b (vectors-077) redefines it again so its matches read the id and the name; the grace handling and the
+        // sweep gate are vectors-069's, untouched.
+        SQL_CONSUMERS.put("vectors-077-rdr229-p35b-readers-both.xml#nexus.reaper_quarantine_chunks",
+            "same as vectors-069's: only the collection matches changed; grace is injected by tests only, production passes NULL");
     }
 
     private static final Pattern UNIT_START = Pattern.compile(

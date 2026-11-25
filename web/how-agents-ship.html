@@ -144,6 +144,9 @@ figure.fig rect.bag{fill:var(--blue-soft);stroke:var(--blue);stroke-width:1.2}
 figure.fig .hd{font-weight:600}
 figure.fig .arrow{fill:currentColor;stroke:none}
 figure.fig .arrow.you{fill:var(--brass)}
+/* a narrow figure scrolls sideways at full label size instead of shrinking */
+figure.fig .figscroll{overflow-x:auto}
+@media (max-width:640px){figure.fig .figscroll svg{min-width:760px}}
 </style>
 <script data-goatcounter="https://hellblazer-nexus.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </head>
@@ -165,22 +168,23 @@ figure.fig .arrow.you{fill:var(--brass)}
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · Agent-run development</span><a href="coordination.html">← Coordination</a></div>
 <h1>How Agents Build and Ship Nexus</h1>
 <p class="lede">Nexus is built with a handful of Claude Code sessions, all running on the same laptop. Each session works in one repository, although many of them cross into others, and one of them runs the managed cloud. They all share the same Nexus engine, so they can work together as one group. The owner (that's me) supervises the whole thing from tmux, with one window for each session, and the owner's decisions are the ones that matter: releases, cloud deploys, and where the project goes next. The sessions coordinate through Nexus and a shared issue tracker, and they stay out of each other's way by writing down what they are doing: a claimed work item, a queued push, a request to a peer.</p>
-<p>Two parts of this setup ship to users: the tuple space, which is part of the engine, and the agents, skills and hooks of the conexus plugin (conexus is also the package's name on PyPI). The lab pool, the managed cloud, the GitHub adapter and the release checks are this project's own.</p>
+<p>Two parts of this setup ship to users: the tuple space, which is part of the engine, and the agents, skills and hooks of the conexus plugin (conexus is also the package's name on PyPI). The lab pool, the managed cloud, the CI adapter and the release checks are this project's own.</p>
 
-<div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table>
+<div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><div class="tbl"><table>
 <tr><th>Term</th><th>Meaning</th></tr>
 <tr><td>tuple space</td><td>The part of the Nexus engine where sessions and agents leave short records for each other. <a href="tuple-space.html">The Nexus Tuple Space</a> explains it.</td></tr>
-<tr><td>board</td><td>A topic in the tuple space. Every session that subscribes receives each post, and a post expires after at most seven days.</td></tr>
+<tr><td>board</td><td>A topic in the tuple space. Every session that subscribes receives each post, and each post expires after a set time.</td></tr>
 <tr><td>mailbox</td><td>The place in the tuple space where the messages for one session or one agent wait.</td></tr>
 <tr><td>ping</td><td>The notice that a subscribed session gets for a new post or message. It names the record and does not contain it.</td></tr>
 <tr><td>worktree</td><td>A second working directory of the same git repository, with its own branch.</td></tr>
 <tr><td>bead</td><td>One work item in the project's shared issue tracker.</td></tr>
-</table></details></div>
+</table></div></details></div>
 
 <section class="lesson" id="glance">
 <div class="lhead"><h2>The system at a glance</h2></div>
 <figure class="fig">
-<svg viewBox="0 0 760 450" role="img" aria-label="The laptop holds the sessions and their worktrees. Sessions write records to the tuple space in the managed engine and receive pings back. They push to GitHub and send heavy runs to the lab pool. GitHub and the lab pool exchange CI jobs and their results. GitHub sends webhooks to an adapter, which posts to the CI board in the tuple space. The cloud session deploys and checks the engine and exchanges messages through its mailbox. The owner sends decisions to the sessions and approves deploys in the cloud session.">
+<div class="figscroll">
+<svg viewBox="0 0 760 450" role="img" aria-label="The laptop holds the sessions and their worktrees. Sessions write records to the tuple space in the managed engine and get pings back. They push to GitHub and send heavy runs to the lab pool. GitHub and the lab pool exchange CI jobs and their results. GitHub sends webhooks to a CI adapter, which posts to the CI board in the tuple space. The cloud-managing session deploys and checks the engine and exchanges messages through its mailbox. The owner sends decisions to the sessions and approves each deploy to the cloud-managing session.">
   <!-- sessions to tuple space, and pings back -->
   <path d="M80 60 V18 H700 V52"/>
   <path class="arrow" d="M700 60 l-4 -9 h8 z"/>
@@ -216,10 +220,10 @@ figure.fig .arrow.you{fill:var(--brass)}
   <path class="arrow" d="M375 250 l-4 -9 h8 z"/>
   <text x="383" y="223" class="lbl">webhooks</text>
 
-  <!-- adapter -->
+  <!-- adapter: an AWS Lambda function -->
   <rect class="box" x="290" y="250" width="170" height="50" rx="4"/>
-  <text x="375" y="271" text-anchor="middle" class="lbl">webhook adapter</text>
-  <text x="375" y="288" text-anchor="middle" class="sm">run by cloud session</text>
+  <text x="375" y="271" text-anchor="middle" class="hd">CI adapter</text>
+  <text x="375" y="288" text-anchor="middle" class="sm">AWS Lambda</text>
   <line x1="460" y1="275" x2="532" y2="275"/>
   <path class="arrow" d="M540 275 l-9 -4 v8 z"/>
   <text x="500" y="265" text-anchor="middle" class="lbl">posts</text>
@@ -227,7 +231,7 @@ figure.fig .arrow.you{fill:var(--brass)}
   <!-- managed engine -->
   <rect class="box" x="540" y="60" width="210" height="260" rx="4"/>
   <text x="645" y="82" text-anchor="middle" class="hd">Managed engine</text>
-  <text x="645" y="99" text-anchor="middle" class="sm">run by cloud session</text>
+  <text x="645" y="99" text-anchor="middle" class="sm">run by cloud-managing session</text>
   <rect class="bag" x="554" y="110" width="182" height="196" rx="3"/>
   <text x="645" y="130" text-anchor="middle" class="sm">tuple space</text>
   <text x="566" y="160" class="lbl">boards</text>
@@ -266,29 +270,32 @@ figure.fig .arrow.you{fill:var(--brass)}
 
   <!-- conexus instance -->
   <rect class="box" x="540" y="372" width="210" height="60" rx="4"/>
-  <text x="645" y="396" text-anchor="middle" class="hd">Cloud session</text>
+  <text x="645" y="396" text-anchor="middle" class="hd">Cloud-managing session</text>
   <text x="645" y="416" text-anchor="middle" class="lbl">a peer session</text>
 
   <!-- owner -->
   <rect class="you" x="300" y="372" width="160" height="60" rx="4"/>
-  <text x="380" y="396" text-anchor="middle" class="hd">Owner</text>
-  <text x="380" y="416" text-anchor="middle" class="lbl">tags, deploys, direction</text>
+  <text x="380" y="390" text-anchor="middle" class="hd">Owner</text>
+  <text x="380" y="407" text-anchor="middle" class="lbl">tags, approves deploys,</text>
+  <text x="380" y="422" text-anchor="middle" class="lbl">direction</text>
   <line x1="460" y1="402" x2="532" y2="402" class="dash you-edge"/>
   <path class="arrow you" d="M540 402 l-9 -4 v8 z"/>
-  <text x="500" y="392" text-anchor="middle" class="lbl">go</text>
+  <text x="500" y="392" text-anchor="middle" class="lbl">approves</text>
   <path d="M300 402 H250 V190 H228" class="dash you-edge"/>
   <path class="arrow you" d="M220 190 l9 -4 v8 z"/>
   <text x="242" y="398" class="lbl" transform="rotate(-90 242 398)">decisions</text>
 </svg>
+</div>
+<figcaption>The participants and the links between them: the laptop, GitHub, the lab pool, the CI adapter, the managed engine, the cloud-managing session and the owner.</figcaption>
 </figure>
-<p>Each working session on the laptop has its own worktree and branch, and it hands most of the work to subagents: developers who implement, and two standing reviewers, a code reviewer and a critic. The cloud session is a peer like the others and runs on the laptop too. The figure draws it beside the managed engine because that is what it runs: it works in its own repository and looks after the engine that holds the shared tuple space. It also runs the adapter that turns GitHub events into CI board posts, deploys each engine release and runs the cloud checks, and other sessions reach it by writing to its mailbox.</p>
+<p>Each working session on the laptop has its own worktree and branch, and it hands most of the work to subagents: developers who implement, and two standing reviewers, a code reviewer and a critic. The cloud-managing session, the session that manages the cloud, is a peer like the others and runs on the laptop too. The figure draws it beside the managed engine because that is what it runs: it works in its own repository and looks after the engine that holds the shared tuple space. It also deploys each engine release and runs the cloud checks, and other sessions reach it by writing to its mailbox. The CI adapter is not a session. The Check CI step describes it.</p>
 <p>GitHub runs CI on every push to <code>develop</code> and on every pull request, and it runs the release workflows on tags. It sends the Python test shards, the engine's Java tests and a macOS test job to the lab pool, and runs the rest on its own runners.</p>
 <p>The lab pool is a few machines on the local network, shared by CI and by the sessions' own heavy runs. A scheduler gives each run a fixed share of cores and memory, and on the Linux machines it stops a run that goes over its memory. One machine is a Mac and one also runs Windows natively, for hand runs of the Windows tests and for the <code>win-release</code> runner that builds the Windows binaries. The pool builds the macOS release binaries too, and a session named labrun looks after it.</p>
 </section>
 
 <section class="lesson" id="agents">
 <div class="lhead"><h2>Agents, skills and tools</h2></div>
-<p>Every session runs the conexus plugin, so every session has the same agents, skills and hooks, and none has to tell another how to work. A session gives most of its work to background subagents, such as developers, the two reviewers, a debugger and planners. Skills carry checklists, for example the two release procedures. Hooks brief each subagent when it starts, stop a subagent from running git write commands in the shared checkout, and stop a command from printing a credential. Before Claude Code compacts a session's context, a hook saves the session's working state as a checkpoint, and after the compaction a second hook puts it back. The checkpoint checks the thread entry against the facts, such as a closed bead or a worktree that is gone. It also names worktrees that hold unlanded work and lists the session's background tasks. Review is a rule the sessions follow, described in the build step below, and no hook enforces it.</p>
+<p>Every session runs the conexus plugin, so every session has the same agents, skills and hooks, and none has to tell another how to work. A session gives most of its work to background subagents, such as developers, the two reviewers, a debugger and planners. Skills carry checklists, for example the two release procedures. Hooks brief each subagent when it starts, stop a subagent from running git write commands in the shared checkout, and stop a command from printing a credential. Before Claude Code compacts a session's context, a hook saves the session's working state as a checkpoint, and after the compaction a second hook puts it back. The checkpoint finds the session's entry on the threads board and checks the entry against the facts, such as a closed bead or a worktree that is gone. It also names worktrees that hold unlanded work and lists the session's background tasks. Review is a rule the sessions follow, described in the build step below, and no hook enforces it.</p>
 <details class="gloss"><summary>The agent types</summary><div class="pad">
 <div class="tbl"><table>
 <tr><th>Agent</th><th>Used for</th></tr>
@@ -310,7 +317,20 @@ figure.fig .arrow.you{fill:var(--brass)}
 <p>Anything that needs a real design decision starts life as an RDR, a design record kept in the repository. Before anyone plans from it, a critic agent puts the record through a gate, and then the owner decides whether to accept it. Once it is accepted, the <code>strategic-planner</code> agent breaks the design down into beads, the work items the sessions pick up. <a href="rdr.html">Working with RDRs</a> covers the record and the gate in more detail.</p>
 <h3>Claim and announce</h3>
 <p>When a session takes on a bead, it claims it with <code>bd update --claim</code>, and that is how the other sessions know not to start the same work. Each session subscribes to the boards it cares about and holds a short name in a directory in the tuple space, so a peer can send it a message by name and the message lands in its mailbox. Subagents get mailboxes of their own too. Nobody sits in a polling loop: whether a session is waiting for CI, for a peer or for a reply, a ping tells it when something new has arrived. Posts and messages stay short, and anything longer, a measurement for example, goes into a Nexus memory entry that the message points to.</p>
-<p>Every session also keeps one thread entry in Nexus memory, with a block for each piece of work it has open. Each block says what the work is about, where it stands, what it is waiting on, and whether it needs something from the owner. A block can also carry a <code>due:</code> date and a <code>worktree:</code> line that says where the work lives. The session-start hook prints a due date once it has come, and the console highlights it. The session rewrites the entry whenever the work moves on, when a thread starts, at a push, when it starts waiting and when it finishes, and the Threads tab of <code>nx console</code> shows every session's entry in one place.</p>
+<h3>The threads board</h3>
+<p>The threads board shows what each session is doing. Each session keeps one entry in Nexus memory, in the project <code>threads</code>, titled with its session name. The entry holds one block for each piece of open work. The block's heading says the work in plain words, and its fields say where the work stands. A session rewrites its entry when a thread starts, at a push, when it starts waiting on someone, and when it finishes. A finished block is deleted.</p>
+<details class="gloss"><summary>The thread fields</summary><div class="pad">
+<div class="tbl"><table>
+<tr><th>Field</th><th>What it says</th></tr>
+<tr><td><code>ref:</code></td><td>The beads, RDRs or commits the work points to.</td></tr>
+<tr><td><code>state:</code></td><td>Where the work stands, in one line.</td></tr>
+<tr><td><code>waiting_on:</code></td><td>What the work waits on. <code>none</code> means the session is working on it now.</td></tr>
+<tr><td><code>needs_sam:</code></td><td>A decision only the owner can make, or the id of an ask that holds it.</td></tr>
+<tr><td><code>due:</code></td><td>A date when the work needs another look. The session-start hook prints the thread once it is due.</td></tr>
+<tr><td><code>worktree:</code></td><td>Where the work lives.</td></tr>
+</table></div>
+</div></details>
+<p>The owner reads the board in the Threads tab of <code>nx console</code>. The threads that need the owner appear first, under Needs you.</p>
 <h3>Build and review</h3>
 <p>The session makes a worktree on a feature branch and hands the job to a developer subagent, which writes the failing test first and then the fix. Before anyone reviews it, the session writes down what done means as a line that starts "Ship when", for example "Ship when the local-upgrade path cannot wedge", and both reviewers judge the change against that line. Each finding is either a ship-blocker, which gets fixed, or a new bead for later, never both. One more round confirms the fixes, and once both reviewers are clean the session commits the change by explicit path and closes the bead.</p>
 <h3>Test</h3>
@@ -325,10 +345,12 @@ figure.fig .arrow.you{fill:var(--brass)}
 <li>the engine's main suite, when the batch changes the engine</li>
 <li>a run on the pool's Windows side, when the batch touches files that the Windows tests watch</li>
 </ul>
-<p>When the last CI run on <code>develop</code> has finished, the conductor opens a push window and names the order. Each session in the window rebases again, pushes, fast-forwards the primary checkout and tells the conductor its new tip. A fix for a red <code>develop</code> goes first in the next window, and nothing else is added behind a known red until it is fixed.</p>
+<p>When the last CI run on <code>develop</code> has finished, the conductor opens a push window and names the order. Each session in the window rebases again, pushes, fast-forwards the primary checkout and tells the conductor its new tip. A fix for a red <code>develop</code> goes first in the next window.</p>
+<p>A red <code>develop</code> has an owner, the session that the CI board names as most likely to have caused it, and while the red is open the push script holds other pushes. Before it pushes, the script runs <code>nx ci check-hold</code>. The owner may push, and so may the session that pushed one of the commits the board suspects, because the fix often comes from there. Anyone else is refused unless the push names a reason with <code>--red-fix</code>, and the script prints a line when that flag overrode a refusal. A check that cannot be made, because a read failed, lets the push through with a warning that says what failed. The owner tells the board it has seen the red with <code>nx ci ack</code>. When the red is not the owner's, <code>nx ci ack --not-mine</code> records that, with a note on who has it, and if the owner does not answer before the deadline, the board gives the red to the next person in line, usually the session that pushed a later suspect. If that person does not answer either, the board escalates it to an operator.</p>
 <p>The push script, <code>scripts/git-push-develop.sh</code>, pushes only the commits that the session names, and it refuses when any other commit is outbound, so a peer's work cannot go out with the push. Normally it first prints the files those commits touch, with a digest of that list, and it pushes only when the session repeats the command with the digest, so a file added after the session read the list stops the push. It takes the push lock just before it pushes and releases it right after. The primary checkout stays on <code>develop</code> as the shared reference, and nobody edits it.</p>
 <h3>Check CI</h3>
-<p>GitHub sends the adapter a webhook for each change of state of each run and job on <code>develop</code> and <code>main</code>, and the adapter posts each one to the CI board. Once every push run for a commit has finished, it also posts one row to a second board. Sessions subscribe to that second board and get a ping through the Claude Code channel, so a session that has pushed goes on with other work, with no watcher process. The ping comes for every commit and names the commit's sha, so a session checks whether the commit is its own. The row carries the conclusion of each run, so the session reads the result from the row. When the row is cut short, the session reads the commit's check runs with one call, <code>gh api repos/&lt;owner&gt;/&lt;repo&gt;/commits/&lt;sha&gt;/check-runs</code>.</p>
+<p>The CI adapter, an AWS Lambda function, receives GitHub's webhooks. Each time a run or job on develop or main changes state, it posts one entry to the CI board in the tuple space. Once every push run for a commit has finished, it posts one more entry to a second board, which a session can wait on for that commit as a whole. The mechanism and its design are in <a href="https://github.com/Hellblazer/nexus/blob/develop/docs/rdr/rdr-220-ci-status-from-github-webhooks-to-the-tuple-space.md">RDR-220</a>.</p>
+<p>Sessions subscribe to that second board and get a ping through the Claude Code channel, so a session that has pushed goes on with other work, with no watcher process. The ping comes for every commit and names the commit's sha, so a session checks whether the commit is its own. The entry carries the conclusion of each run, so the session reads the result. When the entry is cut short, the session reads the commit's check runs with one call, <code>gh api repos/&lt;owner&gt;/&lt;repo&gt;/commits/&lt;sha&gt;/check-runs</code>.</p>
 <p>The result of a push window is the result of its last commit's own run, and that counts only when the run took the full test lane. A documentation-only commit skips the test shards, so a window that ends on one says nothing about the code under it, and a documentation-only batch never pushes last. A red commit gets its fix as a new commit.</p>
 <p>The wake has two limits today. It goes to every subscribed session for every commit, not only to the session that pushed it. And a session started without the Claude Code channel sees a post only at its next prompt, so it runs <code>nx ci wait &lt;sha&gt;</code> as a background command instead. The command exits when the runs finish and prints the result.</p>
 <details class="gloss"><summary>The CI jobs</summary><div class="pad">
@@ -354,8 +376,8 @@ figure.fig .arrow.you{fill:var(--brass)}
 <li>An upgrade does not rewrite user data at boot: the first boot writes at most 64 MiB, a plain reboot of the same version writes at most 64 MiB, and a restart during a background index build never discards the build.</li>
 </ul>
 <p>The owner pushes the engine tag, or authorizes a session to push that one tag. The engine workflow builds and signs the native binaries for Linux and macOS, and for Windows when the switch is on. It publishes the GitHub release only when every asset is present. A failed build job leaves the release as a draft until a rerun completes it. A check then installs the published binary on a bare machine and tests it.</p>
-<p>To deploy, a session sends the cloud session's mailbox a request carrying the tag and the evidence from these checks, but no approval. The approval has to come from the owner, typed into the cloud session itself, and the cloud session refuses any approval relayed by another session. With it, the cloud session deploys the engine and runs its cloud checks, and afterwards a session on a cloud-mode machine checks that the engine's contracts reach real client code through the public edge.</p>
-<p>The order of engine and client comes from the wire-contract ledger, which lists every engine change whose client half hasn't shipped yet and marks whether an old client still works against the new engine. If every entry is safe for old clients, the engine deploys before the client release. If not, the cloud session has to stage the redeploy and confirm that back before the client is tagged. No script checks this, so a person confirms it, and the releaser waits until they do.</p>
+<p>To deploy, a session sends the cloud-managing session's mailbox a request carrying the tag and the evidence from these checks, but no approval. The approval has to come from the owner, typed into the cloud-managing session itself, and the cloud-managing session refuses any approval relayed by another session. With it, the cloud-managing session deploys the engine and runs its cloud checks, and afterwards a session on a cloud-mode machine checks that the engine's contracts reach real client code through the public edge.</p>
+<p>The order of engine and client comes from the wire-contract ledger, which lists every engine change whose client half hasn't shipped yet and marks whether an old client still works against the new engine. If every entry is safe for old clients, the engine deploys before the client release. If not, the cloud-managing session has to stage the redeploy and confirm that back before the client is tagged. No script checks this, so a person confirms it, and the releaser waits until they do.</p>
 </section>
 
 <section class="lesson" id="decisions">
@@ -371,18 +393,20 @@ figure.fig .arrow.you{fill:var(--brass)}
 <tr><td>Merge of the release pull request, and each release tag and engine tag (pushed by the owner, or by a session the owner authorizes for that one tag)</td><td>The owner</td></tr>
 <tr><td>Build, sign, and publish after a tag</td><td>GitHub workflows</td></tr>
 <tr><td>Deploy request with evidence</td><td>A session</td></tr>
-<tr><td>Approval of each cloud deploy, typed in the cloud session</td><td>The owner</td></tr>
-<tr><td>Cloud deploy and cloud checks</td><td>The cloud session</td></tr>
+<tr><td>Approval of each cloud deploy, typed in the cloud-managing session</td><td>The owner</td></tr>
+<tr><td>Cloud deploy and cloud checks</td><td>The cloud-managing session</td></tr>
 <tr><td>Lab pool machines, classes, and capacity</td><td>The labrun session</td></tr>
 <tr><td>The repository switch <code>NX_WINDOWS_RELEASE_LEGS</code> (on adds the Windows release builds)</td><td>The owner</td></tr>
 <tr><td>Session restarts, cloud data writes, credentials, spending, installs on the lab pool machines, messages to anyone outside the team, deletions, archives, and removal of public command-line surface, edits to published records, accepting a known gap or risk, and changes to test or promotion criteria set in advance</td><td>The owner</td></tr>
 <tr><td>Decisions that change scope or direction</td><td>The owner</td></tr>
 </table></div>
-<p>When something is the owner's call, the session writes it into its thread entry as an ask. The ask says what the question is, where the work stands and what happens if the owner doesn't answer yet. It gives two or more options, marks any that can't be undone, may recommend one, and says whether every option is cheap to undo and whether the work is stuck until the answer comes. A <code>needs_sam</code> line in the thread points at the ask, so the Threads tab shows it right next to the work, and if the decision is also a bead, that bead gets the <code>needs-sam</code> label. When the owner answers, the answer reaches the session through its mailbox, and the drain hook shows it as an unverified claim. The session checks its own entry to see that the ask still stands at that version. It acts without asking again only when every option is cheap to undo and the owner's words clearly choose one.</p>
+<p>When something is the owner's call, the session raises an ask in its thread, with the question, where the work stands, the options (any that cannot be undone marked as such), a recommendation if there is one, and whether waiting blocks the work. The thread then points at the ask, so the Threads tab shows it next to the work.</p>
+<p>The owner answers from a session the owner opens, or from a terminal, with <code>nx ask answer</code>. A session that relays an answer confirms the owner's words with the owner before it records them. The asking session receives the answer through its mailbox and reads its own ask again before it acts. It acts without asking again only when the ask is reversible and the owner's words choose one of its options.</p>
+
 <p>The owner can see at a glance what every session is doing. Claude Code hooks mark each one as working, waiting for the owner's next message, needing an answer, or held while it waits on something else such as background work. One key after the tmux prefix jumps to whichever session has waited longest, and the ones that need an answer come first.</p>
 </section>
 
-<p class="footer">Further reading: <a href="tuple-space.html">The Nexus Tuple Space</a> covers boards, queues, and locks, and <a href="coordination.html">Coordination</a> covers messages between sessions and agents. Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a>.</p>
+<p class="footer">Further reading: <a href="tuple-space.html">The Nexus Tuple Space</a> covers boards, queues, and locks, and <a href="coordination.html">Coordination</a> covers messages between sessions and agents. The field reference for the threads board is <a href="https://github.com/Hellblazer/nexus/blob/develop/docs/agents/threads-board.md">docs/agents/threads-board.md</a>. Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a>.</p>
 </main>
 </div>
 </body>

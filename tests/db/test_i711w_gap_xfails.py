@@ -128,6 +128,14 @@ class TestT3GcTombstoneSafety:
 
     _OWNER_PREFIX = "1.5"
 
+    @staticmethod
+    def _register_collection(cat, coll: str) -> None:
+        """RDR-229 P3.1: the engine refuses a document under a collection with no registry row. This engine's
+        profile is bge-768 whatever the name says (the stub chunks below follow it)."""
+        cat.register_collection(
+            coll, content_type="code", owner_id="i711w-gc-owner",
+            embedding_model="bge-base-en-v15-768", model_version="v1")
+
     def _owner(self, cat) -> str:
         cat.register_owner(
             name="i711w-gc-owner",
@@ -151,6 +159,7 @@ class TestT3GcTombstoneSafety:
         """
         owner = self._owner(cat)
         coll = "code__i711w-gc1__voyage-code-3__v1"
+        self._register_collection(cat, coll)
         t = cat.register(
             owner,
             "GC Tombstone Doc 1",
@@ -190,6 +199,7 @@ class TestT3GcTombstoneSafety:
     def test_docs_for_chashes_excludes_tombstoned_doc(self, cat, pg_instance) -> None:
         owner = self._owner(cat)
         coll = "code__i711w-gc2__voyage-code-3__v1"
+        self._register_collection(cat, coll)
         t = cat.register(
             owner,
             "GC Tombstone Doc 2",
@@ -250,7 +260,7 @@ class TestSupersedeCollectionSemantics:
             old,
             content_type="code",
             owner_id="i711w-sup",
-            embedding_model="bge-base-en-v15-768",
+            embedding_model="bge-base-en-v15-768", model_version="v1",
         )
         # NON-VACUITY guard: the old row exists before the rename.
         assert cat.get_collection(old) is not None
@@ -286,13 +296,14 @@ class TestSupersedeCollectionSemantics:
             old,
             content_type="code",
             owner_id="i711w-supat",
-            embedding_model="bge-base-en-v15-768",
+            embedding_model="bge-base-en-v15-768", model_version="v1",
         )
         cat.register_collection(
             new,
             content_type="code",
             owner_id="i711w-supat",
-            embedding_model="bge-base-en-v15-768",
+            # RDR-229 P3.8: a tuple has one live collection, so the successor is the next version of it, as its name says.
+            embedding_model="bge-base-en-v15-768", model_version="v2",
         )
 
         cat.supersede_collection(old, new)
@@ -312,7 +323,7 @@ class TestSupersedeCollectionSemantics:
             new,
             content_type="code",
             owner_id="i711w-supguard",
-            embedding_model="bge-base-en-v15-768",
+            embedding_model="bge-base-en-v15-768", model_version="v1",
         )
         missing = "code__i711w-nosuch__bge-base-en-v15-768__v1"
         assert cat.get_collection(missing) is None  # guard: truly unregistered
@@ -410,7 +421,7 @@ class TestSupersedeCollectionSemantics:
             old,
             content_type="code",
             owner_id="i711w-dangl",
-            embedding_model="bge-base-en-v15-768",
+            embedding_model="bge-base-en-v15-768", model_version="v1",
         )
         missing_new = "code__i711w-dangl-nosuch__bge-base-en-v15-768__v2"
 
@@ -516,31 +527,25 @@ class TestResolvePathServiceParity:
 
 
 class TestLegacyGrandfatheredDerivation:
-    """A non-conformant collection name registered through the bare
-    ``register_collection(name)`` path must land ``legacy_grandfathered=True``,
-    the way the local catalog derives it.
+    """RDR-229 P3.8 (item 11, ``legacy_grandfathered`` goes): the client no longer derives the flag from a
+    name. A non-conformant collection name registered with its attributes lands ``legacy_grandfathered=False``;
+    the flag it used to carry (nexus-cecqy) is no longer written by any registration.
     """
 
-    # nexus-i711w.1 item 16 -> nexus-cecqy (legacy_grandfathered half,
-    # scope-corrected comment 2026-07-29). XFAIL REMOVED — the fix landed:
-    # HttpCatalogClient.register_collection now defaults the kwarg to None and
-    # DERIVES `not is_conformant_collection_name(name)`, covering all three
-    # bare-else call sites (indexer.py:784, catalog_cmds/collections.py:138
-    # and :349) at one boundary instead of patching them one at a time.
-    def test_bare_register_nonconformant_name_flagged_legacy(self, cat) -> None:
+    def test_registering_a_nonconformant_name_does_not_flag_it_legacy(self, cat) -> None:
         from nexus.catalog.rows.legacy_names import is_conformant_collection_name
 
-        # Legacy 2-segment shape — the vacuity trap named on the bead: the
-        # CONFORMANT case is correct-by-accident at the False default, so
-        # this test MUST use a non-conformant name.
         name = "docs__i711w-legacy71b"
-        assert not is_conformant_collection_name(name)  # non-vacuity guard
+        assert not is_conformant_collection_name(name)  # non-vacuity guard: the name the old derivation flagged
 
-        cat.register_collection(name)  # the bare-else call-site shape
+        cat.register_collection(
+            name, content_type="docs", owner_id="i711w-legacy",
+            embedding_model="bge-base-en-v15-768", model_version="v1",
+        )
 
         row = cat.get_collection(name)
         assert row is not None
-        assert row["legacy_grandfathered"] is True
+        assert row["legacy_grandfathered"] is False
 
     def test_conformant_name_not_flagged_legacy(self, cat) -> None:
         """Passing companion (correct today): a CONFORMANT name stays
@@ -555,7 +560,7 @@ class TestLegacyGrandfatheredDerivation:
             name,
             content_type="docs",
             owner_id="i711w-conf",
-            embedding_model="bge-base-en-v15-768",
+            embedding_model="bge-base-en-v15-768", model_version="v1",
         )
 
         row = cat.get_collection(name)

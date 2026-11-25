@@ -239,13 +239,17 @@ public final class ManifestFillableCount {
 
     /**
      * The manifest row, its document and its chunk row, joined as the count and the fill job both read them: the
-     * document by tumbler, the chunk row at the manifest row's own collection and embedding model and chash.
+     * document by tumbler, the chunk row at the manifest row's own collection and embedding model and chash. The collection is matched
+     * by the name before gate 3 (a row the id stamp has not reached may carry no id) and by the collection id from it (RDR-229 P3.5c,
+     * linda): after a one-row rename the chunk's stored name is stale, and a name join would pair no chunk with its manifest row.
      */
-    static Table<?> joined(CatalogDocumentChunks row, CatalogDocuments doc) {
+    static Table<?> joined(CatalogDocumentChunks row, CatalogDocuments doc, dev.nexus.service.datamove.Gate3 gate3) {
+        java.util.Objects.requireNonNull(gate3, "gate3");
+        Condition sameCollection = gate3.holds() ? CHUNKS.COLLECTION_ID.eq(row.COLLECTION_ID) : CHUNKS.COLLECTION.eq(row.COLLECTION);
         return row.join(doc).on(doc.TENANT_ID.eq(row.TENANT_ID).and(doc.TUMBLER.eq(row.DOC_ID)))
             .join(CHUNKS).on(CHUNKS.TENANT_ID.eq(row.TENANT_ID)
                 .and(CHUNKS.EMBEDDING_MODEL.eq(row.EMBEDDING_MODEL))
-                .and(CHUNKS.COLLECTION.eq(row.COLLECTION)).and(CHUNKS.CHASH.eq(row.CHASH)));
+                .and(sameCollection).and(CHUNKS.CHASH.eq(row.CHASH)));
     }
 
     /**
@@ -283,11 +287,11 @@ public final class ManifestFillableCount {
      * {@code edge}, those that do not, and the number of relaxed rows seen (equal to {@code limit} means capped). Public
      * so a plan-shape test can explain the exact statement the route runs.
      */
-    public static Select<Record3<Integer, Integer, Integer>> query(DSLContext ctx, String tenant, Kind kind, int limit) {
+    public static Select<Record3<Integer, Integer, Integer>> query(DSLContext ctx, String tenant, Kind kind, int limit, dev.nexus.service.datamove.Gate3 gate3) {
         var row = CATALOG_DOCUMENT_CHUNKS;
         var doc = CATALOG_DOCUMENTS;
         var candidates = ctx.select(DSL.field(strict(kind, doc)).as("strict_ok"))
-            .from(joined(row, doc))
+            .from(joined(row, doc, gate3))
             .where(candidates(ctx, tenant, kind, row, doc))
             .limit(limit)
             .asTable("candidates");
@@ -308,7 +312,7 @@ public final class ManifestFillableCount {
         var counts = repo.tenantScope().withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", Integer.toString(Integer.getInteger(
                 CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS)));
-            return query(ctx, tenant, kind, limit).fetchOne();
+            return query(ctx, tenant, kind, limit, repo.gate3()).fetchOne();
         });
         return new Result(kind, counts.value1(), limit, counts.value3() >= limit, counts.value2());
     }

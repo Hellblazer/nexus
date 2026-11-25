@@ -49,6 +49,8 @@ final class PciReindexPhase {
     private final Clock clock;
     private final Anchorer anchorer;
     private final RedMarker redMarker;
+    /** Whether the canary measures id indexes now: the reconciler's latch (gate 3 latched, id readers present). Before it an id REINDEX is not re-measured. */
+    private volatile java.util.function.BooleanSupplier idCanary = () -> false;
 
     /** @param canary the canary's schedule, or null (a reconciler built without one measures nothing) */
     PciReindexPhase(PciReindexState state, PciCanarySchedule canary, Clock clock, Anchorer anchorer) {
@@ -62,6 +64,10 @@ final class PciReindexPhase {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.anchorer = Objects.requireNonNull(anchorer, "anchorer");
         this.redMarker = Objects.requireNonNull(redMarker, "redMarker");
+    }
+
+    void idCanaryWhen(java.util.function.BooleanSupplier latched) {
+        this.idCanary = Objects.requireNonNull(latched, "latched");
     }
 
     /**
@@ -82,7 +88,8 @@ final class PciReindexPhase {
             if (!snapshotIndexes.contains(e.getKey())) {
                 continue;   // gone: the state forgets it with the snapshot
             }
-            if (writeAnchor(pass, owed.leaf(), owed.dimension(), new Build(e.getKey(), owed.collection()))) {
+            if (writeAnchor(pass, owed.leaf(), owed.dimension(),
+                new Build(e.getKey(), owed.collection(), owed.collectionId()))) {
                 state.anchorWritten(e.getKey());
                 written.add(e.getKey());
                 log.info("event=pci_anchor_retried index={} leaf={}", e.getKey(), PciReconciler.leafId(owed.leaf()));
@@ -133,14 +140,18 @@ final class PciReindexPhase {
                     PciReconciler.leafId(leaf), name, r.collection(), r.trigger().label(), r.bytes());
                 // A fresh graph, a fresh anchor (built, rows and bytes now). One that is not written is retried at the
                 // start of the next pass, and the index is not judged against its old anchor meanwhile.
-                boolean anchored = writeAnchor(pass, leaf, subject.dimension(), new Build(name, r.collection()));
+                Long id = subject.index().collectionId();
+                boolean anchored = writeAnchor(pass, leaf, subject.dimension(), new Build(name, r.collection(), id));
                 if (!anchored) {
-                    state.anchorOwed(name, leaf, subject.dimension(), r.collection());
+                    state.anchorOwed(name, leaf, subject.dimension(), r.collection(), id);
                 }
                 if (r.vacuumAfter() && pass.live()) {
                     vacuumLeaf(pass, leaf);
                 }
-                remeasure(pass, leaf, name, r, wasRed);
+                // The canary measures the family the serving statement selects by: a name index before the latch, an id index once it holds.
+                if (id == null || idCanary.getAsBoolean()) {
+                    remeasure(pass, leaf, name, r, wasRed, id);
+                }
                 return true;
             }
             case FAILED, REJECTED -> {
@@ -190,7 +201,7 @@ final class PciReindexPhase {
      * REINDEX whatever the canary reads (a REINDEX of a graph under a day old rebuilds essentially the same graph), is
      * independent of both.
      */
-    private void remeasure(PciBuilderSession.Pass pass, Leaf leaf, String name, Reindex r, boolean wasRed) {
+    private void remeasure(PciBuilderSession.Pass pass, Leaf leaf, String name, Reindex r, boolean wasRed, Long id) {
         if (canary == null) {
             return;
         }
@@ -198,7 +209,7 @@ final class PciReindexPhase {
             PciCanary.Result before = canary.latest(name);
             List<float[]> sample = before != null && before.state() == PciCanary.State.RED ? before.redSample() : null;
             var target = new PciCanary.Target(PciReconciler.leafId(leaf), leaf.tenant(), leaf.model(), r.collection(),
-                name);
+                name, id);
             PciCanary.Result after = canary.remeasure(target, sample);
             if (wasRed && after.state() == PciCanary.State.RED) {
                 state.stillRed(name);

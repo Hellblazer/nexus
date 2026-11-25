@@ -449,6 +449,21 @@ class RawSqlGateTest {
             // identifier, key or prefix is concatenated in Java. Plain JDBC Statement.execute, as PciBuilderSession's
             // does. Single-homed: AdminDdlSession#ddl, for the chunk constraints and the catalog TTL CHECK alike.
             "runDdl", Map.of(".execute(sql)", 1))),
+        Map.entry("LeafIndexPass.java", Map.of(
+            // SANCTIONED RAW (RDR-229 P3.3b, nexus-p2m1x.20): CREATE UNIQUE INDEX CONCURRENTLY, DROP INDEX CONCURRENTLY, ALTER TABLE ...
+            // ADD CONSTRAINT UNIQUE (USING INDEX) and ALTER INDEX ... ATTACH PARTITION have no typed jOOQ form, and a concurrent build
+            // cannot run inside a function or a transaction block, so the pass sends them on its own autocommit admin connection. The
+            // text is rendered by PostgreSQL's format() with %I and %s (LeafIndexPass.Session#ddl) from a literal template and catalog
+            // names; the %s column list is a constant of LeafIndexPass.KEYS. Plain JDBC Statement.execute, as PciBuilderSession's and
+            // AdminDdlSession's do. Single-homed: Session#ddl.
+            "runDdl", Map.of(".execute(sql)", 1))),
+        Map.entry("IdUniqueIndexPass.java", Map.of(
+            // SANCTIONED RAW (RDR-229 P3.4, nexus-p2m1x.22): CREATE [UNIQUE] INDEX CONCURRENTLY and DROP INDEX CONCURRENTLY have no typed
+            // jOOQ form, and a concurrent build cannot run inside a function or a transaction block, so the pass sends them on its own
+            // autocommit admin connection. The text is rendered by PostgreSQL's format() with %I and %s (IdUniqueIndexPass#ddl) from a
+            // literal template; the %s column list and predicate are constants of IdUniqueIndexPass.SPECS and ArbiterTwins. Plain JDBC
+            // Statement.execute, as LeafIndexPass's and PciBuilderSession's do. Single-homed: runDdl.
+            "runDdl", Map.of(".execute(sql)", 1))),
         Map.entry("MoveSql.java", Map.of(
             // SANCTIONED RAW (RDR-246, nexus-f3yqd.2.14): a data move's verification query and on_complete are SQL text
             // that a changeset registered in nexus.data_moves (the registry's own columns); the worker runs them and
@@ -3103,6 +3118,8 @@ class RawSqlGateTest {
         // batch 11
         "role-application-name-poison", "role-granted-by", "schema-authorization", "table-storage-set",
         "table-storage-reset", "hnsw-index-collection", "hnsw-index-collection-tenant", "hnsw-index",
+        // RDR-229 P3.5b (nexus-p2m1x.24): PgContainerHelper#createLeafHnswIndexOnId validates index, schema, table, column; the id is a long
+        "hnsw-index-collection-id",
         "role-connection-limit", "schema-create-grant", "schema-create-revoke", "nologin-role-password",
         "superuser-login-role", "create-policy", "drop-policy", "table-row-security",
         "hnsw-index-collection-concurrently", "hnsw-index-builder-concurrently", "reindex-index-concurrently",
@@ -3111,6 +3128,9 @@ class RawSqlGateTest {
         "index-comment-not-an-anchor", "index-comment-wrong-version", "index-comment-clear",
         // nexus-4lnn1.1.10: an anchor text with no relfilenode, behind PgContainerHelper.commentIndexAnchorWithoutRelfilenode
         "index-comment-no-relfilenode",
+        // nexus-p2m1x.27 (RDR-229 P3.7): ALTER TABLE ... DISABLE/ENABLE TRIGGER, the control of the vectors-079 tests, behind
+        // PgContainerHelper.disableTrigger and enableTrigger (both names through requireTestIdentifier)
+        "trigger-disable", "trigger-enable",
         // earlier batches, each behind a requireTestIdentifier helper (or taking no caller input) and named nowhere
         // else in code
         "role-planner-guc", "nologin-role", "schema-usage", "schema-default-select-acl", "table-owner",
@@ -3122,7 +3142,16 @@ class RawSqlGateTest {
         // (a plain file name only)
         "deadlock-trigger-install",
         // nexus-7fku2.1.1: TS2's template copy, behind PgContainerHelper.cloneDatabase (both names through requireTestIdentifier)
-        "database-clone");
+        "database-clone",
+        // nexus-p2m1x.17 (RDR-229 P3.1): behind PgContainerHelper.dropPolicyIfExists and validateConstraintStandalone (requireTestIdentifier
+        // on the policy and the constraint, the table rendered from a jOOQ Table)
+        "drop-policy-if-exists", "validate-constraint",
+        // RDR-229 P3.5a (nexus-p2m1x.23): ALTER COLUMN .. DROP IDENTITY (no typed form in jOOQ 3.20.11), behind PgContainerHelper.dropIdentity
+        // (the table rendered from a jOOQ Table, the column through requireTestIdentifier)
+        "drop-identity",
+        // nexus-p2m1x.21 (RDR-229 P3.3c): REVOKE USAGE ON SCHEMA (no typed form), behind PgContainerHelper.revokeSchemaUsage (both names through
+        // requireTestIdentifier)
+        "schema-usage-revoke");
 
     /**
      * The parameterised test changelogs that are NOT on the validated list, each with the reason it is allowed. Every
@@ -3151,7 +3180,9 @@ class RawSqlGateTest {
         Map.entry("reindex-index", "named in code only by PgContainerHelperChangesetTextTest, as an input the "
             + "changeset-text extractor must refuse; PgContainerHelper#reindexIndex validates its two names"),
         Map.entry("p225-partition-squatter", "PartitionScratch#createSquatterLeaf runs it after "
-            + "PgContainerHelper.requireTestIdentifier on both names (PartitionScratch is the fixture's own helper)"));
+            + "PgContainerHelper.requireTestIdentifier on both names (PartitionScratch is the fixture's own helper)"),
+        Map.entry("id-index-plan-shapes", "PciIdIndexIntegrationTest runs it with one fixed role literal, "
+            + "PgContainerHelper.SVC_USERNAME, as ${svcRole} in its two GRANT EXECUTE statements (RDR-229 P3.4)"));
 
     private static final Pattern SQL_BODY = Pattern.compile("(?is)<sql\\b[^>]*>(.*?)</sql>");
 

@@ -77,7 +77,7 @@ reads green with `not judged: dead <= N` in the detail (nexus-j6un5).
 **Action**: the fix suggestion is literal — `VACUUM ANALYZE nexus.<table>;`.
 This check reads `pg_stat_user_tables` directly (local-only admin-psql
 path, the same one `nx doctor`'s migration-state and RLS checks use); it
-does not run on a managed deployment, which vacuums server-side.
+does not run on a managed deployment: the row reads not applicable there (`[ ]`, not checked from this client), and nothing in this client checks it.
 
 ## `tuples.sweep_freshness`
 

@@ -84,6 +84,11 @@ def _owner_dies() -> None:
     sub._owner_records.clear()
 
 
+#: Every throwaway cluster logs each autovacuum, so a test's partition drop that gives up on a lock can be matched to
+#: the vacuum that held it (tests/_tenant_drop.py; CI shard 4 on 2773105b83).
+_AUTOVACUUM_LOG = "log_autovacuum_min_duration = 0"
+
+
 class TestClusterConf:
     def test_a_tmpfs_cluster_gets_fsync_off_wal_cap_and_mmap_dsm(self) -> None:
         conf = sub.throwaway_cluster_conf(
@@ -99,7 +104,7 @@ class TestClusterConf:
             "/home/nxtest/tmp", env={}, mounts_text=_TMPFS_MOUNTS,
         )
         lines = set(conf.splitlines())
-        assert lines == {"fsync = off", "synchronous_commit = off", "full_page_writes = off"}
+        assert lines == {"fsync = off", "synchronous_commit = off", "full_page_writes = off", _AUTOVACUUM_LOG}
 
     def test_the_conf_follows_the_pgdata_parent(self) -> None:
         pgdata = str(Path("/dev/shm/nexus-test-pg-1000") / "nexus_x_pg_abc")
@@ -129,18 +134,20 @@ class TestReloadableConf:
     (nexus-0ajjm): ``wal_level``, ``max_wal_senders`` and ``dynamic_shared_memory_type`` are restart-only."""
 
     _TRIO = {"fsync = off", "synchronous_commit = off", "full_page_writes = off"}
+    # Not part of the trio: a diagnostic every throwaway cluster carries, reloadable like the trio (2776c549e3).
+    _ALWAYS = _TRIO | {_AUTOVACUUM_LOG}
 
     def test_a_tmpfs_cluster_gets_the_trio_and_the_wal_sizes_but_no_restart_only_setting(self) -> None:
         lines = set(sub.reloadable_cluster_conf(
             "/dev/shm/nexus-test-pg-1000/nexus_x_pg_abc", env={}, mounts_text=_TMPFS_MOUNTS, shm_dir=_SHM,
         ).splitlines())
-        assert lines == self._TRIO | {"max_wal_size = 64MB", "min_wal_size = 32MB", "wal_keep_size = 0"}
+        assert lines == self._ALWAYS | {"max_wal_size = 64MB", "min_wal_size = 32MB", "wal_keep_size = 0"}
 
     def test_a_disk_cluster_gets_only_the_trio(self) -> None:
         lines = set(sub.reloadable_cluster_conf(
             "/home/nxtest/tmp/nexus_x_pg_abc", env={}, mounts_text=_TMPFS_MOUNTS,
         ).splitlines())
-        assert lines == self._TRIO
+        assert lines == self._ALWAYS
 
     def test_the_restart_only_set_names_exactly_what_the_full_conf_gives_beyond_the_reloadable_part(self) -> None:
         full = sub.integration_cluster_conf(

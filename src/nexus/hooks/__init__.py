@@ -398,6 +398,15 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
     if session_id and session_id != "unknown":
         # Every source, not just clear/resume: see the writer's docstring.
         _write_tuple_watch_session_marker(session_id, source)
+    if _holds_its_identity(identity):
+        # RDR-253 Step 6 (nexus-hczdo): close the work rows whose work ended without its end being written (an agent in
+        # flight across a restart, a killed lab run). Detached; returns at once; logs a count of what it closed.
+        try:
+            from nexus.hooks.work_reap_child import spawn as _spawn_work_reap  # noqa: PLC0415 — stdlib-only, deferred
+
+            _spawn_work_reap(session_id)
+        except Exception:  # noqa: BLE001 — session start must never break on a reap
+            pass
 
     # nexus-gff3g: do NOT claim "T1 scratch initialized" here. This hook only
     # records the session-id; T1 chroma is owned by the MCP server's FastMCP
@@ -415,6 +424,17 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
     # here rather than inside the pure render.
     text = render_session_start(session_id, mailbox_arm_text=_mailbox_arm_block(session_id))
     return f"{text}\n\n{identity.text()}" if identity is not None and identity.notices else text
+
+
+#: The bind outcomes of a session that holds its own identity, whose rows the SessionStart reap may close: it bound (a seat,
+#: a rebind or an ephemeral), kept its binding, or is a compaction of a bound session. Not a delegated ``claude -p`` child
+#: (its rows are its parent's), a pending or unbound start, or a start that bound nothing (``NX_IDENTITY_BIND=0``).
+_REAP_ACTIONS: frozenset[str] = frozenset({"bound", "ephemeral", "unchanged", "skipped"})
+
+
+def _holds_its_identity(identity) -> bool:
+    outcome = getattr(identity, "outcome", None)
+    return outcome is not None and getattr(outcome, "action", None) in _REAP_ACTIONS
 
 
 def _bind_identity(session_id: str, source: str | None):

@@ -18,6 +18,9 @@ _COLL = "knowledge__rfvyy617d__bge-base-en-v15-768__v1"
 
 
 def _seed(n: int = 2) -> list[str]:
+    from tests._catalog_fixture_ops import register_seed_collections
+
+    register_seed_collections(_COLL)
     with HttpCatalogClient() as cat:
         owner = cat.register_owner("rfvyy617d-owner", owner_type="curator", tumbler_prefix="73.1")
         docs = [

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
-import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.datamove.BootedSchema;
 import dev.nexus.service.db.TenantExport.Column;
 import dev.nexus.service.db.TenantExport.ExportTable;
 import dev.nexus.service.db.TenantExport.Reference;
@@ -30,7 +30,8 @@ import java.util.TreeSet;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The tenant export registry against a Liquibase-migrated database (RDR-248, bead nexus-csayy.1).
+ * The tenant export registry against a booted database (RDR-248, bead nexus-csayy.1): the Liquibase walk plus the boot work the engine
+ * runs, driven to completion by {@link BootedSchema} (RDR-229 P3.11), because P3.3c's id keys are made by data-move on_complete statements.
  *
  * <p>Every check reads the live catalog, never a hand count: the RLS parent tables, their primary keys and
  * types, which keys are global serials, their foreign keys, their triggers, and their id-shaped columns.
@@ -69,9 +70,10 @@ class TenantExportRegistryParityTest {
 
     @BeforeAll
     void migrateAndRead() throws Exception {
-        pg = PgContainerHelper.start();
+        // A booted install, not the walk alone: P3.3c's id keys are made by data-move on_complete statements (RDR-229 P3.11).
+        pg = BootedSchema.startContainer();
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.applyProductSchema(su);
+            BootedSchema.migrateAndBoot(su);
         }
         try (Connection su = pg.createConnection("")) {
             live = readLiveRlsTables(DSL.using(su, SQLDialect.POSTGRES));
@@ -286,8 +288,14 @@ class TenantExportRegistryParityTest {
                 if (t.columns().get(c).serial()) serials.add(c);
             }
             String serial = serials.isEmpty() ? null : serials.get(0);
+            // The one exemption (Sam 2026-11-21, T2 nexus/sam-ruling-p31-parity-serial-rule-2026-11-21): a serial
+            // column outside the key whose entry declares it computed on restore (Entry.importComputed: maintained
+            // and not a reference) is the decision this rule asks for, recorded where the rule reads it. A restore
+            // never reads such a column; the target's sequence assigns it (RDR-229 P3.1 catalog_collections.collection_id).
             t.columns().values().forEach(c -> {
-                if (c.serial() && !t.primaryKey().contains(c.name())) {
+                boolean computedOnRestore = e.triggerMaintained().contains(c.name())
+                    && e.notReferences().contains(c.name());
+                if (c.serial() && !t.primaryKey().contains(c.name()) && !computedOnRestore) {
                     wrong.add(name + "." + c.name() + ": a serial column outside the primary key; decide whether "
                         + "a restore reassigns it before classing it");
                 }
@@ -386,6 +394,21 @@ class TenantExportRegistryParityTest {
             });
         });
         return unclassified;
+    }
+
+    /**
+     * A column is a reference or holds no other row's key, never both (RDR-229 P3.3a): an id twin that gains an id foreign key
+     * moves from {@code notReferences} to a reference ({@code Entry.importComputedRef}), and one left in both says the twin
+     * was keyed without its entry being re-classed.
+     */
+    static List<String> columnsClassedTwice(List<ExportTable> tables) {
+        List<String> twice = new ArrayList<>();
+        byName(tables).forEach((name, e) -> e.references().forEach(r -> r.columns().forEach(c -> {
+            if (e.notReferences().contains(c)) {
+                twice.add(name + "." + c + ": both a reference and listed as holding no other row's key");
+            }
+        })));
+        return twice;
     }
 
     /** An exported table refers only to exported tables (or global ones): otherwise its rows cannot load. */
@@ -508,6 +531,11 @@ class TenantExportRegistryParityTest {
             .as("id-shaped columns of exported tables that are neither the reassigned id, a reference, "
                 + "nor listed as not a reference (gate S1 census)")
             .isEmpty();
+    }
+
+    @Test
+    void noColumnIsBothAReferenceAndNotAReference() {
+        assertThat(columnsClassedTwice(TenantExport.TABLES)).isEmpty();
     }
 
     @Test
@@ -656,6 +684,24 @@ class TenantExportRegistryParityTest {
     }
 
     @Test
+    void aKeyedTwinLeftAsNotAReferenceFails() {
+        // topics.collection_id keyed by an id foreign key (P3.3a) and still listed among the not-references: the half
+        // re-class this check exists for. Planted both ways, so the check bites whichever cut this tree is at.
+        List<ExportTable> planted = replacing("topics", t -> {
+            List<Reference> refs = new ArrayList<>(t.references());
+            if (refs.stream().noneMatch(r -> r.columns().contains("collection_id"))) {
+                refs.add(Reference.fk(List.of("tenant_id", "collection_id"), "catalog_collections",
+                    List.of("tenant_id", "collection_id")));
+            }
+            Set<String> notRefs = new TreeSet<>(t.notReferences());
+            notRefs.add("collection_id");
+            return copy(t, t.primaryKey(), t.reassignedId(), refs, t.triggers(), t.triggerMaintained(), notRefs);
+        });
+        assertThat(columnsClassedTwice(planted)).containsExactly(
+            "topics.collection_id: both a reference and listed as holding no other row's key");
+    }
+
+    @Test
     void firingKeepsEverythingButTheNameTableAndFunction() {
         assertThat(firing("CREATE TRIGGER t BEFORE UPDATE ON nexus.topics FOR EACH ROW "
             + "EXECUTE FUNCTION nexus.stamp_updated_at()")).isEqualTo("BEFORE UPDATE FOR EACH ROW");
@@ -678,6 +724,32 @@ class TenantExportRegistryParityTest {
             plans.triggers()));
         assertThat(reassignedIdMismatches(planted, TenantExport.TABLES))
             .anySatisfy(s -> assertThat(s).startsWith("plans.id: a serial column outside the primary key"));
+    }
+
+    @Test
+    void aSerialColumnOutsideTheKeyNotDeclaredComputedOnRestoreFails() {
+        // The exemption above is earned only by the declaration: catalog_collections.collection_id with its
+        // importComputed declaration dropped is flagged again.
+        List<ExportTable> planted = replacing("catalog_collections", t -> copy(t, t.primaryKey(), t.reassignedId(),
+            t.references(), t.triggers(), without(t.triggerMaintained(), "collection_id"),
+            without(t.notReferences(), "collection_id")));
+        assertThat(reassignedIdMismatches(live, planted)).singleElement().asString()
+            .startsWith("catalog_collections.collection_id: a serial column outside the primary key");
+    }
+
+    @Test
+    void aSerialColumnOutsideTheKeyDeclaredOnlyMaintainedStillFails() {
+        // Half a declaration is not the declaration: maintained without not-a-reference is still flagged.
+        List<ExportTable> planted = replacing("catalog_collections", t -> copy(t, t.primaryKey(), t.reassignedId(),
+            t.references(), t.triggers(), t.triggerMaintained(), without(t.notReferences(), "collection_id")));
+        assertThat(reassignedIdMismatches(live, planted)).singleElement().asString()
+            .startsWith("catalog_collections.collection_id: a serial column outside the primary key");
+    }
+
+    private static Set<String> without(Set<String> s, String drop) {
+        Set<String> out = new TreeSet<>(s);
+        out.remove(drop);
+        return out;
     }
 
     @Test

@@ -223,7 +223,7 @@ class NoteUriRepairContentTypeTest {
     void census_aRowTheCacheStillCallsKnowledgeButTheTableCallsDocsIsRefused() throws Exception {
         Fx f = new Fx("stale-cache");
         String label = registerLabel(f.tenant, "knowledge");
-        // The registry caches the row it reads, and upsertCollection's ON CONFLICT never evicts it.
+        // The registry caches the row it reads, and the direct UPDATE below (not upsertCollection, which evicts) leaves it.
         assertThat(tenantScope.withTenant(f.tenant, ctx -> CollectionRegistry.require(ctx, f.tenant, label)).contentType())
             .isEqualTo("knowledge");
         setContentType(f.tenant, label, "docs");
@@ -237,25 +237,81 @@ class NoteUriRepairContentTypeTest {
         assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(f.x1, "alpha"));
     }
 
+    /**
+     * The repair takes the registry row FOR SHARE before its "locked" stage (RDR-229 P3.5a, registry first), so a flip to docs between the census and the
+     * lock can no longer land: it WAITS behind the repair. The hook's flip runs on a second connection with a lock_timeout, so a regression (the
+     * flip going through, or the repair not holding the row) fails the assertions instead of hanging the repair's own thread on its own lock.
+     */
     @Test
-    void apply_aRowFlippedToDocsBetweenTheCensusAndTheLockIsNotRewritten() throws Exception {
+    void apply_aFlipToDocsAtTheLockedStageWaitsBehindTheRepair_soTheRowIsRewrittenAsKnowledge() throws Exception {
         Fx f = new Fx("flip");
         String label = registerLabel(f.tenant, "knowledge");
         seedNote(f.tenant, "n1", label, f.nx(f.x1, "alpha"));
+        java.util.concurrent.atomic.AtomicReference<Throwable> flip = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicBoolean ran = new java.util.concurrent.atomic.AtomicBoolean();
         CatalogRepository.setNoteUriRepairHookForTests(stage -> {
-            if (stage.equals("locked")) {
+            if (!stage.equals("locked")) return;
+            ran.set(true);
+            try (Connection other = pg.createConnection("")) {
+                other.setAutoCommit(true);
+                var dsl = DSL.using(other, SQLDialect.POSTGRES);
+                dsl.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val("400ms"), DSL.val(false))).fetch();
                 try {
-                    setContentType(f.tenant, label, "docs");
-                } catch (Exception e) {
-                    throw new IllegalStateException(e);
+                    dsl.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.CONTENT_TYPE, "docs")
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(f.tenant).and(CATALOG_COLLECTIONS.NAME.eq(label))).execute();
+                } catch (Throwable t) {
+                    flip.set(t);
                 }
+            } catch (java.sql.SQLException e) {
+                throw new IllegalStateException(e);
             }
         });
 
-        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+        Map<String, Object> r;
+        try {
+            r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+        } finally {
+            CatalogRepository.setNoteUriRepairHookForTests(null);
+        }
 
-        assertThat(r.get("rewrite")).as("the census ran before the flip").isEqualTo(1);
-        assertThat(r.get("rewritten")).isEqualTo(0);
+        assertThat(ran.get()).as("the locked stage ran").isTrue();
+        assertThat(flip.get()).as("the flip waited on the repair's share lock and timed out").isNotNull().hasStackTraceContaining("lock timeout");
+        assertThat(r.get("rewritten")).as("the row was still a knowledge collection when the repair wrote it").isEqualTo(1);
+        assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(label, "alpha"));
+    }
+
+    /**
+     * The re-read filter of the write half ({@code rewriteStaleNotes}: the collections that are STILL knowledge, read FOR SHARE) is what keeps a
+     * row out that stopped being a note collection between the census and the lock. The flip runs at the census seam, after the census read and before the
+     * repair takes the registry row, so nothing of the repair's is held and the flip commits at once (no self-wait on the repair's own thread). The
+     * census still counted the row; the run ends at the filter, before the "checked" stage, and writes nothing.
+     */
+    @Test
+    void apply_aRowThatStoppedBeingKnowledgeBetweenTheCensusAndTheLockIsKeptOutByTheReReadFilter() throws Exception {
+        Fx f = new Fx("filter");
+        String label = registerLabel(f.tenant, "knowledge");
+        seedNote(f.tenant, "n1", label, f.nx(f.x1, "alpha"));
+        java.util.List<String> stages = new java.util.ArrayList<>();
+        CatalogRepository.setNoteUriRepairHookForTests(stages::add);
+        CatalogRepository.setNoteUriCensusedHookForTests(() -> {
+            try {
+                setContentType(f.tenant, label, "docs");
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+
+        Map<String, Object> r;
+        try {
+            r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+        } finally {
+            CatalogRepository.setNoteUriCensusedHookForTests(null);
+            CatalogRepository.setNoteUriRepairHookForTests(null);
+        }
+
+        assertThat(r.get("rewrite")).as("the census ran before the flip and counted the row").isEqualTo(1);
+        assertThat(r.get("rewritten")).as("the re-read filter kept the retyped row out").isEqualTo(0);
+        assertThat(stages).as("the run reached the lock and ended at the filter, before the holder check").containsExactly("locked");
         assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(f.x1, "alpha"));
     }
 
@@ -319,8 +375,10 @@ class NoteUriRepairContentTypeTest {
         Fx f = new Fx("unregistered");
         String gone = "c999" + SEQ.incrementAndGet();
         seedNote(f.tenant, "ok", f.y, f.nx(f.x1, "fine"));
+        registerCollection(f.tenant, gone);
         seedNote(f.tenant, "un", gone, f.nx(f.x1, "orphan"));
         seedNote(f.tenant, "un2", gone, f.nx(f.x1, "orphan2"));
+        dropRegistryRow(f.tenant, gone);
 
         Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
 
@@ -336,7 +394,9 @@ class NoteUriRepairContentTypeTest {
     void census_aDocsNamedCollectionWithNoRegistryRowIsRefused_asUnregistered_notByItsName() throws Exception {
         Fx f = new Fx("docs-unregistered");
         String ghost = "docs__ghost-" + SEQ.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        registerCollection(f.tenant, ghost);
         seedNote(f.tenant, "g1", ghost, f.nx(f.x1, "alpha"));
+        dropRegistryRow(f.tenant, ghost);
 
         Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, false, 1000, 5);
 
@@ -357,6 +417,26 @@ class NoteUriRepairContentTypeTest {
 
     private static String coll(String slug) {
         return "knowledge__" + slug + "__minilm-l6-v2-384__v1";
+    }
+
+    /**
+     * Registers {@code name}: since P3.1 a document under an unregistered collection is refused (typed 422), so a
+     * row whose collection has no registry row is seeded by registering first and then {@link #dropRegistryRow}.
+     */
+    private void registerCollection(String tenant, String name) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, name);
+        }
+    }
+
+    /** The legacy shape the census must refuse: a live row naming a collection whose registry row is gone. */
+    private void dropRegistryRow(String tenant, String name) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
+        }
     }
 
     private void seedNote(String tenant, String tumbler, String collection, String uri) {

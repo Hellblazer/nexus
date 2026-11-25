@@ -43,6 +43,11 @@ package dev.nexus.service.db;
  *                        A superseded row is the product of a rename or supersede, and a write to
  *                        it is refused (nexus-mp8ys, {@link CollectionSupersededException}); such a
  *                        row is never cached, see {@link CollectionRegistry#markKnown}
+ * @param collectionId   {@code catalog_collections.collection_id} (RDR-229 P3.5a, nexus-p2m1x.23), the registry's own id;
+ *                        {@code 0} for a row built without one (the short constructors below, which tests and seeding
+ *                        callers use: the identity starts at 1, so 0 names no row)
+ * @param label          {@code catalog_collections.name}, the label the row is registered under; {@code ""} for a row
+ *                        built without one
  */
 public record CollectionRow(
         String contentType,
@@ -50,16 +55,30 @@ public record CollectionRow(
         String embeddingModel,
         int dimension,
         String lifecycleState,
-        String supersededBy) {
+        String supersededBy,
+        long collectionId,
+        String label) {
 
     public CollectionRow {
         supersededBy = supersededBy == null ? "" : supersededBy;
+        label = label == null ? "" : label;
+    }
+
+    /** A row without an id or a label: the shape every caller before RDR-229 P3.5a built. */
+    public CollectionRow(String contentType, String ownerId, String embeddingModel, int dimension,
+                         String lifecycleState, String supersededBy) {
+        this(contentType, ownerId, embeddingModel, dimension, lifecycleState, supersededBy, 0L, "");
     }
 
     /** A row that is not superseded; the shape every caller before nexus-mp8ys built. */
     public CollectionRow(String contentType, String ownerId, String embeddingModel, int dimension,
                          String lifecycleState) {
         this(contentType, ownerId, embeddingModel, dimension, lifecycleState, "");
+    }
+
+    /** True when the row carries its registry id and label, as every row the registry reads does. */
+    public boolean hasIdentity() {
+        return collectionId > 0 && !label.isEmpty();
     }
 
     /** True when the row names a successor: it was renamed away or superseded. */

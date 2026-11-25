@@ -49,6 +49,7 @@ Interface parity (bead nexus-gmiaf.14, RDR-152 P2.4):
 
 from __future__ import annotations
 
+import shlex
 import json
 import math
 import time
@@ -187,7 +188,7 @@ def _uniform_embedding_matrix(
             f"{site}: collection {collection!r} has embeddings at "
             f"{len(census)} dimensions "
             f"({', '.join(f'{d}d x{n}' for d, n in sorted(census.items()))}). "
-            + remedy.format(collection=collection)
+            + remedy.format(quoted_collection=shlex.quote(collection))  # a quoted_* placeholder sits in a command
         )
     return np.array(rows, dtype=np.float32)
 
@@ -195,7 +196,7 @@ def _uniform_embedding_matrix(
 #: Remedy line for the rebuild read: a partial old set is worse than a refusal,
 #: because it transfers operator labels for some centroids and silently marks
 #: the rest pending.
-#: ``{collection}`` is substituted by :func:`_uniform_embedding_matrix`, which
+#: ``{quoted_collection}`` is substituted, with :func:`shlex.quote`, by :func:`_uniform_embedding_matrix`, which
 #: is the only caller and does have the name in hand. The first version left a
 #: literal ``<collection>`` in the text: a remedy naming a real verb that the
 #: operator still has to fill in by hand is only half-reachable, and calling
@@ -232,7 +233,7 @@ _monotonic = time.monotonic
 _REBUILD_REMEDY = (
     "A rebuild cannot preserve operator labels across incommensurable "
     "centroids. Finish the embedding migration for this collection, or discard "
-    "its taxonomy with `nx taxonomy reset -c {collection}` and discover afresh."
+    "its taxonomy with `nx taxonomy reset -c {quoted_collection}` and discover afresh."
 )
 # Swept alongside the cross-space refusal, not separately: this line used to say
 # "purge the stale-dimension centroids", which is the SAME defect the reviewers

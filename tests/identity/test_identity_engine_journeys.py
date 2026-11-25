@@ -38,6 +38,7 @@ from tests.identity import (
     test_identity_token_engine,
     test_lease_wiring,
     test_mcp_identity_lease,
+    test_owner_path_journeys,
     test_pending_bind,
     test_session_start_bind,
     test_sweep,
@@ -68,6 +69,9 @@ JOURNEYS = (
     # RDR-252 Step 4 part B1 (nexus-igea9.7): `nx group` and nexus.groups. The rows send identity tokens and reset the same
     # caches; they assert the engine issued one, so an engine without Step 2 fails them (no precheck is needed).
     _journey(test_group_journeys, "grp", cleanup=token_header.reset_for_tests),
+    # RDR-252 post-close audit lane A5 (nexus-igea9): the owner paths never seen live (no_record, chain_gap, owner_not_live,
+    # owner_unleased, stamper_error, escalated). The rows send identity tokens and reset the same caches.
+    _journey(test_owner_path_journeys, "own", cleanup=token_header.reset_for_tests),
     # Step 6 (nexus-hczdo.1.9): identity scratch, memberships, per-identity T2 and background work. The rows send identity
     # tokens, so the module needs Step 2 and resets the same caches.
     _journey(test_work_engine_rows, "wrk", precheck=test_work_engine_rows.step2_skip_reason,

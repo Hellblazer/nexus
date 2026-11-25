@@ -288,8 +288,11 @@ def _open_red(wire: _Wire) -> None:
 
 
 def _ack(args: list[str], wire: _Wire, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """`nx ci ack ARGS` on the develop board, named with --base: no board is a default (the origin-derived board is
+    tests/test_ci_ack_not_mine.py's)."""
     monkeypatch.setattr(ci_cmd, "_store", lambda: wire.store)
-    return CliRunner().invoke(ci_cmd.ci_group, ["ack", *args])
+    named = "--base" in args or "--topic" in args
+    return CliRunner().invoke(ci_cmd.ci_group, ["ack", *args] if named else ["ack", *args, "--base", "nexus-develop"])
 
 
 def test_nx_ci_ack_writes_the_ack_row_from_the_callers_identity_id(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -402,7 +405,7 @@ def test_nx_ci_ack_refuses_without_an_identity_and_says_how_to_check(wire: _Wire
     assert wire.sent == []
 
 
-def test_nx_ci_ack_takes_a_topic_and_keeps_the_develop_default(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_nx_ci_ack_takes_a_topic_named_whole(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
     _open_red(wire)
     assert _ack([SHA, "--topic", "halcyon-main--owner"], wire, monkeypatch).exit_code == 0
     assert wire.sent[-1]["subspace"] == "board/ci/halcyon-main--owner"

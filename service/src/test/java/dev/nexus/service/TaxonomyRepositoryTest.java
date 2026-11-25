@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CatalogIdentityConflictException;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
@@ -112,6 +113,7 @@ class TaxonomyRepositoryTest {
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant)
                 .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
                 .set(CHUNKS.CHUNK_TEXT, "seed")
@@ -530,6 +532,23 @@ class TaxonomyRepositoryTest {
         repo.renameCollection(TENANT_A, oldCol, newCol);
         assertThat(repo.getAllTopics(TENANT_A, oldCol)).isEmpty();
         assertThat(repo.getAllTopics(TENANT_A, newCol)).isNotEmpty();
+    }
+
+    /**
+     * The rename target is a label a user supplied, so it is judged by the label rule before any row moves (n3hhc's
+     * class, nexus-n3hhc): every refused target leaves the topics where they were.
+     */
+    @Test @Order(17)
+    void renameCollection_refusesATargetTheLabelRuleRefusesAndMovesNothing() {
+        String oldCol = "knowledge__rename-refuse-" + System.nanoTime();
+        registerReal(TENANT_A, oldCol);
+        repo.insertTopic(TENANT_A, "rename-refuse-topic", null, oldCol, 1, null, null);
+        for (String bad : java.util.List.of("", "c42", "a/b", "a,b", " edge", "a\nb", "a".repeat(256))) {
+            assertThatThrownBy(() -> repo.renameCollection(TENANT_A, oldCol, bad))
+                .as("target %s", bad.length() > 20 ? bad.substring(0, 20) + "..." : bad)
+                .isInstanceOf(IllegalArgumentException.class);
+        }
+        assertThat(repo.getAllTopics(TENANT_A, oldCol)).isNotEmpty();
     }
 
     // ── Meta ───────────────────────────────────────────────────────────────────
@@ -1088,6 +1107,7 @@ class TaxonomyRepositoryTest {
                         .set(TOPICS.TENANT_ID, "other-tenant")
                         .set(TOPICS.LABEL, "evil")
                         .set(TOPICS.COLLECTION, "col-x")
+                        .set(TOPICS.COLLECTION_ID, CollectionIds.idOf("other-tenant", "col-x"))
                         .set(TOPICS.DOC_COUNT, 0)
                         .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
                         .set(TOPICS.REVIEW_STATUS, "pending")

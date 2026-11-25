@@ -203,7 +203,17 @@ def test_a_row_urlparse_rejects_is_reported_not_fatal(monkeypatch: pytest.Monkey
     with pytest.raises(ValueError):
         urlparse(bad)
     assert doctor_references.is_reference_only(bad) is True
+    # RDR-229 P3.6 (review I2): stat_source reads the scheme from the text before the first ':' and no longer
+    # urlparses the URI, so a row urlparse rejects reaches its scheme's handler and is classified by it.
     monkeypatch.setitem(aspect_readers._STAT_HANDLERS, "https", lambda uri, **_kw: StatOk(current_mtime=None))
+    result = doctor_references.stat_one(_Entry("1.1.1", bad), http_client=None)
+    assert (result.tumbler, result.scheme, result.signal, result.error) == ("1.1.1", "https", "fresh", None)
+
+    # A handler that raises on the row (the ValueError urlparse would give) is still reported, never fatal.
+    def _rejects(uri: str, **_kw):
+        raise ValueError("Invalid IPv6 URL")
+
+    monkeypatch.setitem(aspect_readers._STAT_HANDLERS, "https", _rejects)
     result = doctor_references.stat_one(_Entry("1.1.1", bad), http_client=None)
     assert (result.tumbler, result.scheme, result.signal) == ("1.1.1", "https", None)
     assert result.error is not None and result.error.startswith("ValueError")

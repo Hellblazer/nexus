@@ -65,6 +65,16 @@ public final class PgContainerRecipe {
      */
     public static final long MEMORY_LIMIT_BYTES = 2560L * 1024 * 1024;
 
+    /**
+     * The container's {@code /dev/shm} (row 24). Docker's default is 64 MB, and a parallel {@code CREATE INDEX} (an HNSW build
+     * among them) allocates its shared area in dynamic shared memory there, sized from {@code maintenance_work_mem}: under load
+     * it failed with "could not resize shared memory segment ... No space left on device", and alone it passed. 1 GiB covers the
+     * server default (64 MB) times every participant (max_parallel_maintenance_workers 2, plus the leader) many times over,
+     * and the builder's own cap of one area (PciBuildMemory: min(1 GB, an eighth of RAM)). Its pages are charged to the
+     * container's memory like the tmpfs's, and only while a build holds them.
+     */
+    public static final long SHM_SIZE_BYTES = 1024L * 1024 * 1024;
+
     private PgContainerRecipe() {}
 
     /** {@code "<n>g"} in bytes; the only form these sizes are written in. */
@@ -131,7 +141,8 @@ public final class PgContainerRecipe {
             .withCommand(command.toArray(new String[0]))
             .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig()
                 .withMemory(memoryBytes)
-                .withMemorySwap(memoryBytes))
+                .withMemorySwap(memoryBytes)
+                .withShmSize(SHM_SIZE_BYTES))
             // Lets a host count one run's containers among everyone else's.
             .withLabel("dev.nexus.test.run", System.getenv().getOrDefault("NX_TEST_RUN_ID", ""))
             // nexus-7xfh7: which caller asked for this boot, so `docker events` can rank call sites:

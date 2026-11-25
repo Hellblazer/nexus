@@ -23,8 +23,10 @@ neither file.)
 **Removed in cleanup step 11 (nexus-0r1uz), numbering left as it was:** Step 1c
 (the generation-flip live-holder gate), Step 6 (sandbox smoke), Step 6b
 (the upgrade shakeout) and Step 6c (sandbox shakedown) went with the scripts they
-ran. The battery is now the fresh-install MVV, the package-upgrade convergence
-MVV and the local-service gate, behind one preflight. Steps that remain:
+ran. The battery is now six legs behind one preflight: the fresh-install MVV
+(mvv), the package-upgrade convergence MVV (pkgup), the local-service gate
+(lsg), the dual-embedder gate (dual), the constraints resolve gate (resolve) and
+the plugin out-of-repo gate (plugins). Steps that remain:
 0, 0c, 1, 2, 3, 4, 4a, 5, 6d, 6e, 7, 8, 8a, 9, 10, 11, 11b, 11c, 12, 12a.
 
 **RDR-237 prerequisite (the release that first carries MinerU-only extraction).**
@@ -120,6 +122,9 @@ surfaces the whole fix list. The checks:
   `CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION` (RDR-241 Phase 2: a release must pin an
   engine with the catalog routes, or author search, `list --meta`, `gc` and
   `--check-references` answer errors and operator dispatch drops its file tools);
+- `wire-ledger-shipped` -- on a release tree (pyproject newer than the newest `v*`
+  tag), no `## Unshipped` wire-ledger entry may ship in it (Step 4b);
+  `check_wire_contract_pairing.py --release-tree`, NOT-APPLICABLE on any other tree;
 - `ci-evidence-contexts` -- the required-context drift tests, run with `-m ""` so
   the integration-marked live branch-protection check actually executes;
 - `mandatory-pins` -- the GitHub-backed `mandatory_regression_pin` tests under
@@ -128,6 +133,10 @@ surfaces the whole fix list. The checks:
 - the pin sweep -- the pin tests that are not lint-marked,
   `check_wire_contract_pairing.py`, and `ruff check src`. The lint-marked ones run
   in PR CI's `test-lint`; a lint red shows there about 12 minutes into the PR's run.
+- `mineru-weights-published` -- the MinerU weights tag (`WEIGHTS_ASSET_TAG`, F35) serves this tree's pinned
+  `MANIFEST.tsv` and every asset at its pinned size: one GET and one HEAD per asset against the public download
+  URL, so it needs the network (offline reads UNVERIFIED). An absent tag or asset FAILS with step 8b's upload as
+  the fix; a tag serving other bytes FAILS with "new tag and pins" as the fix, since the upload never overwrites.
 
 WHY (the 7.15.0 cut, 2026-08-22). The battery was ordered expensive-first and
 abort-on-first-red, so each blocker cost a full replay and hid every other one.
@@ -200,7 +209,8 @@ tests/e2e/migration-rehearsal/run.sh --package-upgrade   # leg pkgup: ONE-engine
 tests/e2e/fresh-install-mvv.sh       # leg mvv: VIRGIN-journey gate (nexus-nolqs), and the formula-PDF check through MinerU on the CANDIDATE wheel with an empty model cache (F34, nexus-7t3w1): its row in the verdict table names that check's status; a skip needs NX_MVV_FORMULA_PDF_CHECK=0 plus NX_MVV_FORMULA_PDF_SKIP_REASON and reads as SKIPPED there — see below
 tests/e2e/constraints-resolve-gate.sh   # leg resolve: the shipped constraints.txt + overrides.txt RESOLVE (uv pip compile, no install): 22 compiles on Linux x86_64/aarch64 py3.12/3.13 (cpu; [pdf] also cu130 and cu126), Windows x64 and macOS 14 arm64, default and [pdf], plus a macOS 13 negative control (nexus-2k66t.4.4); network; needs a uv that knows --torch-backend cu130 and cu126 (the gate probes and says so); offline self-test tests/e2e/constraints_resolve_gate_test.sh
 tests/e2e/plugin-out-of-repo-gate.sh --all   # leg plugins: the four plugin dirs run from a project outside any nexus checkout (nexus-z7ddd): the static pass plus a canary (a fixture plugin with random nonces that measures what Claude Code substitutes, judged on events not prose; five live runs, so UNVERIFIED is red: rerun, never waive); no per-target model sweep; where claude is absent the leg is --static-only, and its row AND the battery's closing line say "static pass only": run it again on the laptop; offline self-test tests/e2e/plugin_out_of_repo_gate_test.sh
-tests/e2e/hook-cli-skew/run.sh       # every hooks.json entry vs every published CLI from 7.55.0 (nexus-rcoze); standalone since cleanup step 11, no longer a battery leg
+tests/e2e/dual-embedder-gate.sh      # leg dual: the keyed bge + Voyage engine (nexus-oc2bk); needs the operator's Voyage key, and an absent key fails the leg, it does not skip it
+tests/e2e/hook-cli-skew/run.sh       # every hooks.json entry vs every published CLI from 7.55.0 (nexus-rcoze); not a leg of the full battery, it is the `skew` leg only in `--plugin-only` mode (Plugin-only fast lane below)
 ```
 
 All must pass.
@@ -311,9 +321,15 @@ the working tree, and asserts — with the harness forbidden from supplying or
 touching any engine binary (sha256-verified) — that the product converges the
 engine to `REQUIRED_ENGINE_VERSION`, the service boots, the chash probe answers
 via the view path, and T1 survives the cycle. Must end
-`PACKAGE-UPGRADE CONVERGENCE MVV PASSED`. If `run.sh` aborts with the
-PREV_ENGINE_TAG staleness FATAL, bump `NEXUS_PREV_RELEASE`/`NEXUS_PREV_ENGINE_TAG`
-in `run.sh` to the release immediately before this one — the scenario must
+`PACKAGE-UPGRADE CONVERGENCE MVV PASSED`. `run.sh` derives the starting point
+from the git tags: `NEXUS_PREV_RELEASE` is the newest `vX.Y.Z` tag whose
+`REQUIRED_ENGINE_VERSION` is strictly older than this tree's (so a release that
+skipped an engine tag, or pinned the same engine as its predecessor, is walked
+past), and `NEXUS_PREV_ENGINE_TAG` is the engine that release pinned. There is
+no default to rotate. The staleness FATAL is reached through a hand-set
+override: when `NEXUS_PREV_RELEASE`/`NEXUS_PREV_ENGINE_TAG` names an engine equal
+to the current pin, unset it, or point it at a release that pinned an older
+engine. The scenario must
 always start from a genuinely older engine.
 
 **Local-mode functional gate — two separate proofs, self-provisioning**
@@ -353,7 +369,7 @@ any new hard failure is real signal — compensate with live validation of the
 release's changed paths (the v6.3.5/v6.3.6 pattern: exercise the advertised
 claims against the real deployment).
 
-If unit-suite Py3.13 surfaces a known nexus-9eaz-family flake (`test_migration_guard_*`, `test_concurrent_apply_pending_*`, `test_concurrent_bootstrap`, `test_concurrent_t2database_construction`, `test_stop_claiming_on_running_worker_causes_exit`): these are marked with `@_skip_on_gha_flake` on main, so they shouldn't fire here. If they DO fire locally, that's signal: investigate before proceeding.
+If a PR CI unit shard on Py3.13 (the release runs no hand unit suite) surfaces a known nexus-9eaz-family flake (`test_migration_guard_*`, `test_concurrent_apply_pending_*`, `test_concurrent_bootstrap`, `test_concurrent_t2database_construction`, `test_stop_claiming_on_running_worker_causes_exit`): these are marked with `@_skip_on_gha_flake` on main, so they shouldn't fire there. If they DO fire, that's signal: investigate before proceeding.
 
 ### 2. Audit docs against changes since last tag
 
@@ -393,7 +409,7 @@ uv-lock-version-matches-pyproject test.
 
 Optional but recommended: also bump `plugins[].source.sha` to the 40-char SHA of the release commit, for protection against tag force-push. Add post-commit (Step 8a, see below).
 
-**Engine-service pin (conditional 8th target — nexus-3rq00).** The Python/Java boundary rides one more hand-edited constant that sits OUTSIDE the seven-manifest parity gate: `PINNED_SERVICE_TAG` in `src/nexus/daemon/binary_install.py`, the `engine-service-vX.Y.Z` release this build auto-installs. It is DERIVED from `REQUIRED_ENGINE_VERSION`, so it is never hand-edited: moving the engine identity moves the pin by construction. Two invariants the `TestEnginePinParity` test enforces: (1) `PINNED_SERVICE_TAG`'s numeric version must be `>= REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — never ship a client that auto-installs an engine it then refuses as too old; (2) at the 6.0 release boundary the pin must be non-None (it is intentionally `None` pre-6.0). A release that bumps pyproject to 6.x without setting a real pin trips CI. **The pin's VALUE is asserted in exactly one test** — `tests/test_engine_version.py::TestRequiredEngineVersion::test_pinned_floor_is_current` — and since nexus-9gggv (2026-09-08) it is DERIVED, not typed: the floor must equal the first `engine-service-vX.Y.Z` the newest released `CHANGELOG.md` section names. So a `REQUIRED_ENGINE_VERSION` bump needs no test edit; it needs the release's CHANGELOG section to name its engine pairing as the FIRST `engine-service-v` mention in that section (a `was engine-service-vX` aside goes after the pairing, never before it; every released section to date satisfies this, 358 checked), and a bump without that line, or that line without the bump, is the red. Add the bump's reason to the test's comment trail for provenance. Before this derivation the tuple was hand-edited per release and missed on 7.23.0: the unit leg of the battery red'd on it after the paired engine gate was already green.
+**Engine-service pin (conditional 9th target — nexus-3rq00).** The Python/Java boundary rides one more constant that sits OUTSIDE the seven-manifest parity gate: `PINNED_SERVICE_TAG` in `src/nexus/daemon/binary_install.py`, the `engine-service-vX.Y.Z` release this build auto-installs. It is DERIVED from `REQUIRED_ENGINE_VERSION`, so it is never hand-edited (it was, before the derivation): moving the engine identity moves the pin by construction. Two invariants the `TestEnginePinParity` test enforces: (1) `PINNED_SERVICE_TAG`'s numeric version must be `>= REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — never ship a client that auto-installs an engine it then refuses as too old; (2) at the 6.0 release boundary the pin must be non-None (it is intentionally `None` pre-6.0). A release that bumps pyproject to 6.x without setting a real pin trips CI. **The pin's VALUE is asserted in exactly one test** — `tests/test_engine_version.py::TestRequiredEngineVersion::test_pinned_floor_is_current` — and since nexus-9gggv (2026-09-08) it is DERIVED, not typed: the floor must equal the first `engine-service-vX.Y.Z` the newest released `CHANGELOG.md` section names. So a `REQUIRED_ENGINE_VERSION` bump needs no test edit; it needs the release's CHANGELOG section to name its engine pairing as the FIRST `engine-service-v` mention in that section (a `was engine-service-vX` aside goes after the pairing, never before it; every released section to date satisfies this, 358 checked), and a bump without that line, or that line without the bump, is the red. Add the bump's reason to the test's comment trail for provenance. Before this derivation the tuple was hand-edited per release and missed on 7.23.0: the unit leg of the battery red'd on it after the paired engine gate was already green.
 
 Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 
@@ -486,13 +502,14 @@ Every install path hands `src/nexus/_install/constraints.txt` to `uv pip install
 lock. A bare version bump leaves it unchanged (the project itself is not
 constrained); a dependency change in the cycle does not.
 `tests/test_install_constraints_pin.py` fails the default suite, and so the
-release battery, while the file and `uv.lock` disagree.
+release PR's unit shards, while the file and `uv.lock` disagree (the battery runs
+no unit suite).
 
 ### 6d. Migration-release branch (CONDITIONAL — this release ships a data migration)
 
 Trigger: this release carries a schema or data migration — a new `upgrade_ladder` rung (`src/nexus/upgrade_ladder/registry.py`), or any client-side change to a shape data already has to conform to (T2 [22511] gap 9). Skip this step entirely when the release carries no such change.
 
-1. **Representative-scale rehearsal.** Run the populated-store upgrade rehearsal against a corpus seeded ABOVE a stated floor, not the harness's default toy seed (10-30 docs in `rehearse_package_upgrade.sh` / `rehearse_acquire.sh`). Pre-tag, that is the worktree `--package-upgrade` run in Step 1; post-publish, close the loop with Step 11c's published-bytes run:
+1. **Representative-scale rehearsal.** Run the populated-store upgrade rehearsal against a corpus seeded ABOVE a stated floor, not the harness's default toy seed (10-30 docs in `rehearse_package_upgrade.sh` / `rehearse_acquire.sh`, which is what Step 1's `--package-upgrade` leg uses, so it does not satisfy this item). Pre-tag, that is Step 6e's `tests/e2e/upgrade-rehearsal.sh` (seeded above its 50,000-row floor). Post-publish, Step 11c's published-bytes `--package-upgrade` run proves the PUBLISHED bytes upgrade, with the same toy seed, so it closes the loop on identity and not on scale:
    ```bash
    NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade
    ```
@@ -737,6 +754,14 @@ published** (draft=false, every asset attached):
 ```bash
 uv run python scripts/check_engine_release_floor.py --require-windows engine-service-vA.B.C   # exit 0 before `gh pr create` or any push to the open release branch
 ```
+`--require-windows` is the strict form of "published": it always requires the six
+Windows assets (36 in all, 27 for a tag cut before the POSIX engine archives), so a
+tag cut with `NX_WINDOWS_RELEASE_LEGS` off fails it even though it is published
+(30 assets). That is intended for a client that must carry Windows: the recovery
+is another engine cut with the switch on, never a pin on the Windows-less tag. A
+cut that deliberately ships without Windows is Sam's call; confirm it by hand
+(`gh release view <tag> --json isDraft,assets`: not a draft, the 30 assets) and
+say so on the cut bead.
 PR CI, the hellmini suite and the battery all boot the engine substrate,
 which downloads the PINNED tag's PG bundle. Before the tag is published,
 every substrate-backed test fails at setup. On 2026-10-08, 7.75.0's PR CI
@@ -785,11 +810,19 @@ Per the marketplace-pinned-source playbook (also used by `Hellblazer/palinex`), 
 # accumulated state to main (CLAUDE.md: "releases promote develop to main via
 # merge"). Branching off main would omit develop's unmerged fixes, so the
 # release PR must carry develop's commits + the version-bump commit.
-git checkout develop && git pull
+# The primary checkout keeps develop checked out and is never edited or
+# switched (AGENTS.md worktree rules 2 and 3), so the release branch lives in
+# its own linked worktree, cut off origin/develop. No checkout of develop.
+git fetch origin develop main
 # Read develop's tip CI before cutting on it; a red is diagnosed first, never
 # carried into the release PR (7.46.0: fix, rebase, force-push, second PR cycle).
-gh api repos/Hellblazer/nexus/commits/$(git rev-parse HEAD)/check-runs --jq '.check_runs[] | [.name, .conclusion] | @tsv'
-git checkout -b release/vX.Y.Z
+gh api repos/Hellblazer/nexus/commits/$(git rev-parse origin/develop)/check-runs --jq '.check_runs[] | [.name, .conclusion] | @tsv'
+# Run the next two lines FROM THE PRIMARY: the relative path ../nexus-wt is the
+# primary's sibling directory and resolves nowhere else (from another worktree,
+# spell the primary's absolute path). Skip them if you already cut the release
+# worktree before Step 1 ("Where to run the battery"), and work in that one:
+git worktree add -b release/vX.Y.Z ../nexus-wt/<session>-release origin/develop
+cd ../nexus-wt/<session>-release   # everything below runs here
 
 # PRE-MERGE MAIN FIRST (added 2026-07-04, learned on v6.3.1): a release branch
 # based on develop ALWAYS conflicts with main's release-only files (the eight
@@ -834,7 +867,7 @@ Wait for CI green, then merge:
 
 ```bash
 gh pr merge <N> --merge   # NOT --squash — preserves the chore(release) commit verbatim; NEVER --auto (see below)
-git checkout main && git pull
+git fetch origin main     # the merge commit is now origin/main; nothing checks out main
 ```
 
 Never `gh pr merge --auto` on a release PR: it fires when the required checks pass, including while a non-required check is red, and squashes only the tip at that moment, orphaning later pushes (three times, 2026-05 to 2026-06). Merge by hand, after CI is green.
@@ -863,18 +896,61 @@ The version+ref strings must all line up. CI's `TestMarketplaceVersion` parity c
 
 ### 8a. Optional: bump source.sha post-merge (defends against tag force-push)
 
-After Step 7's merge lands on main, the release commit has a known SHA. Optionally add it to marketplace.json's `plugins[].source.sha`:
+After Step 7's merge lands on main, the release commit has a known SHA. Optionally add it to marketplace.json's `plugins[].source.sha`. Main takes changes through PRs only, so this is a second, small release PR; there is no direct push to main:
 
 ```bash
-git checkout main && git pull
-RELEASE_SHA=$(git rev-parse HEAD)        # the merge commit (or the chore(release) commit if merged via merge-commit)
+git fetch origin main
+RELEASE_SHA=$(git rev-parse origin/main)  # the merge commit Step 7 produced
+git switch -c release/vX.Y.Z-pin-sha origin/main   # in the release worktree
 # Edit .claude-plugin/marketplace.json: add "sha": "$RELEASE_SHA" alongside "ref": "vX.Y.Z" for every plugin the file lists
 git add .claude-plugin/marketplace.json
 git commit -m "chore(release): pin sha for vX.Y.Z"
-git push
+git push -u origin release/vX.Y.Z-pin-sha
+gh pr create --base main --title "release: pin sha for vX.Y.Z" --body-file <body.md>
 ```
 
-Tradeoff: extra commit on main, but guards against the case where someone could force-push the `vX.Y.Z` tag. For solo / small-team projects the `ref` alone is usually fine; skip if so.
+Wait for CI green and merge by hand with `gh pr merge <N> --merge` (never `--auto`), as in Step 7. Step 9 then tags the NEW merge commit on main, not the one in `RELEASE_SHA`.
+
+Tradeoff: an extra PR cycle and commit on main, and for that whole CI cycle main's marketplace.json already names a `vX.Y.Z` that is not tagged yet, so a plugin install in that window fails. It guards against someone force-pushing the `vX.Y.Z` tag. For solo / small-team projects the `ref` alone is usually fine; skip this step unless the force-push risk outweighs that window.
+
+### 8b. Publish the MinerU weights assets (F35, nexus-7t3w1; BEFORE the tag, under the release's go)
+
+The preflight's `mineru-weights-published` leg (step 0c) fails on any tree that carries it until this step has run
+once, because a client cut without the tag ships broken fresh installs. The first client cut that ships the leg
+therefore meets it red at step 0c: run this step then (dry run, then the upload under the release's go) and re-run
+the preflight. Once the tag carries every asset the leg passes and this step is a no-op. A plugin-only lane runs the
+preflight its base tag carries, so a lane off a tag older than F35 has no such leg, and a lane off a later tag finds
+the weights already published.
+
+A fresh install fetches MinerU's pipeline weights (about 1.2 GB) from the release assets of the immutable tag
+`mineru-pipeline-ed6b654c` (`WEIGHTS_ASSET_TAG` in `src/nexus/mineru_weights.py`), never from Hugging Face. The
+wheel Step 9 publishes needs those assets to exist, so they go up first. Run it from the release commit; the pinned
+files and their digests are `MANIFEST` in that module, the one source the client, the gate and this script share:
+
+```bash
+STAGE="$(mktemp -d)"
+uv run --extra pdf python scripts/publish-mineru-weights.py --stage-dir "$STAGE" --upload --dry-run   # stage, verify, print the plan and the tag target
+uv run --extra pdf python scripts/publish-mineru-weights.py --stage-dir "$STAGE" --upload              # only under the release's go
+```
+
+The script stages the 20 files from the local Hugging Face cache (any revision whose bytes verify; otherwise a
+download at the pinned revision), verifies each against the manifest, writes `LICENSE-AGPL-3.0.txt`,
+`LICENSE-Apache-2.0.txt`, `THIRD-PARTY-NOTICES.md` and `MANIFEST.tsv`, and uploads to the tag only what is absent.
+It creates the release when it is absent, with the tag at `--target` (default `main`, printed in the dry run; not
+marked latest), and otherwise uploads only the missing assets, never overwriting. It is a no-op once the tag
+carries every asset, so run it at every cut. It refuses, with nothing uploaded and a one-line reason:
+
+- a staged weight file or `MANIFEST.tsv` that does not match the manifest (delete it and stage again);
+- an existing release asset whose sha256 differs for a weight file or `MANIFEST.tsv`;
+- a release that exists only as a draft (publish or delete it by hand first);
+- a release it cannot read through `gh`.
+
+An existing license or notice asset that differs from the repo's text is not a refusal: the published copy stays and
+the script prints a warning, so a wording fix in `THIRD-PARTY-NOTICES.md` never makes a later cut fail. (A fix that
+must reach the release is a manual asset replacement the releaser decides.) Staging and the dry run need no go; the
+upload is a release-asset write, so it waits for the releaser's go for this release. A release that bumps the pin
+(new upstream revision) changes `WEIGHTS_REVISION`, `WEIGHTS_ASSET_TAG`, `MANIFEST` and the notice text together, and
+uses a new tag; never re-upload under the old one.
 
 ### 9. Tag and push IMMEDIATELY after merge (triggers Release workflow + PyPI publish via OIDC)
 
@@ -900,11 +976,12 @@ Authority for the protocol: `docs/agents/engine-service-release.md`
 (nexus-1emxn refinement paragraph) — this step carries the operational
 form; on any wording conflict, that file wins.
 
-After Step 7's PR merges, switch to main, fetch, and tag the merge commit:
+After Step 7's PR merges (or, when you ran Step 8a, the pin PR's merge commit), fetch and tag `origin/main`, with no checkout of main:
 
 ```bash
-git checkout main && git pull
-git tag -a vX.Y.Z -m "conexus X.Y.Z" $(git rev-parse HEAD)
+git fetch origin main
+git rev-parse origin/main                # read it: the merge commit you mean to tag
+git tag -a vX.Y.Z -m "conexus X.Y.Z" origin/main
 git push origin vX.Y.Z
 ```
 
@@ -953,14 +1030,25 @@ curl -s "https://pypi.org/pypi/conexus/json" | \
     python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])"
 ```
 
-Both must report `vX.Y.Z` / `X.Y.Z`. **Do not declare done before this check passes.** PyPI publish can be skipped if the Release workflow's pytest fails; the tag alone does not guarantee publication.
+Both must report `vX.Y.Z` / `X.Y.Z`. **Do not declare done before this check passes.** PyPI publish is skipped when a gate before it in the Release workflow fails (the tagged commit's check-run evidence, the tag-matches-pyproject check, the engine-floor check, the relay attestation); the workflow runs no pytest at tag time. The tag alone does not guarantee publication.
 
 The aggregate JSON above lags the simple index (7.48.0 and 7.49.0 both): a still-old `info.version` is not a pass, and not yet a failure. Re-read after a few minutes; once `https://pypi.org/simple/conexus/` serves the wheel, rerun any check that read the aggregate (`tests/e2e/fresh-install-mvv.sh --published X.Y.Z` is the usual candidate) rather than treating the first red as a publish failure.
 
 ### 11b. Back-merge main into develop (MANDATORY — ends the stale-develop class)
 
+Run it from a linked worktree on a branch cut off `origin/develop`, never from
+the primary (it keeps `develop` checked out and is not edited: AGENTS.md
+worktree rules 2 and 3, so `checkout develop` is refused in a worktree and
+forbidden in the primary). Cut a fresh worktree for it and leave the release
+worktree alone: Steps 11c and 12 run from a worktree at the client tag (in the
+release worktree, `git switch --detach vX.Y.Z`), and a back-merge branch there
+would be in their way.
+
 ```bash
-git checkout develop && git pull
+# From the primary (the relative path is the primary's sibling directory):
+git fetch origin develop main
+git worktree add -b backmerge/vX.Y.Z ../nexus-wt/<session>-backmerge origin/develop
+cd ../nexus-wt/<session>-backmerge    # everything below runs here
 git merge origin/main --no-edit    # conflict-free right after a release (the release
                                    # branch just CONTAINED develop), but clean is
                                    # NOT correct: check CHANGELOG.md below first
@@ -982,13 +1070,43 @@ Move every extra entry (with its `###` heading) back under `## [Unreleased]`
 in this same merge commit. The fast lane below hand-resolves this merge, but its
 CHANGELOG order carries the same risk: run this check there too.
 
+Push from that worktree with `--source HEAD`, which pushes the worktree's commits
+and leaves the local `develop` (the primary's) alone:
+
 ```bash
-scripts/git-push-develop.sh --allowed-paths-from-range HEAD
-# step 1 prints the files and a digest and pushes nothing; read the list
+M=$(git rev-parse HEAD)    # the merge commit, the one sha you vouch for
+scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range "$M"
+# step 1 prints the files and a digest and pushes nothing (exit 7); read the list
 # (it should be the release's bump files and main's release commits), then:
-scripts/git-push-develop.sh --allowed-paths-from-range=<digest> HEAD
+scripts/git-push-develop.sh --source HEAD --allowed-paths-from-range=<digest> "$M"
 # the merge commit vouches for what it merged in (nexus-9wxu6)
 ```
+
+Three things stand between the merge and `PUSH_OK`, none of them optional:
+
+- **The check gate runs against the pushed tree.** Beyond the always-on checks,
+  this merge carries `pyproject.toml`, `uv.lock`, docs and plugin files, so it needs
+  BOTH heavy proofs: the docs-readers selection and the write-seam gate, each a
+  `scripts/watched_pytest.py --status` file made on this merge's own tree sha and passed
+  with `--proof <file>` (repeatable). Step 1 stops at the scope audit (exit 7, the
+  list and the digest) before the check gate runs, so it shows no proof refusal. The
+  refusal comes on step 2: a missing proof refuses (`PUSH_REFUSED_DOCS_READERS` /
+  `PUSH_REFUSED_WRITE_SEAM`, exit 14) and prints the three-step chas recipe and the
+  whole re-push line with `--proof` added. To avoid the extra round, make both
+  proofs on the merge commit `M` before step 2 (the tree must be clean at `M`; a
+  later commit changes the tree and voids them). The other way is `--skip-docs-readers '<reason>' --skip-write-seam '<reason>'`; each reason
+  goes on stdout and into the push record, so write the real one (what the same files
+  already passed in, with the run) and never a placeholder.
+- **The develop-red hold.** While a red is open on `board/ci/nexus-develop--owner`, a
+  push from anyone but the red's owner or a suspect's pusher is refused
+  (`PUSH_REFUSED_DEVELOP_RED`, exit 13). The back-merge is not a fix for it, so
+  say so on the bus and wait for the red to clear when you can; `--red-fix '<reason>'`
+  pushes past the hold, on the record, and is for a merge that touches nothing the
+  red names (state that in the reason). A develop red that the merge could worsen is
+  Sam's call.
+- **The primary follows.** Once the push lands, fast-forward the primary in the same
+  breath (`git -C <primary> merge --ff-only origin/develop`, worktree rule 9), and read
+  the pushed sha's develop CI before cutting anything else on it (rule 7).
 
 Why mandatory (2026-07-23 incident): from 6.12.0 through 6.17.0 no release
 was ever merged back, so develop's seven manifests froze at 6.11.0 — all
@@ -1038,8 +1156,8 @@ a real user would actually install. Must end
 was not set and the loop was NOT actually closed.
 
 **Formula-PDF / MinerU coverage (default-on, required; nexus-gqrg0 GH #1533,
-nexus-tr1rj.20 RDR-237).** The pre-tag battery's resolver-bound lint
-(`tests/test_install_source_wiring_pins.py`) covers the LOCAL wheel's dependency
+nexus-tr1rj.20 RDR-237).** PR CI's resolver-bound pin test
+(`tests/test_install_source_wiring_pins.py`; the battery does not run it) covers the LOCAL wheel's dependency
 resolution only. The `--published` invocation above also proves that the
 PUBLISHED dependency resolution indexes a real formula PDF through MinerU
 (`tests/fixtures/bft-to-smr.pdf`, `--extractor mineru`) and that the added chunk's
@@ -1361,8 +1479,9 @@ the picked commits and refuses the release when another commit naming that bead
 on `origin/develop` since the tag touches a path the lane does not ship. It
 matches the whole bead id in commit messages, so a commit that does not name its
 bead is not seen by that check; the per-path rules still bind the diff. A change that names an
-nx verb the tag lacks fails the existing verb-rot test in the preflight; it is
-not eligible.
+nx verb the tag lacks fails the verb-rot tests (`tests/test_release_artifact_verb_rot.py`,
+`tests/test_user_surface_verb_rot.py`), which run in PR CI, not in the preflight
+(its pin tests are five fixed files); it is not eligible.
 
 **3. Bump (Steps 3, 4, 5).** The same surfaces as Step 3 (`pyproject.toml`,
 `mcpb/pyproject.toml`, `mcpb/manifest.json`, `.claude-plugin/marketplace.json`
@@ -1513,7 +1632,7 @@ push its tags once their gates are green (engine-release skill Step 4 states the
 - **Forgetting the coordinated install after tag-push (Step 12).** Local `nx` stays on the old version; the post-merge "verify locally" step lies. The opposite slip is also a mistake: running `scripts/reinstall-tool.sh` or `nx upgrade` in one session while others are live.
 - **Pushing the tag before the version-bump commit.** Tag points at the wrong commit; the Release workflow's version-match step fails (`tag != pyproject.toml version`).
 - **Running `uv publish` or `twine upload` manually.** The Release workflow handles PyPI via OIDC; manual publish either duplicates or fights the workflow.
-- **Declaring "release done" after `git push origin vX.Y.Z`.** Step 11 (PyPI + GitHub release verification) is what closes the loop. The tag-push only TRIGGERS the workflow; if Py3.13 flakes, publish is skipped.
+- **Declaring "release done" after `git push origin vX.Y.Z`.** Step 11 (PyPI + GitHub release verification) is what closes the loop. The tag-push only TRIGGERS the workflow; if one of its gates refuses (check-run evidence, engine floor, relay attestation), publish is skipped.
 - **Closing follow-on beads as "done" before Step 11 confirms PyPI publication.** Bead-close before publish-verified == the publish-was-skipped class of failure goes undetected.
 
 ## See also

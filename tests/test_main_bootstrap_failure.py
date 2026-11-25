@@ -92,7 +92,7 @@ def _psql(state: dict, sql: str, dbname: str) -> str:
     proc = subprocess.run(
         [str(psql), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
          "-U", state["pg_user"], "-d", dbname, "-tAc", sql],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, f"psql failed: {sql}\n{proc.stderr}"
     return proc.stdout.strip()

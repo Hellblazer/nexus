@@ -148,6 +148,48 @@ public final class StatusHandler implements HttpHandler {
         return this;
     }
 
+    private volatile Supplier<Boolean> collectionTupleIndex;               // nullable — key omitted
+
+    /**
+     * RDR-229 P3.8 (nexus-p2m1x.28), [additive]: {@code collection_tuple_index_present} (bool): whether the partial
+     * UNIQUE index {@code catalog_collections_live_tuple_uq} on the collection registry exists. The changeset that
+     * builds it waits for the re-own data move and for no duplicate live tuple, so {@code false} means it has not been
+     * built yet, not that something failed. Absent = an engine that predates the field, or a probe that could not
+     * run; a client must not read an absent key as false. One boolean, no tenant, collection or tuple text.
+     */
+    public StatusHandler collectionTupleIndex(Supplier<Boolean> collectionTupleIndex) {
+        this.collectionTupleIndex = collectionTupleIndex;
+        return this;
+    }
+
+    private volatile Supplier<Boolean> liveLabelIndex;                    // nullable — key omitted
+
+    /**
+     * RDR-229 P3.12 (nexus-p2m1x.32), [additive]: {@code live_label_index_present} (bool): whether the partial UNIQUE
+     * index {@code idx_catalog_collections_live_label} on the collection registry (catalog-053-1) exists and is valid.
+     * That changeset is {@code failOnError="false"}, so {@code false} means it never built (or was left invalid) on this
+     * install. Absent = an engine that predates the field, or a probe that could not run; a client must not read an
+     * absent key as false. One boolean, no tenant, collection or label text.
+     */
+    public StatusHandler liveLabelIndex(Supplier<Boolean> liveLabelIndex) {
+        this.liveLabelIndex = liveLabelIndex;
+        return this;
+    }
+
+    private volatile Supplier<Boolean> catalogEpoch;                      // nullable — key omitted
+
+    /**
+     * RDR-229 P3.11 (nexus-p2m1x.31), [additive]: {@code catalog_epoch_available} (bool): whether the engine's role can
+     * read the cluster facts the catalog epoch is made of ({@code pg_control_system()}, {@code pg_control_checkpoint()}
+     * and {@code pg_postmaster_start_time()}). {@code false} means the engine sends no {@code catalog_epoch}, so a client
+     * keys its id cache by label. Absent = an engine that predates the field, or a probe that could not run; a client must
+     * not read an absent key as false. One boolean, no tenant, collection or cluster value.
+     */
+    public StatusHandler catalogEpoch(Supplier<Boolean> catalogEpoch) {
+        this.catalogEpoch = catalogEpoch;
+        return this;
+    }
+
     private volatile Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.Entry>> bootWork;   // null: always []
 
     /**
@@ -164,6 +206,42 @@ public final class StatusHandler implements HttpHandler {
      */
     public StatusHandler bootWork(Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.Entry>> bootWork) {
         this.bootWork = bootWork;
+        return this;
+    }
+
+    private volatile Supplier<String> rdr229Completion;   // null: key omitted
+
+    /**
+     * RDR-229 P3.1 (fix round A), [additive]: bind the source of {@code rdr229_completion}, the boot-time completion check's
+     * state as one JSON object (gates, missing CHECKs, VALIDATEs that wait, the dangling-tombstone pre-flight; shape in
+     * {@code CompletionStatusJson}). It is its own field and not a {@code boot_work} entry because it is not work in
+     * progress. A supplier answers from memory; null, or a supplier that returns null (not read yet), omits the key, and a
+     * client reads that as "not known".
+     */
+    public StatusHandler rdr229Completion(Supplier<String> rdr229Completion) {
+        this.rdr229Completion = rdr229Completion;
+        return this;
+    }
+
+    private volatile Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.NeedsOperator>> dataMovesNeedOperator;
+
+    /**
+     * RDR-246 (nexus-p2m1x.22), [additive]: bind the source of {@code data_moves_need_operator}, the data moves whose worker has
+     * failed them transiently {@code MoveRetryPolicy.NEEDS_OPERATOR_AT} times in a row, or lock- or statement-timed-out at
+     * {@code on_complete} {@code MoveRetryPolicy.NEEDS_OPERATOR_AT_ON_COMPLETE} times in a row. Present whenever bound:
+     * {@code data_moves_need_operator} (a boolean), {@code data_moves_need_operator_labels} (their labels) and
+     * {@code data_moves_need_operator_moves}, one object each: {@code label}, {@code retries}, {@code last_attempt_at} and
+     * {@code next_retry_at} (ISO-8601 UTC; the engine computes the second, so a client does not repeat the backoff),
+     * {@code sqlstate} (null when unknown), {@code statement_timeout_ms}, {@code terminates_index_builds} (an attempt ends
+     * in-flight index builds), {@code step} (the stage of the last failure this engine saw, or null), {@code bound_ms} (the
+     * bound that failure missed when it was a timeout, else null) and {@code retry_in_progress} (a retry runs now, so
+     * {@code next_retry_at} is past). No run, tenant or server text. The moves keep
+     * retrying; this says a human should look. A supplier answers from memory
+     * ({@link dev.nexus.service.BootWorkRegistry#dataMovesNeedOperator()}). Unbound, the keys are omitted.
+     */
+    public StatusHandler dataMovesNeedOperator(
+            Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.NeedsOperator>> dataMovesNeedOperator) {
+        this.dataMovesNeedOperator = dataMovesNeedOperator;
         return this;
     }
 
@@ -322,7 +400,9 @@ public final class StatusHandler implements HttpHandler {
      *
      * <ul>
      *   <li>the READ half's last catalog read, global (the same on every engine, up to when each last read):
-     *       {@code valid}, {@code invalid}, {@code unparsed}, {@code reindex_leftover} (nexus-rn1yd), {@code last_read_at},
+     *       {@code valid}, {@code invalid}, {@code unparsed}, {@code reindex_leftover} (nexus-rn1yd), {@code valid_id} and
+     *       {@code invalid_id} (RDR-229 P3.4, [additive]: the id-predicate indexes, which serve once gate 3 has latched and the
+     *       name indexes retire, so {@code valid} alone reads 0 then), {@code last_read_at},
      *       and {@code expired}, true when
      *       the set is older than three sweep periods plus the read bound and so is answering as empty;</li>
      *   <li>{@code this_engine}, the DDL half of THIS process only.</li>
@@ -330,20 +410,22 @@ public final class StatusHandler implements HttpHandler {
      *
      * <p>Served from values the sweep and the reconciler already hold; the route runs no catalog query.
      *
-     * @param valid      parsed {@code pci_} indexes with {@code indisvalid} true at the last read
-     * @param invalid    parsed indexes with {@code indisvalid} false (a failed or in-flight build)
+     * @param valid      parsed {@code pci_} name-predicate indexes with {@code indisvalid} true at the last read
+     * @param invalid    parsed name-predicate indexes with {@code indisvalid} false (a failed or in-flight build)
      * @param unparsed   {@code pci_} indexes that failed any part of the name-and-definition rule, EXCLUDING the
      *                   {@code reindexLeftover} ones
      * @param reindexLeftover invalid REINDEX CONCURRENTLY leftovers ({@code _ccnew}/{@code _ccold}) of a builder
      *                   index, which the reconciler drops; counted apart from {@code unparsed}, never in both
+     * @param validId    id-predicate indexes with {@code indisvalid} true at the last read ({@code valid_id}, directly after {@code reindex_leftover})
+     * @param invalidId  id-predicate indexes with {@code indisvalid} false, a leftover of one included ({@code invalid_id}): a failed or in-flight id build
      * @param lastReadAt when the last successful read finished; null before the first
      * @param expired    the set is older than {@code 3 * period + readBound} and the router ignores it
      * @param thisEngine this process's DDL half
      * @param sweepSeconds the period of the DDL passes ({@code NX_SEARCH_PCI_SWEEP_SECONDS}); a client reads it to
      *                   judge how old {@code last_ddl_pass_at} may be before it is a stall
      */
-    public record PerCollectionIndexes(int valid, int invalid, int unparsed, int reindexLeftover,
-                                       java.time.Instant lastReadAt, boolean expired, ThisEngine thisEngine,
+    public record PerCollectionIndexes(int valid, int invalid, int unparsed, int reindexLeftover, int validId,
+                                       int invalidId, java.time.Instant lastReadAt, boolean expired, ThisEngine thisEngine,
                                        long sweepSeconds) {
 
         /**
@@ -389,7 +471,7 @@ public final class StatusHandler implements HttpHandler {
                                               dev.nexus.service.vectors.PciReconciler.DdlStatus ddl,
                                               dev.nexus.service.vectors.PciMaintenanceStatus maintenance) {
             return new PerCollectionIndexes(sweep.valid(), sweep.invalid(), sweep.unparsed(),
-                sweep.reindexLeftover(), sweep.lastReadAt(), sweep.expired(),
+                sweep.reindexLeftover(), sweep.validId(), sweep.invalidId(), sweep.lastReadAt(), sweep.expired(),
                 new ThisEngine(ddl.builderState().wire(), ddl.building(), ddl.failing(), ddl.lastDdlPassAt(),
                     ddl.passStartedAt(), ddl.passInProgress(), maintenance),
                 ddl.sweepSeconds());
@@ -632,6 +714,18 @@ public final class StatusHandler implements HttpHandler {
         // nexus-f3yqd.3, [additive]: the heavy work in flight; [] when idle. Always present.
         appendBootWork(body, bootWork == null ? java.util.List.of() : bootWork.get());
 
+        // RDR-246 (nexus-p2m1x.22), [additive]: the data moves that need an operator; beside boot_work, never in it.
+        if (dataMovesNeedOperator != null) {
+            appendDataMovesNeedOperator(body, dataMovesNeedOperator.get());
+        }
+
+        // RDR-229 P3.1 (fix round A), [additive]: the completion check's state; absent until it has read.
+        Supplier<String> completion = rdr229Completion;
+        String completionJson = completion == null ? null : completion.get();
+        if (completionJson != null) {
+            body.append(",\"rdr229_completion\":").append(completionJson);
+        }
+
         // nexus-wbfpw.48, [additive]: false when a permissive policy other than tenant_isolation on
         // nexus.chunks applies to the role this engine serves traffic as (it would read or write every tenant's
         // chunks), or when row security on nexus.chunks is not enabled and forced or tenant_isolation is gone.
@@ -660,6 +754,33 @@ public final class StatusHandler implements HttpHandler {
                     }
                     body.append('}');
                 }
+            }
+        }
+
+        // RDR-229 P3.8 (nexus-p2m1x.28), [additive]: is the live-tuple unique index built? Absent = cannot tell.
+        Supplier<Boolean> tupleIndex = collectionTupleIndex;
+        if (tupleIndex != null) {
+            Boolean present = tupleIndex.get();
+            if (present != null) {
+                body.append(",\"collection_tuple_index_present\":").append(present);
+            }
+        }
+
+        // RDR-229 P3.12 (nexus-p2m1x.32), [additive]: is the live-label unique index built and valid? Absent = cannot tell.
+        Supplier<Boolean> labelIndex = liveLabelIndex;
+        if (labelIndex != null) {
+            Boolean present = labelIndex.get();
+            if (present != null) {
+                body.append(",\"live_label_index_present\":").append(present);
+            }
+        }
+
+        // RDR-229 P3.11 (nexus-p2m1x.31), [additive]: can the engine's role read the catalog epoch's cluster facts? Absent = cannot tell.
+        Supplier<Boolean> epoch = catalogEpoch;
+        if (epoch != null) {
+            Boolean available = epoch.get();
+            if (available != null) {
+                body.append(",\"catalog_epoch_available\":").append(available);
             }
         }
 
@@ -708,11 +829,37 @@ public final class StatusHandler implements HttpHandler {
         body.append(']');
     }
 
+    private static void appendDataMovesNeedOperator(StringBuilder body,
+                                                    java.util.List<dev.nexus.service.BootWorkRegistry.NeedsOperator> moves) {
+        body.append(",\"data_moves_need_operator\":").append(!moves.isEmpty()).append(",\"data_moves_need_operator_labels\":[");
+        for (int i = 0; i < moves.size(); i++) {
+            body.append(i == 0 ? "" : ",").append(HttpUtil.jsonString(moves.get(i).label()));
+        }
+        body.append("],\"data_moves_need_operator_moves\":[");
+        for (int i = 0; i < moves.size(); i++) {
+            var m = moves.get(i);
+            body.append(i == 0 ? "" : ",").append("{\"label\":").append(HttpUtil.jsonString(m.label()))
+                .append(",\"retries\":").append(m.retries()).append(",\"last_attempt_at\":");
+            appendSeconds(body, m.lastAttemptAt());
+            body.append(",\"next_retry_at\":");
+            appendSeconds(body, m.nextRetryAt());
+            body.append(",\"sqlstate\":").append(m.sqlstate() == null ? "null" : HttpUtil.jsonString(m.sqlstate()))
+                .append(",\"statement_timeout_ms\":").append(m.statementTimeoutMs())
+                .append(",\"terminates_index_builds\":").append(m.terminatesIndexBuilds())
+                .append(",\"step\":").append(m.step() == null ? "null" : HttpUtil.jsonString(m.step()))
+                .append(",\"bound_ms\":").append(m.boundMs() < 0 ? "null" : Integer.toString(m.boundMs()))
+                .append(",\"retry_in_progress\":").append(m.retryInProgress()).append('}');
+        }
+        body.append(']');
+    }
+
     private static void appendPerCollectionIndexes(StringBuilder body, PerCollectionIndexes p) {
         body.append(",\"per_collection_indexes\":{\"valid\":").append(p.valid())
             .append(",\"invalid\":").append(p.invalid())
             .append(",\"unparsed\":").append(p.unparsed())
             .append(",\"reindex_leftover\":").append(p.reindexLeftover())
+            .append(",\"valid_id\":").append(p.validId())
+            .append(",\"invalid_id\":").append(p.invalidId())
             .append(",\"last_read_at\":");
         appendSeconds(body, p.lastReadAt());
         body.append(",\"expired\":").append(p.expired())

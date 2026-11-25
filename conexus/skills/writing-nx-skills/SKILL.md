@@ -104,16 +104,15 @@ When a memory file's "How to apply" is a procedure, ordered steps, over about 8 
 
 **Never** instruct agents to use `bd update <id> --description "..."` for multi-line or markdown content. Shell escaping silently destroys backticks (executed as command substitution), `$variables` (expanded to empty), and nested quotes (break argument boundaries). No error is raised — the command reports success with mangled data.
 
-**Correct pattern**: Write content to a temp file via the Write tool, then use `--body-file`:
+**Correct pattern**: Write the content to a temp file with the Write tool, then append it through command substitution:
 
 ```
-Step 1 — Write enriched content using the Write tool (file_path: /tmp/bead-<id>.md)
-Step 2 — bd update <id> --body-file /tmp/bead-<id>.md
+bd update <id> --append-notes "$(cat /tmp/bead-<id>.md)"
 ```
 
-Short single-phrase values (e.g. `--design "revised scope"`) are safe. The bug only affects multi-line content with markdown formatting.
+`$(cat ...)` inside double quotes keeps the file's backticks and `$variables` literal. Inline multi-line `--notes` or `--design` has the same problem: use a file (`--design-file`, or `--append-notes "$(cat <file>)"`). **Never use `--body-file` or `--description` to add to a bead**: both REPLACE the description.
 
-This applies to `--description`, `--notes`, `--design`, and any flag that accepts free-text content longer than a simple phrase. Use `--body-file` or `--design-file` respectively.
+Short single-phrase values (e.g. `--design "revised scope"`) are safe.
 
 ## Quality Checklist
 

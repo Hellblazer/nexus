@@ -619,6 +619,39 @@ class PutNoteOutcome:
         return self.chunk_ids[0] if self.chunk_ids else ""
 
 
+def _register_collection_first(collection: str) -> BaseException | None:
+    """Register *collection* before its note's catalog document (RDR-229 P3.1, nexus-p2m1x.17).
+
+    Registers through the registrar the combined write registers with, so the write that follows finds the
+    name cached and does not register it again. Returns the refusal the client raised before it sent
+    anything (:func:`~nexus.catalog.write_outcome.client_side_refusals`) for the caller to hold, and ``None``
+    otherwise, including when the registration failed any other way: that failure is the catalog hook's to
+    report, which meets the same engine.
+    """
+    from nexus.catalog.factory import make_catalog_writer, writer_collection_registrar  # noqa: PLC0415 — deferred to avoid circular import at module load
+    from nexus.registration_retry import register_collection_for_write  # noqa: PLC0415 — deferred: the one seam every registration before a document shares
+
+    writer = None
+    try:
+        writer = make_catalog_writer()
+        register_collection_for_write(collection, writer_collection_registrar(writer))
+    except client_side_refusals() as exc:
+        return exc
+    except Exception as exc:  # noqa: BLE001 — best effort: the catalog hook that follows meets the same failure and reports it
+        # Warning, not debug: the engine's later 422 names only the collection, so this is where the real cause is read.
+        _log.warning(
+            "collection_registered_first_failed", collection=collection,
+            error_type=type(exc).__name__, error=str(exc)[:300],
+        )
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:  # noqa: BLE001 — a handle that will not close changes nothing for the note
+                _log.debug("collection_registrar_writer_close_failed", collection=collection)
+    return None
+
+
 def put_note(
     *,
     content: str,
@@ -715,6 +748,17 @@ def put_note(
 
     pre_call: dict[str, Any] = {}
     cause: dict[str, str] = {}
+    # RDR-229 P3.1 (nexus-p2m1x.17): the engine refuses a document registered under a collection that has
+    # no registry row (422 unregistered_collection). This function registers the document BEFORE the
+    # combined write below, which is what used to register the collection, so a note put into a new
+    # collection failed at the catalog step ("could not catalog"). Register the collection first, through
+    # the registrar the combined write registers with (so the write finds it registered and does not
+    # register it a second time). The step is best effort, so every failure surface after it is the one
+    # it always was: a failure it cannot name is left to the catalog hook, which fails the same way, and a
+    # refusal the client raises before it sends anything (an off-profile model, a retired name, a missing
+    # Voyage key) is held, to be raised by the write as before when the document registers, and reported as
+    # that refusal when it does not (a new collection, whose registration the refusal stopped).
+    registration_refusal = _register_collection_first(collection)
     try:
         out.catalog_doc_id, out.minted = sh.catalog_store_hook_tracked(
             title=title, doc_id=first_chash, collection_name=collection, pre_call_doc_id_out=pre_call,
@@ -725,6 +769,13 @@ def put_note(
         _log.warning(
             "catalog_store_hook_failed", doc_id=first_chash, collection=collection,
             **_stack_unless_anticipated(exc))
+    if not out.catalog_doc_id and registration_refusal is not None:
+        out.status, out.reason, out.refusal = NOT_LANDED, str(registration_refusal), REFUSED_BY_CLIENT
+        _log.warning(
+            "store_put_note_write_failed", doc_id=out.doc_id, catalog_doc_id="", collection=collection,
+            manifest_empty=True, refusal=out.refusal, error=out.reason[:300],
+            cause_chain=_cause_chain(registration_refusal))
+        return out
     if not out.catalog_doc_id:
         # catalog_store_hook_tracked swallows every exception into ("", False) and hands the cause back
         # through error_out: a caller that only said "catalog registration failed" left the operator

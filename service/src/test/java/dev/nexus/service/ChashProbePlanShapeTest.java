@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.impl.SQLDataType;
 import org.jooq.Field;
 import org.jooq.DSLContext;
@@ -131,10 +132,11 @@ class ChashProbePlanShapeTest {
                     modelFor(dim));
                 var series = DSL.generateSeries(1, CHUNKS_PER_DIM).as("s", "i");
                 Field<String> iText = DSL.cast(series.field("i", Integer.class), SQLDataType.VARCHAR);
-                ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHASH,
-                        CHUNKS.CHUNK_TEXT, VectorSeeds.chunkEmbedding(dim))
+                ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.EMBEDDING_MODEL,
+                        CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, VectorSeeds.chunkEmbedding(dim))
                     .select(ctx.select(DSL.val(TENANT, CHUNKS.TENANT_ID),
                             DSL.val("plan-" + dim, CHUNKS.COLLECTION),
+                            CollectionIds.idOf(TENANT, "plan-" + dim),
                             DSL.val(modelFor(dim), CHUNKS.EMBEDDING_MODEL),
                             DSL.function("decode", SQLDataType.BLOB,
                                 DSL.concat(
@@ -154,6 +156,7 @@ class ChashProbePlanShapeTest {
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, "plan-384")
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, "plan-384"))
                 .set(CHUNKS.EMBEDDING_MODEL, modelFor(384))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(liveChash(768, 42)))
                 .set(CHUNKS.CHUNK_TEXT, "cross-model copy")
@@ -183,6 +186,26 @@ class ChashProbePlanShapeTest {
                 .as("lookup may not degrade to a sequential scan of the seeded leaf %s", leaf)
                 .doesNotContainPattern("Seq Scan on (nexus\\.)?" + leaf);
         }
+    }
+
+    /**
+     * RDR-229 P3.5c: from gate 3 {@code lookup} runs {@link ChashRepository#idProbe}, a different statement from {@link ChashRepository#PROBE_SQL}
+     * (a join of the chunk's {@code collection_id} to the registry label). Its plan keeps the same tenant-chash index at the same scale, and
+     * answers the same two collections.
+     */
+    @Test
+    void idArmProbeKeepsTenantChashIndexUnderRlsAtScale() {
+        byte[] bytes = Chash.fromHex(liveChash(768, 42)).toBytes();
+        String plan = tenantScope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlan(ctx, ChashRepository.idProbe(ctx, TENANT, bytes)));
+        for (int dim : new int[] {384, 768, 1024}) {
+            String leaf = leafName(modelFor(dim), TENANT);
+            assertThat(plan).as("the id arm must use an index on the seeded leaf %s at 255k-row scale", leaf).contains(leaf + "_tenant_id_chash_idx");
+            assertThat(plan).as("the id arm may not degrade to a sequential scan of the seeded leaf %s", leaf)
+                .doesNotContainPattern("Seq Scan on (nexus\\.)?" + leaf);
+        }
+        var latched = new ChashRepository(tenantScope, () -> true);
+        assertThat(latched.lookup(TENANT, Chash.fromHex(liveChash(768, 42)))).extracting(r -> r.get("collection"))
+            .containsExactlyInAnyOrder("plan-384", "plan-768");
     }
 
     @Test

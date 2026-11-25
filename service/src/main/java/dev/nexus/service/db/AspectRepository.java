@@ -1,5 +1,7 @@
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
@@ -71,6 +73,12 @@ public final class AspectRepository {
     private static final Field<String>          EX_SOURCE_URI             = excluded(DOCUMENT_ASPECTS.SOURCE_URI);
     private static final Field<JSONB>           EX_SALIENT_SENTENCES      = excluded(DOCUMENT_ASPECTS.SALIENT_SENTENCES);
     private static final Field<String>          EX_DOC_ID                 = excluded(DOCUMENT_ASPECTS.DOC_ID);
+    // RDR-229 P3.1 stage 2b: the dual write. EXCLUDED's id is the incoming row's, so the conflict branch re-stamps it;
+    // OWN_ID is the id of the row's own name, for an UPDATE that does not name the collection (the NOT VALID CHECK
+    // looks at every updated row, and a row not stamped yet has a name and no id).
+    private static final Field<Long>            EX_COLLECTION_ID          = excluded(DOCUMENT_ASPECTS.COLLECTION_ID);
+    private static final Field<Long>            ASPECT_OWN_NAME_ID        = coalesce(DOCUMENT_ASPECTS.COLLECTION_ID,
+        CollectionIds.idOf(DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION));
 
     // COALESCE(EXCLUDED.x, table.x) fields for importAspect path
     private static final Field<String>          EX_SOURCE_URI_COALESCE =
@@ -83,14 +91,54 @@ public final class AspectRepository {
     // document_highlights EXCLUDED fields
     private static final Field<String>          EX_HL_SOURCE_URI   = excluded(DOCUMENT_HIGHLIGHTS.SOURCE_URI);
     private static final Field<String>          EX_HL_COLLECTION   = excluded(DOCUMENT_HIGHLIGHTS.COLLECTION);
+    private static final Field<Long>            EX_HL_COLLECTION_ID = excluded(DOCUMENT_HIGHLIGHTS.COLLECTION_ID);
     private static final Field<String>          EX_HL_HIGHLIGHTS   = excluded(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD);
     private static final Field<String>          EX_HL_MENTIONS     = excluded(DOCUMENT_HIGHLIGHTS.MENTIONS_MD);
     private static final Field<OffsetDateTime>  EX_HL_INGESTED_AT  = excluded(DOCUMENT_HIGHLIGHTS.INGESTED_AT);
 
+    // the conflict keys are ArbiterTwins' name and id columns for the table, not retyped here
+    private static final Field<?>[] ASPECT_NAME_KEY =
+        CollectionKey.fields(DOCUMENT_ASPECTS, TwinKeyUpsert.pair("document_aspects").orElseThrow().nameKey());
+    private static final Field<?>[] ASPECT_ID_KEY =
+        CollectionKey.fields(DOCUMENT_ASPECTS, TwinKeyUpsert.pair("document_aspects").orElseThrow().idKey());
+
     private final TenantScope tenantScope;
+    private final Gate3 gate3;
+    /** RDR-229 P3.5a: the rename refusal this repository's rename consults first ({@link RenameGuard#open()} never refuses). */
+    private final RenameGuard renameGuard;
 
     public AspectRepository(TenantScope tenantScope) {
+        this(tenantScope, Gate3.never(), RenameGuard.open());
+    }
+
+    /** The rename guard alone: gate 3 never holds (P3.5a's callers and tests). */
+    public AspectRepository(TenantScope tenantScope, RenameGuard renameGuard) {
+        this(tenantScope, Gate3.never(), renameGuard);
+    }
+
+    /** RDR-229 P3.5c: from gate 3 on the install the readers name a collection by its id column ({@link CollectionKey}). */
+    public AspectRepository(TenantScope tenantScope, Gate3 gate3) {
+        this(tenantScope, gate3, RenameGuard.open());
+    }
+
+    /** The production constructor: the one gate-3 signal and the one rename guard ({@code NexusService} passes both). */
+    public AspectRepository(TenantScope tenantScope, Gate3 gate3, RenameGuard renameGuard) {
         this.tenantScope = tenantScope;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+        this.renameGuard = java.util.Objects.requireNonNull(renameGuard, "renameGuard");
+    }
+
+    private CollectionKey ck() {
+        return CollectionKey.of(gate3);
+    }
+
+    private Condition aspectsIn(String tenant, String c) {
+        return ck().eq(tenant, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID, c);
+    }
+
+    /** The id an UPDATE that names no collection leaves on the row: its own id from gate 3 (the name may be stale), else the name's. */
+    private Field<Long> ownId() {
+        return ck().byId() ? DOCUMENT_ASPECTS.COLLECTION_ID : ASPECT_OWN_NAME_ID;
     }
 
     // ── Timestamp helpers ──────────────────────────────────────────────────────
@@ -143,11 +191,11 @@ public final class AspectRepository {
      * document_highlights default no longer registers itself (RDR-204 §Technical
      * Design step 4).
      */
-    private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
-        if (collection == null) return;
+    private static String ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
+        if (collection == null) return null;
         // nexus-i15oc: an aspect or highlight row filed under a retired (superseded) name strands
         // exactly as a chunk does (nexus-mp8ys), so every live writer refuses it 409 naming the successor.
-        CollectionRegistry.requireWritable(ctx, tenant, collection);
+        return CollectionRegistry.requireWritable(ctx, tenant, collection).label();   // the row's CURRENT label: the id is the identity
     }
 
     /**
@@ -161,7 +209,7 @@ public final class AspectRepository {
     private static void ensureCollectionRegisteredAllowingSuperseded(DSLContext ctx, String tenant,
                                                                      String collection) {
         if (collection == null) return;
-        CollectionRegistry.requireRegistered(ctx, tenant, collection);
+        CollectionRegistry.requireForWrite(ctx, tenant, collection);   // RDR-229 P3.5a: a write's check takes the key share, a tombstone allowed
     }
 
     /**
@@ -169,9 +217,9 @@ public final class AspectRepository {
      *
      * <p>{@code claim_id} and {@code claimant} come together or not at all: one without the other is an
      * {@link IllegalArgumentException} (400) naming both fields, thrown before a transaction opens. Both
-     * absent is today's write, unchanged. Both present, the FIRST statement of the upsert's transaction is
-     * {@link TupleRepository#lockLiveClaimRow}, which locks the claim's tuples row, and the write follows in
-     * the same transaction. The order is fixed: the claim lookup, then {@link #ensureCollectionRegistered}
+     * absent is today's write, unchanged. Both present, the transaction reads the collection's registry row
+     * {@code FOR KEY SHARE} (see the lock order below), then {@link TupleRepository#lockLiveClaimRow} locks the claim's
+     * tuples row, and the write follows in the same transaction. The order is fixed: the claim lookup, then {@link #ensureCollectionRegistered}
      * (a retired name answers 409), then the {@code document_aspects} insert. So a 409 means the claim was
      * live at that instant, and a lapsed claim on a retired name answers 404.
      *
@@ -189,19 +237,20 @@ public final class AspectRepository {
      * inside the transaction, after the lock, so the claim is locked for the (short) time they take; a
      * claim-less write has no lock and runs the gates first, as ever. Nothing is written on any refusal.
      *
-     * <p>Lock order, shared with the rename helper (bead nexus-5r2sc.2.6): the tuples row lock FIRST, so a
-     * rename that rewrites task bodies before its registry loop cannot deadlock against a fenced persist of the
-     * same document. After it come the catalog row of {@code doc_id} ({@code FOR SHARE}, RDR-254) and then
-     * {@code document_aspects}; the catalog-first order is the reverse of the rename's and the collection
-     * delete's, so an UNFENCED upsert during a rename or delete of its collection can deadlock and PostgreSQL
-     * aborts one (see {@link AspectDocIdAttribution}). Each side's whole transaction runs under
-     * {@link DeadlockRetry}: this one here, the rename and the delete through {@code manifestWriteTxn}. The
-     * retried body is only the database transaction (nothing leaves it; the handler answers after it returns), so
-     * a rerun repeats no side effect. {@link DeadlockRetry} makes at most four attempts; after them the 40P01
-     * propagates and the handler answers 500. A retried upsert reads the collection through the in-process
-     * {@code CollectionRegistry}, which a rename or delete evicts only after its commit, so a retry that checks the
-     * name before that eviction can still write under the retired name (an orphan row; the same window as an
-     * upsert that started just before the rename committed). It is not a 409 or 422 in that case.
+     * <p>Lock order (RDR-229 P3.5a, linda's ruling; {@link RenameGuard#runRename}): the registry row of the collection
+     * {@code FOR KEY SHARE} FIRST (a fenced write names no advisory lock), so a verb that retires the collection waits for
+     * this write; then the tuples row of the claim, so a rename of the claim's task bodies (tuple row locks, before its
+     * document_aspects update, bead nexus-5r2sc.2.6) cannot deadlock against a fenced persist of the same document; then the
+     * catalog row of {@code doc_id} ({@code FOR SHARE}, RDR-254) and {@code document_aspects}. The registry read refuses nothing
+     * of its own on a label (a retired or unregistered name is answered after the claim, as ever); a request by id whose id is
+     * gone or retired answers its typed 404 or 409 there. The catalog-first order is the reverse of the rename's and the
+     * collection delete's, so an UNFENCED upsert during a rename or delete of its collection can deadlock and PostgreSQL aborts
+     * one (see {@link AspectDocIdAttribution}). Each side's whole transaction runs under {@link DeadlockRetry}: this one here,
+     * the rename and the delete through {@code manifestWriteTxn}. The retried body is only the database transaction (nothing
+     * leaves it; the handler answers after it returns), so a rerun repeats no side effect. {@link DeadlockRetry} makes at most
+     * four attempts; after them the 40P01 propagates and the handler answers 500. A retried upsert reads the registry row
+     * again, in its new transaction, so a retry after a rename or delete commit sees the retired row (409) and not a cached
+     * live one.
      */
     public long upsertAspect(String tenant, Map<String, Object> body) {
         // Before everything else: a malformed pair is a caller bug whatever the payload or the claim is.
@@ -219,23 +268,29 @@ public final class AspectRepository {
         if (claimId == null) {
             // No fence: the payload gates run before a transaction opens, as ever.
             ValidUpsert valid = validateUpsert(body);
-            if (valid == null) return -1L;
+            if (valid == null) {
+                if (body.get("collection") instanceof String c && !c.isEmpty()) {
+                    CollectionRegistry.readRowForEmptyWrite(tenantScope, tenant, c);   // nothing to write: a by-id call still reads its row
+                }
+                return -1L;
+            }
             return DeadlockRetry.run("aspect.upsert " + valid.collection(),
                 () -> tenantScope.withTenant(tenant, ctx -> writeAspect(ctx, tenant, body, valid)));
         }
         // Fenced: the claim is looked up and locked FIRST, so a lapsed or foreign claim answers 404 or 403
         // whatever the payload is (nexus-eyynd M1); the payload gates run after it, in the same transaction.
         return DeadlockRetry.run("aspect.upsert fenced", () -> tenantScope.withTenant(tenant, ctx -> {
-            // Lock order (shared with the rename helper, nexus-5r2sc.2.6): the tuples row lock FIRST, then the
-            // catalog row (RDR-254) and document_aspects. This lookup takes the first lock; the write the rest.
-            // A rename rewrites task bodies (tuple row locks) before its registry loop updates
-            // document_aspects, so a claim on a task of the collection being renamed serializes with it. The claim
-            // check reads only doc_id, not the body's collection, so that is the usual case, not a guarantee: the
-            // DeadlockRetry around this transaction covers the rest.
+            // Lock order (the javadoc above): the registry row FOR KEY SHARE first, then the tuples row (shared with the
+            // rename helper, nexus-5r2sc.2.6: it rewrites task bodies before its document_aspects update), then the catalog
+            // row (RDR-254) and document_aspects; the DeadlockRetry around this transaction covers the rest.
+            if (body.get("collection") instanceof String c && !c.isEmpty()) RequestedCollectionRead.require(ctx, tenant, c);
             var claimRow = TupleRepository.lockLiveClaimRow(ctx, tenant, claimId, claimant);
             requireClaimOnTaskFor(claimRow, claimId, body.get("doc_id") instanceof String d ? d : null);
             ValidUpsert valid = validateUpsert(body);
-            return valid == null ? -1L : writeAspect(ctx, tenant, body, valid);
+            if (valid == null) {
+                return -1L;   // nothing to write; the registry read at the head of this transaction already consumed a named id
+            }
+            return writeAspect(ctx, tenant, body, valid);
         }));
     }
 
@@ -285,17 +340,18 @@ public final class AspectRepository {
     }
 
     private long writeAspect(DSLContext ctx, String tenant, Map<String, Object> body, ValidUpsert v) {
-        String collection = v.collection();
+        // the id is the identity (linda's ruling): the row is written under the registry row's CURRENT label, from the locked read
+        // (a name the request carried that a one-row rename has since changed is the same collection)
+        String collection = CollectionRegistry.requireWritable(ctx, tenant, v.collection()).label();
         String sourcePath = v.sourcePath();
         String modelVersion = v.modelVersion();
         String extractorName = v.extractorName();
         String docId = v.docId();
         double confidence = v.confidence();
         OffsetDateTime extractedAtTs = v.extractedAt();
-        ensureCollectionRegistered(ctx, tenant, collection);
         // RDR-254: a doc_id naming a trashed or alias document never replaces the row's doc_id (AspectDocIdAttribution).
         Field<String> docIdOnConflict = AspectDocIdAttribution.onConflict(ctx, tenant, docId, EX_DOC_ID_COALESCE);
-        var result = ctx.insertInto(DOCUMENT_ASPECTS,
+        var insert = ctx.insertInto(DOCUMENT_ASPECTS,
                 DOCUMENT_ASPECTS.TENANT_ID,
                 DOCUMENT_ASPECTS.COLLECTION,
                 DOCUMENT_ASPECTS.SOURCE_PATH,
@@ -311,7 +367,8 @@ public final class AspectRepository {
                 DOCUMENT_ASPECTS.EXTRACTOR_NAME,
                 DOCUMENT_ASPECTS.SOURCE_URI,
                 DOCUMENT_ASPECTS.SALIENT_SENTENCES,
-                DOCUMENT_ASPECTS.DOC_ID)
+                DOCUMENT_ASPECTS.DOC_ID,
+                DOCUMENT_ASPECTS.COLLECTION_ID)
             .values(
                 tenant,
                 collection,
@@ -332,11 +389,12 @@ public final class AspectRepository {
                 // nne()-guarded NOT NULL text columns).
                 NoteUri.canonical(nne((String) body.get("source_uri"))),
                 jsonbOrNull((String) body.get("salient_sentences")),
-                docId)
-            .onConflict(
-                DOCUMENT_ASPECTS.TENANT_ID,
-                DOCUMENT_ASPECTS.COLLECTION,
-                DOCUMENT_ASPECTS.SOURCE_PATH)
+                docId,
+                CollectionIds.require(ctx, tenant, collection));   // RDR-229 P3.1: read after the registration above
+        final boolean byId1 = ck().byId();
+        var result = TwinKeyUpsert.run(ctx, "document_aspects", byId1 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+            c -> { Field<?>[] key = byId1 ? ASPECT_ID_KEY : ASPECT_NAME_KEY; return insert
+            .onConflict(key)
             .doUpdate()
             .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
             .set(DOCUMENT_ASPECTS.PROPOSED_METHOD,        EX_PROPOSED_METHOD)
@@ -354,8 +412,9 @@ public final class AspectRepository {
             // attribution a previous write established — same COALESCE the
             // other two writers already use.
             .set(DOCUMENT_ASPECTS.DOC_ID,                 docIdOnConflict)
+            .set(DOCUMENT_ASPECTS.COLLECTION_ID,          EX_COLLECTION_ID)
             .returning(DOCUMENT_ASPECTS.ID)
-            .fetch();
+            .fetch(); });
         return result.isEmpty() ? -1L : result.get(0).get(DOCUMENT_ASPECTS.ID);
     }
 
@@ -407,7 +466,7 @@ public final class AspectRepository {
     public Optional<Map<String, Object>> getAspect(String tenant, String collection, String sourcePath) {
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.select(
-                    DOCUMENT_ASPECTS.COLLECTION,
+                    ck().label(tenant, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID).as("collection"),
                     DOCUMENT_ASPECTS.SOURCE_PATH,
                     DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
                     DOCUMENT_ASPECTS.PROPOSED_METHOD,
@@ -423,7 +482,7 @@ public final class AspectRepository {
                     DOCUMENT_ASPECTS.SALIENT_SENTENCES,
                     DOCUMENT_ASPECTS.DOC_ID)
                 .from(DOCUMENT_ASPECTS)
-                .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
+                .where(aspectsIn(tenant, collection)
                     .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
                 .fetch();
             if (rows.isEmpty()) return Optional.empty();
@@ -438,7 +497,7 @@ public final class AspectRepository {
         if (docId == null || docId.isBlank()) return Optional.empty();
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.select(
-                    DOCUMENT_ASPECTS.COLLECTION,
+                    ck().label(tenant, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID).as("collection"),
                     DOCUMENT_ASPECTS.SOURCE_PATH,
                     DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
                     DOCUMENT_ASPECTS.PROPOSED_METHOD,
@@ -467,7 +526,7 @@ public final class AspectRepository {
     public List<Map<String, Object>> listByCollection(String tenant, String collection, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx -> {
             var q = ctx.select(
-                    DOCUMENT_ASPECTS.COLLECTION,
+                    ck().label(tenant, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID).as("collection"),
                     DOCUMENT_ASPECTS.SOURCE_PATH,
                     DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
                     DOCUMENT_ASPECTS.PROPOSED_METHOD,
@@ -483,7 +542,7 @@ public final class AspectRepository {
                     DOCUMENT_ASPECTS.SALIENT_SENTENCES,
                     DOCUMENT_ASPECTS.DOC_ID)
                 .from(DOCUMENT_ASPECTS)
-                .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection))
+                .where(aspectsIn(tenant, collection))
                 .orderBy(DOCUMENT_ASPECTS.SOURCE_PATH.asc());
             var rows = (limit > 0 ? q.limit(limit).offset(offset) : q).fetch();
             List<Map<String, Object>> out = new ArrayList<>();
@@ -497,8 +556,9 @@ public final class AspectRepository {
      */
     public List<Map<String, Object>> listByExtractorVersion(String tenant, String extractorName, String maxVersion) {
         return tenantScope.withTenant(tenant, ctx -> {
+            var lbl = ck().label(tenant, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID).as("collection");
             var rows = ctx.select(
-                    DOCUMENT_ASPECTS.COLLECTION,
+                    lbl,
                     DOCUMENT_ASPECTS.SOURCE_PATH,
                     DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
                     DOCUMENT_ASPECTS.PROPOSED_METHOD,
@@ -516,7 +576,7 @@ public final class AspectRepository {
                 .from(DOCUMENT_ASPECTS)
                 .where(DOCUMENT_ASPECTS.EXTRACTOR_NAME.eq(extractorName)
                     .and(DOCUMENT_ASPECTS.MODEL_VERSION.lt(maxVersion)))
-                .orderBy(DOCUMENT_ASPECTS.COLLECTION.asc(), DOCUMENT_ASPECTS.SOURCE_PATH.asc())
+                .orderBy(lbl.asc(), DOCUMENT_ASPECTS.SOURCE_PATH.asc())
                 .fetch();
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : rows) out.add(recordToMap(r));
@@ -528,11 +588,13 @@ public final class AspectRepository {
      * Delete an aspect by (collection, source_path). Returns deleted count.
      */
     public int deleteAspect(String tenant, String collection, String sourcePath) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(DOCUMENT_ASPECTS)
-               .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
+        return tenantScope.withTenant(tenant, ctx -> {
+            var row = RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
+            return ctx.deleteFrom(DOCUMENT_ASPECTS)
+               .where(CollectionOwnedRows.of(row, DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.COLLECTION, collection)
                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
-               .execute());
+               .execute();
+        });
     }
 
     /**
@@ -541,7 +603,9 @@ public final class AspectRepository {
      * {@code /queue/rename_collection}, which was the standalone caller's way of re-homing them).
      */
     public int renameAspectCollection(String tenant, String oldColl, String newColl) {
-        return tenantScope.withTenant(tenant, ctx -> {
+        boolean[] noop = new boolean[1];   // set by the committed attempt when the one-row regime made this a no-op
+        int answer = renameGuard.runRename(tenantScope, tenant, ctx -> {
+            noop[0] = false;
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): refused while a re-embed job holds either name.
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldColl, newColl);
             // RDR-164 P1a: register the new collection before re-pointing the denorm column
@@ -559,9 +623,16 @@ public final class AspectRepository {
                .execute();
             return ctx.update(DOCUMENT_ASPECTS)
                 .set(DOCUMENT_ASPECTS.COLLECTION, newColl)
+                .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(tenant, newColl))
                 .where(DOCUMENT_ASPECTS.COLLECTION.eq(oldColl))
                 .execute();
+        }, ctx -> {
+            RenameGuard.requireRegistryRenamed(ctx, tenant, oldColl, newColl);   // the registry rename moved the label: nothing to rewrite
+            noop[0] = true;
+            return 0;
         });
+        if (noop[0]) RenameNoOpActivity.record("aspects", oldColl, newColl);   // counted once committed
+        return answer;
     }
 
     /**
@@ -569,23 +640,31 @@ public final class AspectRepository {
      */
     public int setSalientSentences(String tenant, String docId, String sentencesJson) {
         if (docId == null || docId.isBlank()) return 0;
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(DOCUMENT_ASPECTS)
+        return tenantScope.withTenant(tenant, ctx -> {
+            var held = AspectDocCollectionLocks.requireForWriteDocAspects(ctx, tenant, docId);   // RDR-229 P3.5a: the doc's collections FOR KEY SHARE first
+            if (held.isEmpty()) return 0;
+            return ctx.update(DOCUMENT_ASPECTS)
                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, jsonbOrNull(sentencesJson))
-               .where(DOCUMENT_ASPECTS.DOC_ID.eq(docId))
-               .execute());
+               .set(DOCUMENT_ASPECTS.COLLECTION_ID, ownId())   // each row keeps its own id and label
+               .where(DOCUMENT_ASPECTS.DOC_ID.eq(docId)
+                   .and(held.owns(DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.COLLECTION)))
+               .execute();
+        });
     }
 
     /**
      * Set salient_sentences by (collection, source_path) — pre-migration fallback.
      */
     public int setSalientSentencesByKey(String tenant, String collection, String sourcePath, String sentencesJson) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(DOCUMENT_ASPECTS)
+        return tenantScope.withTenant(tenant, ctx -> {
+            var row = RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
+            return ctx.update(DOCUMENT_ASPECTS)
                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, jsonbOrNull(sentencesJson))
-               .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
+               .set(DOCUMENT_ASPECTS.COLLECTION_ID, ownId())
+               .where(CollectionOwnedRows.of(row, DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.COLLECTION, collection)
                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
-               .execute());
+               .execute();
+        });
     }
 
     /**
@@ -634,7 +713,7 @@ public final class AspectRepository {
      */
     public int importAspectsBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
-        return tenantScope.withTenant(tenant, ctx -> {
+        return DeadlockRetry.run("aspects.importAspectsBatch", () -> tenantScope.withTenant(tenant, ctx -> {
             List<Map<String, Object>> kept = new ArrayList<>();
             for (var body : rows) {
                 double confidence = body.containsKey("confidence") && body.get("confidence") != null
@@ -649,7 +728,12 @@ public final class AspectRepository {
                 String c = (String) body.get("collection");
                 if (c != null) collections.add(c);
             }
-            for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
+            CollectionRegistry.lockAllInIdOrder(ctx, tenant, collections);
+            var collectionIds = new java.util.HashMap<String, Long>();
+            for (String c : collections) {
+                ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
+                collectionIds.put(c, CollectionIds.require(ctx, tenant, c));   // RDR-229 P3.1: one read a name, not a subselect a row
+            }
 
             // Conflict key: (tenant_id, collection, source_path). tenant constant.
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(kept.size());
@@ -658,7 +742,7 @@ public final class AspectRepository {
             }
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 
-            final int cols = 16;
+            final int cols = 17;
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
@@ -678,7 +762,8 @@ public final class AspectRepository {
                         DOCUMENT_ASPECTS.EXTRACTOR_NAME,
                         DOCUMENT_ASPECTS.SOURCE_URI,
                         DOCUMENT_ASPECTS.SALIENT_SENTENCES,
-                        DOCUMENT_ASPECTS.DOC_ID);
+                        DOCUMENT_ASPECTS.DOC_ID,
+                        DOCUMENT_ASPECTS.COLLECTION_ID);
                 for (var body : batch) {
                     double confidence = ((Number) body.get("confidence")).doubleValue();
                     OffsetDateTime extractedAtTs = parseTs((String) body.get("extracted_at"));
@@ -703,12 +788,13 @@ public final class AspectRepository {
                             // genuine caller error, same as the live upsert path.
                             NoteUri.canonical(nne((String) body.get("source_uri"))),
                             jsonbOrNull((String) body.get("salient_sentences")),
-                            nullIfBlank((String) body.get("doc_id")));
+                            nullIfBlank((String) body.get("doc_id")),
+                            collectionIds.get((String) body.get("collection")));
                 }
-                insert.onConflict(
-                        DOCUMENT_ASPECTS.TENANT_ID,
-                        DOCUMENT_ASPECTS.COLLECTION,
-                        DOCUMENT_ASPECTS.SOURCE_PATH)
+                final var rowsInsert = insert;
+                final boolean byId2 = ck().byId();
+                TwinKeyUpsert.run(ctx, "document_aspects", byId2 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+                    c -> { Field<?>[] key = byId2 ? ASPECT_ID_KEY : ASPECT_NAME_KEY; return rowsInsert.onConflict(key)
                       .doUpdate()
                       .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
                       .set(DOCUMENT_ASPECTS.PROPOSED_METHOD,        EX_PROPOSED_METHOD)
@@ -723,10 +809,11 @@ public final class AspectRepository {
                       .set(DOCUMENT_ASPECTS.SOURCE_URI,             EX_SOURCE_URI_COALESCE)
                       .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_COALESCE)
                       .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
-                      .execute();
+                      .set(DOCUMENT_ASPECTS.COLLECTION_ID,          EX_COLLECTION_ID)
+                      .execute(); });
             }
             return kept.size();
-        });
+        }));
     }
 
     private int doImportAspect(DSLContext ctx, String tenant, Map<String, Object> body) {
@@ -740,7 +827,7 @@ public final class AspectRepository {
 
         {
             ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, (String) body.get("collection"));
-            return ctx.insertInto(DOCUMENT_ASPECTS,
+            var insert = ctx.insertInto(DOCUMENT_ASPECTS,
                     DOCUMENT_ASPECTS.TENANT_ID,
                     DOCUMENT_ASPECTS.COLLECTION,
                     DOCUMENT_ASPECTS.SOURCE_PATH,
@@ -756,7 +843,8 @@ public final class AspectRepository {
                     DOCUMENT_ASPECTS.EXTRACTOR_NAME,
                     DOCUMENT_ASPECTS.SOURCE_URI,
                     DOCUMENT_ASPECTS.SALIENT_SENTENCES,
-                    DOCUMENT_ASPECTS.DOC_ID)
+                    DOCUMENT_ASPECTS.DOC_ID,
+                    DOCUMENT_ASPECTS.COLLECTION_ID)
                 .values(
                     tenant,
                     (String) body.get("collection"),
@@ -775,11 +863,12 @@ public final class AspectRepository {
                     // identical comment for why doc_id stays nullIfBlank).
                     NoteUri.canonical(nne((String) body.get("source_uri"))),
                     jsonbOrNull((String) body.get("salient_sentences")),
-                    nullIfBlank((String) body.get("doc_id")))
-                .onConflict(
-                    DOCUMENT_ASPECTS.TENANT_ID,
-                    DOCUMENT_ASPECTS.COLLECTION,
-                    DOCUMENT_ASPECTS.SOURCE_PATH)
+                    nullIfBlank((String) body.get("doc_id")),
+                    CollectionIds.require(ctx, tenant, (String) body.get("collection")));   // RDR-229 P3.1
+            final boolean byId3 = ck().byId();
+            return TwinKeyUpsert.run(ctx, "document_aspects", byId3 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+                c -> { Field<?>[] key = byId3 ? ASPECT_ID_KEY : ASPECT_NAME_KEY; return insert
+                .onConflict(key)
                 .doUpdate()
                 .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
                 .set(DOCUMENT_ASPECTS.PROPOSED_METHOD,        EX_PROPOSED_METHOD)
@@ -794,7 +883,8 @@ public final class AspectRepository {
                 .set(DOCUMENT_ASPECTS.SOURCE_URI,             EX_SOURCE_URI_COALESCE)
                 .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_COALESCE)
                 .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
-                .execute();
+                .set(DOCUMENT_ASPECTS.COLLECTION_ID,          EX_COLLECTION_ID)
+                .execute(); });
         }
     }
 
@@ -819,7 +909,7 @@ public final class AspectRepository {
         tenantScope.withTenant(tenant, ctx -> {
             // hygiene-001: register the SAME nne()-defaulted collection value
             // the INSERT below binds, or a blank collection 404s the FK.
-            ensureCollectionRegistered(ctx, tenant, nne((String) body.get("collection")));
+            final String coll = ensureCollectionRegistered(ctx, tenant, nne((String) body.get("collection")));
             ctx.insertInto(DOCUMENT_HIGHLIGHTS,
                     DOCUMENT_HIGHLIGHTS.TENANT_ID,
                     DOCUMENT_HIGHLIGHTS.DOC_ID,
@@ -827,21 +917,24 @@ public final class AspectRepository {
                     DOCUMENT_HIGHLIGHTS.COLLECTION,
                     DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                     DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
-                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                    DOCUMENT_HIGHLIGHTS.INGESTED_AT,
+                    DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
                 .values(
                     tenant,
                     docId,
                     // hygiene-001 (nexus-tk070.p6a follow-on): source_uri/collection
                     // are NOT NULL now.
                     NoteUri.canonical(nne((String) body.get("source_uri"))),
-                    nne((String) body.get("collection")),
+                    coll,
                     highlightsMd,
                     mentionsMd,
-                    ingestedAtTs)
+                    ingestedAtTs,
+                    CollectionIds.require(ctx, tenant, coll))   // RDR-229 P3.1; '' gives NULL
                 .onConflict(DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID)
                 .doUpdate()
                 .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI,    EX_HL_SOURCE_URI)
                 .set(DOCUMENT_HIGHLIGHTS.COLLECTION,    EX_HL_COLLECTION)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, EX_HL_COLLECTION_ID)
                 .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, EX_HL_HIGHLIGHTS)
                 .set(DOCUMENT_HIGHLIGHTS.MENTIONS_MD,   EX_HL_MENTIONS)
                 .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT,   EX_HL_INGESTED_AT)
@@ -859,7 +952,7 @@ public final class AspectRepository {
             var rows = ctx.select(
                     DOCUMENT_HIGHLIGHTS.DOC_ID,
                     DOCUMENT_HIGHLIGHTS.SOURCE_URI,
-                    DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    ck().label(tenant, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID).as("collection"),
                     DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                     DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
                     DOCUMENT_HIGHLIGHTS.INGESTED_AT)
@@ -879,7 +972,7 @@ public final class AspectRepository {
             var rows = ctx.select(
                     DOCUMENT_HIGHLIGHTS.DOC_ID,
                     DOCUMENT_HIGHLIGHTS.SOURCE_URI,
-                    DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    ck().label(tenant, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID).as("collection"),
                     DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                     DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
                     DOCUMENT_HIGHLIGHTS.INGESTED_AT)
@@ -900,7 +993,7 @@ public final class AspectRepository {
             var rows = ctx.select(
                     DOCUMENT_HIGHLIGHTS.DOC_ID,
                     DOCUMENT_HIGHLIGHTS.SOURCE_URI,
-                    DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    ck().label(tenant, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID).as("collection"),
                     DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                     DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
                     DOCUMENT_HIGHLIGHTS.INGESTED_AT)
@@ -919,10 +1012,14 @@ public final class AspectRepository {
      * Delete a highlight by doc_id. Returns true if deleted.
      */
     public boolean deleteHighlight(String tenant, String docId) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(DOCUMENT_HIGHLIGHTS)
-               .where(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId))
-               .execute() > 0);
+        return tenantScope.withTenant(tenant, ctx -> {
+            var held = AspectDocCollectionLocks.requireForWriteDocHighlight(ctx, tenant, docId);   // RDR-229 P3.5a: the row's collection FOR KEY SHARE first
+            if (held.isEmpty()) return false;
+            return ctx.deleteFrom(DOCUMENT_HIGHLIGHTS)
+               .where(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId)
+                   .and(held.owns(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, DOCUMENT_HIGHLIGHTS.COLLECTION)))
+               .execute() > 0;
+        });
     }
 
     /**
@@ -942,7 +1039,7 @@ public final class AspectRepository {
      */
     public int importHighlightsBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
-        return tenantScope.withTenant(tenant, ctx -> {
+        return DeadlockRetry.run("aspects.importHighlightsBatch", () -> tenantScope.withTenant(tenant, ctx -> {
             List<Map<String, Object>> kept = new ArrayList<>();
             for (var body : rows) {
                 String docId = (String) body.get("doc_id");
@@ -957,13 +1054,18 @@ public final class AspectRepository {
             for (var body : kept) {
                 collections.add(nne((String) body.get("collection")));
             }
-            for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
+            CollectionRegistry.lockAllInIdOrder(ctx, tenant, collections);
+            var collectionIds = new java.util.HashMap<String, Long>();
+            for (String c : collections) {
+                ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
+                collectionIds.put(c, CollectionIds.require(ctx, tenant, c));   // RDR-229 P3.1; '' gives null
+            }
 
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(kept.size());
             for (var body : kept) unique.put((String) body.get("doc_id"), body);
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 
-            final int cols = 7;
+            final int cols = 8;
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
@@ -974,7 +1076,8 @@ public final class AspectRepository {
                         DOCUMENT_HIGHLIGHTS.COLLECTION,
                         DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                         DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
-                        DOCUMENT_HIGHLIGHTS.INGESTED_AT);
+                        DOCUMENT_HIGHLIGHTS.INGESTED_AT,
+                        DOCUMENT_HIGHLIGHTS.COLLECTION_ID);
                 for (var body : batch) {
                     String ingestedAt = (String) body.get("ingested_at");
                     OffsetDateTime ingestedAtTs = parseTs(ingestedAt);
@@ -985,19 +1088,21 @@ public final class AspectRepository {
                             nne((String) body.get("collection")),
                             (String) body.getOrDefault("highlights_md", ""),
                             (String) body.getOrDefault("mentions_md", ""),
-                            ingestedAtTs);
+                            ingestedAtTs,
+                            collectionIds.get(nne((String) body.get("collection"))));
                 }
                 insert.onConflict(DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID)
                       .doUpdate()
                       .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI,    EX_HL_SOURCE_URI)
                       .set(DOCUMENT_HIGHLIGHTS.COLLECTION,    EX_HL_COLLECTION)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, EX_HL_COLLECTION_ID)
                       .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, EX_HL_HIGHLIGHTS)
                       .set(DOCUMENT_HIGHLIGHTS.MENTIONS_MD,   EX_HL_MENTIONS)
                       .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT,   EX_HL_INGESTED_AT)
                       .execute();
             }
             return kept.size();
-        });
+        }));
     }
 
     private int doImportHighlight(DSLContext ctx, String tenant, Map<String, Object> body) {
@@ -1017,7 +1122,8 @@ public final class AspectRepository {
                     DOCUMENT_HIGHLIGHTS.COLLECTION,
                     DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                     DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
-                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                    DOCUMENT_HIGHLIGHTS.INGESTED_AT,
+                    DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
                 .values(
                     tenant,
                     docId,
@@ -1025,11 +1131,13 @@ public final class AspectRepository {
                     nne((String) body.get("collection")),
                     (String) body.getOrDefault("highlights_md", ""),
                     (String) body.getOrDefault("mentions_md", ""),
-                    ingestedAtTs)
+                    ingestedAtTs,
+                    CollectionIds.require(ctx, tenant, nne((String) body.get("collection"))))   // RDR-229 P3.1; '' gives NULL
                 .onConflict(DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID)
                 .doUpdate()
                 .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI,    EX_HL_SOURCE_URI)
                 .set(DOCUMENT_HIGHLIGHTS.COLLECTION,    EX_HL_COLLECTION)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, EX_HL_COLLECTION_ID)
                 .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, EX_HL_HIGHLIGHTS)
                 .set(DOCUMENT_HIGHLIGHTS.MENTIONS_MD,   EX_HL_MENTIONS)
                 .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT,   EX_HL_INGESTED_AT)
@@ -1044,14 +1152,23 @@ public final class AspectRepository {
      * and no collision-defense DELETE is needed — a plain UPDATE suffices.
      */
     public int renameHighlightsCollection(String tenant, String oldColl, String newColl) {
-        return tenantScope.withTenant(tenant, ctx -> {
+        boolean[] noop = new boolean[1];   // set by the committed attempt when the one-row regime made this a no-op
+        int answer = renameGuard.runRename(tenantScope, tenant, ctx -> {
+            noop[0] = false;
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldColl, newColl);
             ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newColl);
             return ctx.update(DOCUMENT_HIGHLIGHTS)
                 .set(DOCUMENT_HIGHLIGHTS.COLLECTION, newColl)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CollectionIds.idOf(tenant, newColl))
                 .where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(oldColl))
                 .execute();
+        }, ctx -> {
+            RenameGuard.requireRegistryRenamed(ctx, tenant, oldColl, newColl);   // the registry rename moved the label: nothing to rewrite
+            noop[0] = true;
+            return 0;
         });
+        if (noop[0]) RenameNoOpActivity.record("highlights", oldColl, newColl);   // counted once committed
+        return answer;
     }
 
     // ── aspect_promotion_log ───────────────────────────────────────────────────
@@ -1344,88 +1461,7 @@ public final class AspectRepository {
      *         reducerKind is unrecognised
      */
     public Double confidenceAggregate(String tenant, List<String> sourceUris, String reducerKind) {
-        if (sourceUris == null || sourceUris.isEmpty()) return null;
-        List<String> uris = sourceUris.stream().map(NoteUri::canonical).distinct().toList();  // RDR-231
-
-        String aggFunc = switch (reducerKind) {
-            case "avg_confidence" -> "AVG";
-            case "min_confidence" -> "MIN";
-            case "max_confidence" -> "MAX";
-            default -> null;
-        };
-        if (aggFunc == null) return null;
-
-        // Accumulate across batches: AVG needs sum+count; MIN/MAX fold naturally.
-        double sumAcc = 0.0;
-        long   cntAcc = 0L;
-        Double minAcc = null;
-        Double maxAcc = null;
-
-        for (int start = 0; start < uris.size(); start += 300) {
-            List<String> batch = uris.subList(start, Math.min(start + 300, uris.size()));
-
-            final double[] localSum = {0.0};
-            final long[]   localCnt = {0L};
-            final Double[] localVal = {null};
-
-            tenantScope.withTenant(tenant, ctx -> {
-                if ("AVG".equals(aggFunc)) {
-                    // For AVG we need SUM+COUNT to fold across batches correctly.
-                    var rows = ctx.select(
-                            sum(DOCUMENT_ASPECTS.CONFIDENCE),
-                            count(DOCUMENT_ASPECTS.CONFIDENCE))
-                        .from(DOCUMENT_ASPECTS)
-                        .where(DOCUMENT_ASPECTS.SOURCE_URI.in(batch)
-                            .and(DOCUMENT_ASPECTS.CONFIDENCE.isNotNull()))
-                        .fetch();
-                    if (!rows.isEmpty()) {
-                        Object sumVal = rows.get(0).get(0);
-                        Object cntVal = rows.get(0).get(1);
-                        if (sumVal != null) localSum[0] = ((Number) sumVal).doubleValue();
-                        if (cntVal != null) localCnt[0] = ((Number) cntVal).longValue();
-                    }
-                } else if ("MIN".equals(aggFunc)) {
-                    var rows = ctx.select(min(DOCUMENT_ASPECTS.CONFIDENCE))
-                        .from(DOCUMENT_ASPECTS)
-                        .where(DOCUMENT_ASPECTS.SOURCE_URI.in(batch)
-                            .and(DOCUMENT_ASPECTS.CONFIDENCE.isNotNull()))
-                        .fetch();
-                    if (!rows.isEmpty()) {
-                        Object val = rows.get(0).get(0);
-                        if (val != null) localVal[0] = ((Number) val).doubleValue();
-                    }
-                } else {
-                    var rows = ctx.select(max(DOCUMENT_ASPECTS.CONFIDENCE))
-                        .from(DOCUMENT_ASPECTS)
-                        .where(DOCUMENT_ASPECTS.SOURCE_URI.in(batch)
-                            .and(DOCUMENT_ASPECTS.CONFIDENCE.isNotNull()))
-                        .fetch();
-                    if (!rows.isEmpty()) {
-                        Object val = rows.get(0).get(0);
-                        if (val != null) localVal[0] = ((Number) val).doubleValue();
-                    }
-                }
-                return null;
-            });
-
-            if ("AVG".equals(aggFunc)) {
-                sumAcc += localSum[0];
-                cntAcc += localCnt[0];
-            } else if (localVal[0] != null) {
-                if ("MIN".equals(aggFunc)) {
-                    minAcc = (minAcc == null) ? localVal[0] : Math.min(minAcc, localVal[0]);
-                } else {
-                    maxAcc = (maxAcc == null) ? localVal[0] : Math.max(maxAcc, localVal[0]);
-                }
-            }
-        }
-
-        return switch (reducerKind) {
-            case "avg_confidence" -> cntAcc == 0 ? null : sumAcc / cntAcc;
-            case "min_confidence" -> minAcc;
-            case "max_confidence" -> maxAcc;
-            default -> null;
-        };
+        return AspectConfidence.aggregate(tenantScope, tenant, sourceUris, reducerKind);
     }
 
     /**

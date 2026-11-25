@@ -243,8 +243,9 @@ class DataMoveVerificationIntegrationTest extends DataMoveIntegrationBase {
     }
 
     @Test
-    void aVerificationThatOutlastsStatementTimeoutMs_isReportedAsTheTimeout_andTheMoveIsNotCompleted() throws Exception {
-        register("v-slow", "tenant_plain", 50, 0, null, "stamp-template.sql", "verification-sleep.sql", 1_000, null);
+    void aFirstPassThatOutlastsVerifyStatementTimeoutMs_isReportedAsTheTimeout_andTheMoveIsNotCompleted() throws Exception {
+        register("v-slow", "tenant_plain", 50, 0, null, "stamp-template.sql", "verification-sleep.sql", 60_000, null);
+        DataMoveTestFixtures.setVerifyStatementTimeout(ctx(), "v-slow", 1_000);
         runsOnly("v-slow");
 
         long started = System.nanoTime();

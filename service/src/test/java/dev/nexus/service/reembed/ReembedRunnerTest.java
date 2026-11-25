@@ -437,7 +437,7 @@ class ReembedRunnerTest extends ReembedFixture {
         su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
             .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant()))
             .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(fx.tgt())).execute());
-        dev.nexus.service.db.CollectionRegistry.evictTenant(fx.tenant());
+        dev.nexus.service.db.CollectionRegistry.shared().evictTenant(fx.tenant());
 
         runner(fx, ONE_DOC_PER_BATCH).tick();
 

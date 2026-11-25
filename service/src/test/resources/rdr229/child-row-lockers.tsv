@@ -1,0 +1,54 @@
+# RDR-229 P3.5a (nexus-p2m1x.23): every statement in service/src/main that takes a row lock (FOR UPDATE, FOR SHARE, FOR NO KEY UPDATE, FOR KEY SHARE),
+# and its order relative to the registry read of its method. ChildRowLockerCensusTest scans the source and fails on a site missing here or gone, and
+# on an after-registry verdict the scan cannot prove. A no-registry-lock verdict says why no registry waiter can sit behind the lock.
+# file	method	table	lock	count	verdict	reason
+AspectDocIdAttribution.java	namesNonLiveDocument	CATALOG_DOCUMENTS	forShare	1	no-registry-lock	document read FOR SHARE inside writeAspect, which read the registry row first (the fenced and unfenced upsert both)
+AspectTaskRefs.java	lockNaming	TUPLES	forNoKeyUpdate	1	no-registry-lock	tuples rows of the aspects rename helper: a per-store rename holds no registry lock, so no registry waiter can be behind it; the fenced upsert takes its key share before the tuples row
+CatalogMoves.java	ownerMove	CATALOG_DOCUMENTS	forUpdate	1	after-registry	the registry rows of every collection the move writes in are read FOR KEY SHARE first, in one id-ordered statement (lockCollectionsOfDocuments), and requireCollectionsHeld refuses a collection it does not hold once the document rows are locked
+CatalogMoves.java	ownerMove	CATALOG_OWNERS	forUpdate	1	no-registry-lock	the owner rows come first, before any registry read; no retiring verb locks a catalog_owners row while it holds a registry row, so no registry waiter sits behind it
+CatalogRepository.java	lockAndReadDocRow	CATALOG_DOCUMENTS	forKeyShare	1	no-registry-lock	document row lock by tumbler (the sensitivity and trash verbs); names no collection
+CatalogRepository.java	lockDocumentRow	CATALOG_DOCUMENTS	forKeyShare	1	no-registry-lock	document row lock by tumbler; every caller reads the registry first: a document writer (normalize, key share), a repair (rewriteStaleNotes, FOR SHARE), the document and owner moves (CatalogMoves.lockCollectionsOfDocuments)
+CatalogRepository.java	lockDocumentRow	CATALOG_DOCUMENTS	forUpdate	1	no-registry-lock	document row lock by tumbler; every caller reads the registry first: a document writer (normalize, key share), a repair (rewriteStaleNotes, FOR SHARE), the document and owner moves (CatalogMoves.lockCollectionsOfDocuments)
+CatalogRepository.java	reconcileStage	CATALOG_RECONCILE_RUNS	forShare	1	no-registry-lock	the reconcile run row, no collection named
+CatalogRepository.java	refuseStaleExpected	CATALOG_DOCUMENT_CHUNKS	forUpdate	1	no-registry-lock	called inside appendOneDocumentTx after registryFirst (the manifest rows of one document)
+CatalogRepository.java	registerDocumentManyWithOutcome	CATALOG_OWNERS	forUpdate	1	after-registry	a registry read (requireWritable, registryFirst or normalize) precedes the lock in the same method
+CatalogRepository.java	registerDocumentWithOutcome	CATALOG_OWNERS	forUpdate	1	after-registry	a registry read (requireWritable, registryFirst or normalize) precedes the lock in the same method
+CatalogRepository.java	sweepOneOwner	CATALOG_OWNERS	forUpdate	1	no-registry-lock	ghost sweep of one owner: owner row, no collection named
+ChunkKeySweep.java	oneBatch	CHUNKS	forUpdate	1	no-registry-lock	background chunk-key sweep: chunk rows FOR UPDATE SKIP LOCKED, which never waits for a row lock, so it cannot be a link of a cycle
+CollectionDeleteFence.java	lockInIdOrder	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: the delete by id takes the origin's row FOR UPDATE between its quarantine siblings' key shares below and above its id, after the re-embed start guard and before any child row; requireSourceById then re-locks it without waiting
+CollectionOneRowRename.java	readOwn	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: the one-row rename re-reads the old label's row FOR UPDATE after CollectionTombstones.lockRowsOfOneRowRename took it in collection_id order
+CollectionRefusals.java	requireSourceById	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: a retiring verb reads its named source (a supersede also its named successor) FOR UPDATE by id; for supersede and rename a second lock of a row the ordered lockRows took (registry first), for the delete the first and only registry lock, taken before any child row with no sweep gate ahead of it
+CollectionRegistry.java	fillOrNull	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
+CollectionRegistry.java	lockAllForWrite	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
+CollectionRegistry.java	lockIdsAndLabelsForWrite	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
+CollectionRegistry.java	readLocked	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
+CollectionRegistry.java	readLocked	CATALOG_COLLECTIONS	forShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
+CollectionTombstones.java	lockRowsWhere	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
+CollectionTombstones.java	repointTombstones	CATALOG_COLLECTIONS	forUpdate	1	after-registry	the successor's registry row is read FOR KEY SHARE first (requireIdForWrite), then the tombstone rows FOR UPDATE in collection_id order, the order of a retiring verb's lockRows (folio review F4)
+GroupRules.java	lock	GROUP_RECORDS	forUpdate	1	no-registry-lock	identity group rows, no collection
+GroupRules.java	onJoin	GROUP_RECORDS	forShare	1	no-registry-lock	identity group rows, no collection
+GroupRules.java	onLeave	GROUP_RECORDS	forShare	1	no-registry-lock	identity group rows, no collection
+IdentityRetention.java	run	IDENTITY_RECORDS	forUpdate	1	no-registry-lock	identity rows, no collection
+IdentityRows.java	lock	IDENTITY_RECORDS	forUpdate	1	no-registry-lock	identity rows, no collection
+ManifestFill.java	picked	?	forUpdate	1	no-registry-lock	background manifest fill: picks documents, takes no registry lock (it reads the registry unlocked); listed for review with the multi-collection writers
+ManifestReplace.java	clearRecords	CHUNK_ORPHANED_AT	forUpdate	1	no-registry-lock	called from ManifestReplace.replace, after its registry read
+ManifestReplace.java	clearRecordsById	CHUNK_ORPHANED_AT	forUpdate	1	no-registry-lock	called from ManifestReplace.replace from gate 3, after its registry read (the id-keyed twin of clearRecords; RDR-229 P3.5c)
+ManifestReplace.java	replace	CATALOG_DOCUMENT_CHUNKS	forUpdate	1	after-registry	a registry read (requireWritable, registryFirst or normalize) precedes the lock in the same method
+ManifestReplace.java	replace	CHUNKS	forNoKeyUpdate	1	after-registry	a registry read (requireWritable, registryFirst or normalize) precedes the lock in the same method
+MemoryRepository.java	replaceMemory	MEMORY	forUpdate	2	no-registry-lock	T2 memory rows, no collection
+PipelineRepository.java	lockRun	PDF_PIPELINE	forUpdate	1	no-registry-lock	the pdf_pipeline row of a run; create takes the key share first, the other run routes name no collection write
+ReembedJobRepository.java	advanceAfterBatch	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows; the job start reads the collections first (round 2 item: requireAllForWrite)
+ReembedJobRepository.java	advanceAfterBatch	REEMBED_JOB_MOVES	forUpdate	1	no-registry-lock	re-embed job rows; the job start reads the collections first (round 2 item: requireAllForWrite)
+ReembedJobRepository.java	markRevivedIn	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows, inside startMarking's transaction, which already read both ends' registry rows (requireAllForWrite); it has no other caller
+ReembedJobRepository.java	recordMoveInTxn	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows, inside the per-document move transaction that read the registry (writeManifestMany)
+ReembedJobRepository.java	recordMoveInTxn	REEMBED_JOB_MOVES	forUpdate	1	no-registry-lock	re-embed job rows, inside the per-document move transaction that read the registry (writeManifestMany)
+RegistryRowLocks.java	keyShareIfPresent	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
+RequestLedger.java	read	?	forUpdate	1	no-registry-lock	request ledger rows, no collection
+TupleRepository.java	claimOnce	TUPLES	forNoKeyUpdate	1	no-registry-lock	tuple space rows
+TupleRepository.java	lockLiveClaimRow	?	forNoKeyUpdate	1	no-registry-lock	the claim row of the fenced aspect upsert, taken after the key share (AspectUpsertFencedLockOrderTest)
+TupleRepository.java	purgeExpiredTuplesQuery	TUPLES	forUpdate	1	no-registry-lock	tuple space rows
+TupleRepository.java	purgeOldClaimLogQuery	TUPLE_CLAIM_LOG	forUpdate	1	no-registry-lock	tuple space rows
+TupleRepository.java	queryOnceAnnounce	TUPLES	forNoKeyUpdate	1	no-registry-lock	tuple space rows
+TupleRepository.java	queryOnceAnnounceSubscriber	TUPLES	forNoKeyUpdate	1	no-registry-lock	tuple space rows
+TupleRepository.java	releaseLapsedClaimsQuery	TUPLES	forNoKeyUpdate	1	no-registry-lock	tuple space rows
+TupleRepository.java	writeReplace	TUPLES	forUpdate	1	no-registry-lock	tuple space rows; a collection is only a field of a task body

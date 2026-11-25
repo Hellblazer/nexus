@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -48,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>the candidate scan is the {@code chunks_pk} range over (tenant, collection);</li>
  *   <li>the manifest probe is {@code idx_catalog_chunks_chash};</li>
  *   <li>the quarantine probe is the primary key of {@code catalog_collections};</li>
- *   <li>the orphaning-record probe is the primary key of {@code chunk_orphaned_at}, with no sequential scan;</li>
+ *   <li>the orphaning-record probe is an index of {@code chunk_orphaned_at} (its primary key or P3.3c's (tenant_id, chash) child index), with no sequential scan;</li>
  *   <li>and there is NO index on {@code nexus.chunks (last_written_at)}: a btree on it would stop HOT updates
  *       for every client re-write (nexus-wbfpw.43 review item 7). That is asserted against the schema the
  *       changelog builds, so a changeset that adds one turns this red. (An earlier version of this test
@@ -104,10 +105,17 @@ class ChunkIsReapablePlanIntegrationTest {
 
             var docs = DSL.generateSeries(0, 999).as("g", "n");
             Field<Integer> docN = docs.field("n", Integer.class);
-            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-               .select(ctx.select(DSL.inline(TENANT), DSL.concat(DSL.inline("doc"), DSL.cast(docN, SQLDataType.VARCHAR)),
-                                  DSL.inline("t"), DSL.inline(COL)).from(docs))
+            ctx.insertInto(CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENTS.TENANT_ID,
+                    CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE,
+                    CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                    CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+               .select(ctx.select(DSL.inline(TENANT),
+                  DSL.concat(DSL.inline("doc"), DSL.cast(docN, SQLDataType.VARCHAR)),
+                  DSL.inline("t"),
+                  DSL.inline(COL),
+                  CollectionIds.idOf(DSL.inline(TENANT), DSL.inline(COL))).from(docs))
                .execute();
 
             // 20,000 of the 30,000 chunks are owned.
@@ -115,12 +123,21 @@ class ChunkIsReapablePlanIntegrationTest {
             Field<Integer> n = rows.field("n", Integer.class);
             // RDR-225: the manifest and orphaning rows carry the model of the chunk they reference.
             final String model = PgContainerHelper.collectionModel(ctx, TENANT, COL);
-            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                    CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION,
+                    CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
                     CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                .select(ctx.select(DSL.inline(TENANT),
-                                  DSL.concat(DSL.inline("doc"), DSL.cast(n.mod(1000), SQLDataType.VARCHAR)),
-                                  n, chash("a", n), DSL.inline(COL), DSL.inline(model)).from(rows))
+                  DSL.concat(DSL.inline("doc"), DSL.cast(n.mod(1000), SQLDataType.VARCHAR)),
+                  n,
+                  chash("a", n),
+                  DSL.inline(COL),
+                  CollectionIds.idOf(DSL.inline(TENANT), DSL.inline(COL)),
+                  DSL.inline(model)).from(rows))
                .execute();
 
             // 8,000 of the 10,000 orphans carry an orphaning record, as they would after a deletion or a
@@ -129,10 +146,19 @@ class ChunkIsReapablePlanIntegrationTest {
             // once anything has been orphaned (the header of vectors-021 says what an empty table plans).
             var orphans = DSL.generateSeries(20001, 28000).as("g", "n");
             Field<Integer> on = orphans.field("n", Integer.class);
-            ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
-                    CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
-               .select(ctx.select(DSL.inline(TENANT), DSL.inline(COL), chash("a", on), DSL.val(old),
-                                  DSL.inline(model)).from(orphans))
+            ctx.insertInto(CHUNK_ORPHANED_AT,
+                    CHUNK_ORPHANED_AT.TENANT_ID,
+                    CHUNK_ORPHANED_AT.COLLECTION,
+                    CHUNK_ORPHANED_AT.COLLECTION_ID,
+                    CHUNK_ORPHANED_AT.CHASH,
+                    CHUNK_ORPHANED_AT.ORPHANED_AT,
+                    CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
+               .select(ctx.select(DSL.inline(TENANT),
+                  DSL.inline(COL),
+                  CollectionIds.idOf(DSL.inline(TENANT), DSL.inline(COL)),
+                  chash("a", on),
+                  DSL.val(old),
+                  DSL.inline(model)).from(orphans))
                .execute();
 
             PgContainerHelper.analyzeTable(su, CHUNK_ORPHANED_AT);
@@ -154,12 +180,25 @@ class ChunkIsReapablePlanIntegrationTest {
         Field<Integer> n = series.field("n", Integer.class);
         // RDR-225: a chunk carries its collection's model (minilm-l6-v2-384, matching the 384-wide vector).
         final String model = PgContainerHelper.collectionModel(ctx, TENANT, collection);
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT)
-           .select(ctx.select(DSL.inline(TENANT), DSL.inline(collection), chash(prefix, n), DSL.inline(model),
-                              DSL.inline("x"),
-                              DSL.val(vector, CHUNKS.EMBEDDING_384.getDataType()),
-                              DSL.val(when), DSL.val(when)).from(series))
+        ctx.insertInto(CHUNKS,
+                CHUNKS.TENANT_ID,
+                CHUNKS.COLLECTION,
+                CHUNKS.COLLECTION_ID,
+                CHUNKS.CHASH,
+                CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT,
+                CHUNKS.EMBEDDING_384,
+                CHUNKS.CREATED_AT,
+                CHUNKS.LAST_WRITTEN_AT)
+           .select(ctx.select(DSL.inline(TENANT),
+              DSL.inline(collection),
+              CollectionIds.idOf(DSL.inline(TENANT), DSL.inline(collection)),
+              chash(prefix, n),
+              DSL.inline(model),
+              DSL.inline("x"),
+              DSL.val(vector, CHUNKS.EMBEDDING_384.getDataType()),
+              DSL.val(when),
+              DSL.val(when)).from(series))
            .execute();
     }
 
@@ -225,8 +264,10 @@ class ChunkIsReapablePlanIntegrationTest {
         assertThat(plan).as("manifest probe:%n%s", plan).contains("idx_catalog_chunks_chash");
         assertThat(plan).as("quarantine probe is the catalog_collections primary key:%n%s", plan)
             .containsPattern("Index (Only )?Scan using \\w*catalog_collections\\w*");
-        assertThat(plan).as("the orphaning record is probed by its primary key, never scanned:%n%s", plan)
-            .containsPattern("Index (Only )?Scan using chunk_orphaned_at_pk")
+        // Either index probes it: the primary key (tenant_id, collection, chash), or RDR-229 P3.3c's child index (tenant_id, chash)
+        // (Rdr229SwapMove.CHILD_INDEX, vectors-075-1), which the planner prefers for the chash-only join.
+        assertThat(plan).as("the orphaning record is probed by an index, never scanned:%n%s", plan)
+            .containsPattern("Index (Only )?Scan using (chunk_orphaned_at_pk|" + dev.nexus.service.vectors.Rdr229SwapMove.CHILD_INDEX + ")")
             .doesNotContainPattern("Seq Scan on chunk_orphaned_at");
     }
 

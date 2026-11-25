@@ -95,7 +95,7 @@ class MoveBootWorkTest {
     }
 
     private static DataMove move(String label) {
-        return new DataMove(label, "t", "s", "t", 10, 0, 1000, "v", null, null, null, null, 0, null, null);
+        return new DataMove(label, "t", "s", "t", 10, 0, 1000, "v", null, null, null, null, 0, null, null, DataMove.DEFAULT_VERIFY_STATEMENT_TIMEOUT_MS);
     }
 
     private final FakeClock clock = new FakeClock();
@@ -400,7 +400,8 @@ class MoveBootWorkTest {
         var restarted = new DataMove("m", "t", "s", "t", 10, 0, 1000, "v", null, null, null, null, 3,
             java.time.OffsetDateTime.parse("2026-11-16T23:00:00Z"),
             "retry 3, last 2026-11-16T23:00:00Z: run m/acme-corp/leafed_m1_acme-corp raised sqlstate=40001: "
-                + "could not serialize access; Key (tenant_id)=(acme-corp) conflicts");
+                + "could not serialize access; Key (tenant_id)=(acme-corp) conflicts",
+            DataMove.DEFAULT_VERIFY_STATEMENT_TIMEOUT_MS);
         reader.open = List.of(restarted);
         var w = work(Duration.ofMinutes(15));
 
@@ -488,10 +489,59 @@ class MoveBootWorkTest {
 
         var restarted = new DataMove("r", "t", "s", "t", 10, 0, 1000, "v", null, null, null, null, 3,
             java.time.OffsetDateTime.parse("2026-11-16T23:00:00Z"),
-            "retry 3, last 2026-11-16T23:00:00Z: pg_background is not installed");
+            "retry 3, last 2026-11-16T23:00:00Z: pg_background is not installed",
+            DataMove.DEFAULT_VERIFY_STATEMENT_TIMEOUT_MS);
         reader.open = List.of(restarted);
         w.publish();
         assertThat(entry("r").what()).startsWith("blocked: r:");
         assertThat(entry("r").reasonClass()).isEqualTo("missing_prerequisite");
+    }
+
+    // ── a validation with no statement bound (nexus-p2m1x.21) ───────────────────────────────────────────────
+
+    @Test
+    void aValidationWithNoStatementBoundShowsHowLongItHasRunAndThatItCanBeCancelled() {
+        var m = move("m");
+        reader.open = List.of(m);
+        states.working(m);
+        states.callStarted(m, VerifyingFinisher.COMPLETION_RUN, 4242);
+        var w = work(Duration.ofMinutes(15));
+
+        w.publish();
+        assertThat(entry("m").what()).startsWith("working: m, validating for under a minute").contains("pg_cancel_backend");
+        assertThat(entry("m").step().what()).isEqualTo("validation in flight");
+
+        clock.advance(Duration.ofMinutes(5));
+        w.publish();
+        assertThat(entry("m").what()).as("the elapsed time, and never the stalled text of a CALL").startsWith("working: m, validating for 5 m");
+    }
+
+    // ── nexus-p2m1x.27 row 23: a restarted engine's page says what an attempt would do, by the move's own definition ──
+
+    private DataMove restartedWithRetries(String label, String onComplete) {
+        return new DataMove(label, "t", "s", "t", 10, 0, 1000, "v", onComplete, null, null, null, 20,
+            java.time.OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC), "an earlier transient",
+            DataMove.DEFAULT_VERIFY_STATEMENT_TIMEOUT_MS);
+    }
+
+    @Test
+    void aRestartedEngine_saysTheDropMoveEndsNoIndexBuilds_andAnotherChunkFamilyMoveDoes() {
+        String onComplete = NameKeyDropMove.onComplete();
+        var drop = restartedWithRetries(NameKeyDropMove.LABEL, onComplete);
+        var other = restartedWithRetries("some-other-chunk-move", onComplete);
+        assertThat(ChunkFamily.touches(drop)).as("non-vacuity: both are chunk-family by the same on_complete").isTrue();
+        assertThat(ChunkFamily.touches(other)).isTrue();
+        reader.open = List.of(drop, other);
+        var w = work(Duration.ofMinutes(15));
+
+        w.publish();
+
+        var paged = registry.dataMovesNeedOperator();
+        assertThat(paged).extracting(BootWorkRegistry.NeedsOperator::label).containsExactlyInAnyOrder(NameKeyDropMove.LABEL,
+            "some-other-chunk-move");
+        assertThat(paged).filteredOn(e -> e.label().equals(NameKeyDropMove.LABEL)).singleElement()
+            .extracting(BootWorkRegistry.NeedsOperator::terminatesIndexBuilds).as("the drop waits for builds").isEqualTo(false);
+        assertThat(paged).filteredOn(e -> e.label().equals("some-other-chunk-move")).singleElement()
+            .extracting(BootWorkRegistry.NeedsOperator::terminatesIndexBuilds).as("another move still ends them").isEqualTo(true);
     }
 }

@@ -122,6 +122,75 @@ class PciIndexSweepTest {
         assertThat(reads).as("1000 questions, no read").hasValue(1);
     }
 
+    /** RDR-229 P3.4: after the latch the id indexes serve and the name indexes are gone: the sweep's line and set-change log must not read 0. */
+    @Test
+    void aLeafWithOnlyIdIndexes_isCountedAndLogged_asTheIdFamily() {
+        sweep = new PciIndexSweep(() -> snapshot(PciCatalog.Index.byId(HASH_A, true, 7L, null), PciCatalog.Index.byId(HASH_B, true, 8L, null)),
+            SETTINGS);
+
+        assertThat(sweep.refresh()).isTrue();
+
+        assertThat(sweep.status().valid()).as("the name count stays the name count").isZero();
+        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=0 valid_id=2 invalid=0 invalid_id=0 unparsed=0 reindex_leftover=0");
+        assertThat(lines("pci_sweep_set_changed")).singleElement().asString().contains("added_count=2").contains(":id=7:").contains(":id=8:");
+    }
+
+    /** The WARN says no index parsed, of either family: valid id indexes serving after the latch are not that, and an id build that failed shows. */
+    @Test
+    void theNoValidIndexWarning_ignoresAnUnparsedIndexWhenIdIndexesServe_butStillFiresWhenNoneOfEitherFamilyDoes() {
+        sweep = new PciIndexSweep(() -> snapshot(index("pci_foo", true, null), PciCatalog.Index.byId(HASH_A, true, 7L, null),
+            PciCatalog.Index.byId(HASH_B, false, 8L, null)), SETTINGS);
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(lines("pci_sweep")).as("unparsed plus a valid id index: the INFO form, with the failed id build counted").containsExactly(
+            "event=pci_sweep valid=0 valid_id=1 invalid=0 invalid_id=1 unparsed=1 reindex_leftover=0");
+        assertThat(logs.list.stream().filter(e -> e.getFormattedMessage().contains("event=pci_sweep ")).map(ILoggingEvent::getLevel))
+            .containsExactly(Level.INFO);
+        sweep.stop();
+
+        logs.list.clear();
+        sweep = new PciIndexSweep(() -> snapshot(index("pci_foo", true, null)), SETTINGS);   // control: nothing valid, of either family
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(lines("pci_sweep")).singleElement().asString().contains("warning=unparsed_indexes_and_no_valid_one");
+        assertThat(logs.list.stream().filter(e -> e.getFormattedMessage().contains("event=pci_sweep ")).map(ILoggingEvent::getLevel))
+            .containsExactly(Level.WARN);
+    }
+
+    /** The maintenance status reads the anchor of the index a canary target measures: an id target reads the id index's, not a name index's. */
+    @Test
+    void anIdIndexsAnchor_isReadByIdAndByTheTargetThatMeasuresIt() {
+        var anchor = new PciCatalog.Anchor(Instant.parse("2026-10-20T08:00:00Z"), 100, 4096, PciCatalog.ORIGIN_BUILT);
+        sweep = new PciIndexSweep(() -> snapshot(PciCatalog.Index.byId(HASH_A, true, 7L, anchor.toJson())), SETTINGS);
+        assertThat(sweep.refresh()).isTrue();
+
+        assertThat(sweep.anchorById(M, T, 7L)).contains(anchor);
+        assertThat(sweep.anchorById(M, T, 8L)).isEmpty();
+        var idTarget = new PciCanary.Target("nexus.chunks_leaf", T, M, "c1", HASH_A, 7L);
+        assertThat(sweep.anchorOf(idTarget)).contains(anchor);
+        assertThat(sweep.anchorOf(new PciCanary.Target("nexus.chunks_leaf", T, M, "c1", HASH_A))).as("a name target reads the name index's: none here").isEmpty();
+    }
+
+    @Test
+    void aFailedReadAndARecoveredSet_carryTheIdCountToo() {
+        Instant t0 = Instant.parse("2026-10-09T12:00:00Z");
+        var clock = new MutableClock(t0);
+        AtomicInteger n = new AtomicInteger();
+        sweep = new PciIndexSweep(() -> {
+            if (n.incrementAndGet() == 1 || n.get() == 4) {
+                return snapshot(PciCatalog.Index.byId(HASH_A, true, 7L, null));
+            }
+            throw new IllegalStateException("down");
+        }, SETTINGS, clock, Duration.ofSeconds(30));
+        sweep.refresh();
+        clock.set(t0.plusSeconds(600));
+        sweep.refresh();                                       // fails: the previous counts are kept
+        assertThat(lines("pci_sweep_read_failed")).singleElement().asString().contains("kept_valid=0 kept_valid_id=1");
+        clock.set(t0.plusSeconds(1831));
+        sweep.hasValidIndex(M, T, "c1");                       // the set expires
+        sweep.refresh();                                       // fails again
+        assertThat(sweep.refresh()).isTrue();                  // recovers
+        assertThat(lines("pci_sweep_set_recovered")).singleElement().asString().contains("valid=0 valid_id=1");
+    }
+
     @Test
     void aSuccessfulRead_replacesTheSet_keepsTheCountsAndTheReadTime_andLogsPciSweep() {
         Instant now = Instant.parse("2026-10-09T12:00:00Z");
@@ -141,7 +210,7 @@ class PciIndexSweepTest {
         assertThat(s.unparsed()).isEqualTo(1);
         assertThat(s.lastReadAt()).isEqualTo(now);
         assertThat(s.reindexLeftover()).isZero();
-        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=1 invalid=1 unparsed=1 reindex_leftover=0");
+        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=1 valid_id=0 invalid=1 invalid_id=0 unparsed=1 reindex_leftover=0");
     }
 
     @Test
@@ -173,7 +242,7 @@ class PciIndexSweepTest {
         assertThat(s.unparsed()).as("unparsed excludes leftovers: no double count").isEqualTo(1);
         assertThat(s.reindexLeftover()).isEqualTo(1);
         assertThat(sweep.hasValidIndex(M, T, "c1")).isTrue();
-        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=1 invalid=0 unparsed=1 reindex_leftover=1");
+        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=1 valid_id=0 invalid=0 invalid_id=0 unparsed=1 reindex_leftover=1");
     }
 
     @Test

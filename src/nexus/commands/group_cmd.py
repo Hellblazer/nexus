@@ -332,6 +332,18 @@ def _rows(store: Any, subspace: str, topic: str) -> tuple[list[Any], bool]:
     return out, bool(store.rd(subspace, {"topic": topic}, n=1, since=since))
 
 
+def _disclaim_counted(episode: list[Any], at: datetime, row: Any, resolver: AckResolver) -> bool | None:
+    """Whether the engine would act on the disclaim *row* posted at *at*: true when it carries the sender-session stamp of the
+    identity that owned the red at that time (the stamp mapped through the session index; ``from`` is a label and is never
+    read), false when it does not (anyone else, no stamp, a stamp no identity holds), None when the lookup failed."""
+    current = [body for t, _, body in episode if t <= at][-1:]
+    owner = current[0].get("owner") if current else None
+    who, known = resolver.identity_of(row)
+    if not known:
+        return None
+    return bool(owner) and who == owner
+
+
 def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict[str, Any]]:
     """One entry per red of an ``--owner`` subspace, from its owner, clear and ack rows (:func:`nexus.ci_reds.split`
     says how rows make reds; a hand-off's ``reason`` ties it to the open red, not its new ``episode_at``).
@@ -387,6 +399,14 @@ def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict
             "cleared_at": cleared.isoformat().replace("+00:00", "Z") if cleared else None,
             # Acks on a red tip, inside the red, that the engine ignores (null or unmapped stamp), up to the counting ack.
             "ignored_acks": resolver.ignored - ignored_before,
+            # The owner's `not mine` rows (`nx ci ack --not-mine`), recorded for display: never an ack, never in minutes.
+            # `counted` says whether the engine would act on it: true only for a disclaim stamped by the session of the owner at
+            # that time; false for anyone else's, no stamp or a stamp the index maps to nobody; null when it could not be checked.
+            "disclaims": [
+                {"at": row.created_at, "from": (row.dims or {}).get("from"), "sha": (row.dims or {}).get("sha"),
+                 "note": (row.body or None), "counted": _disclaim_counted(episode, at, row, resolver)}
+                for at, row in red.disclaims
+            ],
         })
     return out
 
@@ -441,3 +461,6 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     for r in reds:
         ack = f"acked by {r['acked_by_alias'] or r['acked_by']} at {r['acked_at']}, {r['minutes']} min" if r["acked_at"] else "no ack"
         click.echo(f"  {str(r['sha'])[:12]}  episode {r['episode_at']}  {ack}" + (f"  ({r['handoffs']} hand-off)" if r["handoffs"] else ""))
+        for d in r["disclaims"]:
+            tag = {True: "", False: " (ignored: not the owner)", None: " (not verified: the poster could not be resolved)"}[d["counted"]]
+            click.echo(f"    disclaimed by {d['from']} at {d['at']}" + (f": {d['note']}" if d["note"] else "") + tag)

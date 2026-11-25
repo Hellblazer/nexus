@@ -13,12 +13,13 @@ $ARGUMENTS
 
 ## Action
 
-Run `nx index pdf <file> --collection <name>` for each PDF. For batch processing, use a loop:
+Run `nx index pdf <file> --collection <subject>` for each PDF. `<subject>` is the bare subject
+the papers belong to (`distributed-systems`), never a model token or a `knowledge__...` name: reuse an
+existing subject when one fits (`nx collection list`), and the catalog names the collection
+([collection rules](https://github.com/Hellblazer/nexus/blob/main/docs/collections.md)). For batch processing, use a loop:
 
 ```bash
-# Short form: t3_collection_name auto-promotes to the conformant
-# 4-segment shape knowledge__<corpus>__voyage-context-3__v1.
-for f in *.pdf; do nx index pdf "$f" --collection knowledge__<corpus>; done
+for f in *.pdf; do nx index pdf "$f" --collection <subject>; done
 ```
 
 Pass through the user's arguments: $ARGUMENTS

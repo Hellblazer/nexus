@@ -36,6 +36,9 @@ def _env(monkeypatch, t2_service_env):
 @pytest.fixture
 def docs(t2_service_env):
     """Four documents: a1 and a2 in collection A (paths under docs/ and notes/), b1 and b2 in B."""
+    from tests._catalog_fixture_ops import register_seed_collections
+
+    register_seed_collections(_COLL_A, _COLL_B)
     with HttpCatalogClient() as cat:
         owner = cat.register_owner("sens-owner", owner_type="curator", tumbler_prefix="71.1")
 

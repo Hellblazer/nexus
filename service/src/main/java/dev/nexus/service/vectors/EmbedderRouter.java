@@ -303,7 +303,7 @@ public final class EmbedderRouter implements Embedder {
             }
             return null;
         });
-        CollectionRegistry.evictTenant(tenant);
+        CollectionRegistry.shared().evictTenant(tenant);
     }
 
     /**
@@ -366,7 +366,7 @@ public final class EmbedderRouter implements Embedder {
             upsertProfileRow(ctx, tenant, contentType, finalModelToken);
             return null;
         });
-        CollectionRegistry.evictTenant(tenant);
+        CollectionRegistry.shared().evictTenant(tenant);
     }
 
     /**

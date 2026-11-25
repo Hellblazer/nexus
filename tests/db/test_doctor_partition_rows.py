@@ -36,7 +36,7 @@ def _psql(state: dict, sql: str, *, dbname: str | None = None) -> list[str]:
     proc = subprocess.run(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
          "-U", state["pg_user"], "-d", dbname or state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", sql],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, f"psql failed: {proc.stderr}\nSQL: {sql}"
     return [ln for ln in proc.stdout.splitlines() if ln.strip()]

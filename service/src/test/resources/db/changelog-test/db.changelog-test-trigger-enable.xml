@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.7 (nexus-p2m1x.27): ALTER TABLE nexus.${table} ENABLE TRIGGER ${trigger}, in Liquibase XML instead of a Java SQL
+    string (nexus-zrcj7). jOOQ has no trigger DDL.
+
+    The control of the vectors-079 tests: the same statement run with the child-row name trigger off. Only the two names are
+    parameters, checked by PgContainerHelper#enableTrigger. runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="trigger-enable" author="nexus-p2m1x.27" runAlways="true">
+        <sql>ALTER TABLE nexus.${table} ENABLE TRIGGER ${trigger}</sql>
+    </changeSet>
+</databaseChangeLog>

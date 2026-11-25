@@ -1,10 +1,12 @@
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.vectors.DimTables;
 import org.jooq.DSLContext;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -89,9 +91,33 @@ public final class ChashRepository {
         " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ?";
 
     private final TenantScope tenantScope;
+    private final Gate3 gate3;
+    /** RDR-229 P3.5a: the rename refusal this repository's rename consults first ({@link RenameGuard#open()} never refuses). */
+    private final RenameGuard renameGuard;
 
     public ChashRepository(TenantScope tenantScope) {
+        this(tenantScope, Gate3.never(), RenameGuard.open());
+    }
+
+    /** The rename guard alone: gate 3 never holds (P3.5a's callers and tests). */
+    public ChashRepository(TenantScope tenantScope, RenameGuard renameGuard) {
+        this(tenantScope, Gate3.never(), renameGuard);
+    }
+
+    /** RDR-229 P3.5c: from gate 3 on the install the readers name a collection by its id column ({@link CollectionKey}). */
+    public ChashRepository(TenantScope tenantScope, Gate3 gate3) {
+        this(tenantScope, gate3, RenameGuard.open());
+    }
+
+    /** The production constructor: the one gate-3 signal and the one rename guard ({@code NexusService} passes both). */
+    public ChashRepository(TenantScope tenantScope, Gate3 gate3, RenameGuard renameGuard) {
         this.tenantScope = tenantScope;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+        this.renameGuard = java.util.Objects.requireNonNull(renameGuard, "renameGuard");
+    }
+
+    private CollectionKey ck() {
+        return CollectionKey.of(gate3);
     }
 
     /**
@@ -122,6 +148,19 @@ public final class ChashRepository {
     // ── lookup ─────────────────────────────────────────────────────────────────
 
     /**
+     * The lookup probe from gate 3, typed: the collections holding this chash as the registry's current label of each chunk's
+     * {@code collection_id}, joined on the id. Public so {@code ChashProbePlanShapeTest} EXPLAINs exactly the statement {@code lookup} runs
+     * from the latch, as it does {@link #PROBE_SQL} before it.
+     */
+    public static org.jooq.ResultQuery<?> idProbe(DSLContext ctx, String tenant, byte[] chash) {
+        return ctx.select(CATALOG_COLLECTIONS.NAME.as("collection"), CHUNKS.CREATED_AT)
+            .from(CHUNKS).join(CATALOG_COLLECTIONS)
+            .on(CATALOG_COLLECTIONS.TENANT_ID.eq(CHUNKS.TENANT_ID)
+                .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(CHUNKS.COLLECTION_ID)))
+            .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.CHASH.eq(chash)));
+    }
+
+    /**
      * Return all {@code (collection, created_at)} rows for {@code chash} —
      * the collections whose chunk store actually holds this content.
      *
@@ -138,7 +177,9 @@ public final class ChashRepository {
     public List<Map<String, String>> lookup(String tenant, Chash chash) {
         byte[] bytes = chash.toBytes();
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.resultQuery(PROBE_SQL, bytes).fetch();
+            // RDR-229 P3.5c: from gate 3 the collection is the registry's label of the chunk's id (typed, joined on the id);
+            // before it, the published probe over the name column.
+            var rows = ck().byId() ? idProbe(ctx, tenant, bytes).fetch() : ctx.resultQuery(PROBE_SQL, bytes).fetch();
             List<Map<String, String>> result = new ArrayList<>(rows.size());
             for (var r : rows) {
                 OffsetDateTime ts = r.get("created_at", OffsetDateTime.class);
@@ -170,11 +211,18 @@ public final class ChashRepository {
      */
     public Set<String> distinctCollections(String tenant) {
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(384);
-        return tenantScope.withTenant(tenant, ctx ->
-            new HashSet<>(ctx.selectDistinct(ch.collection())
+        return tenantScope.withTenant(tenant, ctx -> {
+            if (ck().byId()) {
+                // DISTINCT collection_id first, then each id's label once (not a correlated label per chunk row)
+                // a dangling id is listed under its stored name, so ghost detection sees it (linda 2026-11-23)
+                return new HashSet<>(CollectionKey.distinctLabelsKeepingDangling(ctx, tenant, ch.table(), ch.tenantId().eq(tenant),
+                    CHUNKS.COLLECTION_ID, ch.collection()));
+            }
+            return new HashSet<>(ctx.selectDistinct(ch.collection())
                              .from(ch.table())
                              .where(ch.tenantId().eq(tenant))
-                             .fetch(ch.collection())));
+                             .fetch(ch.collection()));
+        });
     }
 
     // ── rename_collection ──────────────────────────────────────────────────────
@@ -217,6 +265,8 @@ public final class ChashRepository {
                 || newCollection == null || newCollection.isBlank()) {
             throw new IllegalArgumentException("old and new collection must not be empty");
         }
+        // The target is a label a user supplied: judged by the label rule the catalog rename applies (n3hhc's class).
+        CollectionLabel.validateUserLabel(newCollection);
         // nexus-wbfpw.71: a re-home with no audit row; refused on a quarantine collection, source or target.
         // RDR-229 P2.5: each end by its row (registry cache, else one short read); a row-less target, its prefix.
         QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", oldCollection);
@@ -225,7 +275,9 @@ public final class ChashRepository {
         // fires vectors-021-3's chunk-locking trigger, so this whole transaction is retried on a 40P01
         // (the same wrap CatalogRepository.renameCollectionTxn carries). Everything it produces is the
         // `total` it returns; the registry cache update runs after the committed attempt returns.
-        int updated = DeadlockRetry.run("chash.renameCollection " + oldCollection, () -> tenantScope.withTenant(tenant, ctx -> {
+        boolean[] noop = new boolean[1];   // set by the committed attempt when the one-row regime made this a no-op
+        int updated = DeadlockRetry.run("chash.renameCollection " + oldCollection, () -> renameGuard.runRename(tenantScope, tenant, ctx -> {
+            noop[0] = false;
             // nexus-11gh6 (post-review, T2 nexus/review-11gh6-gate-2026-08-08
             // [21797] Important finding): this method is a SECOND,
             // independently-reachable (via /v1/chash/*) implementation of the
@@ -247,6 +299,10 @@ public final class ChashRepository {
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): a name a re-embed job is moving documents out of or into
             // is not re-homed underneath it; 409 naming the job (HttpUtil.sendTypedDbError).
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldCollection, newCollection);
+            // RDR-229 P3.5a row 14 (nexus-p2m1x.23): the verb's own registry lock, FOR UPDATE in id order (the canonical order's
+            // step 3, as CollectionRename takes it), so a writer of either name in flight, which holds its row FOR KEY SHARE, finishes
+            // before this re-home reads the chunk rows and one that arrives later reads the renamed row. A name with no row is skipped.
+            CollectionTombstones.lockRows(ctx, tenant, oldCollection, newCollection);
             // nexus-i15oc: plain registration check on purpose. A rename onto an EMPTY tombstone revives it
             // (renaming B back onto A, the round trip that undoes a rename, lands on A's tombstone), so the
             // target may be superseded. The source needs no check, it is only read.
@@ -301,8 +357,13 @@ public final class ChashRepository {
             // a chunk to another collection is maintenance: it re-writes no client
             // content, and refreshing the reapable(c) grace window here would keep an
             // unowned chunk alive by moving it.
+            // RDR-229 P3.1: the rows take the target's id with its name. newCollection is registered (checked above),
+            // and the rows the chunk foreign keys carry along (the manifest, topic assignments, chunk_orphaned_at)
+            // get the id from repairCascadedIds below, since the cascade renames them without writing their id.
+            final Long newId = CollectionIds.require(ctx, tenant, newCollection);
             int total = ctx.update(ch.table())
                         .set(ch.collection(), newCollection)
+                        .set(CHUNKS.COLLECTION_ID, newId)
                         .where(ch.tenantId().eq(tenant)
                             .and(ch.collection().eq(oldCollection)))
                         .execute();
@@ -312,19 +373,31 @@ public final class ChashRepository {
             // (tenant, collection, chash, model)); same-model it is the value already there.
             ctx.update(CATALOG_DOCUMENT_CHUNKS)
                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newCollection)
+               .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, newId)
                .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, newModel)
                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldCollection)))
                .execute();
+            // The manifest rows the chunk cascade already renamed (the statement above then matched none of them).
+            ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, newId)
+               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(newCollection))
+                   .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.isDistinctFrom(newId)))
+               .execute();
+            CatalogIdStamps.repairCascadedIds(ctx, tenant, newCollection, newId);
             // nexus-wbfpw.68: quarantine rows tagged for oldCollection now name a collection that is gone;
             // retag them to newCollection (an audit row per sibling). The chunk count returned stays the
             // origin's own rows. NOT when oldCollection is still a live registered collection: then its
             // quarantine rows (source-model vectors) stay with it. A catalog rename retires the source row
             // first, so this guard then passes.
-            if (!QuarantineOrigin.isLiveRegistered(ctx, tenant, oldCollection)) {
-                QuarantineOrigin.retagRowsOf(ctx, tenant, oldCollection, newCollection);
+            if (!QuarantineOrigin.isLiveRegistered(ctx, tenant, oldCollection, gate3)) {
+                QuarantineOrigin.retagRowsOf(ctx, tenant, oldCollection, newCollection, gate3);
             }
             return total;
+        }, ctx -> {
+            RenameGuard.requireRegistryRenamed(ctx, tenant, oldCollection, newCollection);   // the registry rename moved the label: nothing to rewrite
+            noop[0] = true;
+            return 0;
         }));
         // Post-commit (nexus-h8rf6.2): see CollectionRegistry class doc. newCollection's
         // row already existed before this transaction (ensureCollectionRegistered
@@ -333,7 +406,11 @@ public final class ChashRepository {
         // on the rare eviction race otherwise (RDR-204 nexus-ft04v.14).
         // nexus-hkh1y: the lookup itself caches (on a miss, through the guarded fill); a direct
         // markKnown of its result would re-cache a read a concurrent evict had invalidated.
-        CollectionRegistry.lookup(tenantScope, tenant, newCollection);
+        if (noop[0]) {
+            RenameNoOpActivity.record("chash", oldCollection, newCollection);   // counted once committed
+        } else {
+            CollectionRegistry.lookup(tenantScope, tenant, newCollection);
+        }
         return updated;
     }
 
@@ -380,7 +457,7 @@ public final class ChashRepository {
             Integer n = ctx.selectCount()
                            .from(ch.table())
                            .where(ch.tenantId().eq(tenant)
-                               .and(ch.collection().eq(collection)))
+                               .and(ck().eq(tenant, ch.collection(), CHUNKS.COLLECTION_ID, collection)))
                            .fetchOne(0, Integer.class);
             return n != null ? n : 0;
         });
@@ -420,7 +497,7 @@ public final class ChashRepository {
             for (String hex : ctx.selectDistinct(ch.chash())
                                  .from(ch.table())
                                  .where(ch.tenantId().eq(tenant)
-                                     .and(ch.collection().eq(collection)))
+                                     .and(ck().eq(tenant, ch.collection(), CHUNKS.COLLECTION_ID, collection)))
                                  .fetch(ch.chash())) {
                 if (hex != null && !hex.isEmpty()) {
                     result.add(hex);

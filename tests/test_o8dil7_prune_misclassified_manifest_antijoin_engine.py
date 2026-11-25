@@ -89,7 +89,7 @@ def _psql(state: dict, sql: str) -> list[str]:
             "-d", state["pg_dbname"],
             "-tAc", sql,
         ],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, (
         f"psql failed ({proc.returncode}) running:\n{sql}\n"
@@ -538,14 +538,20 @@ def test_inverted_control_handseeded_dangling_row_detected(t2_service_env):
     ))
     # Correlation pin: one unrelated LIVE chunk in the same collection, so
     # the anti-join cannot pass by "the chunk table happens to be empty".
+    # RDR-229 P3.1: every row that names the collection carries the registry's id beside the name (the CHECKs on
+    # chunks, catalog_documents and the manifest), read back from the row inserted above.
+    coll_id = (
+        "(SELECT collection_id FROM nexus.catalog_collections "
+        f"WHERE tenant_id = '{tenant}' AND name = '{coll}')"
+    )
     _psql(state, (
-        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024, embedding_model) "
+        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024, embedding_model, collection_id) "
         f"VALUES ('{tenant}', '{coll}', decode('{pin_chash}', 'hex'), 'pin', '{vec_1024}'::nexus.vector, "
-        "'voyage-code-3')"
+        f"'voyage-code-3', {coll_id})"
     ))
     _psql(state, (
-        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-        f"VALUES ('{tenant}', '{doc_id}', 'o8dil7 control doc', '{coll}') "
+        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection, physical_collection_id) "
+        f"VALUES ('{tenant}', '{doc_id}', 'o8dil7 control doc', '{coll}', {coll_id}) "
         "ON CONFLICT DO NOTHING"
     ))
     # Genuinely dangling: ghost_chash resolves in no chunk table, and the
@@ -556,8 +562,8 @@ def test_inverted_control_handseeded_dangling_row_detected(t2_service_env):
     with fk_dropped_for_dangling_seed():
         _psql(state, (
             "INSERT INTO nexus.catalog_document_chunks "
-            "(tenant_id, doc_id, position, chash, collection, embedding_model) "
-            f"VALUES ('{tenant}', '{doc_id}', 0, decode('{ghost_chash}', 'hex'), '{coll}', 'voyage-code-3')"
+            "(tenant_id, doc_id, position, chash, collection, embedding_model, collection_id) "
+            f"VALUES ('{tenant}', '{doc_id}', 0, decode('{ghost_chash}', 'hex'), '{coll}', 'voyage-code-3', {coll_id})"
         ))
 
     dangling_after = _dangling_count(state, tenant)
