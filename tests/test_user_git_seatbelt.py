@@ -659,7 +659,7 @@ def test_a_config_write_to_a_host_wide_file_denies_in_any_cwd(cmd, tmp_path):
 
 
 def test_a_config_write_to_the_account_homes_gitconfig_by_absolute_path_denies(tmp_path):
-    home = os.path.expanduser("~")
+    home = pathlib.Path(os.path.expanduser("~")).as_posix()  # forward slashes: shlex reads a backslash as an escape
     assert sb.decide(f"git config --file {home}/.gitconfig user.name x", str(tmp_path)) is not None
 
 
