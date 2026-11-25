@@ -17,7 +17,7 @@ These agents **MUST proactively search** for context before starting:
 - **codebase-deep-analyzer**: Search T3 store for codebase knowledge, architecture notes
 
 **Search Sources in Order**:
-1. **Bead**: `bd show <id>` for task context, design field, dependencies
+1. **Bead**: where the project has a `.beads/` directory, `bd show <id>` for task context, design field, dependencies
 2. **Project Infrastructure**: the SubagentStart hook injects T2 memory context into a dispatched agent; SessionStart prints only an index (read the rest on demand with `nx brief <topic>` or the `brief` tool)
 3. **T3 store**: mcp__plugin_conexus_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
 4. **Catalog link graph**: `mcp__plugin_conexus_nexus__query( question="[topic]", follow_links="implements" )` — the `query` tool automatically boosts results from documents with precise `implements` links
@@ -230,7 +230,7 @@ Use the right search form for the task:
 ## PRODUCE
 
 Agents produce artifacts based on their specialization:
-- **Code Changes**: Left in the working tree for the caller, who runs the review gate, then commits with the bead reference (an implementer never commits)
+- **Code Changes**: Left in the working tree for the caller, who runs the review gate, then commits with the bead reference (an implementer does not commit unless your brief tells you to commit; in a linked worktree your brief assigned you, commit as the brief says)
 - **Test Results**: Reported in the hand-back; the caller files or updates any bug bead
 - **Analysis/Research**: Store in T3 store with appropriate title pattern
 - **Session State**: Store in T2 memory for multi-session work
@@ -341,13 +341,13 @@ If expected context not received:
 1. Search T3 store for related prior work: mcp__plugin_conexus_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
 2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search( `query="[topic]", project="{project}"`
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch( `action="search", query="[topic]"`
-4. Query active work via `bd list --status=in_progress`
-5. Document assumption in bead notes
+4. Where the project has a `.beads/` directory, query active work via `bd list --status=in_progress`
+5. Document assumption in bead notes (or in your hand-back where there are no beads)
 6. Flag incomplete context in downstream relay
 
 ## Beads Integration
 
-All agents should check `bd ready` for available work before starting and claim a bead with `bd update <id> --claim`. For an implementer (`developer`) and any agent that works a bead someone else owns: do NOT close it (the caller closes it after both reviewers return clean), and record discovered work as a note on the bead (`bd update <id> --append-notes`) or hand it back, since the caller files beads. An agent's own Beads section wins where it differs: the planners create beads, and the critics and analysts follow their own sections.
+Applies where the project has a `.beads/` directory; elsewhere skip the `bd` steps. There, all agents should check `bd ready` for available work before starting and claim a bead with `bd update <id> --claim`. For an implementer (`developer`) and any agent that works a bead someone else owns: do NOT close it (the caller closes it after both reviewers return clean), and record discovered work as a note on the bead (`bd update <id> --append-notes`) or hand it back, since the caller files beads. An agent's own Beads section wins where it differs: the planners create beads, and the critics and analysts follow their own sections.
 
 ## nx Store Patterns
 

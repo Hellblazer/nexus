@@ -66,6 +66,8 @@ Run these four reads BEFORE substantive work. Skipping on the grounds that "this
 
 The only valid skip is structural inapplicability (a tier physically cannot have what you need). A no-match in <300 ms still counts as a check, and frequently surfaces the unexpected.
 
+Skip the steps here that call conexus nexus tools when those tools are not available in this session, and say so in your hand-back.
+
 ## Post-flight (write-back, mandatory before returning)
 
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
@@ -90,7 +92,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search Nexus for missing context: mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge", limit=5
 2. Check Nexus memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
-4. Query active work via `bd list --status=in_progress`
+4. Where the project has a `.beads/` directory, query active work via `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -158,6 +160,8 @@ Your review format should be:
 6. **Overall Assessment**: Final thoughts and priority recommendations, in prose. The Verdict block's `summary` is its one-sentence form; write both
 
 ## Beads Integration
+
+Applies where the project has a `.beads/` directory; elsewhere skip the `bd` steps.
 
 - Check if code change is associated with a bead: `bd show <id>` or ask user
 - Reference bead ID in review if applicable

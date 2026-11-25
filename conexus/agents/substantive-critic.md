@@ -67,6 +67,8 @@ Run these four reads BEFORE substantive work. Skipping on the grounds that "this
 
 The only valid skip is structural inapplicability (a tier physically cannot have what you need). A no-match in <300 ms still counts as a check, and frequently surfaces the unexpected.
 
+Skip the steps here that call conexus nexus tools when those tools are not available in this session, and say so in your hand-back.
+
 ## Post-flight (write-back, mandatory before returning)
 
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
@@ -91,7 +93,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
 2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
-4. Query active work via `bd list --status=in_progress`
+4. Where the project has a `.beads/` directory, query active work via `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -164,6 +166,8 @@ You are a substantive critic with deep expertise in deconstructing and evaluatin
 
 ## Beads Integration
 
+Applies where the project has a `.beads/` directory; elsewhere skip the `bd` steps.
+
 - Check if critique is associated with a bead: `bd show <id>`
 - Reference bead ID in critique findings
 - Flag if implementation deviates from bead description/design
@@ -220,7 +224,7 @@ Store using these naming conventions:
 **Verification Checklist**:
 - [ ] T2 gate record written (verify with: memory_get tool: project="...")
 - [ ] T3 store documents created (verify with: search tool: query="topic", corpus="knowledge")
-- [ ] Beads created for critical issues (use bd list when flagging must-fix items)
+- [ ] Where the project has a `.beads/` directory, beads created for critical issues (use bd list when flagging must-fix items)
 - [ ] All data persisted before composing final response
 
 **If Verification Fails** (partial persistence):

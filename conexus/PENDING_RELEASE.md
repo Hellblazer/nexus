@@ -51,5 +51,18 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/routing/_user_git_seatbelt.py` (nexus-sby49.2): new. The git guard's short user-mode deny list (force pushes, `branch -D`, reflog and gc pruning, hook-path and global config writes, discards of uncommitted work).
 - `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` (nexus-sby49.2): the full rule now runs only for a maintainer; anyone else gets the seatbelt, so a user's subagent can commit, add, push, rebase and merge. `NX_REMOTE_TEST_HOSTS` is no longer read: the exempt ssh hosts come from `~/.config/nexus/remote-test-hosts`.
 - `conexus/hooks/scripts/routing/registry.yaml` (nexus-sby49.2): stale fail-open text corrected.
+- `conexus/agents/architect-planner.md` (nexus-sby49.2): `bd` steps only where `.beads/` exists; nexus-tool steps skipped when the tools are absent.
+- `conexus/agents/code-review-expert.md` (nexus-sby49.2): same wording change.
+- `conexus/agents/codebase-deep-analyzer.md` (nexus-sby49.2): same wording change.
+- `conexus/agents/debugger.md` (nexus-sby49.2): same wording change.
+- `conexus/agents/deep-analyst.md` (nexus-sby49.2): same wording change.
+- `conexus/agents/deep-research-synthesizer.md` (nexus-sby49.2): same wording change.
+- `conexus/agents/developer.md` (nexus-sby49.2): same wording change, plus the no-commit rule gains "unless your brief tells you to commit" and the linked-worktree clause.
+- `conexus/agents/strategic-planner.md` (nexus-sby49.2): same wording change.
+- `conexus/agents/substantive-critic.md` (nexus-sby49.2): same wording change.
+- `conexus/agents/test-validator.md` (nexus-sby49.2): same wording change.
+- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-sby49.2): `bd` steps conditional on `.beads/`; the implementer no-commit line gains the brief and worktree clauses.
+- `conexus/resources/agent-shared/RELAY_TEMPLATE.md` (nexus-sby49.2): the `bd list` recovery step is conditional on `.beads/`.
+- `conexus/skills/orchestration/SKILL.md` (nexus-sby49.2): the no-commit lines gain the brief and worktree clauses.
 
 ## Deferred to the next client release

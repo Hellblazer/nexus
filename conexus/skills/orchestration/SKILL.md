@@ -61,7 +61,7 @@ Report the returned entry_id VERBATIM. It is a UUID; do not invent a title-shape
 
 ## HAND-BACK
 SubagentHandback (or SendMessage) to orchestrator: outcome, artifact paths, deviations (each labelled DEVIATION with rationale), blockers.
-Shared tree: never git add/commit. Hand back diffs + paths.
+Shared tree: never git add/commit. Hand back diffs + paths. Unless the brief tells you to commit; in a linked worktree the brief assigned you, commit as the brief says.
 ```
 
 Non-negotiable fields: bead id; design-of-record T1 id (referenced, never restated); file:line for every touch site; locked invariants; verify commands (foreground-only, per above); write-back tags; deviation-reporting instruction.
@@ -113,7 +113,7 @@ A run that was disturbed (a peer deleted its temp directory, a process under it 
 
 ## Review Gate (caller side, MANDATORY on every implementation)
 
-The reviewers cannot dispatch and the developer does not commit, so you drive the gate. Do not stop at the developer's return.
+The reviewers cannot dispatch and the developer does not commit unless its brief tells it to, so you drive the gate. Do not stop at the developer's return.
 
 1. **State the acceptance bar** in the relay's Context Notes before either reviewer runs: "Ship when <X>." X is the condition that ends the gate, never "no criticals" (unfalsifiable against an adversarial reviewer). Example: "Ship when the local-upgrade path cannot wedge and the migration walk is proven atomic; anything else becomes a bead."
 2. **Run both reviewers**; they catch different, non-overlapping classes. `code-review-expert`: line-level bugs, security, missing edge cases, convention violations. `substantive-critic`: unvalidated assumptions, silent scope reduction, vacuous test assertions, spec-vs-implementation drift. A clean code review never excuses skipping the critic. Brief the critic with the locked spec (RDR `## Decision`, plan, phase boundary).
