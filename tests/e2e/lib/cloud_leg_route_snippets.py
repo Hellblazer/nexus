@@ -221,9 +221,13 @@ store = HttpChashIndex()
 source = "@label@-chash-probe"
 if store.count_for_collection(source):
     raise SystemExit(f"refusing: chash rows are recorded under {source!r}")
+# Post the route directly: HttpChashIndex.rename_collection wraps the POST in write_with_registration_retry(new), which first
+# registers the target, and the engine refuses to register a minted-form label (400 at collections/upsert), so the rename
+# route itself would never be sent.
 try:
-    store.rename_collection(old=source, new="c42")
+    store._post("/v1/chash/rename_collection", {"old": source, "new": "c42"})
 except httpx.HTTPStatusError as exc:
+    assert exc.response.url.path.endswith("/v1/chash/rename_collection"), f"refused by {exc.response.url.path}, not the rename route"
     assert exc.response.status_code == 400, f"a minted-form target answered {exc.response.status_code}, not 400"
     print("chash minted target refused 400")
 else:
@@ -239,9 +243,13 @@ store = HttpTaxonomyStore()
 source = "@label@-tax-probe"
 if store.get_topics_for_collection(source):
     raise SystemExit(f"refusing: topics are recorded under {source!r}")
+# Post the route directly: HttpTaxonomyStore.rename_collection wraps the POST in write_with_registration_retry(new), which first
+# registers the target, and the engine refuses to register a minted-form label (400 at collections/upsert), so the rename
+# route itself would never be sent.
 try:
-    store.rename_collection(source, "c42")
+    store._post("/rename_collection", {"old": source, "new": "c42"})
 except httpx.HTTPStatusError as exc:
+    assert exc.response.url.path.endswith("/v1/taxonomy/rename_collection"), f"refused by {exc.response.url.path}, not the rename route"
     assert exc.response.status_code == 400, f"a minted-form target answered {exc.response.status_code}, not 400"
     print("taxonomy minted target refused 400")
 else:
@@ -266,7 +274,10 @@ row = cat.get_collection(home)
 if row is None:
     raise SystemExit(f"{home} is not registered: the store-put step has not run")
 other = "@label@-split-other"
-cat.register_collection(other, content_type=row["content_type"], owner_id=row["owner_id"],
+# A second live collection on the home row's tuple is refused 409, so `other` takes an owner no tenant registers (1.9998, beside
+# FOR_TUPLE's 1.9999). A different model_version would not do: the store steps resolve the probe collection by its content type,
+# owner and model and take the newest version, so a higher one would capture their deletes.
+cat.register_collection(other, content_type=row["content_type"], owner_id="1.9998",
                         embedding_model=row["embedding_model"], model_version=row["model_version"])
 ids = store.persist_discovered_topics(other, [{"label": "split-probe", "doc_ids": []}])
 if not ids:
@@ -383,7 +394,7 @@ GC_PROBES = {
 _RETIRING_BY_ID = r"""
 import httpx
 from nexus.commands.catalog import _get_catalog
-probe_id = 9_000_000_000_000_000_000   # below bigint's top, far above any id the registry's sequence hands out
+probe_id = 999_999_999_999_999_999   # the largest 18-digit id: the engine refuses a longer one with 400, and no sequence reaches this one
 try:
     _get_catalog()._post("@path@", {"collection_id": probe_id, @extra@}, idempotent=False)
 except httpx.HTTPStatusError as exc:
