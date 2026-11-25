@@ -180,7 +180,7 @@ def note_marker_only(payload: object) -> None:
         sentinels = os.path.join(logs, "audience-tripwire")
         os.makedirs(sentinels, exist_ok=True)
         try:
-            os.close(os.open(os.path.join(sentinels, sid), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            os.close(os.open(os.path.join(sentinels, sid), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
         except FileExistsError:
             return
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())

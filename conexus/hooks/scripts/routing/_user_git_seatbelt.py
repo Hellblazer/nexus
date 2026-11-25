@@ -61,6 +61,8 @@ _LEADING_WORDS = frozenset({"then", "do", "else", "elif", "!", "{", "}", "if", "
 _WRAPPERS = frozenset({"env", "command", "exec", "nohup", "sudo", "nice"})
 #: Wrapper options that take a value as the next word.
 _WRAPPER_VALUE_FLAGS = frozenset({"-u", "-n", "-C", "-g", "-a", "-S", "-p", "-U", "-h", "-r", "-t"})
+#: What the word in command position is called when it is git (read, never spawned).
+_GIT_NAMES = frozenset({"git", "git.exe"})
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 #: Git global options that take a value as the next word (``--x=v`` forms need no skip).
@@ -222,7 +224,7 @@ def _git_invocation(words: list[str]) -> "list[str] | None":
             while i < len(words) and (words[i].startswith("-") or _ASSIGN_RE.match(words[i])):
                 i += 2 if words[i] in _WRAPPER_VALUE_FLAGS else 1
         else:
-            return words[i + 1:] if base in ("git", "git.exe") else None
+            return words[i + 1:] if base in _GIT_NAMES else None
     return None
 
 
