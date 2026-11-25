@@ -56,7 +56,7 @@ print(os.path.expanduser("~"))
 def _run_child(env_overrides: dict[str, str]) -> list[str]:
     env = {**os.environ, **env_overrides}
     out = subprocess.run([sys.executable, "-c", _PROBE], env=env, capture_output=True,
-                         text=True, check=True, timeout=60).stdout
+                         text=True, encoding="utf-8", check=True, timeout=60).stdout
     return out.splitlines()
 
 
