@@ -82,11 +82,26 @@ SCRIPTS = os.path.join(
 )
 
 
+def plugin_scripts_dir(script: str) -> str:
+    """The ``hooks/scripts`` directory of the plugin *script* belongs to: the nearest ancestor that holds ``_audience.py``.
+
+    The behaviour leg runs the plugin under test (a copy, or the installed one), so the helper the seam is set on must be
+    that plugin's own, not this checkout's. A script outside any plugin falls back to this checkout's."""
+    d = os.path.dirname(os.path.abspath(script))
+    while True:
+        if os.path.isfile(os.path.join(d, "_audience.py")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return SCRIPTS
+        d = parent
+
+
 def main(argv: list[str]) -> None:
     if len(argv) < 3:
         sys.exit("usage: audience_harness.py <account-home> <script> [args...]")
     home, script, rest = argv[1], argv[2], argv[3:]
-    scripts_dir = os.path.normpath(SCRIPTS)
+    scripts_dir = os.path.normpath(plugin_scripts_dir(script))
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
     import _audience  # noqa: PLC0415 -- after the sys.path insert

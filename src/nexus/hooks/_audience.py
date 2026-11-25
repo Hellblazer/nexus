@@ -58,8 +58,8 @@ TRIPWIRE_LINE = "maintainer flag absent on this account; resolved by the repo ma
 
 def _windows_profile_dir() -> "str | None":
     """The profile folder from the known-folder API (``FOLDERID_Profile``)."""
-    import ctypes
-    from ctypes import wintypes
+    import ctypes  # noqa: PLC0415 -- Windows only; a POSIX hook never pays for it
+    from ctypes import wintypes  # noqa: PLC0415 -- same
 
     class _GUID(ctypes.Structure):
         _fields_ = [
@@ -96,7 +96,7 @@ def account_home() -> "str | None":
         return os.fspath(_ACCOUNT_HOME_OVERRIDE)
     if os.name == "nt":
         return _windows_profile_dir()
-    import pwd
+    import pwd  # noqa: PLC0415 -- POSIX only; the module has to import on Windows
 
     try:
         return pwd.getpwuid(os.getuid()).pw_dir or None

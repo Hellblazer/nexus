@@ -893,12 +893,30 @@ expect_eq "--installed wants a version" 64 "$rc"
 out="$(bash "$GATE" --all --only worker 2>&1)"; rc=$?
 expect_eq "--only does not combine with --all" 64 "$rc"
 # --all runs the four directories of this checkout (conexus, sn, tool-spill, prose-edit)
-out="$(bash "$GATE" --all --static-only 2>&1)"; rc=$?
+# --no-behaviour: the behaviour pass runs the real hooks over several hundred payloads (its own self-test is
+# tests/test_plugin_behaviour_leg.py and its own gate pass is the release battery's plugins leg); this block pins the static pass
+out="$(bash "$GATE" --all --static-only --no-behaviour 2>&1)"; rc=$?
 expect_has "--all names all four directories of the checkout" "$out" "######## plugin: prose-edit"
 expect_has "including the hook-only ones" "$out" "######## plugin: tool-spill"
 case "$rc" in 0|1) ok "--all --static-only on the real tree ends 0 (clean) or 1 (a plugin fails), never 2 or 64" ;; *) bad "--all --static-only exited $rc" ;; esac
 case "$rc" in 0) expect_has "a clean tree reports PASSED (static pass only)" "$(printf '%s\n' "$out" | tail -1)" "GATE PASSED (static pass only)" ;;
               *) expect_has "a failing tree reports FAILED on the last line" "$(printf '%s\n' "$out" | tail -1)" "GATE FAILED" ;; esac
+
+# ---- 7. the behaviour pass (nexus-sby49.3) --------------------------------------------------------
+# A plugin named conexus that carries hooks and no hooks/audience.yaml is UNVERIFIED, never a pass; --no-behaviour skips the
+# pass; any other plugin never runs it. (The leg itself is tested in tests/test_plugin_behaviour_leg.py.)
+BH="$WORKDIR/bh-conexus"; mkplugin "$BH" conexus 1.0.0; mkdir -p "$BH/hooks"; printf '{"hooks": {}}\n' >"$BH/hooks/hooks.json"
+export NX_GATE_CONEXUS_FLOOR="1 1"
+out="$(bash "$GATE" --plugin "$BH" --static-only --allowlist "$NOALLOW" 2>&1)"; rc=$?
+expect_eq "a conexus plugin with hooks and no audience.yaml is UNVERIFIED (exit 2)" 2 "$rc"
+expect_has "naming the missing manifest or the missing uv" "$out" "UNVERIFIED"
+expect_has "the closing verdict is UNVERIFIED, never PASSED" "$(printf '%s\n' "$out" | tail -1)" "PLUGIN OUT-OF-REPO GATE UNVERIFIED"
+out="$(bash "$GATE" --plugin "$BH" --static-only --no-behaviour --allowlist "$NOALLOW" 2>&1)"; rc=$?
+expect_eq "--no-behaviour skips the pass" 0 "$rc"
+expect_lacks "no behaviour note in the verdict" "$out" "behaviour"
+BH2="$WORKDIR/bh-other"; mkplugin "$BH2" fx 1.0.0; mkdir -p "$BH2/hooks"; printf '{"hooks": {}}\n' >"$BH2/hooks/hooks.json"
+out="$(bash "$GATE" --plugin "$BH2" --static-only --allowlist "$NOALLOW" 2>&1)"; rc=$?
+expect_eq "a plugin that is not conexus never runs the pass" 0 "$rc"
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

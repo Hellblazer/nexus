@@ -10,7 +10,7 @@
 #             SAM-WIDE    fires when the account flag exists or the checkout carries the marker
 #             REMOVE      never
 #   gate      none | maintainer | nexus_repo | account_flag | data
-#   live      false = the rule's end state is not wired yet (a Phase 3 row); the leg's allowlist is exactly these rows
+#   live      false = the rule's end state is not wired yet (a Phase 3 row); the leg's allowlist may name only these rows
 #   phase     when the item changes: - (never), 1, 2, 3, after-2, 4
 #   decision  the owner decision (D1..D13) the entry rests on
 #
@@ -851,6 +851,15 @@ rules:
   gate: nexus_repo
   evidence: The CI text (nx ci wait, develop/main, the CI board) is fed by nexus CI (stop_wake_guard.py:780-787)
   target_state: the CI text only with the marker
+  phase: '3'
+  live: false
+- id: S2-2
+  module: conexus/hooks/scripts/compact_checkpoint.py
+  audience: EVERY-USER
+  gate: data
+  evidence: The compaction text names the threads board and `bd list --status=in_progress` (compact_checkpoint.py:1272-1276, 1376-1377), whether
+    or not the project has either
+  target_state: the board and bd words only where a board entry or .beads/ exists
   phase: '3'
   live: false
 - id: U6c
