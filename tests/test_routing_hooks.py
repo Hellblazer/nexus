@@ -26,6 +26,7 @@ import urllib.parse
 import pytest
 
 from nexus.daemon.service_registry import service_identity
+from tests.hooks.audience_harness import marked_repo
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 #: The plugin-resident library both live routing guards import. The wheel
@@ -1269,7 +1270,10 @@ def _hook_env(tmp_path, port: int) -> dict:
 
 
 def _run_deny_hook(env: dict) -> tuple[subprocess.CompletedProcess, float]:
-    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": _DENY_CMD}, "session_id": "s-1"})
+    # the event is the maintainer's (nexus-sby49.3): the payload names a nexus checkout, since a child process cannot
+    # reach the in-process account seam and a CI runner has no flag
+    cwd = marked_repo(pathlib.Path(env["NEXUS_CONFIG_DIR"]).parent / "nexus-checkout")
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": _DENY_CMD}, "session_id": "s-1", "cwd": cwd})
     t0 = _time.monotonic()
     proc = subprocess.run(
         [sys.executable, str(_ROUTING_DIR / "credential_print_guard.py")],
@@ -1380,7 +1384,7 @@ def test_a_child_that_cannot_start_is_metered_and_the_deny_is_still_emitted(tmp_
         "_lib.run_hook(body, fail_closed=True, rule_name='r')\n"
     )
     proc = subprocess.run(
-        [sys.executable, "-c", stub], input=json.dumps({"session_id": "s"}),
+        [sys.executable, "-c", stub], input=json.dumps({"session_id": "s", "cwd": marked_repo(tmp_path / "nexus-checkout")}),
         capture_output=True, text=True, env=_hook_env(tmp_path, 1), timeout=30,
     )
     assert proc.returncode == 0, proc.stderr
@@ -1399,6 +1403,7 @@ def test_the_bearer_token_goes_to_the_child_over_stdin_never_argv(tmp_path):
     fake.chmod(0o755)
     stub = (
         f"import sys; sys.path.insert(0, {str(_ROUTING_DIR)!r}); import _lib\n"
+        f"_lib._payload = {{'cwd': {marked_repo(tmp_path / 'nexus-checkout')!r}}}  # the event is the maintainer's\n"
         f"sys.executable = {str(fake)!r}\n"
         "_lib.log_routing_event(rule='r', outcome='deny')\n"
     )
