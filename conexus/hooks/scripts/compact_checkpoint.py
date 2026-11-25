@@ -112,6 +112,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# nexus-sby49.4 audience gate (S2-2): the compaction text names the threads board and ``bd`` only where the project has
+# them, and with no checkpoint to read the board is named for the maintainer. ``maintainer`` tightens (it adds the board
+# words), so an import that fails binds it to True: a broken helper gives the full text.
+try:
+    from _audience import maintainer as _maintainer
+except BaseException:  # noqa: BLE001
+    def _maintainer(payload: object) -> bool:
+        return True
+
 #: The plugin's sibling modules, bound by ``_load_siblings`` inside ``main``'s guard.
 _cli_lookup = None
 _endpoint_resolve = None
@@ -209,11 +219,82 @@ _STUB_BODY = "[no pre-compaction checkpoint for this compaction]"
 #: approval, or work another session owns.
 _RESUME_DIRECTIVE = (
     "After this compaction, once you have done what the user last asked: act on any open item that has nothing to "
-    "wait on (a board thread, or a summary item the board, git or beads still show open). "
+    "wait on ({open_items}). "
     "If all you are doing is waiting on a running task, say what you are waiting on. "
     "Never start work the user held back or asked you to wait on, work that needs the user's approval, or work "
     "another session owns."
 )
+
+
+#: The places named in the compaction text, by (the project has a board entry, the project has beads). Tables of words, so no
+#: list literal starts with the name of a program (tests/test_hooks_bare_exec_lint.py).
+_OPEN_SOURCES = {(True, True): "the board, git or beads", (True, False): "the board or git",
+                 (False, True): "git or beads", (False, False): "git"}
+_CHECKED_PLACES = {(True, True): "git, beads and the board", (True, False): "git and the board",
+                   (False, True): "git and beads", (False, False): "git"}
+
+
+def _join(items: list[str], word: str = "and") -> str:
+    """``a``, ``a and b``, ``a, b and c`` (*word* ``or`` for a choice)."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + f" {word} " + items[-1]
+
+
+def _resume_directive(board: bool, beads: bool) -> str:
+    """:data:`_RESUME_DIRECTIVE` naming only the places this project has (nexus-sby49.4, S2-2): a board thread and the
+    board only with a board entry, beads only with a ``.beads/`` directory; git always. With all three it is the text
+    this session's predecessors read."""
+    sources = _OPEN_SOURCES[(board, beads)]
+    item = f"a summary item {sources} still {'show' if ' ' in sources else 'shows'} open"
+    return _RESUME_DIRECTIVE.format(open_items=("a board thread, or " if board else "") + item)
+
+
+def _checked_places(board: bool, beads: bool) -> str:
+    """The places a stale checkpoint is checked against: git, and beads and the board where the project has them."""
+    return _CHECKED_PLACES[(board, beads)]
+
+
+def _state_places(board: bool, beads: bool) -> str:
+    """Where the state lives, in the inject intro: version control, and beads and the threads board where they exist."""
+    return _join([w for w, on in (("version control", True), ("beads", beads), ("the threads board", board)) if on])
+
+
+def _has_beads(payload: dict) -> bool:
+    """True when the payload's project has a ``.beads/`` directory: the cwd or a parent up to the repository root.
+    The cwd is the payload's, then ``CLAUDE_PROJECT_DIR``, never the process cwd (uv starts this script elsewhere)."""
+    try:
+        cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else os.environ.get("CLAUDE_PROJECT_DIR", "")
+        if not cwd or not os.path.isabs(cwd):
+            return False
+        here = os.path.realpath(cwd)
+        while True:
+            if os.path.isdir(os.path.join(here, ".beads")):
+                return True
+            if os.path.lexists(os.path.join(here, ".git")) or os.path.dirname(here) == here:
+                return False
+            here = os.path.dirname(here)
+    except (OSError, ValueError):
+        return False
+
+
+def _without_beads_section(shaped: str, payload: dict) -> str:
+    """*shaped* without its ``### In-progress beads`` subsection when the project has no ``.beads/`` directory: for such a
+    project ``nx command-context continuation`` fills it with a ``bd unavailable`` placeholder (nexus-sby49.4, S2-2)."""
+    if _has_beads(payload):
+        return shaped
+    return re.sub(r"(?ms)^### In-progress beads[^\n]*\n.*?(?=^### |\Z)", "", shaped)
+
+
+def _board_known(checkpoint: str | None, payload: dict) -> bool:
+    """Whether the compaction text may name the threads board. A checkpoint that pre wrote shows whether pre found an
+    entry. With none to read, inject cannot ask the service (it makes no ``nx`` call: nexus-75w5d), so the board is
+    named for the maintainer, whose sessions keep one (``_maintainer`` answers True when the helper cannot load)."""
+    if checkpoint is not None:
+        heading = re.search(rf"(?m)^## Threads board entry \({_BOARD_PROJECT}/[^)\n]*\)\n+(.*)$", checkpoint)
+        if heading is not None and not heading.group(1).startswith("[no board entry"):
+            return True
+    return bool(_maintainer(payload))
+
+
 _ARCHIVE_STAMP = "%Y%m%dT%H%M%SZ"
 #: Suffix of the per-session sidecar inject writes: the ``written:`` stamp it last emitted.
 _INJECTED_SUFFIX = ".injected"
@@ -1103,7 +1184,7 @@ def run_pre(payload: dict) -> str:
     parts.extend(_running_work_section(cwd))
     parts.append(f"## Working state\n\n(nx command-context continuation, run {state_stamp}; old tool output is "
                  "as of when it ran)\n")
-    shaped = _filter_in_progress(_shape_state(state), board)
+    shaped = _without_beads_section(_filter_in_progress(_shape_state(state), board), payload)
     if shaped:
         parts.append(_cap(shaped).rstrip() + "\n")
     if error:
@@ -1260,20 +1341,25 @@ def _emit_context(context: str) -> None:
     sys.stdout.flush()
 
 
-def _no_restore_notice(session_id: str) -> str:
+def _no_restore_notice(session_id: str, *, board: bool = True, beads: bool = True) -> str:
     """The context a compact start gets when there is no checkpoint to restore (nexus-2v7da).
 
     Without it the resumed session cannot tell "nothing was lost" from "nothing was saved". A few
-    hundred bytes, far under ``_INJECT_CAP_BYTES``; it names where the state lives instead.
+    hundred bytes, far under ``_INJECT_CAP_BYTES``; it names where the state lives instead: the threads board
+    entry only with *board*, and ``bd list`` only with *beads* (S2-2); the default is the full text.
     """
+    look = ["git status", "the branch", *(["`bd list --status=in_progress`"] if beads else [])]
+    where = (
+        "read your threads board entry (project threads: the entry "
+        "whose `identity:` line names your identity, `nx identity show` prints it; else the one titled "
+        f"with your session name, or whose `session:` line is `{session_id}`), then check "
+        if board else "check "
+    )
     return (
         "The conexus PreCompact hook has no working-state checkpoint for this compaction (its pre step "
         "did not run or failed), so nothing is restored here and the compact summary is all you have. "
-        "Recover your state before acting on it: read your threads board entry (project threads: the entry "
-        "whose `identity:` line names your identity, `nx identity show` prints it; else the one titled "
-        f"with your session name, or whose `session:` line is `{session_id}`), then check "
-        "git status, the branch and `bd list --status=in_progress`.\n\n"
-        f"{_RESUME_DIRECTIVE}\n"
+        f"Recover your state before acting on it: {where}{_join(look)}.\n\n"
+        f"{_resume_directive(board, beads)}\n"
     )
 
 
@@ -1293,13 +1379,18 @@ def run_inject(payload: dict) -> str:
         return "skipped: no usable session id"
     path = _checkpoint_dir() / f"{session_id}.md"
     compact = payload.get("source") == "compact"
+
+    def notice() -> str:
+        # no checkpoint to read: the board is named for the maintainer only, and `bd list` only where `.beads/` exists
+        return _no_restore_notice(session_id, board=_board_known(None, payload), beads=_has_beads(payload))
+
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         if compact:
             # Live, inject runs before post, so a compaction whose pre did not run has no stub yet:
             # the file is simply absent. Only a start that says it is a compact one is told.
-            _emit_context(_no_restore_notice(session_id))
+            _emit_context(notice())
             return "emitted: no restore (no checkpoint file)"
         return "skipped: no checkpoint file"
     except OSError as exc:
@@ -1316,14 +1407,14 @@ def run_inject(payload: dict) -> str:
         # record, and a later compaction whose pre also failed is owed the same notice.
         _log("INFO", f"inject: {path} is a stub (no pre-compaction checkpoint for this compaction); "
                      "emitting the no-restore notice")
-        _emit_context(_no_restore_notice(session_id))
+        _emit_context(notice())
         return "emitted: no restore (stub)"
     if age is None:
         if compact:
             # An earlier compaction's checkpoint older than seven days: pre did not run for this one.
             _log("INFO", f"inject: {path} has no usable written: stamp (older than {_MAX_AGE_S / 3600:.0f} h, "
                          "or missing); emitting the no-restore notice")
-            _emit_context(_no_restore_notice(session_id))
+            _emit_context(notice())
             return "emitted: no restore (no usable written: stamp)"
         _log("INFO", f"inject: {path} has no usable written: stamp (older than {_MAX_AGE_S / 3600:.0f} h, "
                      "or missing); nothing injected")
@@ -1344,7 +1435,7 @@ def run_inject(payload: dict) -> str:
             # belongs to an earlier compaction, so the session is told there is nothing to restore.
             _log("INFO", f"inject: {path} (written {written}) was already injected by an earlier compaction; "
                          "emitting the no-restore notice")
-            _emit_context(_no_restore_notice(session_id))
+            _emit_context(notice())
             return "emitted: no restore (already injected)"
         _log("INFO", f"inject: {path} (written {written}) was already injected"
                      f"{' moments ago, by this compaction' if compact else ' by an earlier compaction'}; "
@@ -1357,6 +1448,7 @@ def run_inject(payload: dict) -> str:
     summary_match = _SUMMARY_RE.search(text)
     body = text[: summary_match.start()] if summary_match else text
     body = body.rstrip() + "\n\n"
+    board, beads = _board_known(body, payload), _has_beads(payload)
     lead = f"The conexus PreCompact hook wrote this working-state checkpoint {_age_label(age)} ago (trigger {trigger})"
     if age < _STALE_NOTE_S:
         lead += ", just before this session was compacted."
@@ -1365,15 +1457,15 @@ def run_inject(payload: dict) -> str:
             # The payload marked the summary precomputed: it was prepared while the session was
             # idle, after pre ran, so an old checkpoint is no evidence of a failed pre (nexus-3lcda).
             lead += (". This compaction's summary was prepared while the session was idle, after the "
-                     "checkpoint was taken. The state may have changed since: check git, beads and "
-                     "the board before acting on it.")
+                     f"checkpoint was taken. The state may have changed since: check {_checked_places(board, beads)} "
+                     "before acting on it.")
         else:
             # Only the age is known: a failure is not inferred from it (nexus-702gy, nexus-mtl98,
             # nexus-3lcda).
             lead += (". The state may have changed since it was written, and the checkpoint may "
-                     "predate this compaction: check git, beads and the board before acting on it.")
-    directive = f"{_RESUME_DIRECTIVE}\n\n" if compact else ""
-    intro = (f"{lead} The state lives in version control, beads and the threads board, "
+                     f"predate this compaction: check {_checked_places(board, beads)} before acting on it.")
+    directive = f"{_resume_directive(board, beads)}\n\n" if compact else ""
+    intro = (f"{lead} The state lives in {_state_places(board, beads)}, "
              f"not in the summary.\n\n{directive}")
     footer = f"Full checkpoint (with the compact summary): {path}\n"
     context = _fit(intro + body, footer)

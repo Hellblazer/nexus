@@ -23,7 +23,9 @@ MODE. :data:`MODE` is ``"advise"``: a matched call gets the advice as
 decides, exactly like ``_lib.warn``). The hook never denies in this mode. The
 flip to ``"deny"`` is the one line below (or a per-row ``mode=``); the deny
 path is implemented and pinned by tests but is not active. In deny mode the
-usual ``# routing-allow: <reason>`` escape applies to Bash calls.
+usual ``# routing-allow: <reason>`` escape applies to Bash calls. A deny applies only
+when ``_audience.maintainer`` is true for the call (nexus-sby49.4, U8b, D6): for anyone
+else every row stays advice, whatever mode is set.
 
 FALSE POSITIVES only advise, but the predicates are written to keep them rare:
 the command is split on unquoted ``; & | newline``, each segment is tokenised
@@ -831,12 +833,10 @@ ROWS: tuple[Row, ...] = (
         f"{_SRC} / 'No pattern kills' (R32; R34 pattern forms)",
         _BASH,
         _pattern_kill,
-        "pkill, killall and kill-by-pgrep end every process the pattern matches, on the laptop as on a shared "
-        "host: a laptop `pkill -f` has been used to end an agent's own queued run, and it cannot tell that run "
-        "from a peer's. A single SIGTERM to a pid picked out of `ps` by its command line has ended another "
-        "session's lab-remote run. Signal only a pid you started yourself (`$!` or your own background task "
-        "id), found by its parent pid, and check its parent and its working directory "
-        "(`ps -p <pid> -o pid,ppid,args`, `lsof -a -p <pid> -d cwd`) before `kill <pid>`. "
+        "pkill, killall and kill-by-pgrep end every process the pattern matches, whoever started it: the pattern "
+        "cannot tell your own run from another session's or another user's. Signal only a pid you started "
+        "yourself (`$!` or your own background task id), found by its parent pid, and check its parent and its "
+        "working directory (`ps -p <pid> -o pid,ppid,args`, `lsof -a -p <pid> -d cwd`) before `kill <pid>`. "
         "Never take a pid from ps or pgrep by its command line.",
         hints=("kill",),
     ),
@@ -846,9 +846,8 @@ ROWS: tuple[Row, ...] = (
         _BASH,
         _branch_delete,
         "Deleting branches by glob, from xargs or a command substitution, or with the output hidden can remove "
-        "other sessions' branches with no record of the names (216 branches were lost once; a branch's reflog "
-        "dies with it). Delete only branch names you can name as yours, one `git branch -D <name>` at a time, "
-        "and keep the output visible.",
+        "branches you did not mean to, with no record of the names (a branch's reflog dies with it). Delete only "
+        "branch names you can name, one `git branch -D <name>` at a time, and keep the output visible.",
         hints=("branch",),
     ),
     Row(
@@ -947,10 +946,29 @@ def decide(payload: dict) -> list[Hit]:
     return hits
 
 
-def row_mode(row: Row, mode: str | None = None) -> str:
-    """The mode *row* runs in: its own, else *mode*, else :data:`MODE`; anything unknown is advise."""
+def row_mode(row: Row, mode: str | None = None, *, maintainer: bool = True) -> str:
+    """The mode *row* runs in: its own, else *mode*, else :data:`MODE`; anything unknown is advise.
+
+    ``deny`` is the maintainer's only (nexus-sby49.4, U8b, D6): a call that is not the maintainer's is advised
+    whatever mode is set, so the flip, when it is made row by row, can never reach a user."""
     m = row.mode or mode or MODE
+    if m == "deny" and not maintainer:
+        return "advise"
     return m if m in ("advise", "deny") else "advise"
+
+
+def _is_maintainer(payload: dict) -> bool:
+    """``_audience.maintainer`` for *payload*; True when the helper is missing or fails (it tightens: a deny stays a deny)."""
+    try:
+        sys.path.insert(0, _SCRIPTS)
+        try:
+            from _audience import maintainer as _maintainer  # noqa: PLC0415 -- only a deny-mode hit pays for it
+        except BaseException:  # noqa: BLE001
+            def _maintainer(payload: object) -> bool:
+                return True
+        return bool(_maintainer(payload))
+    except BaseException:  # noqa: BLE001
+        return True
 
 
 def render(hits: list[Hit]) -> str:
@@ -961,7 +979,8 @@ def emit(_lib, payload: dict, hits: list[Hit], mode: str | None = None) -> None:
     """Log each hit, then advise (never deny in advise mode) or deny."""
     ctx = Ctx(payload)
     escaped = bool(ctx.command) and _lib.should_skip_for_reason(ctx.command)
-    denying = [h for h in hits if row_mode(h.row, mode) == "deny"]
+    maint = _is_maintainer(payload) if any(row_mode(h.row, mode) == "deny" for h in hits) else True
+    denying = [h for h in hits if row_mode(h.row, mode, maintainer=maint) == "deny"]
     for h in hits:
         if h in denying:
             outcome = "escape" if escaped else "deny"

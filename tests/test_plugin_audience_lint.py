@@ -71,10 +71,10 @@ def test_every_registration_names_its_modules_audience_and_end_state(manifest) -
         assert r["modules"] and r["evidence"] and r["target_state"], r["key"]
 
 
-def test_the_not_live_rows_are_the_phase_3_rows(manifest) -> None:
-    """The behaviour leg's allowlist is exactly these. Every one names the phase that wires it."""
-    rows = am.allowlist_rows(manifest)
-    assert rows, "a Phase 2 manifest with no Phase 3 rows would mean the long tail was done"
+def test_phase_3_left_no_row_that_is_not_live(manifest) -> None:
+    """nexus-sby49.4: the long tail is wired, so no row is `live: false` and the behaviour leg's allowlist has no row it
+    may name. A row added later as not live must still name the phase that wires it."""
+    assert am.allowlist_rows(manifest) == []
     for kind in ("registrations", "constants", "rules"):
         for e in manifest[kind]:
             if not e.get("live", True):
@@ -265,9 +265,14 @@ def test_a_live_gated_entry_in_a_module_that_never_calls_its_predicate_fails(man
 
 
 def test_a_gated_entry_that_is_not_live_may_have_no_call_yet(manifest, hooks_json) -> None:
-    """The Phase 3 rows: their gate is declared and not wired, so the module need not call it (and the leg allowlists them)."""
-    assert any(not e.get("live", True) and e["gate"] in am.PREDICATE_GATES for k in ("constants", "rules") for e in manifest[k])
-    assert _problems(manifest, hooks_json) == []
+    """A row whose gate is declared and not wired (`live: false`) need not be called by its module, where a live one must."""
+    def add_unwired(m):
+        m["rules"].append({
+            "id": "unwired", "module": "hooks/scripts/nx_setup_notice.py", "audience": "SAM-WIDE", "gate": "maintainer",
+            "evidence": "x", "target_state": "x", "phase": "3", "live": False,
+        })
+
+    assert _problems(_mutated(manifest, add_unwired), hooks_json) == []
 
 
 def test_a_module_that_declares_the_wrong_predicates_fails(manifest, hooks_json) -> None:

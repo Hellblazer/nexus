@@ -70,6 +70,8 @@ def _payload(text: str = BLOCKING, **extra: object) -> dict:
 
 def _run(payload: object, tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
     raw = payload if isinstance(payload, str) else json.dumps(payload)
+    if tmp_path.is_dir():
+        (tmp_path / "logs").mkdir(exist_ok=True)  # the guard logs only where the directory exists (nexus-sby49.4, U6c)
     child_env = scrubbed_env(NEXUS_CONFIG_DIR=str(tmp_path), PATH=os.environ.get("PATH", ""), **env)
     return subprocess.run(
         [sys.executable, "-I", str(SCRIPT)], input=raw, capture_output=True, text=True, encoding="utf-8", env=child_env, timeout=60
@@ -856,10 +858,79 @@ def test_internal_error_fails_open(tmp_path: Path) -> None:
         "m.decide = boom\n"
         "sys.exit(m.main())\n"
     )
+    (tmp_path / "logs").mkdir()
     env = scrubbed_env(NEXUS_CONFIG_DIR=str(tmp_path), PATH=os.environ.get("PATH", ""))
     proc = subprocess.run([sys.executable, "-I", "-c", code], input=json.dumps(_payload()), capture_output=True, text=True, encoding="utf-8", env=env, timeout=60)
     assert (proc.returncode, proc.stdout) == (0, "")
     assert "allow reason=error error=RuntimeError" in _log(tmp_path)
+
+
+# --- the audience of the CI text and of the log (nexus-sby49.4: U6b, U6c) ------------------------
+
+_CI_TEXT_WORDS = ("nx ci wait", "CI board", "develop and main")
+
+
+def _repo(path: Path, *, marked: bool) -> Path:
+    (path / ".git").mkdir(parents=True)
+    if marked:
+        (path / "scripts").mkdir()
+        (path / "scripts" / "agent-worktree-preflight.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    return path
+
+
+def _run_in_repo(repo: Path, config: Path, text: str) -> subprocess.CompletedProcess[str]:
+    """The script as hooks.json runs it (no ``-I``, so its own directory is on the path and the audience helper imports)."""
+    env = scrubbed_env(NEXUS_CONFIG_DIR=str(config), PATH=os.environ.get("PATH", ""))
+    return subprocess.run([sys.executable, str(SCRIPT)], input=json.dumps(_payload(text, cwd=str(repo))), capture_output=True,
+                          text=True, encoding="utf-8", env=env, timeout=60)
+
+
+@pytest.mark.parametrize("cls", [swg.CLASS_CI_WAIT, swg.CLASS_CI_WAIT_NO_CHANNEL])
+def test_the_ci_text_is_the_nexus_checkouts_and_a_user_gets_neutral_wording(cls: str) -> None:
+    full = swg.block_reason(cls, "The runs are still going.")
+    assert "`nx ci wait <sha>" in full and "CI board" in full
+    user = swg.block_reason(cls, "The runs are still going.", nexus=False)
+    for word in _CI_TEXT_WORDS:
+        assert word not in user, word
+    for word in ("Monitor", "until-loop", "ScheduleWakeup", "CronCreate", "who it is", "The runs are still going."):
+        assert word in user, word
+
+
+def test_a_user_session_gets_the_neutral_block_and_a_nexus_checkout_gets_the_ci_text(tmp_path: Path) -> None:
+    text = "The suite is still running. When it finishes, I'll read the result."
+    got: dict[str, str] = {}
+    for name, marked in (("user", False), ("nexus", True)):
+        proc = _run_in_repo(_repo(tmp_path / name, marked=marked), tmp_path / f"cfg-{name}", text)
+        assert proc.returncode == 0, proc.stderr
+        got[name] = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "The suite is still running." in got["user"] and "ScheduleWakeup" in got["user"]
+    assert not any(w in got["user"] for w in _CI_TEXT_WORDS), got["user"]
+    assert "`nx ci wait <sha> --branch <branch>`" in got["nexus"]
+
+
+def test_a_broken_audience_helper_gives_the_full_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``nexus_repo`` tightens, so an import that fails binds it to True (the plan's failure-in-the-safe-direction rule)."""
+    monkeypatch.setitem(sys.modules, "_audience", None)  # an import of it now raises ImportError
+    spec = importlib.util.spec_from_file_location("stop_wake_guard_no_helper", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module._nexus_repo({"cwd": "/nowhere"}) is True
+
+
+def test_the_log_is_not_created_where_its_directory_is_absent(tmp_path: Path) -> None:
+    """U6c: a user's home must not gain ``~/.config/nexus/logs/hook.log`` from a Stop hook."""
+    config = tmp_path / "cfg"
+    config.mkdir()
+    proc = _run_in_repo(_repo(tmp_path / "r", marked=False), config, BLOCKING)
+    assert proc.returncode == 0 and "additionalContext" in proc.stdout
+    assert list(config.iterdir()) == [], "the hook made a directory under the config dir"
+
+
+def test_the_log_is_written_where_its_directory_exists(tmp_path: Path) -> None:
+    config = tmp_path / "cfg"
+    (config / "logs").mkdir(parents=True)
+    _run_in_repo(_repo(tmp_path / "r", marked=False), config, BLOCKING)
+    assert " INFO stop-wake-guard: block class=" in (config / "logs" / "hook.log").read_text(encoding="utf-8")
 
 
 def test_unicode_closing_text_round_trips_on_a_cp1252_console(tmp_path: Path) -> None:
@@ -890,7 +961,8 @@ def test_script_imports_only_the_standard_library() -> None:
             imported |= {a.name.split(".")[0] for a in node.names}
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
-    assert imported <= set(sys.stdlib_module_names), sorted(imported - set(sys.stdlib_module_names))
+    # `_audience` is the plugin's own stdlib-only sibling (U6b); it is imported inside a try and falls back to True.
+    assert imported - {"_audience"} <= set(sys.stdlib_module_names), sorted(imported - set(sys.stdlib_module_names))
     assert not {"nexus", "structlog"} & imported
 
 

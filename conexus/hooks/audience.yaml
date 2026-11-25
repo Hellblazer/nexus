@@ -279,7 +279,6 @@ registrations:
   evidence: 'U8a: the advisory rows run in advise mode for everyone; their text is neutral in Phase 3'
   target_state: advise for everyone, neutral text
   phase: '3'
-  live: false
 - key: PreToolUse hooks/scripts/nx_hook_shim.py auto-approve
   event: PreToolUse
   matcher: mcp__plugin_conexus_.*
@@ -358,7 +357,6 @@ registrations:
   evidence: 'U6a: the promise and timed classes, one extra turn at most (stop_hook_active); D9: every user, neutral text'
   target_state: neutral text for users; the CI text is a rule below
   phase: '3'
-  live: false
   decision: D9
 modules:
   hooks/scripts/nx_setup_notice.py:
@@ -383,11 +381,13 @@ modules:
     wrapper: none
     predicates: []
   nexus.hooks.auto_approve:
-    wrapper: none
-    predicates: []
+    wrapper: entry
+    predicates:
+    - account_flag
   hooks/scripts/routing/credential_print_guard.py:
-    wrapper: none
-    predicates: []
+    wrapper: run_hook
+    predicates:
+    - nexus_repo
   nexus.session_start_guidance:
     wrapper: none
     predicates: []
@@ -407,8 +407,9 @@ modules:
     wrapper: none
     predicates: []
   hooks/scripts/compact_checkpoint.py:
-    wrapper: none
-    predicates: []
+    wrapper: main_try
+    predicates:
+    - maintainer
   hooks/scripts/mailbox_drain.py:
     wrapper: none
     predicates: []
@@ -419,8 +420,9 @@ modules:
     wrapper: none
     predicates: []
   hooks/scripts/stop_wake_guard.py:
-    wrapper: none
-    predicates: []
+    wrapper: main_try
+    predicates:
+    - nexus_repo
     not_injected:
       _ROLE: a regular-expression fragment the promise classifier compiles; never injected
       _FUNCTION_WORDS: a regular-expression fragment the promise classifier compiles; never injected
@@ -452,8 +454,9 @@ modules:
       _DASHED_LEAD_WORDS: a rule identifier or a regular-expression fragment the scanner compiles; never injected
       _MASK_DELIM: a rule identifier or a regular-expression fragment the scanner compiles; never injected
   hooks/scripts/routing/destructive_action_advice.py:
-    wrapper: none
-    predicates: []
+    wrapper: run_hook
+    predicates:
+    - maintainer
     not_injected:
       _HOME_TMP: a regular-expression fragment the temp-root matcher compiles; never injected
   hooks/scripts/routing/_lib.py:
@@ -798,7 +801,6 @@ constants:
   evidence: 'S2-2: names the board and bd; Phase 3 gates the board and beads words on what the project has'
   target_state: the board and bd words only where a board entry or .beads/ exists
   phase: '3'
-  live: false
 - id: hooks/scripts/compact_checkpoint.py:_CRON_NOTE
   audience: EVERY-USER
   gate: none
@@ -818,7 +820,12 @@ constants:
   evidence: 'U7b: the redirect names the Hellblazer/nexus wrapper; users get ''ask your operator for an equivalent'''
   target_state: the wrapper URL only with the marker
   phase: '3'
-  live: false
+- id: hooks/scripts/routing/credential_print_guard.py:_REDIRECT_USER
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U7b: the redirect every other user reads, with no wrapper to point at (ask your operator for an equivalent)'
+  target_state: as is
+  phase: '3'
 rules:
 - id: U1a
   module: hooks/scripts/routing/subagent_git_write_requires_orchestrator.py
@@ -866,7 +873,6 @@ rules:
     nx_tidy, tuple_in and mailbox_send; the flag keeps the full list'
   target_state: a prompt for users on the destructive and other-party tools
   phase: '3'
-  live: false
   decision: D2
 - id: U6b
   module: hooks/scripts/stop_wake_guard.py
@@ -875,7 +881,6 @@ rules:
   evidence: The CI text (nx ci wait, develop/main, the CI board) is fed by nexus CI (stop_wake_guard.py:780-787)
   target_state: the CI text only with the marker
   phase: '3'
-  live: false
 - id: S2-2
   module: hooks/scripts/compact_checkpoint.py
   audience: EVERY-USER
@@ -884,7 +889,6 @@ rules:
     or not the project has either
   target_state: the board and bd words only where a board entry or .beads/ exists
   phase: '3'
-  live: false
 - id: U6c
   module: hooks/scripts/stop_wake_guard.py
   audience: REMOVE
@@ -892,13 +896,11 @@ rules:
   evidence: Creating ~/.config/nexus/logs/hook.log in a user's home (_log at :806-815)
   target_state: log only when the directory exists
   phase: '3'
-  live: false
 - id: U8b
   module: hooks/scripts/routing/destructive_action_advice.py
   audience: SAM-WIDE
   gate: maintainer
   evidence: Sam's planned deny flip, recorded only in b5998a9644's subject; never for users, per row for Sam from routing_events (D6)
-  target_state: per-row Row.mode for the maintainer
-  phase: after-2
-  live: false
+  target_state: advise for everyone today; a row's deny mode, set on no row yet, applies only under maintainer()
+  phase: '3'
   decision: D6

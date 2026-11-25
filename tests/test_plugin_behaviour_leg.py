@@ -116,15 +116,29 @@ def test_classify_reads_the_hook_envelopes() -> None:
 # --- the allowlist -------------------------------------------------------------------------------
 
 
-def _row(manifest: dict) -> str:
-    return next(r for r in am.allowlist_rows(manifest) if r.startswith("hooks/scripts/routing/credential_print_guard.py:"))
+ROW = "hooks/scripts/routing/credential_print_guard.py:_REDIRECT"
 
 
-def test_the_checked_in_allowlist_is_well_formed_and_names_only_rows_not_live_yet(manifest) -> None:
+@pytest.fixture()
+def unwired(manifest) -> dict:
+    """The manifest with one row (the credential redirect) switched to ``live: false``: Phase 3 wired every real one, so the
+    allowlist's rules are exercised on a synthetic row."""
+    import copy
+
+    m = copy.deepcopy(manifest)
+    for c in m["constants"]:
+        if c["id"] == ROW:
+            c["live"] = False
+    assert am.allowlist_rows(m) == [ROW]
+    return m
+
+
+def test_the_checked_in_allowlist_is_empty_and_every_manifest_row_is_live(manifest) -> None:
+    """Phase 3 (nexus-sby49.4) ships when the allowlist has no entry and no row is `live: false`."""
     entries = leg.parse_allowlist(leg.DEFAULT_ALLOWLIST.read_text(encoding="utf-8"))
-    assert entries, "Phase 2 ships with its Phase 3 worklist"
+    assert entries == []
     assert leg.allowlist_problems(entries, manifest) == []
-    assert all(e.until == "phase-3" for e in entries)
+    assert am.allowlist_rows(manifest) == []
 
 
 def test_an_allowlist_entry_for_a_live_row_is_refused(manifest) -> None:
@@ -134,8 +148,14 @@ def test_an_allowlist_entry_for_a_live_row_is_refused(manifest) -> None:
     assert any("not a row that is not live yet" in p for p in leg.allowlist_problems(entries, manifest))
 
 
-def test_an_allowlist_entry_past_its_condition_is_refused(manifest) -> None:
-    row = _row(manifest)
+def test_an_allowlist_entry_for_a_row_that_is_not_live_is_accepted_until_its_phase(unwired) -> None:
+    entries = leg.parse_allowlist(f"{ROW}\tHellblazer/nexus\tuntil: phase-4\tbecause\n")
+    assert leg.allowlist_problems(entries, unwired) == []
+
+
+def test_an_allowlist_entry_past_its_condition_is_refused(unwired) -> None:
+    manifest = unwired
+    row = ROW
     expired = leg.parse_allowlist(f"{row}\tSam\tuntil: phase-2\tbecause\n")
     assert any("has passed" in p for p in leg.allowlist_problems(expired, manifest))
     answered = leg.parse_allowlist(f"{row}\tSam\tuntil: D6\tbecause\n")
@@ -149,8 +169,9 @@ def test_a_malformed_allowlist_line_raises() -> None:
         leg.parse_allowlist("only\ttwo fields\n")
 
 
-def test_an_allowlisted_finding_is_let_through_and_counted_and_the_rest_fail(manifest) -> None:
-    row = _row(manifest)
+def test_an_allowlisted_finding_is_let_through_and_counted_and_the_rest_fail(unwired) -> None:
+    manifest = unwired
+    row = ROW
     entries = leg.parse_allowlist(f"{row}\tHellblazer/nexus\tuntil: phase-3\treason\n")
     key = "PreToolUse hooks/scripts/routing/credential_print_guard.py"
     findings = [
@@ -165,19 +186,10 @@ def test_an_allowlisted_finding_is_let_through_and_counted_and_the_rest_fail(man
 
 #: The allowlist may only shrink (nexus-sby49.3, critic I3/I4). Phase 3 removes entries; nothing adds one. A new entry
 #: needs a decision of record, and then this set changes in the same commit.
-ALLOWLIST_PINNED = {
-    ("hooks/scripts/routing/credential_print_guard.py:_REDIRECT", "Hellblazer/nexus"),
-    ("hooks/scripts/routing/credential_print_guard.py:_REDIRECT", "RDR-219"),
-    ("PreToolUse hooks/scripts/routing/destructive_action_advice.py", "lab-remote"),
-    ("S2-2", "bd"),
-}
+ALLOWLIST_PINNED: set[tuple[str, str]] = set()  # emptied by Phase 3 (nexus-sby49.4)
 #: Every manifest row whose end state is not wired yet. Phase 3 (and D6's flip) empties this; a new `live: false` row is a
 #: decision, not a way around the leg.
-NOT_LIVE_PINNED = {
-    "PreToolUse hooks/scripts/routing/destructive_action_advice.py", "S2-2", "Stop hooks/scripts/stop_wake_guard.py", "U2b",
-    "U6b", "U6c", "U8b", "hooks/scripts/compact_checkpoint.py:_RESUME_DIRECTIVE",
-    "hooks/scripts/routing/credential_print_guard.py:_REDIRECT",
-}
+NOT_LIVE_PINNED: set[str] = set()  # emptied by Phase 3 (nexus-sby49.4)
 
 
 def test_the_allowlist_is_pinned_and_may_only_shrink() -> None:
@@ -187,7 +199,7 @@ def test_the_allowlist_is_pinned_and_may_only_shrink() -> None:
 
 def test_the_not_live_rows_are_pinned_and_may_only_shrink(manifest) -> None:
     assert set(am.allowlist_rows(manifest)) <= NOT_LIVE_PINNED, "a new live: false row is a decision, not a way around the leg"
-    assert len(NOT_LIVE_PINNED) == 9
+    assert not NOT_LIVE_PINNED and am.allowlist_rows(manifest) == []
 
 
 def test_every_advisory_rows_text_is_clean_or_allowlisted(manifest) -> None:
@@ -197,6 +209,7 @@ def test_every_advisory_rows_text_is_clean_or_allowlisted(manifest) -> None:
     spec.loader.exec_module(daa)
     allowed = {e.hit for e in leg.parse_allowlist(leg.DEFAULT_ALLOWLIST.read_text(encoding="utf-8"))
                if e.row == "PreToolUse hooks/scripts/routing/destructive_action_advice.py"}
+    assert allowed == set(), "U8a: every advice row's text is neutral, so nothing is allowlisted"
     assert len(daa.ROWS) >= 8
     for row in daa.ROWS:
         extra = set(leg.lexicon_hits(row.advice)) - allowed
@@ -329,3 +342,85 @@ def test_a_plugin_with_no_manifest_is_unverified(tmp_path) -> None:
     (tmp_path / "hooks" / "hooks.json").write_text('{"hooks": {}}')
     proc = subprocess.run([sys.executable, str(LEG), "run", "--plugin", str(tmp_path)], capture_output=True, text=True, timeout=60, cwd=str(ROOT))
     assert proc.returncode == 2 and "UNVERIFIED" in proc.stdout and "audience.yaml" in proc.stdout
+
+
+# --- Phase 3's expectations (nexus-sby49.4) ----------------------------------------------------------------------
+
+
+def _reg(event: str, tail_end: str) -> dict:
+    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    return next(r for r in am.registrations(hooks) if r["event"] == event and r["argv"][-1].endswith(tail_end))
+
+
+def _scenarios_for(reg: dict, name: str) -> dict[str, dict]:
+    fx = leg.Fixture(name, Path("/x") / name, Path("/h"), name == "flagged")
+    return {sc["name"]: sc for sc in leg._scenarios(reg, fx)}
+
+
+def test_the_leg_expects_the_prompt_for_the_six_tools_for_everyone_but_the_flagged_account() -> None:
+    """U2b: the six are silent for a user and for the marked checkout (the marker never loosens), allowed for the flag."""
+    reg = _reg("PreToolUse", "auto-approve")
+    for name in ("plain", "plain-dirty", "plain-beads", "marked", "flagged"):
+        sc = _scenarios_for(reg, name)
+        assert sc["search"]["expect"] == "allow"
+        for tool in leg.PROMPTED_FOR_USERS:
+            assert sc[tool]["expect"] == ("allow" if name == "flagged" else "none"), (name, tool)
+    assert len(leg.PROMPTED_FOR_USERS) == 6
+
+
+def test_the_leg_expects_neutral_stop_text_for_users_and_the_ci_text_only_in_the_marked_checkout() -> None:
+    reg = _reg("Stop", "stop_wake_guard.py")
+    marked = _scenarios_for(reg, "marked")
+    assert marked["ci wait"]["must"] == ("nx ci wait",) and marked["ci wait"]["private_cfg"] is True
+    for name in ("plain", "plain-dirty", "plain-beads", "flagged"):
+        sc = _scenarios_for(reg, name)
+        assert set(leg.CI_TEXT) <= set(sc["ci wait"]["forbid"]) and set(leg.CI_TEXT) <= set(sc["closing promise"]["forbid"]), name
+        assert sc["ci wait"]["private_cfg"] is True, "no config directory may appear (U6c)"
+
+
+def test_the_leg_expects_the_compaction_words_by_the_projects_data() -> None:
+    inject = _reg("SessionStart", "inject")
+    user, beads, marked = (_scenarios_for(inject, n) for n in ("plain", "plain-beads", "marked"))
+    assert "board" in user["compact, no checkpoint"]["forbid"] and "bd list" in user["compact, no checkpoint"]["forbid"]
+    assert "bd list --status=in_progress" in beads["compact, no checkpoint"]["must"]
+    assert "board" in beads["compact, no checkpoint"]["forbid"], "a beads project is not a board project"
+    assert "threads board entry" in marked["compact, no checkpoint"]["must"], "the maintainer keeps the board"
+
+
+def test_the_beads_fixture_runs_only_the_compaction_registrations(manifest) -> None:
+    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    regs = {r["key"]: r for r in am.registrations(hooks)}
+    kept = [k for k, r in regs.items() if leg._is_compaction(r)]
+    assert sorted(regs[k]["event"] for k in kept) == ["PostCompact", "PreCompact", "SessionStart"]
+    assert "plain-beads" in leg.USER_FIXTURES and leg.BEADS_FIXTURES == ("plain-beads",)
+
+
+def test_the_bd_word_is_a_hit_unless_the_project_has_beads() -> None:
+    assert leg.lexicon_hits("run `bd list` now") == ["bd"]
+    assert leg.lexicon_hits("run `bd list` now", beads=True) == []
+    assert leg.lexicon_hits("nexus-abc12 and bd", beads=True) == ["nexus-abc12"]
+
+
+def test_evaluate_fails_a_missing_required_word_a_forbidden_one_and_a_leaked_config_dir(manifest) -> None:
+    def outcome(text: str, *, must=(), forbid=(), leaked=()):
+        probe = leg.Probe("P2/plain/x/y", "k", "plain", "P2", "script", [], None, None, must=must, forbid=forbid)
+        return leg.Outcome(probe, 0, text, "", "advice", text, "", leaked)
+
+    _f, hard, _t, _c = leg.evaluate([outcome("hello", must=("nx ci wait",))], manifest, ROOT)
+    assert any("does not carry 'nx ci wait'" in h for h in hard)
+    _f, hard, _t, _c = leg.evaluate([outcome("the board", forbid=("board",))], manifest, ROOT)
+    assert any("carries 'board'" in h for h in hard)
+    _f, hard, _t, _c = leg.evaluate([outcome("ok", leaked=("logs",))], manifest, ROOT)
+    assert any("left ['logs']" in h for h in hard)
+    _f, hard, _t, _c = leg.evaluate([outcome("fine")], manifest, ROOT)
+    assert hard == []
+
+
+def test_a_private_config_probe_reports_what_a_hook_leaves_in_it(tmp_path) -> None:
+    probe = leg.Probe("p", "k", "plain", "P2", "script",
+                      [sys.executable, "-c", "import os; os.makedirs(os.path.join(os.environ['NEXUS_CONFIG_DIR'], 'logs'))"],
+                      {}, None, private_cfg=True)
+    out = leg.run_probe(probe, {"TMPDIR": str(tmp_path)}, tmp_path, 30)
+    assert out.leaked == ("logs",)
+    clean = leg.Probe("p", "k", "plain", "P2", "script", [sys.executable, "-c", "pass"], {}, None, private_cfg=True)
+    assert leg.run_probe(clean, {"TMPDIR": str(tmp_path)}, tmp_path, 30).leaked == ()

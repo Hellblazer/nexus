@@ -165,6 +165,48 @@ class TestPreflightVerbDirect:
 
 
 
+@pytest.fixture()
+def beads_project(tmp_path: Path) -> dict:
+    """A payload whose project has a ``.beads/`` directory (the bd check runs only there)."""
+    (tmp_path / "proj" / ".git").mkdir(parents=True)
+    (tmp_path / "proj" / ".beads").mkdir()
+    return {"cwd": str(tmp_path / "proj")}
+
+
+class TestTheBdCheckFollowsTheProjectsBeads:
+    """nexus-sby49.4: ``bd (beads, optional)`` is probed, and named in the FAILED marker, only where the project has beads."""
+
+    @staticmethod
+    def _broken_nx(monkeypatch) -> list[str]:
+        probed: list[str] = []
+
+        def fake_probe(name: str, args: list[str], timeout: float = 3.0):
+            probed.append(name)
+            return preflight_verb._ToolStatus(name=name, available=False, detail="not on PATH", install_hint="")
+
+        monkeypatch.setattr(preflight_verb, "_probe", fake_probe)
+        monkeypatch.setattr(preflight_verb, "_platform", lambda: "darwin")
+        return probed
+
+    def test_a_project_without_beads_gets_no_bd_line_and_no_bd_probe(self, monkeypatch, tmp_path: Path) -> None:
+        probed = self._broken_nx(monkeypatch)
+        (tmp_path / "bare" / ".git").mkdir(parents=True)
+        out = preflight_verb.run({"cwd": str(tmp_path / "bare")}).stdout
+        assert out and "## nx Preflight: FAILED" in out and "nx (conexus CLI)" in out
+        assert "bd" not in out.replace("-bd", "") and probed == ["nx (conexus CLI)"]
+
+    def test_a_beads_project_still_names_bd(self, monkeypatch, beads_project) -> None:
+        probed = self._broken_nx(monkeypatch)
+        out = preflight_verb.run(beads_project).stdout
+        assert "bd (beads, optional)" in out and probed == ["nx (conexus CLI)", "bd (beads, optional)"]
+
+    def test_no_cwd_at_all_is_a_project_without_beads(self, monkeypatch) -> None:
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        probed = self._broken_nx(monkeypatch)
+        preflight_verb.run(None)
+        assert probed == ["nx (conexus CLI)"]
+
+
 class TestWindowsSkipsTheRedundantNxSpawn:
     """nexus-3cydr: on Windows the nx probe re-imported the CLI in this very
     venv (nx_argv uses sys.executable -m nexus.cli) and cost 2-7 s on a fresh
@@ -186,19 +228,19 @@ class TestWindowsSkipsTheRedundantNxSpawn:
         monkeypatch.setattr(pv, "_probe", fake_probe)
         return probed
 
-    def test_nx_beside_the_hook_is_not_spawned(self, monkeypatch) -> None:
+    def test_nx_beside_the_hook_is_not_spawned(self, monkeypatch, beads_project) -> None:
         from nexus.hooks import preflight_verb as pv
 
         probed = self._wire(monkeypatch, {"nx": r"C:\u\.local\bin\nx.exe"}, r"C:\u\.local\bin")
-        assert pv.run(None).stdout is None
+        assert pv.run(beads_project).stdout is None
         assert all(a[0] not in (r"C:\u\.local\bin\nx.exe",) and "nexus.cli" not in a for a in probed), probed
         assert probed == [["bd", "version"]]
 
-    def test_nx_missing_from_path_is_reported_without_a_spawn(self, monkeypatch) -> None:
+    def test_nx_missing_from_path_is_reported_without_a_spawn(self, monkeypatch, beads_project) -> None:
         from nexus.hooks import preflight_verb as pv
 
         probed = self._wire(monkeypatch, {}, r"C:\u\.local\bin")
-        out = pv.run(None).stdout
+        out = pv.run(beads_project).stdout
         assert out is not None and "## nx Preflight: FAILED" in out and "not on PATH" in out
         assert probed == [["bd", "version"]]
 
@@ -209,10 +251,10 @@ class TestWindowsSkipsTheRedundantNxSpawn:
         assert pv.run(None).stdout is None
         assert probed[0] == [r"D:\other\bin\nx.exe", "--version"]
 
-    def test_posix_keeps_the_nx_argv_probe(self, monkeypatch) -> None:
+    def test_posix_keeps_the_nx_argv_probe(self, monkeypatch, beads_project) -> None:
         from nexus.hooks import preflight_verb as pv
 
         probed = self._wire(monkeypatch, {"nx": "/u/.local/bin/nx"}, "/u/.local/bin")
         monkeypatch.setattr(pv, "_platform", lambda: "darwin")
-        pv.run(None)
+        pv.run(beads_project)
         assert probed[0][-1] == "--version" and len(probed) == 2

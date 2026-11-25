@@ -83,10 +83,11 @@ LEXICON_CI = re.compile(
 )
 
 
-def lexicon_hits(text: str) -> list[str]:
-    """Every lexicon term in *text*, as written, in order of appearance."""
+def lexicon_hits(text: str, *, beads: bool = False) -> list[str]:
+    """Every lexicon term in *text*, as written, in order of appearance. With *beads* (the project has a ``.beads/``
+    directory: a data gate that is on) the word ``bd`` is not a hit."""
     found = [(m.start(), m.group(0)) for m in LEXICON_CS.finditer(text)] + [(m.start(), m.group(0)) for m in LEXICON_CI.finditer(text)]
-    return [t for _, t in sorted(found)]
+    return [t for _, t in sorted(found) if not (beads and t.lower() == "bd")]
 
 
 # --- section 2.1: the git guard per verb, for a user and for the maintainer ---------------------------
@@ -157,10 +158,18 @@ DIRTY_ROWS: list[str] = [
     "git stash", "git stash -u", "git rm -f f", "git clean -fd",
 ]
 CREDENTIAL_ROWS = [("cat /proc/1234/environ", "deny"), ("ls -la", "pass")]
-ADVICE_ROWS = ["pkill -f pytest", "find / -name x.py", "ls -la"]
+#: (command, what the output is): advice is additionalContext with no decision, none is silence. A user's advice is as neutral
+#: as the maintainer's (U8a), and no fixture's output is a deny (U8b: the flip is not made, and never reaches a user).
+ADVICE_ROWS = [("pkill -f pytest", "advice"), ("find / -name x.py", "advice"), ("ls -la", "none")]
+#: U2b: the tools a user is prompted for (the hook is silent, so Claude Code's own prompt decides); the maintainer's account allows.
+PROMPTED_FOR_USERS = ("memory_delete", "plan_delete", "memory_consolidate", "nx_tidy", "tuple_in", "mailbox_send")
+#: U6b: the stop guard's CI wording, which only a nexus checkout reads.
+CI_TEXT = ("nx ci wait", "CI board", "develop and main")
 
-FIXTURES = ("plain", "plain-dirty", "marked", "flagged")
-USER_FIXTURES = ("plain", "plain-dirty")
+FIXTURES = ("plain", "plain-dirty", "plain-beads", "marked", "flagged")
+USER_FIXTURES = ("plain", "plain-dirty", "plain-beads")
+#: A user's repository with a ``.beads/`` directory: only the compaction events run in it (S2-2's data gate, switched on).
+BEADS_FIXTURES = ("plain-beads",)
 #: The interpreter that runs the module-driven probes (SubagentStart): the project's, or the installed tool's with ``--nx installed``.
 MODULE_PYTHON = sys.executable
 
@@ -185,11 +194,14 @@ class Probe:
     kind: str                       # script | nx | module
     argv: list[str]                 # for script and nx probes; empty for module
     payload: dict | None
-    expect: str | None = None       # "deny" | "pass" | "block" | None (no expectation beyond the fixture rules)
+    expect: str | None = None       # "deny" | "pass" | "block" | "allow" | "advice" | "none" | None (no expectation beyond the fixture rules)
     group: str = ""                 # probes of one group run in order (by seq), in one worker
     module_driver: str = ""         # for kind == module: the driver's source
     stdin_raw: str | None = None
     seq: int = 0
+    must: tuple[str, ...] = ()      # the output carries each of these
+    forbid: tuple[str, ...] = ()    # the output carries none of these
+    private_cfg: bool = False       # run with a fresh, empty config dir and fail if the hook leaves anything in it (U6c)
 
 
 @dataclasses.dataclass
@@ -201,6 +213,7 @@ class Outcome:
     decision: str
     text: str
     note: str = ""
+    leaked: tuple[str, ...] = ()    # what a private_cfg probe's hook left in its empty config dir
 
 
 # --- output classification ------------------------------------------------------------------------
@@ -441,6 +454,8 @@ def make_fixtures(work: Path) -> dict[str, Fixture]:
             (repo / "scripts" / "agent-worktree-preflight.sh").write_text("#!/bin/sh\n")
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", "init")
+        if name in BEADS_FIXTURES:
+            (repo / ".beads").mkdir()
         if name == "plain-dirty":
             (repo / "f").write_text("two\n")
             (repo / "untracked.txt").write_text("x\n")
@@ -630,6 +645,8 @@ def build_probes(plugin: Path, manifest: dict, hooks_json: dict, fixtures: dict[
         for fx in fixtures.values():
             if fx.name == "plain-dirty" and not is_guard:
                 continue  # the dirty tree exists for the guard's git-state rows alone
+            if fx.name in BEADS_FIXTURES and not _is_compaction(reg):
+                continue  # the beads directory exists for the compaction text's data gate alone
             if account_mode == "harness":
                 use_harness = True
             elif account_mode == "real":
@@ -643,14 +660,21 @@ def build_probes(plugin: Path, manifest: dict, hooks_json: dict, fixtures: dict[
                     pid = f"{posture}/{fx.name}/{r['key']}/{scenario['name']}"
                     if only and only not in pid:
                         continue
+                    extra = {"must": tuple(scenario.get("must", ())), "forbid": tuple(scenario.get("forbid", ())),
+                             "private_cfg": bool(scenario.get("private_cfg", False))}
                     if reg["hook"].get("type") == "mcp_tool":
                         probes.append(Probe(pid, r["key"], fx.name, posture, "module", [], scenario["payload"], scenario.get("expect"),
-                                            module_driver=SUBAGENT_START_DRIVER))
+                                            module_driver=SUBAGENT_START_DRIVER, **extra))
                         continue
                     argv = entry_argv(plugin, reg["hook"], harness_home=fx.home if (use_harness and not nx_entry) else None)
                     probes.append(Probe(pid, r["key"], fx.name, posture, "nx" if nx_entry else "script", argv, scenario["payload"],
-                                        scenario.get("expect"), group=scenario.get("group", ""), seq=scenario.get("seq", 0)))
+                                        scenario.get("expect"), group=scenario.get("group", ""), seq=scenario.get("seq", 0), **extra))
     return probes
+
+
+def _is_compaction(reg: dict) -> bool:
+    """PreCompact, PostCompact and the compact SessionStart inject: the events whose text S2-2 gates on the project's beads."""
+    return reg["event"] in ("PreCompact", "PostCompact") or (reg["event"] == "SessionStart" and reg["argv"][-1] == "inject")
 
 
 def _scenarios(reg: dict, fx: Fixture) -> list[dict]:
@@ -673,16 +697,39 @@ def _scenarios(reg: dict, fx: Fixture) -> list[dict]:
                 out.append({"name": cmd, "payload": _bash(fx, cmd), "expect": "deny"})
         return out
     if event == "PreToolUse" and tail[-1].endswith("credential_print_guard.py"):
-        return [{"name": cmd, "payload": _bash(fx, cmd), "expect": exp} for cmd, exp in CREDENTIAL_ROWS]
+        # U7b: the wrapper the redirect names is the nexus checkout's; every other repository is told to ask its operator.
+        out = []
+        for cmd, exp in CREDENTIAL_ROWS:
+            sc: dict = {"name": cmd, "payload": _bash(fx, cmd), "expect": exp}
+            if exp == "deny":
+                sc["must"] = ("claude_credentials.py status",) if fx.name == "marked" else ("Ask your operator",)
+                sc["forbid"] = () if fx.name == "marked" else ("claude_credentials", "Hellblazer/nexus")
+            out.append(sc)
+        return out
     if event == "PreToolUse" and tail[-1].endswith("destructive_action_advice.py"):
-        return [{"name": cmd, "payload": _bash(fx, cmd), "expect": None} for cmd in ADVICE_ROWS]
+        return [{"name": cmd, "payload": _bash(fx, cmd), "expect": what} for cmd, what in ADVICE_ROWS]
     if event in ("PreToolUse", "PermissionRequest") and tail[-1] == "auto-approve":
-        return [{"name": tool, "payload": _common(fx, event, tool_name=tool, tool_input={"query": "x", "project": "p", "title": "t"}), "expect": None}
-                for tool in ("mcp__plugin_conexus_nexus__search", "mcp__plugin_conexus_nexus__memory_delete")]
+        # U2b: the six tools are the account flag's alone (the marker does not loosen); every other allowed tool is everyone's
+        out = [{"name": "search", "expect": "allow", "payload": _common(
+            fx, event, tool_name="mcp__plugin_conexus_nexus__search", tool_input={"query": "x", "project": "p", "title": "t"})}]
+        for tool in PROMPTED_FOR_USERS:
+            out.append({"name": tool, "expect": "allow" if fx.flagged_home else "none", "payload": _common(
+                fx, event, tool_name=f"mcp__plugin_conexus_nexus__{tool}", tool_input={"query": "x", "project": "p", "title": "t"})})
+        return out
     if event == "Stop":
-        return [{"name": "closing promise", "expect": "advice", "payload": _common(
-            fx, "Stop", stop_hook_active=False, background_tasks=[], session_crons=[],
-            last_assistant_message="The suite is still running. When it finishes, I'll read the result and close the bead.")}]
+        nexus = fx.name == "marked"
+        promise = "The suite is still running. When it finishes, I'll read the result and close the bead."
+        ci_wait = "Pushed. I'll read the CI result once the runs finish."
+        out = []
+        for name, text in (("closing promise", promise), ("ci wait", ci_wait)):
+            sc = {"name": name, "expect": "advice", "private_cfg": True, "payload": _common(
+                fx, "Stop", stop_hook_active=False, background_tasks=[], session_crons=[], last_assistant_message=text)}
+            if name == "ci wait":  # U6b: the CI wording is a nexus checkout's alone
+                sc["must" if nexus else "forbid"] = ("nx ci wait",) if nexus else CI_TEXT
+            elif not nexus:
+                sc["forbid"] = CI_TEXT
+            out.append(sc)
+        return out
     if event == "UserPromptSubmit":
         return [{"name": "prompt", "payload": _common(fx, "UserPromptSubmit", prompt="what is the status"), "expect": None}]
     if event == "PreCompact":
@@ -712,8 +759,21 @@ def _scenarios(reg: dict, fx: Fixture) -> list[dict]:
         return starts
     if event == "SessionStart":
         source = "compact" if tail[-1] == "inject" else "startup"
-        return [{"name": source, "payload": _common(fx, "SessionStart", source=source, model="m"), "expect": None,
-                 "group": f"compact-{fx.name}" if tail[-1] == "inject" else "", "seq": 1}]
+        first = {"name": source, "payload": _common(fx, "SessionStart", source=source, model="m"), "expect": None,
+                 "group": f"compact-{fx.name}" if tail[-1] == "inject" else "", "seq": 1}
+        if tail[-1] != "inject":
+            return [first]
+        # S2-2: a restored checkpoint and a compact start with none; the board and beads are named only where the project has them
+        beads = fx.name in BEADS_FIXTURES
+        maint = fx.name in ("marked", "flagged")
+        # the restored text carries the checkpoint's own body (it says "board" in an error line): assert the intro's wording
+        first["must"] = ("git or beads",) if beads else ()
+        first["forbid"] = (() if maint else ("threads board", "a board thread")) + (() if beads else ("or beads", "and beads"))
+        none = {"name": "compact, no checkpoint", "expect": None, "payload": _common(
+            fx, "SessionStart", source="compact", model="m", session_id=f"leg-{fx.name}-nockpt")}
+        none["must"] = (("bd list --status=in_progress",) if beads else ()) + (("threads board entry",) if maint else ())
+        none["forbid"] = (() if maint else ("board", "threads")) + (() if beads else ("bd list", "beads"))
+        return [first, none]
     return [{"name": "default", "payload": _common(fx, event), "expect": None}]
 
 
@@ -731,14 +791,22 @@ def run_probe(probe: Probe, env: dict[str, str], cwd: Path, timeout: float) -> O
         _no_put_transcript(Path(probe.payload["agent_transcript_path"]))
     if probe.payload and isinstance(probe.payload.get("transcript_path"), str) and not Path(probe.payload["transcript_path"]).exists():
         _no_put_transcript(Path(probe.payload["transcript_path"]))
+    private: Path | None = None
+    if probe.private_cfg:
+        private = Path(tempfile.mkdtemp(prefix="plugin-behaviour-cfg.", dir=env.get("TMPDIR") or None))
+        env = {**env, "NEXUS_CONFIG_DIR": str(private)}
     try:
         proc = subprocess.run(argv, input=payload, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=timeout, env=env, cwd=str(cwd), check=False)
         rc, out, err, note = proc.returncode, proc.stdout, proc.stderr, ""
     except subprocess.TimeoutExpired:
         rc, out, err, note = 124, "", "", f"timed out after {timeout}s"
+    leaked: tuple[str, ...] = ()
+    if private is not None:
+        leaked = tuple(sorted(str(q.relative_to(private)) for q in private.rglob("*")))
+        shutil.rmtree(private, ignore_errors=True)
     decision, text = classify(out)
-    return Outcome(probe, rc, out, err, decision, text, note)
+    return Outcome(probe, rc, out, err, decision, text, note, leaked)
 
 
 def run_all(probes: list[Probe], envs: dict[tuple[str, str], dict[str, str]], fixtures: dict[str, Fixture], jobs: int,
@@ -789,12 +857,21 @@ def evaluate(outcomes: list[Outcome], manifest: dict, repo: Path) -> tuple[list[
         if p.expect is not None:
             if p.expect == "pass" and o.decision in ("deny", "block"):
                 hard.append(f"{p.id}: expected the call to pass, got {o.decision}")
-            elif p.expect in ("deny", "block", "advice", "none") and o.decision != p.expect:
+            elif p.expect in ("deny", "block", "advice", "none", "allow") and o.decision != p.expect:
                 hard.append(f"{p.id}: expected {p.expect}, got {o.decision}")
         elif p.fixture in USER_FIXTURES and o.decision in ("deny", "block"):
             findings.append({"reg_key": p.reg_key, "hit": f"<{o.decision}>", "probe": p.id})
+        low = o.text.lower()
+        for word in p.must:
+            if word.lower() not in low:
+                hard.append(f"{p.id}: the output does not carry {word!r}")
+        for word in p.forbid:
+            if word.lower() in low:
+                hard.append(f"{p.id}: the output carries {word!r}")
+        if o.leaked:
+            hard.append(f"{p.id}: the hook left {list(o.leaked)} in a config directory that did not exist (a Stop hook must not create one)")
         if p.fixture in USER_FIXTURES:
-            for hit in sorted(set(lexicon_hits(o.text))):
+            for hit in sorted(set(lexicon_hits(o.text, beads=p.fixture in BEADS_FIXTURES))):
                 findings.append({"reg_key": p.reg_key, "hit": hit, "probe": p.id})
     return findings, hard, texts, counts
 
