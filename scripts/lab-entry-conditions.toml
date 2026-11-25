@@ -5,19 +5,32 @@
 # these was the post-push CI run's job, and four defects reached develop that way (2026-11-24: Service CI's
 # integration-ran assert on 9c8bc0d04b, the pipefail lint on 05c2704080 over service/native-smoke.sh).
 #
-# tests/scripts/test_lab_entry_conditions.py parses .github/workflows/ci.yml and service-ci.yml and fails when
-# this file and CI disagree: a listed step gone from CI, a CI step that runs a repo script (scripts/*, tests/e2e/*)
-# that is neither a [[check]] script nor an [[excluded]] entry, an exclusion CI no longer needs, or a command
-# that breaks the lab-host rules. A CI step that runs no repo script is listed only when a check names it.
+# tests/scripts/test_lab_entry_conditions.py parses ci.yml, service-ci.yml and .github/actions/* and fails when this
+# file and CI disagree: a listed step gone from CI or its invocation (arguments included) changed, a CI step that
+# runs a repo script or test file that is neither a check nor an exclusion, an exclusion pointing at a step that does
+# not run the script, a path-gate claim the real paths-filter globs contradict, or a command that breaks the
+# lab-host rules.
+#
+# SWEEP LIMITS. The sweep is keyed on repo scripts and test files. A CI step that runs none (uvx ruff, an inline
+# pytest, a count floor) is covered only where [[script_less]] below names it; a new one can appear unlisted. Only
+# ci.yml, service-ci.yml and the composite actions are swept: the release, engine-release, nightly and Windows
+# workflows are gates of their own.
 #
 # Where commands run (AGENTS.md rules 12-13, checklist 0-2):
-#   * mvnw-leased.sh, build-gate-jar.sh, upgrade_boot_writes.py and the assert_* scripts run ON the pool host
-#     (chas-test or qwent-test, over ssh), in the lane's own clone checked out at the stack tip, from its root.
+#   * mvnw-leased.sh, build-gate-jar.sh, upgrade_boot_writes.py, docker and the assert_* scripts run ON the pool
+#     host (chas-test or qwent-test, over ssh), in the lane's own clone checked out at the stack tip, from its root.
 #     Engine builds never go through lab-remote.
-#   * lab-remote lines run from the lane's worktree on the laptop (leave --host off).
+#   * lab-remote lines run from the lane's worktree on the laptop (leave --host off) and `--fetch` their status file.
+#     Status files are root-level `*status*.json` names (git-ignored; output/ does not exist in a lab-remote copy
+#     and watched_pytest does not create it).
 #   * Prerequisites run first, in file order; a check lists the ones it needs in `after`.
-#   * The CI assert scripts read service/target/surefire-reports and assume a clean target/ (CI checks out
-#     fresh); engine-main-suite clears the reports first so a stale report cannot satisfy one.
+#   * The CI assert scripts read service/target/surefire-reports and assume a clean target/ (CI checks out fresh);
+#     engine-main-suite clears the reports first so a stale report cannot satisfy one.
+#
+# Fields: workflow/job/step/run_contains pin the CI step and the exact invocation (normalised; comments and line
+# continuations ignored). lab_runs_ci_line: that invocation is one of the lab command's lines. ci_flags: Maven flags
+# in both CI's step and the lab command. gated_by/gate_job/lane_paths_hit/lane_paths_miss: the paths-filter that gates
+# the CI step, checked against its real globs. full_suite: the entry may use lab-l.
 #
 # twin = "exact"       the same check CI runs, on the lane's tip
 #        "partial"     a weaker substitute; `gap` says what the lab cannot see
@@ -31,6 +44,10 @@ version = 1
 id = "old-engine-tag"
 host = "chas-test or qwent-test"
 note = "service-ci.yml 'Fetch the one old engine tag the upgrade rehearsal reads': without the tag the rehearsal Assumptions-skips and assert_rehearsal_ran.py fails."
+workflow = "service-ci.yml"
+job = "java-test-and-drift-guard"
+step = "Fetch the one old engine tag the upgrade rehearsal reads"
+run_contains = 'git fetch --no-tags --depth 1 origin "refs/tags/${tag}:refs/tags/${tag}"'
 command = [
   '''tag=$(sed -n 's/.*String OLD_TAG = "\(engine-service-v[0-9.]*\)";.*/\1/p' service/src/test/java/dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java) && git fetch --no-tags --depth 1 origin "refs/tags/${tag}:refs/tags/${tag}"''',
 ]
@@ -39,17 +56,43 @@ command = [
 id = "engine-main-suite"
 host = "chas-test or qwent-test"
 note = "Checklist item 1 (the whole engine suite). Runs the upgrade rehearsal and the model gates, and leaves the jars in ~/.m2 that native_jar_listing.py reads."
+workflow = "service-ci.yml"
+job = "java-test-and-drift-guard"
+step = "Run Java test suite"
+run_contains = "./mvnw -q test -Dnexus.ddl.suite=main"
+ci_flags = ["-Dnexus.ddl.suite=main"]
 command = [
   "rm -rf service/target/surefire-reports",
-  "scripts/mvnw-leased.sh --lab-run lab-m -B test",
+  "scripts/mvnw-leased.sh --lab-run lab-m -B test -Dnexus.ddl.suite=main",
 ]
 
 [[prerequisite]]
 id = "engine-integration-group"
 host = "chas-test or qwent-test"
 note = "Checklist item 2 (CI's flags); its count must be non-zero."
+workflow = "service-ci.yml"
+job = "java-test-and-drift-guard"
+step = "Run Java integration group (SQL-vs-stitch parity fixtures)"
+run_contains = "-Dtest.excluded.groups= -Dgroups=integration"
+ci_flags = ["-Dnexus.ddl.suite=integration", "-Dtest.excluded.groups=", "-Dgroups=integration"]
 command = [
   "scripts/mvnw-leased.sh --lab-run lab-m -B test -Dnexus.ddl.suite=integration -Dtest.excluded.groups= -Dgroups=integration",
+]
+
+[[prerequisite]]
+id = "ca3-bundle-build"
+host = "chas-test or qwent-test (needs docker)"
+note = "CI's from-source bundle build in the manylinux_2_28 image. CI caches the bundle by the hash of scripts/build_pg_bundle.sh; a lane may reuse ./bundle from an earlier lane's clone while that script is unchanged. About 10 minutes cold."
+workflow = "ci.yml"
+job = "ca3-pgvector-bundle"
+step = "Build complete PG + pgvector from source (Strategy B, glibc 2.28)"
+run_contains = "scripts/build_pg_bundle.sh"
+script = "scripts/build_pg_bundle.sh"
+ci_env = { PG_VERSION = "17.5", PGVECTOR_VERSION = "v0.8.7", MANYLINUX_IMAGE = "quay.io/pypa/manylinux_2_28_x86_64" }
+command = [
+  'export PG_VERSION=17.5 PGVECTOR_VERSION=v0.8.7 MANYLINUX_IMAGE=quay.io/pypa/manylinux_2_28_x86_64 BUNDLE_PREFIX="$PWD/bundle"',
+  'mkdir -p "$BUNDLE_PREFIX"',
+  'lab-run -c lab-m -- docker run --rm -e PG_VERSION -e PGVECTOR_VERSION -e BUNDLE_PREFIX -v "$PWD:$PWD" "$MANYLINUX_IMAGE" /bin/bash -c "set -eux; bash $PWD/scripts/build_pg_bundle.sh"',
 ]
 
 # ---------------------------------------------------------------- checks CI runs
@@ -59,7 +102,8 @@ id = "integration-group-ran"
 workflow = "service-ci.yml"
 job = "java-test-and-drift-guard"
 step = "Assert every integration-tagged class actually executed"
-run_contains = "assert_integration_group_ran.py service"
+run_contains = "python3 scripts/assert_integration_group_ran.py service"
+lab_runs_ci_line = true
 script = "scripts/assert_integration_group_ran.py"
 after = ["engine-main-suite", "engine-integration-group"]
 twin = "exact"
@@ -74,7 +118,8 @@ id = "upgrade-rehearsal-ran"
 workflow = "service-ci.yml"
 job = "java-test-and-drift-guard"
 step = "Assert upgrade rehearsal actually ran (not skipped)"
-run_contains = "assert_rehearsal_ran.py"
+run_contains = "python3 scripts/assert_rehearsal_ran.py service/target/surefire-reports/TEST-dev.nexus.service.SchemaUpgradeRehearsalIntegrationTest.xml"
+lab_runs_ci_line = true
 script = "scripts/assert_rehearsal_ran.py"
 after = ["old-engine-tag", "engine-main-suite"]
 twin = "exact"
@@ -89,7 +134,8 @@ id = "rerank-inference-ran"
 workflow = "service-ci.yml"
 job = "java-test-and-drift-guard"
 step = "Assert cross-encoder real-inference gate actually ran (not skipped)"
-run_contains = "assert_rerank_inference_ran.py"
+run_contains = "python3 scripts/assert_rerank_inference_ran.py service/target/surefire-reports/TEST-dev.nexus.service.vectors.CrossEncoderRerankerInferenceTest.xml service/target/surefire-reports/TEST-dev.nexus.service.RerankStageIntegrationTest.xml"
+lab_runs_ci_line = true
 script = "scripts/assert_rerank_inference_ran.py"
 after = ["engine-main-suite", "engine-integration-group"]
 twin = "conditional"
@@ -104,7 +150,8 @@ id = "bge-gates-ran"
 workflow = "service-ci.yml"
 job = "java-test-and-drift-guard"
 step = "Assert bge-768 model-dependent gates actually ran (not skipped)"
-run_contains = "assert_bge_gates_ran.py"
+run_contains = "python3 scripts/assert_bge_gates_ran.py service/target/surefire-reports/TEST-dev.nexus.service.Bge768ParityTest.xml service/target/surefire-reports/TEST-dev.nexus.service.vectors.Bge768BatchCompositionTest.xml"
+lab_runs_ci_line = true
 script = "scripts/assert_bge_gates_ran.py"
 after = ["engine-main-suite"]
 twin = "conditional"
@@ -119,7 +166,8 @@ id = "native-jar-listing"
 workflow = "service-ci.yml"
 job = "java-test-and-drift-guard"
 step = "Native jar listing matches the resolved jars"
-run_contains = "native_jar_listing.py --check"
+run_contains = "python3 scripts/native_jar_listing.py --check"
+lab_runs_ci_line = true
 script = "scripts/native_jar_listing.py"
 after = ["engine-main-suite"]
 twin = "exact"
@@ -134,7 +182,7 @@ id = "native-embedded-resources"
 workflow = "ci.yml"
 job = "engine-service-build"
 step = "Check the embedded native resources (nexus-vwfc0)"
-run_contains = "check_native_embedded_resources.py"
+run_contains = "python3 scripts/check_native_embedded_resources.py"
 script = "scripts/check_native_embedded_resources.py"
 after = ["engine-main-suite"]
 twin = "partial"
@@ -142,7 +190,7 @@ host = "chas-test or qwent-test (first command), laptop worktree (second)"
 gap = "chas has no GraalVM, so no native image is built and no embedded-resources.json exists to check. The twin is the JVM-side census of the resource config (ResourceConfigCensusTest, also part of the engine main suite) plus the checker's own unit tests; it does not read a real binary's report or the build-order lines. A lane that changes service/pom.xml's -H:IncludeResources patterns, the native-image resource config or the checker's inputs takes the PR trip-wire 'engine-service native build (PR trip-wire)' (or the engine-release Step 3f dispatch run) as the verdict on a real binary, after the push."
 command = [
   "scripts/mvnw-leased.sh --lab-run lab-m -B test -Dtest=ResourceConfigCensusTest",
-  "lab-remote -c lab-m -- env NX_TEST_T2_SUBSTRATE=none scripts/watched_pytest.py --stall 180 --status output/native-resources-status.json -- uv run pytest tests/scripts/test_check_native_embedded_resources.py",
+  "lab-remote -c lab-m --fetch native-resources-status.json -- env NX_TEST_T2_SUBSTRATE=none scripts/watched_pytest.py --stall 180 --status native-resources-status.json -- uv run pytest tests/scripts/test_check_native_embedded_resources.py",
 ]
 
 [[check]]
@@ -152,11 +200,54 @@ job = "test-lint"
 step = "Run lint-marked tests"
 run_contains = "pytest -m lint"
 after = []
-twin = "exact"
+twin = "partial"
 host = "laptop worktree"
-note = "CI runs the whole lint bucket in two hosted groups; the default addopts deselect `lint` everywhere else, so nothing in an ordinary hand run reaches this test. It scans every shell script with pipefail (it went red on service/native-smoke.sh), so run it on any lane that touches a .sh file. It is substrate-free, so no gate jar is needed."
+gap = "CI runs the whole lint bucket (about 2,100 tests in two hosted groups); this runs the one test file. Another lint-marked test a lane's diff reaches (a census, a frontmatter or hook lint) is not run here: checklist 0a's `scripts/meta_tests.py run --base <tip>` selects those by diff reach, and develop CI runs the rest."
+note = "The default addopts deselect `lint` everywhere else, so nothing in an ordinary hand run reaches this test. It scans every shell script with pipefail (it went red on service/native-smoke.sh), so run it on any lane that touches a .sh file. It is substrate-free, so no gate jar is needed."
 command = [
-  "lab-remote -c lab-m -- env NX_TEST_T2_SUBSTRATE=none scripts/watched_pytest.py --stall 180 --status output/pipefail-lint-status.json -- uv run pytest -m lint tests/test_pipefail_early_exit_consumer_lint.py",
+  "lab-remote -c lab-m --fetch pipefail-lint-status.json -- env NX_TEST_T2_SUBSTRATE=none scripts/watched_pytest.py --stall 180 --status pipefail-lint-status.json -- uv run pytest -m lint tests/test_pipefail_early_exit_consumer_lint.py",
+]
+
+[[check]]
+id = "ca3-live-test"
+workflow = "ci.yml"
+job = "ca3-pgvector-bundle"
+step = "Run CA-3 live test (asserts it actually ran, not skipped)"
+run_contains = "scripts/assert_ca3_ran.py ca3.xml"
+script = "scripts/assert_ca3_ran.py"
+after = ["ca3-bundle-build"]
+twin = "conditional"
+host = "chas-test or qwent-test (needs docker)"
+gated_by = "ca3_core"
+gate_job = "ca3-pgvector-bundle"
+lane_paths_hit = ["service/src/main/resources/db/changelog/db.changelog-master.xml"]
+gap = "Transcribed from CI's steps and not yet run on a lab host: the first live run comes with the next changeset lane. It needs docker and the manylinux image, and the from-source bundle build (ca3-bundle-build) first."
+note = "ca3_core includes the Liquibase changelog tree, so every changeset lane triggers this job on the develop push."
+command = [
+  "uv sync -q --group dev",
+  'lab-run -c lab-m -- env NEXUS_CA3_BUNDLE="$PWD/bundle" scripts/watched_pytest.py --stall 180 --status ca3-live-status.json -- uv run pytest tests/db/test_pg_provision_ca3_bundle.py -o addopts= -m integration -rs --junit-xml=ca3.xml',
+  "uv run python scripts/assert_ca3_ran.py ca3.xml",
+]
+also_covers = ["tests/db/test_pg_provision_ca3_bundle.py"]
+
+[[check]]
+id = "ca3-liquibase-bundle-smoke"
+workflow = "ci.yml"
+job = "ca3-pgvector-bundle"
+step = "Liquibase-against-bundle smoke (nexus-ywts8, linux-amd64 only)"
+run_contains = "bash scripts/liquibase_bundle_smoke.sh"
+script = "scripts/liquibase_bundle_smoke.sh"
+after = ["ca3-bundle-build"]
+twin = "conditional"
+host = "chas-test or qwent-test (needs docker and the liquibase/liquibase:4.31 image)"
+gated_by = "ca3_core"
+gate_job = "ca3-pgvector-bundle"
+lane_paths_hit = ["service/src/main/resources/db/changelog/db.changelog-master.xml", "service/src/main/resources/db/changelog/vectors-081.xml"]
+gap = "Transcribed from CI's step and not yet run on a lab host: the first live run comes with the next changeset lane. It applies the full changelog to the lean from-source bundle PG (ICU-less, --no-locale, no zlib/readline/openssl), which the engine suite's Testcontainers PG is not, so a green engine suite does not cover it."
+note = "ca3_core includes service/src/main/resources/db/changelog/**, so every changeset lane triggers it on the develop push."
+command = [
+  "uv sync -q --group dev",
+  'lab-run -c lab-m -- env NEXUS_CA3_BUNDLE="$PWD/bundle" bash scripts/liquibase_bundle_smoke.sh',
 ]
 
 # ---------------------------------------------------------------- gates no CI workflow runs
@@ -165,122 +256,231 @@ command = [
 id = "upgrade-boot-writes-leg-a"
 twin = "exact"
 host = "chas-test or qwent-test, on the Linux host by name (the harness reads /proc; hellmini cannot run it)"
-note = "Not a CI step: .claude/skills/engine-release Step 3h runs it at the cut. A lane runs leg A on its stack tip so an upgrade that rewrites user data at boot shows before the cut. NX_GATE_JAR_CACHE=off (the switch scripts/build-gate-jar.sh reads) forces the gate jar to be built at this tip: a cache hit reuses an earlier build_ref, and --new-jar-commit must name the commit the jar carries. PREV is the newest released conexus client (8.5.6 at 2026-11-25); re-check it. Legs B and C stay with the cut."
+note = "Not a CI step: .claude/skills/engine-release Step 3h runs it at the cut. A lane runs leg A on its stack tip so an upgrade that rewrites user data at boot shows before the cut. NX_GATE_JAR_CACHE=off (the switch scripts/build-gate-jar.sh reads) forces the gate jar to be built at this tip: a cache hit reuses an earlier build_ref, and --new-jar-commit must name the commit the jar carries. PREV is the newest released conexus client (v8.5.6 on 2026-11-25, `git tag -l 'v8.5*'`): re-check it at each use. Legs B and C stay with the cut."
 command = [
+  "PREV=8.5.6",
+  "uv sync -q",
   "NX_GATE_JAR_CACHE=off NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m",
   "mkdir -p output/gate",
   "lab-run -c lab-m -- uv run python scripts/upgrade_boot_writes.py --prev-client $PREV --new-jar-commit $(git rev-parse HEAD) --ceiling-boot 67108864 --ceiling-reboot 67108864 --json output/gate/A.json",
 ]
 
+# ---------------------------------------------------------------- script-less CI steps
+
+# CI steps that run no repo script, so the sweep cannot see a new one; these are named on purpose.
+
+[[script_less]]
+workflow = "ci.yml"
+job = "lint"
+step = "Lint src/ with ruff"
+run_contains = "uvx ruff@0.15.18 check src/"
+reason = "Hand-runnable and cheap as written: `uvx ruff@0.15.18 check src/`; the pre-push-review skill runs ruff on touched files."
+
+[[script_less]]
+workflow = "ci.yml"
+job = "test-mode-census"
+step = "Run the mode-declarations census against the FULL unsharded corpus"
+run_contains = "NX_CENSUS_ONLY_JOB=1 uv run pytest tests/ -q"
+reason = "Hand path in tests/AGENTS.md: `NX_CENSUS_ONLY_JOB=1 NX_TEST_T2_SUBSTRATE=none uv run pytest tests/ -q`. Checklist 3-6b leaves it to develop CI unless 2f selects it."
+
+[[script_less]]
+workflow = "ci.yml"
+job = "test-integration-affected"
+step = "Verify the jar passes the fixtures' own stamp check"
+run_contains = "unstamped_jar_skip_reason"
+reason = "CI's Python integration shards only; a lane's gate jar comes from scripts/build-gate-jar.sh, which stamps it."
+
+[[script_less]]
+workflow = "ci.yml"
+job = "test-lint"
+step = "Enforce lint-leg non-vacuity floor"
+run_contains = "-ge 200"
+reason = "A passed-count floor over CI's own lint run; the pipefail twin reads its own pytest summary."
+
+[[script_less]]
+workflow = "ci.yml"
+job = "test"
+step = "Executed-count floor (nexus-lemv5 — a shard that skipped its corpus must not report green)"
+run_contains = "-ge 1500"
+reason = "A per-shard passed-count floor over CI's own shard output; a hand run reads its own summary."
+
 # ---------------------------------------------------------------- excluded
 
-# Every script a CI run block invokes that is not a [[check]] above. `reason` says why no lab twin is listed;
-# `hand_path`, where there is one, is how a lane already runs it.
+# Every script or test file a CI run block invokes that is not a [[check]] or [[prerequisite]] above. `reason` says why no
+# lab twin is listed; `ci_workflow`, `ci_job` and `ci_step` name the step that runs it (checked); `hand_path`, where
+# there is one, is how a lane already runs it.
 
 [[excluded]]
 script = "scripts/check_engine_release_floor.py"
+ci_workflow = "ci.yml"
+ci_job = "release-ledger-gate"
+ci_step = "Wire-contract ledger check (pre-tag, tree-static, no network)"
 hand_path = "uv run python scripts/check_engine_release_floor.py --ledger-only"
-reason = "Runs in CI only for a pull request into main (release-ledger-gate). It is tree-static with no network, and checklist 14c already names the wire ledger and pairing check as a lane's entry condition."
+reason = "Runs in CI only for a pull request into main. It is tree-static with no network, and checklist 14c already names the wire ledger and pairing check as a lane's entry condition."
 
 [[excluded]]
 script = "scripts/native_trip_wire_svc.py"
+ci_workflow = "ci.yml"
+ci_job = "changes"
+ci_step = "Does the native-build trip-wire run? (suite audit item 8)"
 reason = "The decision script that gates the native trip-wire job (does the diff reach its inputs). It checks no lane work; its verdict is whether the job runs."
 
 [[excluded]]
 script = "scripts/select_affected_integration_tests.py"
+ci_workflow = "ci.yml"
+ci_job = "changes"
+ci_step = "Select the affected integration tests (nexus-rpaat)"
 hand_path = "checklist 0a: scripts/select_affected_tests.py"
 reason = "Selection plumbing for CI's integration-affected shards; the hand selector covers the same reach and a lane runs integration files by hand only when 2f selects them (checklist 3-6b)."
 
 [[excluded]]
 script = "scripts/split_integration_files.py"
+ci_workflow = "ci.yml"
+ci_job = "test-integration-affected"
+ci_step = "Collect the affected selection"
 reason = "Shard balancing for CI's integration-affected job; no verdict of its own."
 
 [[excluded]]
 script = "scripts/assert_integration_affected_ran.py"
+ci_workflow = "ci.yml"
+ci_job = "test-integration-affected"
+ci_step = "Non-vacuity (nexus-rpaat)"
 hand_path = "checklist 3-6b: the Python integration set runs by hand only when 2f selects it"
-reason = "Non-vacuity assert over CI's pytest integration shards (and the CA-3 jobs); a hand integration run reads its own pytest summary. Not an engine-stack gate."
+reason = "Non-vacuity assert over CI's pytest integration shards (and the CA-3 packaging step); a hand integration run reads its own pytest summary. Not an engine-stack gate."
 
 [[excluded]]
 script = "scripts/select_docs_reader_tests.py"
+ci_workflow = "ci.yml"
+ci_job = "test-docs-readers"
+ci_step = "Run the docs-reading tests"
 hand_path = "scripts/select_affected_tests.py picks the docs readers (checklist 0a)"
 reason = "Selects the docs-reading tests for CI's docs-readers leg; the hand selector includes them."
 
 [[excluded]]
 script = "scripts/scrub_check.py"
+ci_workflow = "ci.yml"
+ci_job = "test-docs-readers"
+ci_step = "Scrub gate (a docs-only commit skips the lint bucket that also runs it)"
 hand_path = "python3 scripts/scrub_check.py check"
 reason = "Cheap, hand-runnable, and the lint bucket runs it too; any lane that runs the lint bucket has run it."
 
 [[excluded]]
 script = "scripts/changelog_fold.py"
+ci_workflow = "ci.yml"
+ci_job = "test-docs-readers"
+ci_step = "Changelog fragments are well formed (nexus-3ceda.2)"
 hand_path = "uv run python scripts/changelog_fold.py check"
 reason = "Checklist item 10 already names changelog_fold on the stack tip."
 
 [[excluded]]
 script = "scripts/ddl_ratchet.py"
+ci_workflow = "ci.yml"
+ci_job = "test"
+ci_step = "DDL/bytes ratchet, this shard (advisory; the gate is the fan-in in pytest-gate)"
 hand_path = "checklist 7 and 7b (ddl_ratchet fan-in on the final pass)"
 reason = "Advisory per shard in CI; the gate is the whole-run fan-in, which the checklist owns (item 7) because one lane's shard is not the run's mix."
 
 [[excluded]]
 script = "scripts/ci_gate_fan_in.py"
+ci_workflow = "ci.yml"
+ci_job = "pytest-gate"
+ci_step = "Whole-run gate (DDL/bytes fan-in, storage-touch fan-in, shard collection; every one evaluated)"
 hand_path = "checklist 7b fan-ins over the final pass's shard reports"
 reason = "The whole-run fan-in over every shard's report; a single lane has no full set of shard reports to fan in."
 
 [[excluded]]
 script = "scripts/ci_junit_verdict.py"
-reason = "Reads a CI shard's own junit file for the PID-namespace probe on the qwent pool; a property of the CI runner, not of the lane's tree."
+also_covers = ["tests/test_tmp_root.py", "tests/test_engine_substrate_owner_lock.py"]
+ci_workflow = "ci.yml"
+ci_job = "test"
+ci_step = "Real PID namespace on this qwent shard (nexus-odkc0)"
+reason = "Two PID-namespace tests that run only on CI's qwent shard, and the verdict script over their junit file; a property of that runner. Both test files also run in the ordinary suite."
 
 [[excluded]]
 script = "scripts/ci_shared_venv.sh"
+ci_workflow = "ci.yml"
+ci_job = "test"
+ci_step = "Shared dependencies venv (pool only; nexus-dvk18)"
 reason = "Pool-runner environment provisioning, not a check."
 
 [[excluded]]
 script = "scripts/ci_install_ripgrep.sh"
+ci_workflow = "ci.yml"
+ci_job = "test"
+ci_step = "Install ripgrep"
 reason = "Runner provisioning, not a check."
 
 [[excluded]]
 script = "scripts/lib/gate-jar-cache.sh"
+ci_workflow = "service-ci.yml"
+ci_job = "java-test-and-drift-guard"
+ci_step = "Point the jOOQ cache at the pool host cache"
 reason = "The jOOQ host-cache plumbing of the pool runner; a cache, not a check (the gate-jar cache a lane controls is NX_GATE_JAR_CACHE, used by upgrade-boot-writes-leg-a)."
 
 [[excluded]]
 script = "scripts/surefire_slowest.py"
+ci_workflow = "service-ci.yml"
+ci_job = "java-test-and-drift-guard"
+ci_step = "Slowest test classes (diagnostic, never fails)"
 reason = "Diagnostic that never fails."
 
 [[excluded]]
-script = "scripts/build_pg_bundle.sh"
-reason = "Builds the PG bundle from source in the CA-3 jobs, path-gated to the bundle's own inputs; no engine-stack lane touches them."
-
-[[excluded]]
-script = "scripts/assert_ca3_ran.py"
-reason = "Non-vacuity assert of the CA-3 pgvector bundle jobs, which run only when the bundle inputs change; no engine-stack lane touches them."
-
-[[excluded]]
-script = "scripts/liquibase_bundle_smoke.sh"
-reason = "Liquibase-against-the-bundle smoke in the CA-3 linux job, path-gated to the bundle inputs; the engine suite already runs Liquibase against its own Postgres."
+script = "tests/db/test_pg_bundle_relocation.py"
+also_covers = ["tests/db/test_pg_bundle_extract.py"]
+ci_workflow = "ci.yml"
+ci_job = "ca3-pgvector-bundle"
+ci_step = "Package bundle + relocation smoke (P3.1, nexus-vwvv5.10)"
+gated_by = "ca3_core"
+gate_job = "ca3-pgvector-bundle"
+lane_paths_hit = ["service/src/main/resources/db/changelog/db.changelog-master.xml"]
+reason = "A changeset lane reaches this step (ca3_core includes the changelog tree), but it packages and relocates what scripts/build_pg_bundle.sh produced and checks the txz size; a changeset changes neither, so the bundle build and the CA-3 live test above are the twins that matter."
 
 [[excluded]]
 script = "scripts/assert_write_seam_ran.py"
-hand_path = "scripts/git-push-develop.sh's write-seam proof (scripts/push_check_gate.py); checklist push audit"
-reason = "Path-gated to the write-seam files. The push script already demands a hand proof of the write-seam tests, so this has a hand path at push time."
+also_covers = ["tests/db/test_write_seam_gate_integration.py", "tests/db/test_http_combined_query_integration.py"]
+ci_workflow = "ci.yml"
+ci_job = "write-seam-gate"
+ci_step = "Run write-seam gate (>300-record, dup-chash, ON CONFLICT, NUL-sanitize, combined-query tripwire)"
+gated_by = "seam"
+gate_job = "write-seam-gate"
+lane_paths_hit = ["service/src/main/resources/db/changelog/db.changelog-master.xml", "service/pom.xml", "service/src/main/java/dev/nexus/service/db/CatalogRepository.java"]
+hand_path = "scripts/git-push-develop.sh refuses a push the seam reaches without a proof of these two test files (scripts/push_check_gate.py WRITE_SEAM_*; its refusal prints the recipe)"
+reason = "Reached by every changeset lane (the seam filter includes the changelog tree, service/pom.xml and CatalogRepository.java). Not given a twin here because the push script already demands a hand proof of these two files before the push, by whoever pushes; a lane may run the same recipe earlier. Checklist 12 and the push audit carry it."
 
 [[excluded]]
 script = "scripts/check_mcpb_resolve.py"
+ci_workflow = "ci.yml"
+ci_job = "mcpb-resolve-gate"
+ci_step = "Resolve the bundle under the staged lock (checkout, not a wheel)"
+gated_by = "mcpb"
+gate_job = "mcpb-resolve-gate"
+lane_paths_miss = ["service/src/main/java/dev/nexus/service/NexusService.java", "service/src/main/resources/db/changelog/db.changelog-master.xml", "service/pom.xml", "docs/rdr/rdr-229.md"]
 hand_path = "python3 scripts/check_mcpb_resolve.py"
-reason = "Resolve-only check of the Desktop .mcpb lock, path-gated to the lock's inputs (pyproject, uv.lock, mcpb/*); a service/ lane does not touch them, and it runs in seconds when one does."
+reason = "Resolve-only check of the Desktop .mcpb lock, path-gated to the lock's inputs (pyproject, uv.lock, mcpb/*); the filter does not match a service/ or changelog path, and it runs in seconds when a lane does touch one."
 
 [[excluded]]
 script = "tests/e2e/constraints-resolve-gate.sh"
+ci_workflow = "ci.yml"
+ci_job = "constraints-resolve-gate"
+ci_step = "Resolve the shipped lock on every supported target"
+gated_by = "constraints"
+gate_job = "constraints-resolve-gate"
+lane_paths_miss = ["service/src/main/java/dev/nexus/service/NexusService.java", "service/src/main/resources/db/changelog/db.changelog-master.xml", "service/pom.xml", "docs/rdr/rdr-229.md"]
 hand_path = "tests/e2e/constraints-resolve-gate.sh"
-reason = "Resolve-only check of the install lock, path-gated to constraints.txt, overrides.txt, uv.lock and pyproject.toml; not touched by a service/ lane."
+reason = "Resolve-only check of the install lock, path-gated to constraints.txt, overrides.txt, uv.lock and pyproject.toml; the filter does not match a service/ or changelog path."
 
 [[excluded]]
 script = "tests/e2e/benchmark-corpus/benchmark_corpus.py"
-reason = "Read by the integration job to pin the benchmark corpus tag; plumbing for CI's Python integration shards, not a check on engine-stack work."
+ci_workflow = "ci.yml"
+ci_job = "test-integration-affected"
+ci_step = "Fetch the benchmark corpus's pinned release commit"
+reason = "Reads the pinned corpus tag for CI's Python integration shards; plumbing, not a check on engine-stack work."
 
 [[excluded]]
 script = "tests/e2e/lib/mandatory_pins.sh"
-reason = "Sourced by CI's integration-release-floor step (release PRs into main) for its carve-out counts; a count check on the Python integration family, owned by the release, not an engine-stack lane."
-
-[[excluded]]
-script = "tests/e2e/local-service-gate.sh"
-hand_path = "tests/e2e/local-service-gate.sh against a dev jar (engine-release skill, 'Engine work is tested on develop before any cut')"
-reason = "CI's integration-release-floor step only reads its carve-out counts with sed; the gate itself runs nightly and at release, not as a CI step."
+also_covers = ["tests/e2e/local-service-gate.sh"]
+ci_workflow = "ci.yml"
+ci_job = "test-integration-affected"
+ci_step = "Carve-out counts (release PRs, nexus-jh1f2)"
+hand_path = "uv run pytest <mark> --collect-only -q, as the step does (the step's own `count` function)"
+reason = "The 'Carve-out counts' step of the integration-affected job, once per release PR (shard 1 of several): it counts the lived_in, keyed_voyage, pg_bundle_artifact and mandatory_regression_pin tests with pytest --collect-only and compares them with the expected numbers these two files hold. It checks Python integration marks, not engine-stack work; local-service-gate.sh itself runs nightly and at release."
