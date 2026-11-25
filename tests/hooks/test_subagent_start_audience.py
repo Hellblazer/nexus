@@ -53,6 +53,32 @@ _OLD_BRIEF_CHECK = (
 )
 
 
+_OLD_PHASE_GATE = (
+    "\n## Phase Boundary Gate (mandatory)\n\n"
+    "If your task closes a phase-review bead, walk the `phase-review-gate` "
+    "skill's checklist BEFORE close: list every numbered item of the phase in "
+    "the RDR, and for each write `Item N = <closing bead id>` or `Item N = none` "
+    "with a one-line reason. Do not close while an item has neither. Nothing "
+    "enforces this; skipping it is the silent-scope-reduction failure mode: "
+    "RDR-112 Phase 1 (nexus-52lb) lost days when the T3 daemon drop surfaced "
+    "three phases later.\n"
+)
+
+
+def test_a_maintainer_gets_the_old_phase_gate_byte_for_byte(nexus_marked_repo) -> None:
+    assert subagent_start._phase_gate({"cwd": str(nexus_marked_repo)}) == _OLD_PHASE_GATE
+
+
+def test_the_account_flag_alone_gets_the_old_phase_gate_too(src_maintainer_flag, tmp_path) -> None:
+    assert subagent_start._phase_gate({"cwd": str(tmp_path)}) == _OLD_PHASE_GATE
+
+
+def test_a_user_gets_the_phase_gate_with_a_neutral_closing_sentence(tmp_path) -> None:
+    text = subagent_start._phase_gate({"cwd": str(tmp_path)})
+    assert text.startswith(subagent_start._PHASE_GATE) and text.endswith(subagent_start._PHASE_GATE_NEUTRAL)
+    assert "RDR-112" not in text and "nexus-52lb" not in text and "dropped item" in text
+
+
 def test_a_maintainer_in_nexus_gets_the_old_orchestration_table_byte_for_byte(nexus_marked_repo) -> None:
     assert subagent_start._orchestration({"cwd": str(nexus_marked_repo)}) == _OLD_ORCH
 
@@ -132,7 +158,7 @@ _LEXICON = re.compile(
 
 _EVERY_USER_CONSTANTS = [
     "_RELAY", "_ORCH_HEAD", "_ORCH_COMPLETION", "_ORCH_INBOX", "_NX_T1", "_NX_TIERS", "_NX_TOOLS", "_NX_T3",
-    "_NX_ANSWER", "_NX_AUTOLINK", "_PHASE_GATE", "_OPERATORS", "_CATALOG_TOOLS", "_CATALOG_LINKING",
+    "_NX_ANSWER", "_NX_AUTOLINK", "_PHASE_GATE", "_PHASE_GATE_NEUTRAL", "_OPERATORS", "_CATALOG_TOOLS", "_CATALOG_LINKING",
 ]
 
 

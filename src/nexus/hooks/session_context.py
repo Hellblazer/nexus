@@ -157,10 +157,10 @@ _INDEX_ME: str = " | me (your startup note)"
 
 
 def _has_beads(project_dir: Path) -> bool:
-    """The beads topic is named where the project tracks work in beads (a ``.beads/`` directory) or ``bd`` is on PATH.
-    Names a topic more often than it must on any doubt: a data gate that fails shows the line it always showed."""
+    """The beads topic is named where the project tracks work in beads: a ``.beads/`` directory with ``bd`` on PATH (plan
+    S2-1). Names a topic more often than it must on any doubt: a data gate that fails shows the line it always showed."""
     try:
-        return (project_dir / ".beads").is_dir() or which("bd")
+        return (project_dir / ".beads").is_dir() and which("bd")
     except Exception:  # noqa: BLE001 — a gate that cannot be read leaves the topic in
         return True
 

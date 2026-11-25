@@ -700,8 +700,13 @@ def _scenarios(reg: dict, fx: Fixture) -> list[dict]:
                 agent_transcript_path=str(fx.repo.parent / f"agent-{fx.name}-{agent_type.replace(':', '_')}.jsonl")), "expect": None})
         return outs
     if event == "SubagentStart":
-        return [{"name": at, "payload": _common(fx, "SubagentStart", agent_id=f"aleg-{fx.name}-start", agent_type=at, prompt_id="p1"), "expect": None}
-                for at in ("conexus:developer", "general-purpose", "Explore")]
+        starts = [{"name": at, "payload": _common(fx, "SubagentStart", agent_id=f"aleg-{fx.name}-start", agent_type=at, prompt_id="p1"), "expect": None}
+                  for at in ("conexus:developer", "general-purpose", "Explore")]
+        # The Phase Boundary Gate block is task-keyed; its maintainer-only incident clause must be reachable by the presence check.
+        starts.append({"name": "phase close", "expect": None, "payload": _common(
+            fx, "SubagentStart", agent_id=f"aleg-{fx.name}-phase", agent_type="conexus:developer", prompt_id="p2",
+            task="close the phase review gate for this phase")})
+        return starts
     if event == "SessionStart":
         source = "compact" if tail[-1] == "inject" else "startup"
         return [{"name": source, "payload": _common(fx, "SessionStart", source=source, model="m"), "expect": None,

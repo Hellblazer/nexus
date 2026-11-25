@@ -575,7 +575,19 @@ constants:
 - id: nexus.hooks.subagent_start:_PHASE_GATE
   audience: EVERY-USER
   gate: none
-  evidence: 'I3: the phase-review-gate pointer, shown only when the task text asks for a phase close; the incident history is gone'
+  evidence: 'I3: the phase-review-gate pointer, shown only when the task text asks for a phase close'
+  target_state: as is
+  phase: '2'
+- id: nexus.hooks.subagent_start:_PHASE_GATE_NEUTRAL
+  audience: EVERY-USER
+  gate: none
+  evidence: 'I3: the block''s closing sentence for everyone, with no incident history'
+  target_state: as is
+  phase: '2'
+- id: nexus.hooks.subagent_start:_PHASE_GATE_INCIDENT
+  audience: SAM-WIDE
+  gate: maintainer
+  evidence: 'I3: the RDR-112 / nexus-52lb incident that put the block here; the maintainer''s closing sentence, byte for byte what it was'
   target_state: as is
   phase: '2'
 - id: nexus.hooks.subagent_start:_CATALOG_TOOLS

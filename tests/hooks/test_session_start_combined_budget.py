@@ -92,6 +92,7 @@ def _real_hook_output(monkeypatch, tmp_path: Path, notes: list[str] | None = Non
     flag.write_text("", encoding="utf-8")
     monkeypatch.setattr(_audience, "_ACCOUNT_HOME_OVERRIDE", str(tmp_path / "acct"))
     (tmp_path / ".beads").mkdir(exist_ok=True)
+    monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")  # a beads project has bd on PATH
     (tmp_path / "docs" / "rdr").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))

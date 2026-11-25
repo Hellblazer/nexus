@@ -328,9 +328,20 @@ _PHASE_GATE = (
     "skill's checklist BEFORE close: list every numbered item of the phase in "
     "the RDR, and for each write `Item N = <closing bead id>` or `Item N = none` "
     "with a one-line reason. Do not close while an item has neither. Nothing "
-    "enforces this; skipping it is the silent-scope-reduction failure mode: "
-    "a dropped item surfaces phases later.\n"
+    "enforces this; skipping it is the silent-scope-reduction failure mode"
 )
+#: How the block ends for everyone (nexus-sby49.3); the maintainer's own ending, with the incident that put the block here, is
+#: ``_PHASE_GATE_INCIDENT`` (SAM-WIDE). A maintainer's text is the block this module carried before, byte for byte.
+_PHASE_GATE_NEUTRAL = ": a dropped item surfaces phases later.\n"
+_PHASE_GATE_INCIDENT = (
+    ": RDR-112 Phase 1 (nexus-52lb) lost days when the T3 daemon drop surfaced "
+    "three phases later.\n"
+)
+
+
+def _phase_gate(payload: dict) -> str:
+    """The Phase Boundary Gate block: the incident clause for ``maintainer()``, a neutral sentence for everyone else."""
+    return _PHASE_GATE + (_PHASE_GATE_INCIDENT if _maintainer(payload) else _PHASE_GATE_NEUTRAL)
 
 #: nexus-yjg4v: the five questions behind the review fix rounds of
 #: 2026-10-08 (T2 nexus/critique-4d362d901-contradiction-scope-2026-10-08,
@@ -703,7 +714,7 @@ def run(payload: dict | None) -> HookResult:
         parts.append(_NX_ANSWER)
         parts.append(_NX_AUTOLINK)
         if _PHASE_GATE_TASK_RE.search(task_text):
-            parts.append(_PHASE_GATE)
+            parts.append(_phase_gate(data))
         parts.append(_knowledge_map_section(repo_root))
 
     if _IMPLEMENTER_TYPE_RE.search(agent_type):

@@ -96,14 +96,22 @@ def test_a_project_with_no_beads_and_no_rdr_directory_gets_neither_topic(project
     assert _out({"cwd": str(project)}).endswith(line)
 
 
-def test_a_beads_directory_adds_the_beads_topic(project: Path) -> None:
+def test_a_beads_directory_with_bd_on_path_adds_the_beads_topic(project: Path, monkeypatch) -> None:
     (project / ".beads").mkdir()
+    monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
     assert _topics(session_context.brief_index_line(project)) == {"memory", "beads", "caps", "map", "me"}
 
 
-def test_bd_on_path_adds_the_beads_topic(project: Path, monkeypatch) -> None:
+def test_a_beads_directory_without_bd_does_not(project: Path) -> None:
+    """Plan S2-1: beads are named where the project tracks work in them, a ``.beads/`` directory with ``bd`` on PATH. A
+    directory with no tool to run is no tracker the session can use."""
+    (project / ".beads").mkdir()
+    assert "beads" not in _topics(session_context.brief_index_line(project))
+
+
+def test_bd_on_path_without_a_beads_directory_does_not(project: Path, monkeypatch) -> None:
     monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
-    assert "beads" in _topics(session_context.brief_index_line(project))
+    assert "beads" not in _topics(session_context.brief_index_line(project))
 
 
 def test_an_rdr_directory_adds_the_rdr_topic(project: Path) -> None:
@@ -111,8 +119,9 @@ def test_an_rdr_directory_adds_the_rdr_topic(project: Path) -> None:
     assert _topics(session_context.brief_index_line(project)) == {"memory", "caps", "map", "rdr", "me"}
 
 
-def test_a_project_with_both_gets_the_line_this_module_always_carried(project: Path) -> None:
+def test_a_project_with_both_gets_the_line_this_module_always_carried(project: Path, monkeypatch) -> None:
     (project / ".beads").mkdir()
+    monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
     (project / "docs" / "rdr").mkdir(parents=True)
     assert session_context.brief_index_line(project) == session_context.BRIEF_INDEX_LINE
 
@@ -123,6 +132,7 @@ def test_a_gate_that_cannot_be_read_leaves_the_topics_in(project: Path, monkeypa
     def boom(*_a, **_k):
         raise OSError("unreadable")
 
+    (project / ".beads").mkdir()  # the directory is there, so the gate has to ask for bd
     monkeypatch.setattr(session_context, "which", boom)
     monkeypatch.setattr("nexus.hooks.rdr_verb._rdr_dir", boom)
     assert session_context.brief_index_line(project) == session_context.BRIEF_INDEX_LINE
