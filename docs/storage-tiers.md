@@ -267,18 +267,19 @@ row holds the collection's `collection_id`, a number the engine assigns and
 never reuses, and its attributes: content type (`code`, `docs`, `rdr`,
 `knowledge`), owner, embedding model, model version, dimension and
 lifecycle state. Chunks, catalog documents and every other per-collection
-table reference the `collection_id`. The service routes by the row: which
-model embeds a collection, and whether it is live or quarantined, is read
-from its attributes (RDR-229).
+table reference the `collection_id`. The engine reads which model
+embeds a collection, and whether it is live or quarantined, from its row
+(RDR-229).
 
 The collection's name is a label, unique among a tenant's live collections.
 A new knowledge subject gets a minted label, `c` followed by its id (`c4812`).
 `nx index repo` does not mint: the `code`, `docs` and `rdr` collections it
 creates are labelled in the four-segment shape below. Any collection can be
-renamed to anything readable. Existing labels stay as they are, and names in
-these shapes are not parsed for meaning:
+renamed to a label that passes the label rule ([Choosing and Naming
+Collections](collections.md), Rule 3). Existing labels stay as they are, in
+one of two older shapes:
 
-- the four-segment RDR-103 shape, `<content_type>__<owner_id>__<embedding_model>__v<n>`, for example `knowledge__nexus-1-1__voyage-context-3__v1`;
+- the four-segment RDR-103 shape, `<content_type>__<owner_id>__<embedding_model>__v<n>`, for example `knowledge__distributed-systems__voyage-context-3__v1`;
 - the pre-RDR-103 two-segment shape, `<content_type>__<repo>-<hash>`, for example `code__myrepo-a1b2c3`.
 
 | Content type | Contents | Managed-cloud model | Local model, default | Local model, keyed |
@@ -288,10 +289,11 @@ these shapes are not parsed for meaning:
 | `rdr` | Indexed RDR documents | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
 | `knowledge` | Stored agent outputs and notes | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
 
-A collection is found by its attributes, never by building its name: `nx
-index repo` asks for the collection with the repo's content type, owner and
-model, and a `knowledge` subject is found the same way, with the subject as
-its owner.
+A collection is found by its attributes: `nx index repo` asks for the
+collection with the repo's content type, owner and model, and a `knowledge`
+subject is found the same way, with the subject as its owner. Only a tuple
+with no collection yet gets a new one: a `knowledge` subject a minted label,
+a repo's `code`, `docs` or `rdr` a rendered four-segment name.
 
 A collection is indexed and queried under the same embedding model: mixing models across one vector space produces near-random similarity scores. The same principle is enforced at query time: multi-collection combined queries are dispatched per embedding-model group by the MCP layer (a corpus spanning `voyage-code-3` and `voyage-context-3` collections issues one query per model and merges results, nexus-3l6gz), and the service rejects a mixed-model collection list outright (`requireHomogeneousModel`, engine-service ≥ 0.1.36).
 

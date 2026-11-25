@@ -94,38 +94,52 @@ collection has a `collection_id`, a number the engine assigns and never
 reuses, and every table that belongs to a collection points at that id. The
 row also holds the attributes: content type, owner, embedding model, model
 version, dimension and lifecycle state. The name is only a label: the string
-you type and read in a command. Routing, the embedding model, the content
-type and the lifecycle state are read from the row, never from the label.
-Two checks still read a model token from a four-segment name: `nx collection
-rename` compares a new name's token with the source row's model, and the
-re-embed job's foreign-origin check falls back to a source's name when that
-source has no row.
+you type and read in a command. The engine reads a collection's content
+type, embedding model and lifecycle state from its row. The client reads the
+row in most paths too; a few still read what an older name carries (a
+four-segment name's model token, a two-segment name's type prefix), and a
+minted `c<id>` label carries neither. Two checks compare a model token
+read from a name: `nx collection rename` sends the new name's token, and the
+engine refuses it when it disagrees with the source row's model; the
+re-embed job's foreign-origin check reads a source's name when that
+source's row is gone.
 
 **New knowledge subjects get a minted label.** When `nx` registers a new
 knowledge subject, the engine sets its label to `c` followed by its id
 (`c4812`). The label says nothing about the collection. `nx collection list`
-shows its owner, model and state beside it; `nx catalog show` prints only the
-document's type and collection label. `nx index repo` does not mint: the
-`code`, `docs` and `rdr` collections it creates are still named in the
-four-segment form, for example `code__1-15__voyage-code-3__v1`. Those names
-are not parsed for meaning either.
+shows its id, owner, model and state beside it; `nx catalog show` prints a
+document's content type and its collection's label, and no owner, model or
+state. A subject that already has a collection keeps writing there: a
+conformant `knowledge__distributed-systems__<model>__v1` or a legacy
+two-segment collection that holds data is found first, whatever its label,
+and a recovery-bundle restore keeps the name it restores. Typing
+`knowledge__distributed-systems` takes the same path. `nx index repo` does
+not mint: the `code`, `docs` and `rdr` collections it creates are still
+named in the four-segment form, for example `code__1-15__voyage-code-3__v1`,
+and a typed `docs__X`, `code__X` or `rdr__X` renders as
+`<type>__X__<model>__v1`.
 
 **A label is unique among a tenant's live collections.** Two live
 collections cannot answer to one label, so a label in a command names one
-collection. A superseded collection keeps its label, and that label stays
-taken: a new collection cannot be given it, because the label is still the
-key the collection is stored under. To give a collection a readable label,
-rename it:
+collection. To give a collection a readable label, rename it:
 
 ```bash
 nx collection rename c4812 distributed-systems-papers
 ```
 
-A rename changes one row; the collection's id, chunks and catalog documents
-stay where they are. A label must be non-empty UTF-8 with no control
-characters, at most 255 bytes, and not the minted form `c<digits>`, which
-only the engine assigns. It may not contain `/` or `,`, and it may not begin
-or end with whitespace.
+What a rename does depends on the engine's gate 3 latch (`nx doctor`'s
+"RDR-229 completion" row says when it has latched; Rule 6 has the rest).
+Before it, a rename rewrites every table that names the collection, gives
+the collection a new registry row and id, and leaves the old name as a
+superseded row that keeps its label taken. From the latch it changes one
+row's label: the collection keeps its id, no chunk or catalog document is
+rewritten, and the old label has no row but stays reserved (409
+`label_reserved`) against a new registration, a rename target or a re-embed
+target until a later engine release relabels the rows still carrying it.
+Renaming the collection back is allowed. A label must be non-empty UTF-8
+with no control characters, at most 255 bytes, and not the minted form
+`c<digits>`, which only the engine assigns. It may not contain `/` or `,`,
+and it may not begin or end with whitespace.
 
 Never type a four-segment name, a model token or a version to create a
 collection. A name that encoded a model the install did not use is how local
