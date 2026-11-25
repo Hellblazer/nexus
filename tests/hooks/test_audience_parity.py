@@ -3,12 +3,16 @@
 
 ``conexus/hooks/scripts/_audience.py`` runs in the plugin's command hooks (stdlib only, no ``nexus`` import).
 ``src/nexus/hooks/_audience.py`` runs inside ``nx-hook`` and the MCP server. They must be byte-identical, and the
-older plugin that a newer checkout is paired with (the copy at the plugin's pinned release tag) must give the same
-answers on every row it can know. ``tests/fixtures/audience_corpus.json`` holds layouts x flag states -> answers; all
+older plugin that a newer checkout is paired with (the helper at the newest release tag that carries one) must give the
+same answers on every row it can know. ``tests/fixtures/audience_corpus.json`` holds layouts x flag states -> answers; all
 three copies are driven over it, so a change to one copy's walk, markers or flag file fails here until the others agree.
 
-Lives under tests/hooks/ so the Windows set runs it: the byte identity (LF) and the walk through a worktree ``.git``
-file on NTFS are exactly the claims a Windows checkout can break.
+Lives under tests/hooks/ so the Windows set runs the byte identity and the two live copies (LF, and the walk through a
+worktree ``.git`` file on NTFS are claims a Windows checkout can break). The previous-release comparison needs the release
+tags, and develop's ``test`` shards and the Windows job check out at depth 1 with none, so that one test is marked ``lint``:
+the ``test-lint`` job checks out at depth 0 (``.github/workflows/ci.yml``, ``fetch-depth: 0``) and is the only CI job that
+runs it. Elsewhere it skips when no tag is readable, unless ``NX_REQUIRE_PREV_RELEASE_COPY=1`` (or ``CI`` is set, which in
+the lint job means the checkout lost its tags) makes that a failure.
 """
 from __future__ import annotations
 
@@ -40,32 +44,28 @@ def _load(path: Path, name: str) -> ModuleType:
     return mod
 
 
-def _pinned_ref() -> str:
-    data = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
-    for plugin in data["plugins"]:
-        if plugin["name"] == "conexus":
-            return str(plugin["source"]["ref"])
-    raise AssertionError("marketplace.json has no conexus plugin")
+_HELPER_IN_TREE = "conexus/hooks/scripts/_audience.py"
 
 
-def _previous_release_copy(tmp_path_factory: pytest.TempPathFactory) -> ModuleType | None:
-    """The helper as the installed plugin carries it: ``git show <pinned ref>:...``.
-
-    ``None`` when the tag cannot be read and the run is a local one. In CI the tag-fetch step is part of the job, so a
-    missing tag there is a failure (a skip would report green having compared nothing).
-    """
-    ref = _pinned_ref()
+def _release_tags() -> list[str]:
+    """Every ``v<major>.<minor>.<patch>`` tag this checkout has, newest first ([] on a tagless clone)."""
     proc = subprocess.run(
-        ["git", "show", f"{ref}:conexus/hooks/scripts/_audience.py"],
-        cwd=REPO_ROOT, capture_output=True, check=False,
+        ["git", "tag", "--list", "v[0-9]*", "--sort=-version:refname"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
     )
-    if proc.returncode != 0:
-        if os.environ.get("CI") or os.environ.get("NX_REQUIRE_PREV_RELEASE_COPY") == "1":
-            pytest.fail(f"the plugin's pinned tag {ref} is not readable here, so the previous release's copy was not compared")
-        return None
-    path = tmp_path_factory.mktemp("prev_release") / "_audience_prev.py"
-    path.write_bytes(proc.stdout)
-    return _load(path, "_audience_prev_release")
+    return proc.stdout.split() if proc.returncode == 0 else []
+
+
+def _previous_release_helper() -> tuple[str, bytes] | None:
+    """``(tag, bytes)`` of the helper at the newest release tag that carries one, or None when no tag does.
+
+    Not the marketplace pin: the release commit moves the pin to the tag it is about to cut, which does not exist yet,
+    and a tag older than the helper's first release (8.5.7) has no file to compare."""
+    for tag in _release_tags():
+        proc = subprocess.run(["git", "show", f"{tag}:{_HELPER_IN_TREE}"], cwd=REPO_ROOT, capture_output=True, check=False)
+        if proc.returncode == 0:
+            return tag, proc.stdout
+    return None
 
 
 @pytest.fixture(scope="module")
@@ -74,11 +74,10 @@ def corpus() -> dict:
 
 
 @pytest.fixture(scope="module")
-def copies(tmp_path_factory: pytest.TempPathFactory) -> dict[str, ModuleType | None]:
+def copies() -> dict[str, ModuleType]:
     return {
         "plugin": _load(PLUGIN_COPY, "_audience_plugin_copy"),
         "src": _load(SRC_COPY, "_audience_src_copy"),
-        "previous_release": _previous_release_copy(tmp_path_factory),
     }
 
 
@@ -149,14 +148,10 @@ def test_the_corpus_is_big_enough_and_complete(corpus: dict) -> None:
         assert marker in layout_paths, f"no corpus row builds the marker {marker}"
 
 
-@pytest.mark.parametrize("copy", ["plugin", "src", "previous_release"])
-def test_every_copy_gives_the_corpus_answers(
-    copy: str, corpus: dict, copies: dict[str, ModuleType | None], tmp_path_factory: pytest.TempPathFactory,
-    monkeypatch: pytest.MonkeyPatch,
+def _drive(
+    label: str, mod: ModuleType, corpus: dict, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch,
+    *, previous: bool = False,
 ) -> None:
-    mod = copies[copy]
-    if mod is None:
-        pytest.skip("the previous release's tag is not readable in this checkout (CI fails instead)")
     examined = 0
     skipped: list[str] = []
     wrong: list[str] = []
@@ -164,7 +159,7 @@ def test_every_copy_gives_the_corpus_answers(
         if row.get("posix_only") and os.name == "nt":
             skipped.append(row["id"])
             continue
-        if copy == "previous_release" and row.get("prev_release") is False:
+        if previous and row.get("prev_release") is False:
             skipped.append(row["id"])
             continue
         tmp = tmp_path_factory.mktemp("row")
@@ -182,8 +177,33 @@ def test_every_copy_gives_the_corpus_answers(
         if got != expect:
             wrong.append(f"{row['id']}: got {got}, corpus says {expect}")
         examined += 1
-    assert not wrong, f"{copy} copy disagrees with the corpus on {len(wrong)} row(s):\n" + "\n".join(wrong)
-    assert examined >= MIN_ROWS - 3, f"{copy} copy examined {examined} rows (skipped: {skipped}); a pass over nothing"
+    assert not wrong, f"{label} copy disagrees with the corpus on {len(wrong)} row(s):\n" + "\n".join(wrong)
+    assert examined >= MIN_ROWS - 3, f"{label} copy examined {examined} rows (skipped: {skipped}); a pass over nothing"
+
+
+@pytest.mark.parametrize("copy", ["plugin", "src"])
+def test_every_live_copy_gives_the_corpus_answers(
+    copy: str, corpus: dict, copies: dict[str, ModuleType], tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _drive(copy, copies[copy], corpus, tmp_path_factory, monkeypatch)
+
+
+@pytest.mark.lint
+def test_the_previous_releases_copy_gives_the_corpus_answers(
+    corpus: dict, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plugin an older install carries must agree with this corpus on every row it can know (``lint``: see the module
+    docstring for why this is the one test that needs tags)."""
+    found = _previous_release_helper()
+    if found is None:
+        if os.environ.get("CI") or os.environ.get("NX_REQUIRE_PREV_RELEASE_COPY") == "1":
+            pytest.fail("no release tag with the audience helper is readable here: the checkout lost its tags, so nothing was compared")
+        pytest.skip("no release tag with the audience helper is readable in this checkout (a shallow or tagless clone)")
+    tag, data = found
+    path = tmp_path_factory.mktemp("prev_release") / "_audience_prev.py"
+    path.write_bytes(data)
+    _drive(f"the {tag}", _load(path, "_audience_prev_release"), corpus, tmp_path_factory, monkeypatch, previous=True)
 
 
 def test_the_src_copy_imports_as_a_package_module() -> None:

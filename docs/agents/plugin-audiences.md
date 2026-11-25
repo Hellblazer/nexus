@@ -15,7 +15,7 @@ The markers are `scripts/agent-worktree-preflight.sh` (kept accepted for two cli
 
 ## The helper
 
-`_audience.py` exists twice, byte for byte: `conexus/hooks/scripts/_audience.py` (the plugin's command hooks, stdlib only) and `src/nexus/hooks/_audience.py` (`nx-hook` and the MCP server). `tests/hooks/test_audience_parity.py` checks the bytes and drives both copies, and the plugin copy of the previous release (`git show <the pinned tag>:`), over `tests/fixtures/audience_corpus.json`. Change one copy and copy it over the other.
+`_audience.py` exists twice, byte for byte: `conexus/hooks/scripts/_audience.py` (the plugin's command hooks, stdlib only) and `src/nexus/hooks/_audience.py` (`nx-hook` and the MCP server). `tests/hooks/test_audience_parity.py` checks the bytes and drives both copies over `tests/fixtures/audience_corpus.json`. A second test, marked `lint`, drives the helper at the newest release tag that carries one (an older plugin paired with this checkout) over the same corpus. It needs tags, which only the `test-lint` job has (it checks out at depth 0; develop's `test` shards and the Windows job are depth 1 with none), so elsewhere it skips, and it fails when `CI` or `NX_REQUIRE_PREV_RELEASE_COPY=1` is set and no tag is readable. Change one copy and copy it over the other.
 
 Invariants, each of which is a test:
 
