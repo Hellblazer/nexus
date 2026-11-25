@@ -388,9 +388,6 @@ modules:
   hooks/scripts/routing/credential_print_guard.py:
     wrapper: none
     predicates: []
-  hooks/scripts/routing/destructive_action_advice.py:
-    wrapper: none
-    predicates: []
   nexus.session_start_guidance:
     wrapper: none
     predicates: []
@@ -439,6 +436,7 @@ modules:
       _RUN_STATE: a regular-expression fragment the promise classifier compiles; never injected
       _PROMISE_VERBS: a regular-expression fragment the promise classifier compiles; never injected
       _TIME: a regular-expression fragment the promise classifier compiles; never injected
+      _ROLE_FOLLOWED_BY_A_VERB: a regular-expression fragment the promise classifier compiles; never injected
   hooks/scripts/routing/subagent_git_write_requires_orchestrator.py:
     wrapper: run_hook
     predicates:
@@ -453,6 +451,11 @@ modules:
       _HOOK_NAMES: a rule identifier or a regular-expression fragment the scanner compiles; never injected
       _DASHED_LEAD_WORDS: a rule identifier or a regular-expression fragment the scanner compiles; never injected
       _MASK_DELIM: a rule identifier or a regular-expression fragment the scanner compiles; never injected
+  hooks/scripts/routing/destructive_action_advice.py:
+    wrapper: none
+    predicates: []
+    not_injected:
+      _HOME_TMP: a regular-expression fragment the temp-root matcher compiles; never injected
   hooks/scripts/routing/_lib.py:
     wrapper: local_try
     predicates:
@@ -800,6 +803,13 @@ constants:
   audience: EVERY-USER
   gate: none
   evidence: 'S2-8: the cron note after a compaction'
+  target_state: as is
+  phase: '-'
+- id: hooks/scripts/routing/destructive_action_advice.py:ROWS
+  audience: EVERY-USER
+  gate: none
+  evidence: 'U8a: the advisory rows'' advice text (each Row also carries its audience, checked against this manifest); advise mode for everyone,
+    neutral text is the registration''s Phase 3 item'
   target_state: as is
   phase: '-'
 - id: hooks/scripts/routing/credential_print_guard.py:_REDIRECT

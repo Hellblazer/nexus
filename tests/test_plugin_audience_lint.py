@@ -103,6 +103,68 @@ def test_the_registry_and_the_advice_rows_carry_an_audience() -> None:
         assert row.audience in am.AUDIENCES, row.id
 
 
+def test_the_registry_audience_agrees_with_the_manifest(manifest) -> None:
+    """``registry.yaml`` names each routing rule's audience for people reading the rule; the manifest is what the lint and the
+    leg enforce. The two must say the same thing about the same hook."""
+    import yaml
+
+    registry = yaml.safe_load((ROOT / "conexus/hooks/scripts/routing/registry.yaml").read_text(encoding="utf-8"))
+    by_script = {r["argv"][-1]: r for r in manifest["registrations"] if r["event"] == "PreToolUse"}
+    seen = 0
+    for name, rule in registry["rules"].items():
+        reg = by_script.get(f"hooks/scripts/routing/{rule['hook_script']}")
+        assert reg is not None, f"{name}: the manifest has no PreToolUse registration for {rule['hook_script']}"
+        assert rule["audience"] == reg["audience"], f"{name}: registry.yaml says {rule['audience']}, audience.yaml says {reg['audience']}"
+        seen += 1
+    assert seen == 3, "the three routing rules"
+
+
+def test_an_advice_row_may_name_a_narrower_audience_only_in_a_module_that_gates_on_it(manifest) -> None:
+    """``Row.audience`` is read by nothing at run time (every row advises for everyone, U8a), so a row that claimed
+    SAM-WIDE or NEXUS-REPO would look gated and be shown to every user. Until the module imports a predicate and filters on
+    it (U8b, D6), every row is EVERY-USER."""
+    spec = importlib.util.spec_from_file_location("daa_lint2", ROOT / "conexus/hooks/scripts/routing/destructive_action_advice.py")
+    daa = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(daa)
+    predicates = manifest["modules"]["hooks/scripts/routing/destructive_action_advice.py"].get("predicates") or []
+    for row in daa.ROWS:
+        assert row.audience == "EVERY-USER" or predicates, f"advice row {row.id} claims {row.audience}, and the module gates on nothing"
+
+
+# --- the census sees the value forms text is written in ------------------------------------------------
+
+_LONG = "x" * 45
+
+
+@pytest.mark.parametrize("source", [
+    f'T = "{_LONG}"',
+    f'T = "{"y" * 25}" + "{"z" * 25}"',
+    f'T = f"{"a" * 30} {{1}} {"b" * 30}"',
+    f'T = ["{_LONG}", "short"]',
+    f'T = ("{_LONG}",)',
+    f'T = {{"k": "{_LONG}"}}',
+    f'T = Row("id", "{_LONG}")',
+    f'T = Row("id", note="{_LONG}")',
+], ids=["literal", "concatenation", "f-string", "list", "tuple", "dict", "call-arg", "call-keyword"])
+def test_the_census_counts_text_in_every_module_level_value_form(source: str) -> None:
+    import ast
+
+    assert "T" in am.census(ast.parse(source))
+
+
+@pytest.mark.parametrize("source", [
+    f'T = re.compile("{_LONG}")',
+    f'T = frozenset(("{_LONG}",))',
+    'T = "short"',
+    'T = ("a", "b", "c")',
+    f'def f():\n    return "{_LONG}"',
+], ids=["re.compile", "frozenset", "short", "short-tuple", "inside-a-function"])
+def test_the_census_leaves_matchers_short_text_and_function_text_alone(source: str) -> None:
+    import ast
+
+    assert am.census(ast.parse(source)) == {}
+
+
 # --- the lint fails on what it is for ---------------------------------------------------------------
 
 

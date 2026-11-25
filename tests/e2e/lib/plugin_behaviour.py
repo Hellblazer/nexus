@@ -695,9 +695,12 @@ def _scenarios(reg: dict, fx: Fixture) -> list[dict]:
     if event == "SubagentStop":
         outs = []
         for agent_type in ("conexus:developer", "general-purpose"):
+            # U5a: a conexus agent with no T1 put is nudged for everyone. U5b: any other type only for the maintainer.
+            nudged = agent_type.startswith("conexus:") or fx.name not in USER_FIXTURES
             outs.append({"name": agent_type, "payload": _common(
                 fx, "SubagentStop", agent_id=f"aleg-{fx.name}-stop", agent_type=agent_type, stop_hook_active=False,
-                agent_transcript_path=str(fx.repo.parent / f"agent-{fx.name}-{agent_type.replace(':', '_')}.jsonl")), "expect": None})
+                agent_transcript_path=str(fx.repo.parent / f"agent-{fx.name}-{agent_type.replace(':', '_')}.jsonl")),
+                "expect": "advice" if nudged else "none"})
         return outs
     if event == "SubagentStart":
         starts = [{"name": at, "payload": _common(fx, "SubagentStart", agent_id=f"aleg-{fx.name}-start", agent_type=at, prompt_id="p1"), "expect": None}
@@ -786,7 +789,7 @@ def evaluate(outcomes: list[Outcome], manifest: dict, repo: Path) -> tuple[list[
         if p.expect is not None:
             if p.expect == "pass" and o.decision in ("deny", "block"):
                 hard.append(f"{p.id}: expected the call to pass, got {o.decision}")
-            elif p.expect in ("deny", "block", "advice") and o.decision != p.expect:
+            elif p.expect in ("deny", "block", "advice", "none") and o.decision != p.expect:
                 hard.append(f"{p.id}: expected {p.expect}, got {o.decision}")
         elif p.fixture in USER_FIXTURES and o.decision in ("deny", "block"):
             findings.append({"reg_key": p.reg_key, "hit": f"<{o.decision}>", "probe": p.id})

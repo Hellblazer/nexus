@@ -163,6 +163,60 @@ def test_an_allowlisted_finding_is_let_through_and_counted_and_the_rest_fail(man
     assert sorted(f["probe"] for f in failures) == ["b", "c"], "another hit, and the same hit in another registration, still fail"
 
 
+#: The allowlist may only shrink (nexus-sby49.3, critic I3/I4). Phase 3 removes entries; nothing adds one. A new entry
+#: needs a decision of record, and then this set changes in the same commit.
+ALLOWLIST_PINNED = {
+    ("hooks/scripts/routing/credential_print_guard.py:_REDIRECT", "Hellblazer/nexus"),
+    ("hooks/scripts/routing/credential_print_guard.py:_REDIRECT", "RDR-219"),
+    ("PreToolUse hooks/scripts/routing/destructive_action_advice.py", "lab-remote"),
+    ("S2-2", "bd"),
+}
+#: Every manifest row whose end state is not wired yet. Phase 3 (and D6's flip) empties this; a new `live: false` row is a
+#: decision, not a way around the leg.
+NOT_LIVE_PINNED = {
+    "PreToolUse hooks/scripts/routing/destructive_action_advice.py", "S2-2", "Stop hooks/scripts/stop_wake_guard.py", "U2b",
+    "U6b", "U6c", "U8b", "hooks/scripts/compact_checkpoint.py:_RESUME_DIRECTIVE",
+    "hooks/scripts/routing/credential_print_guard.py:_REDIRECT",
+}
+
+
+def test_the_allowlist_is_pinned_and_may_only_shrink() -> None:
+    entries = leg.parse_allowlist(leg.DEFAULT_ALLOWLIST.read_text(encoding="utf-8"))
+    assert {(e.row, e.hit) for e in entries} <= ALLOWLIST_PINNED, "a new allowlist entry needs a decision of record, and this pin"
+
+
+def test_the_not_live_rows_are_pinned_and_may_only_shrink(manifest) -> None:
+    assert set(am.allowlist_rows(manifest)) <= NOT_LIVE_PINNED, "a new live: false row is a decision, not a way around the leg"
+    assert len(NOT_LIVE_PINNED) == 9
+
+
+def test_every_advisory_rows_text_is_clean_or_allowlisted(manifest) -> None:
+    """The leg drives three advice commands; this holds EVERY row of the table to the lexicon, from the rows themselves."""
+    spec = importlib.util.spec_from_file_location("daa_for_leg", PLUGIN / "hooks" / "scripts" / "routing" / "destructive_action_advice.py")
+    daa = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(daa)
+    allowed = {e.hit for e in leg.parse_allowlist(leg.DEFAULT_ALLOWLIST.read_text(encoding="utf-8"))
+               if e.row == "PreToolUse hooks/scripts/routing/destructive_action_advice.py"}
+    assert len(daa.ROWS) >= 8
+    for row in daa.ROWS:
+        extra = set(leg.lexicon_hits(row.advice)) - allowed
+        assert not extra, f"advice row {row.id} names {sorted(extra)} to a user, and no allowlist entry covers it"
+
+
+def test_the_leg_expects_the_subagent_stop_nudge_by_audience() -> None:
+    """U5a and U5b: general-purpose is nudged only for the maintainer; a conexus agent for everyone."""
+    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    reg = next(r for r in am.registrations(hooks) if r["event"] == "SubagentStop")
+    seen: dict[tuple[str, str], str] = {}
+    for name in ("plain", "marked", "flagged"):
+        fx = leg.Fixture(name, Path("/x") / name, Path("/h"), name == "flagged")
+        for sc in leg._scenarios(reg, fx):
+            seen[(name, sc["name"])] = sc["expect"]
+    assert seen[("plain", "general-purpose")] == "none"
+    assert seen[("marked", "general-purpose")] == seen[("flagged", "general-purpose")] == "advice"
+    assert all(seen[(n, "conexus:developer")] == "advice" for n in ("plain", "marked", "flagged"))
+
+
 # --- presence ------------------------------------------------------------------------------------
 
 

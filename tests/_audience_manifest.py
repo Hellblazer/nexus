@@ -102,8 +102,39 @@ def load_manifest(path: Path) -> dict:
 # --- AST helpers -----------------------------------------------------------------------------------
 
 
+_PATTERN_CALLS = ("compile", "frozenset")
+
+
+def _text_length(node: ast.AST) -> int:
+    """How much string a module-level value holds: a literal's length; a ``+`` or an f-string's pieces summed; the longest
+    string inside a list, tuple, set or dict or a call's arguments (``Row("id", ..., "advice text")``). ``re.compile`` and
+    ``frozenset`` are matchers, not text, and count as none."""
+    if isinstance(node, ast.Constant):
+        return len(node.value) if isinstance(node.value, str) else 0
+    if isinstance(node, ast.JoinedStr):
+        return sum(_text_length(v) for v in node.values)
+    if isinstance(node, ast.FormattedValue):
+        return 0
+    if isinstance(node, ast.BinOp):
+        return _text_length(node.left) + _text_length(node.right)
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return max((_text_length(e) for e in node.elts), default=0)
+    if isinstance(node, ast.Dict):
+        return max((_text_length(e) for e in [*node.keys, *node.values] if e is not None), default=0)
+    if isinstance(node, ast.Call):
+        name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+        if name in _PATTERN_CALLS:
+            return 0  # a compiled pattern or a frozen set of words is a matcher, not text a reader is shown
+        return max((_text_length(a) for a in [*node.args, *(k.value for k in node.keywords)]), default=0)
+    return 0
+
+
 def _assigned_constants(tree: ast.Module) -> dict[str, int | None]:
-    """Module-level ``NAME = <literal>`` -> its length when it is a string literal, else ``None``."""
+    """Module-level ``NAME = <value>`` -> how much text the value holds (:func:`_text_length`), or ``None`` when it holds none.
+
+    The census looks at the value forms text is written in: a string literal, an implicit or ``+`` concatenation, an f-string,
+    and a list, tuple, set or dict that holds strings. Text built inside a function, joined at run time, or read from a
+    file is out of its reach; ``docs/agents/plugin-audiences.md`` states that limit."""
     out: dict[str, int | None] = {}
     for node in tree.body:
         targets: list[ast.expr] = []
@@ -114,14 +145,10 @@ def _assigned_constants(tree: ast.Module) -> dict[str, int | None]:
             targets, value = [node.target], node.value
         if value is None:
             continue
+        length = _text_length(value)
         for target in targets:
             if isinstance(target, ast.Name):
-                try:
-                    literal = ast.literal_eval(value)
-                except Exception:  # noqa: BLE001 -- not a literal: a computed value is not text a reader can pin
-                    out.setdefault(target.id, None)
-                    continue
-                out[target.id] = len(literal) if isinstance(literal, str) else None
+                out[target.id] = length or None
     return out
 
 
