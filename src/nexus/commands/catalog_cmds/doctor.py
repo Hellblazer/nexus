@@ -1021,7 +1021,7 @@ def _print_t3_vs_catalog_text(report: dict) -> None:
     if report.get("t3_tombstoned_only"):
         click.echo(
             f"  T3 collections whose catalog documents are ALL tombstoned, not gone "
-            f"(restorable until `nx catalog purge-trash --execute`; never FAILs, "
+            f"(restorable until `nx catalog purge-trash --no-dry-run --confirm`; never FAILs, "
             f"never a drop-orphan-collections target) ({len(report['t3_tombstoned_only'])}):"
         )
         for o in report["t3_tombstoned_only"][:20]:

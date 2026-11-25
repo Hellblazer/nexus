@@ -1,7 +1,7 @@
 """GH #1512 (nexus-kt7f4): ``nx catalog reconcile-fences`` stamps index-run
 fences on non-repo documents that carry none, through the same begin +
 verify-then-stamp pair the fenced write paths use; repo documents are left
-to ``nx index <path> --force``; a document the engine refuses (manifest not
+to ``nx index repo <repo-root> --force``; a document the engine refuses (manifest not
 whole in T3) is named, never stamped."""
 
 from __future__ import annotations

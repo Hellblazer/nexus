@@ -1223,6 +1223,31 @@ def test_embedding_profile_off_profile_row_by_disposition_of_a_superseded_source
 
 
 @pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_off_profile_row_keeps_a_restored_source_whose_kept_job_cannot_be_reentered(monkeypatch) -> None:
+    """Engine 0.1.202 refuses the re-entry when the job's target is retired, so ``re-embed --all`` skips the source.
+    The live document is still unserved: the doctor keeps naming it, with the reason, and not under the re-entry remedy."""
+    reader = _FakeReader(_VOYAGE_PROFILE, [
+        _coll(_SRC, "code", _BGE, superseded_by=_TGT),
+        _coll(_TGT, "code", "voyage-code-3", superseded_by="code__1-1__voyage-code-3__v2"),
+    ], live_docs={_SRC: 1}, all_docs={_SRC: 3})
+    health = _patch_profile_check(monkeypatch, reader)
+    monkeypatch.setattr("nexus.reembed_job.local_jobs", lambda: [_kept_job("kept_tombstoned")])
+    r = _by_label(health._check_embedding_profile(), "Collections off-profile")
+    assert r.ok is False and r.warn is True
+    assert f"{_SRC} (its target {_TGT} is retired)" in r.detail
+    assert "cannot be re-entered" in r.detail
+    assert not any("nx collection re-embed --all" in s for s in r.fix_suggestions)
+    # Never reindex: it deletes the collection and its registry row, then cannot re-register it under the old profile.
+    fix = " ".join(r.fix_suggestions)
+    assert "reindex" not in fix and "rebuild" not in fix and "under the current profile" not in fix, fix
+    assert "nx index repo" in fix and "nx collection delete <source>" in fix
+    from tests._cli_tree import missing_commands, named_commands  # noqa: PLC0415 — test-local import
+
+    assert named_commands(fix), "the remedy names commands, so the check below is not vacuous"
+    assert missing_commands(fix) == [], fix
+
+
+@pytest.mark.usefixtures("cloud_mode")
 def test_embedding_profile_off_profile_row_ignores_a_superseded_source_when_jobs_are_unreadable(monkeypatch) -> None:
     reader = _FakeReader(_VOYAGE_PROFILE, [
         _coll(_SRC, "code", _BGE, superseded_by=_TGT),

@@ -59,3 +59,26 @@ def test_a_server_error_body_is_not_shown_as_a_reason() -> None:
     msg = _message(_refusal(500, b'{"error":"java.lang.NullPointerException at ..."}'))
     assert "NullPointerException" not in msg
     assert "500" in msg
+
+
+def test_a_rename_refused_for_a_restart_says_renames_open_after_the_next_restart() -> None:
+    """RDR-229 P3.5a: 409 ``rename_refused`` with ``missing: restart`` is not a fault to fix and retry: the engine opens
+    renames after its next restart, and the operator orders that."""
+    body = (b'{"error":"a collection rename is refused until the engine restarts to apply the P3.5b changesets",'
+            b'"reason":"rename_refused","missing":"restart"}')
+    msg = _message(_refusal(409, body))
+    assert "renames open after its next restart" in msg, msg
+    assert "operator orders that restart" in msg, msg
+    assert "unchanged" in msg and "nothing was renamed" in msg
+    assert "Fix the error and retry" not in msg, "a retry cannot help before the restart"
+
+
+@pytest.mark.parametrize("missing", ["name_key_drop_move", "p35b_list_missing", "readiness_unreadable",
+                                     "p35c_readers_absent", "latch_row_missing"])
+def test_a_rename_refused_for_any_other_missing_value_keeps_the_generic_text_and_the_engines_reason(missing: str) -> None:
+    body = ('{"error":"a collection rename is refused: ' + missing + ' is the missing condition",'
+            '"reason":"rename_refused","missing":"' + missing + '"}').encode()
+    msg = _message(_refusal(409, body))
+    assert "Fix the error and retry" in msg, msg
+    assert f"{missing} is the missing condition" in msg, msg
+    assert "restart" not in msg, msg

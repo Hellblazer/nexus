@@ -204,7 +204,8 @@ def test_the_session_start_context_states_survival_and_the_claude_p_caveat(monke
     assert "swept 24 h after they were written" not in out
     assert "flagged entries land in T2 at session end and on a move to a new id" in out
     assert "survives resume" not in out
-    assert "A `claude -p` child has its own T1 unless started with `share_t1=True`" in out
+    assert "A `claude -p` child always has its own T1" in out
+    assert "`share_t1=True` is retired and raises" in out and "unless started with" not in out
 
 
 def test_the_session_start_context_leads_with_the_t1_contract(monkeypatch) -> None:

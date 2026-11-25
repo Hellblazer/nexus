@@ -108,6 +108,12 @@ def test_target_ok() -> None:
     assert cl.check_target(**_target()) == "api.conexus-nexus.com"
 
 
+def test_the_returned_edge_is_the_pinned_entry_not_the_credential_text() -> None:
+    edge = cl.check_target(**_target())
+    assert edge in cl.ALLOWED_EDGE_HOSTS
+    assert any(edge is known for known in cl.ALLOWED_EDGE_HOSTS), "the allowlist's own string, so no credential-derived text reaches the log"
+
+
 def test_an_edge_host_override_is_explicit_and_exact() -> None:
     env = {cl.EDGE_OVERRIDE_ENV: "edge.staging.example"}
     assert cl.check_target(**_target(service_url="https://edge.staging.example", ambient_environ=env)) == "edge.staging.example"

@@ -252,3 +252,66 @@ def test_every_other_place_that_names_the_move_agrees_with_the_label() -> None:
     assert seen, "non-vacuity: the changeset that waits for the move names it"
     for path, labels in seen.items():
         assert labels == {REOWN_MOVE_LABEL}, f"{path} names {labels}, the doctor names {REOWN_MOVE_LABEL}"
+
+
+# ── a fresh install's first boot (nexus-p2m1x.48) ─────────────────────────────────────────────────────────────────────
+# collections-001-2 is skipped at boot 1 (its precondition needs the re-own move's completed_at, and the move worker starts
+# after the Liquibase walk). On an empty store the re-own move then completes within seconds and leaves boot_work, while the
+# index stays absent until the first restart after the move completed. In that window the status carries no entry for the
+# re-own move, and the doctor must not call the wait "unexplained": the install is still working through RDR-229's moves
+# (marginalia's cold-install gate: two stamp moves queued), or it has published the restart that applies the changeset too.
+# Probed 2026-11-24 on a fresh engine (boot 1, 7 s after start): the re-own entry IS listed while the move is queued or
+# blocked, which is the "queued: first" case above; the rows below are the windows where it has left the list.
+
+_RESTART = {
+    "id": "rdr229-restart",
+    "what": "restart the engine once: it applies the P3.5b changesets that a collection rename waits for (15 of 15 not applied yet)",
+}
+_STAMP = {
+    "id": "data-move:rdr229-stamp-catalog_collections",
+    "what": "queued: rdr229-stamp-catalog_collections (the worker has not reached it yet)",
+}
+
+
+def test_a_pending_rdr229_restart_explains_the_wait_so_the_row_is_not_shown() -> None:
+    # reown complete (no entry), stamps complete, the restart entry is published: that restart builds the index too
+    assert _wait_rows([_row("docs__a")], _status(False, [_RESTART])) == []
+
+
+def test_rdr229_moves_still_open_explain_the_wait_when_the_reown_move_has_left_the_list() -> None:
+    # marginalia's boot 1: the re-own move completed, two stamp moves are still queued, no restart entry yet
+    stamps = [_STAMP, {**_STAMP, "id": "data-move:rdr229-stamp-chash_remap"}]
+    assert _wait_rows([_row("docs__a")], _status(False, stamps)) == []
+    failed = {"id": "data-move:rdr229-stamp-topics", "what": "failed: boom"}
+    assert _wait_rows([_row("docs__a")], _status(False, [failed])) == []
+
+
+def test_the_unexplained_row_stays_when_no_reown_entry_no_restart_and_no_rdr229_move_is_listed() -> None:
+    other = {"id": "data-move:some-other-move", "what": "working: 1 of 3 chunks"}
+    unrelated = {"id": "index-build:docs__x", "what": "building"}
+    assert len(_wait_rows([_row("docs__a")], _status(False, []))) == 1
+    assert len(_wait_rows([_row("docs__a")], _status(False, [other, unrelated]))) == 1
+
+
+def test_a_duplicate_still_wins_over_a_pending_restart() -> None:
+    rows = check_collection_tuples([_row("docs__a"), _row("docs__b")], engine_status=_status(False, [_RESTART]))
+    assert [r.label for r in rows] == [LABEL]
+
+
+# ── after the moves finish, before the first restart (nexus-p2m1x.48) ─────────────────────────────────────────────────
+# marginalia's cold install of engine-service-v0.1.202: boot 1 skips collections-001-2 (the re-own move was still running
+# at the Liquibase walk), every RDR-229 move then completes and boot_work is [] at every capture, and rdr229-restart is
+# never posted (every P3.5b changeset applied at boot 1). Boot 2 builds the index. In that window the row stays a warning
+# but names the restart; the boot log is the second suggestion, for an index still absent after a restart.
+
+
+def test_the_window_between_the_moves_finishing_and_the_first_restart_says_the_engine_builds_the_index_at_its_next_start() -> None:
+    from nexus.corpus import _SERVICE_RESTART_COMMAND  # the command nx doctor names elsewhere (health.py bge-degraded row)
+
+    (r,) = _wait_rows([_row("docs__a")], _status(False, []))  # boot2-pre-restart: index absent, boot_work [], no duplicate
+
+    assert r.ok is False and r.warn is True and r.fatal is False
+    assert "next start" in r.detail and "waits for a reason nothing here names" not in r.detail
+    assert _SERVICE_RESTART_COMMAND in r.fix_suggestions[0]
+    assert "boot log" in r.fix_suggestions[1] and "collections-001-2" in r.fix_suggestions[1]
+    assert "still absent after a restart" in r.fix_suggestions[1]

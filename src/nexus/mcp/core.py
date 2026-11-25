@@ -4843,11 +4843,9 @@ def search_metadata_scoped(
 # ``topic_assignments`` on chunk chash and ranks by vector distance,
 # resolved across every collection in *corpus* (topics are per-collection —
 # a label belongs to one collection's taxonomy, so the multi-collection
-# loop is usually single-hit). NOTE: the merge is
-# per-collection-limit-then-merge-then-truncate, so for a label genuinely
-# present in multiple collections the global top-N can drop a collection's
-# (limit+1)th row that would have ranked; over-fetch per collection if that
-# case becomes real.
+# loop is usually single-hit). The merge is per-collection-limit-then-merge-
+# then-truncate, which is lossless for the global top-N: a row ranked limit+1
+# in its own collection has limit better rows ahead of it.
 @mcp.tool(
     title="Topic-Scoped Combined Search",
     annotations={"readOnlyHint": True},
@@ -4861,7 +4859,7 @@ def search_topic_scoped(
     )] = "knowledge,code,docs",
     limit: Annotated[int, Field(description="Max rows returned.")] = 10,
     structured: Annotated[bool, Field(
-        description="Return {ids, tumblers, distances, collections} for the plan runner.",
+        description="Return {ids, tumblers, distances, collections, contents} for the plan runner.",
     )] = False,
 ) -> "str | dict":
     """Vector search restricted to chunks already assigned to a topic label.
@@ -4877,9 +4875,8 @@ def search_topic_scoped(
     - Requires an HttpVectorClient-backed T3 (every local and cloud install
       since RDR-155 P4b).
     - `ids` are chunk hashes, not document tumblers.
-    - A topic label present in more than one collection can drop a
-      just-below-`limit` row from a collection whose true rank would have
-      included it — see the module comment above this tool for why.
+    - A topic label present in more than one collection searches each
+      one; the results are the global nearest `limit` rows across them.
     """
     try:
         from nexus.db.http_vector_client import VectorServiceError, is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -5158,8 +5155,8 @@ def search_aspect_scoped(
       since RDR-155 P4b).
     - Excludes any document with no `document_aspects` row or a NULL
       `doc_id` there — by design, not a bug; coverage is uneven across
-      corpora (weakest for `knowledge__` collections; see the module
-      comment above this tool).
+      corpora (weakest for knowledge collections, the notes and papers
+      stored with `store_put`).
     - `field` must be one of the five allowlisted columns; an unrecognized
       value is rejected before the network call.
     - `ids`/`tumblers` in the structured result are document tumblers, not
@@ -5327,7 +5324,10 @@ def query(
         ),
     )] = "",
     depth: Annotated[int, Field(description="BFS depth for `follow_links` traversal.")] = 1,
-    subtree: Annotated[str, Field(description="Tumbler prefix; search only documents in this subtree (e.g. \"1.1\").")] = "",
+    subtree: Annotated[str, Field(description=(
+        "Search only documents in this subtree: a tumbler prefix of one or two segments (e.g. \"1.1\") or a "
+        "registered owner name. A document address of three or more segments is refused."
+    ))] = "",
     structured: Annotated[bool, Field(description="Return the structured dict instead of the human-readable string.")] = False,
 ) -> "str | dict":
     """Document-level semantic search: which documents match, not which passages.
@@ -6346,7 +6346,7 @@ def store_put(
         description=(
             "Optional stable identifier this document names, such as \"CUST-0018\", stamped into the "
             "catalog document's metadata (never a chunk's). At most 256 characters, no control "
-            "characters, and refused on a code__ collection. Unset: a collection configured with an "
+            "characters, and refused on a code__ collection (by content type, whatever its label). Unset: a collection configured with an "
             "entity-key pattern stamps the title when the whole title matches it. A re-put without "
             "it removes the stored key."
         ),
@@ -7300,7 +7300,7 @@ def store_get_many(
     max_chars_per_doc: Annotated[int, Field(description="Per-document truncation cap, in characters.")] = 4000,
     structured: Annotated[bool, Field(
         description=(
-            "Return {contents, missing, section_types, section_type_basis} instead of the "
+            "Return {contents, missing, section_types, section_type_basis, source_notes} instead of the "
             "human-readable string; section_types aligns 1:1 with contents/ids "
             "(\"\" when missing, unstamped, or when the documents that own the "
             "chunk disagree on its section type); section_type_basis aligns with "
@@ -8439,7 +8439,7 @@ def scratch(
         ),
     )] = "session",
 ) -> str:
-    """T1 session scratch pad: ephemeral, within-session-only notes.
+    """T1 session scratch pad: ephemeral notes, kept for this session by default (`scope="identity"` keeps them across /clear and restart).
 
     Use `memory_put`/`memory_search` instead for anything that must survive
     past this session; use `store_put` for permanent T3 knowledge. Use
@@ -8565,8 +8565,8 @@ def scratch(
 def scratch_manage(
     action: Annotated[str, Field(description="One of \"flag\", \"promote\".")],
     entry_id: Annotated[str, Field(description="Scratch entry id.")],
-    project: Annotated[str, Field(description="Target T2 project namespace (required for \"promote\").")] = "",
-    title: Annotated[str, Field(description="Target T2 entry title (required for \"promote\").")] = "",
+    project: Annotated[str, Field(description="T2 project namespace: the promote target (required for \"promote\"), and the flush destination for \"flag\" (default scratch_sessions).")] = "",
+    title: Annotated[str, Field(description="T2 entry title: the promote target (required for \"promote\"), and the flush title for \"flag\".")] = "",
     scope: Annotated[str, Field(
         description="\"session\" (default) or \"identity\" (the identity's scratch: promote only, never flag).",
     )] = "session",
@@ -8702,7 +8702,7 @@ def plan_save(
     ttl: Annotated[int | None, Field(description="Time-to-live in days. None (default) is permanent.")] = None,
     scope_tags: Annotated[str, Field(
         description=(
-            "Comma-separated scope-tag string (e.g. \"rdr__arcaneum,code__nexus\"). "
+            "Comma-separated scope-tag string (e.g. \"rdr__,code__\"; each tag is a collection-name prefix, case-insensitive). "
             "Empty infers from plan_json's retrieval steps."
         ),
     )] = "",
@@ -8915,12 +8915,13 @@ def plan_search(
     """
     try:
         with _t2_ctx() as db:
-            # Over-fetch by 1 to detect if there are more.
+            # The engine's plan search takes a limit and no offset, so ask for everything up to the end of
+            # this page plus one row (to detect more) and slice the front off below.
             # any_lexeme=True (nexus-vi8fp decision C): this is a HUMAN
             # browsing surface — a person judges the list — so it gets the
             # any-lexeme recall fallback plan_match deliberately does not.
             results = db.search_plans(
-                query, limit=limit + 1, project=project, any_lexeme=True,
+                query, limit=offset + limit + 1, project=project, any_lexeme=True,
             )
         if offset:
             results = results[offset:]
@@ -8966,11 +8967,11 @@ def plan_delete(
         with _t2_ctx() as db:
             row = db.plans.get_plan(plan_id)
             if row is None:
-                return f"Not found: plan id {plan_id}"
+                return _fail(f"Not found: plan id {plan_id}")
             removed = db.plans.delete_plan(plan_id)
         if not removed:
             # get_plan→delete_plan race: another caller deleted it first.
-            return f"Not found: plan id {plan_id} (already deleted)"
+            return _fail(f"Not found: plan id {plan_id} (already deleted)")
         label = row.get("name") or row.get("query") or "(unnamed)"
         return f"Deleted plan id={plan_id}: {label[:80]}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
@@ -9432,6 +9433,10 @@ def tuple_ack(
 ) -> str:
     """Consume a claimed tuple (`ack`), optionally writing a reply in the same transaction (RDR-206).
 
+    A row that `tuple_out` with mode=replace rewrote while it was claimed
+    is not consumed by this ack: it goes back to available carrying the
+    new body.
+
     Pass `reply` to write a reply as the request is consumed; both commit
     together or not at all. The reply's target must resolve to a
     keys+nonce template (e.g. a mailbox address); a keys-only target (e.g.
@@ -9536,9 +9541,9 @@ def tuple_release(
     claim_id: Annotated[str, Field(description="The claim id returned by `tuple_in`.")],
     claimant: Annotated[str, Field(description="Must match the identity that made the claim.")],
 ) -> str:
-    """Consume a claimed tuple (`release`, RDR-211): release ends a live
-    claim WITHOUT counting an attempt -- a hand-back that is not a
-    failure. Use `tuple_nack` instead when the work genuinely failed and
+    """Hand a claimed tuple back (`release`, RDR-211): the row returns to
+    available with its attempt count unchanged and is NOT consumed -- a
+    hand-back that is not a failure. Use `tuple_nack` instead when the work genuinely failed and
     should count toward the template's `max_attempts`; `nack` counts one.
 
     Returns a confirmation naming the claim. Refused on a lapsed claim
@@ -9597,7 +9602,7 @@ def tuple_registry(
 # context on every unqualified call. The footer entry names the next
 # cursor so a caller that genuinely needs everything can still walk it.
 def tuple_list(
-    prefix: Annotated[str, Field(description="Optional subspace-name prefix filter (e.g. \"agents.mailbox.\").")] = "",
+    prefix: Annotated[str, Field(description="Optional subspace-name prefix filter (e.g. \"mailbox/\"; subspaces are slash-separated).")] = "",
     limit: Annotated[int, Field(description="Max subspaces to return per page.")] = 100,
     after: Annotated[str, Field(description="Subspace-name cursor from a prior truncated page's footer.")] = "",
 ) -> list[dict]:
@@ -10592,7 +10597,11 @@ def traverse(
         description="One or more tumbler strings (e.g. [\"1.1\", \"1.2\"]), or a single string.",
     )],
     link_types: Annotated[list[str] | None, Field(
-        description="Explicit catalog link types to follow (\"implements\", \"cites\", ...). Mutually exclusive with purpose.",
+        description=(
+            "Explicit catalog link types to follow (\"implements\", \"cites\", ...). Mutually exclusive with purpose. "
+            "With neither this nor purpose, the engine follows its default set (cites, implements, relates, contains, "
+            "supersedes, describes, quotes, comments, formalizes, same-as); name implements-heuristic or a custom type here."
+        ),
     )] = None,
     purpose: Annotated[str, Field(
         description="Named alias for a link-type set (e.g. \"find-implementations\"). Mutually exclusive with link_types.",
@@ -16853,10 +16862,12 @@ def daemon_uninstall(
     )] = False,
     remove_data: Annotated[bool, Field(
         description=(
-            "When true (and confirm=true), ALSO deletes the nexus CONFIG "
-            "directory (~/.config/nexus/, or NEXUS_CONFIG_DIR) — notes, "
-            "plans, and the catalog — and the model cache (~/.cache/nexus/). "
-            "Irreversible."
+            "When true (and confirm=true), ALSO deletes everything under the "
+            "nexus CONFIG directory (~/.config/nexus/, or NEXUS_CONFIG_DIR), "
+            "including the bundled Postgres cluster: every T3 chunk (all "
+            "indexed code, docs, rdr and knowledge collections), T1, tuples "
+            "and identities, plus notes, plans and the catalog. It also "
+            "deletes the model cache (~/.cache/nexus/). Irreversible."
         ),
     )] = False,
 ) -> str:

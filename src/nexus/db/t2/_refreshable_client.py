@@ -66,7 +66,7 @@ import structlog
 # additionally pins this module's and http_vector_client's values equal
 # against a future local-redefinition drift.
 from nexus._log_safe_url import log_endpoint
-from nexus.collection_errors import superseded_write_error_from_body
+from nexus.collection_errors import label_reserved_error_from_body, superseded_write_error_from_body
 from nexus.db.client_identity import client_identity_headers
 from nexus.db.t2.shared_ssl import get_shared_ssl_context as _get_shared_ssl_context
 from nexus.identity.token_header import request_with_identity, superseded_from_response
@@ -1433,6 +1433,12 @@ class RefreshableHttpStoreMixin:
                 superseded = None
             if superseded is not None:
                 raise superseded from failure
+            try:
+                reserved = label_reserved_error_from_body(409, resp.json())
+            except Exception:  # noqa: BLE001 — an unreadable body is never this error; the generic 409 stands
+                reserved = None
+            if reserved is not None:  # RDR-229 P3.7: a reserved label, refused whole; typed so no retry ladder resends it
+                raise reserved from failure
             if (lost_seat := superseded_from_response(resp)) is not None:  # RDR-253 Step 3: stop writing, name the holder
                 raise lost_seat from failure
         raise failure

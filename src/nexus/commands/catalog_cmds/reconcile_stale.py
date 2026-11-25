@@ -1242,7 +1242,7 @@ def _run_tombstone_ghost_notes(
         writer.close()
     click.echo(
         f"\nDone: tombstoned {n_deleted} ghost note(s). Reversible until "
-        "`nx catalog purge-trash --execute`; the title list is in T2 "
+        "`nx catalog purge-trash --no-dry-run --confirm`; the title list is in T2 "
         "nexus/ghost-notes-knowledge__knowledge-2026-08-28-titles."
     )
 
@@ -1317,7 +1317,7 @@ def _run_drop_orphan_collections(
         click.echo(
             f"  {len(tombstoned_only)} collection(s) are tombstoned-only -- every "
             "referencing catalog document is soft-deleted (restorable until "
-            "`nx catalog purge-trash --execute`), NOT gone. NEVER a delete target "
+            "`nx catalog purge-trash --no-dry-run --confirm`), NOT gone. NEVER a delete target "
             "for this arm:"
         )
         _echo_sample(

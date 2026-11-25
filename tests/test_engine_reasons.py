@@ -63,6 +63,8 @@ def test_the_quarantine_restore_busy_reason_equals_the_engines() -> None:
         "RENAME_BUSY_REASON",
         "COLLECTION_LABEL_AMBIGUOUS_REASON",
         "RESTORE_ORIGIN_UNREGISTERED_REASON",
+        "COLLECTION_BUSY_REASON",
+        "LABEL_RESERVED_REASON",
     ],
 )
 def test_the_rdr225_partition_reasons_equal_the_engines(name: str) -> None:
