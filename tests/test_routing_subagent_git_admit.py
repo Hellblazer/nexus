@@ -18,8 +18,10 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -88,11 +90,13 @@ def develop_worktree(primary: pathlib.Path, tmp_path: pathlib.Path) -> pathlib.P
 
 
 @pytest.fixture()
-def scratch(tmp_path: pathlib.Path) -> pathlib.Path:
-    """A directory under the temp root with no repository in it or above it."""
-    box = tmp_path / "box"
-    box.mkdir()
-    return box
+def scratch() -> pathlib.Path:
+    """A directory under the temp root the guard reads (``tempfile.gettempdir()``, which the hook
+    subprocess inherits through TMPDIR) with no repository in it or above it. pytest's own tmp_path
+    is not that: on a lab host the suite puts it on tmpfs beside TMPDIR, not under it."""
+    box = pathlib.Path(tempfile.mkdtemp(prefix="nx-5y47c-box-"))
+    yield box
+    shutil.rmtree(box, ignore_errors=True)
 
 
 def _verdict(cmd: str, cwd: pathlib.Path) -> dict:

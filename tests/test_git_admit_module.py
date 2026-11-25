@@ -11,8 +11,9 @@ import ast
 import importlib.util
 import pathlib
 import re
-import subprocess
+import shutil
 import sys
+import tempfile
 
 import pytest
 
@@ -210,10 +211,15 @@ def test_the_push_shape_names_the_checked_out_branch_only():
     assert _kind("git -C /not/a/root push origin HEAD") is None
 
 
-def test_a_scratch_repository_is_only_one_the_command_created(tmp_path):
-    scratch = tmp_path / "s"
-    scratch.mkdir()
-    box = str(scratch)
+def test_a_scratch_repository_is_only_one_the_command_created():
+    box = tempfile.mkdtemp(prefix="nx-5y47c-box-")  # under the temp root the module reads
+    try:
+        _scratch_repository_cases(box)
+    finally:
+        shutil.rmtree(box, ignore_errors=True)
+
+
+def _scratch_repository_cases(box: str) -> None:
     assert _kind("git init -q " + box + "/r && git -C " + box + "/r add -A") == "scratch"
     assert _kind("cd " + box + " && git init -q && git add -A") == "scratch"
     assert _kind("git -C " + box + "/r add -A") is None
