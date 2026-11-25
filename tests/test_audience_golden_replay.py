@@ -154,6 +154,32 @@ def _synthetic_commands() -> list[str]:
     return sorted(set(commands))
 
 
+#: The one deliberate change to the maintainer path since Phase 1 (nexus-sby49.3): plan section 2.1 says the full guard denies
+#: ``git reflog delete``, and the verb set only knew ``reflog expire``. Everything else must replay with zero differences.
+INTENDED_TIGHTENINGS = ["git reflog delete HEAD@{1}", "git reflog delete --rewrite --updateref HEAD@{2}"]
+
+
+def test_the_replay_shows_exactly_the_intended_tightening(old_tree, tmp_path):
+    """Phase 1's guard (``PHASE1_PARENT``) passes ``git reflog delete``; the working tree denies it, in every place the
+    synthetic replay runs. The zero-difference test above holds the rest of the table to identical verdicts."""
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    _git("init", "-q", cwd=primary)
+    mark_nexus(primary)
+    (primary / "f.txt").write_text("x")
+    _git("add", "f.txt", "scripts/agent-worktree-preflight.sh", cwd=primary)
+    _git("commit", "-q", "-m", "init", cwd=primary)
+    flagged = pathlib.Path(flagged_home(tmp_path / "flagged-home"))
+    unflagged = tmp_path / "unflagged-home"
+    unflagged.mkdir()
+    for label, cwd, home in (("primary", str(primary), unflagged), ("no cwd (flagged)", "", flagged)):
+        cases = [{"command": c, "cwd": cwd} for c in INTENDED_TIGHTENINGS]
+        old, new = _both(old_tree, home, cases)
+        for c, o, n in zip(INTENDED_TIGHTENINGS, old, new):
+            assert o["verdict"] == "", f"[{label}] Phase 1 already denied {c!r}: the tightening is not new"
+            assert '"deny"' in n["verdict"], f"[{label}] the working tree still passes {c!r}"
+
+
 def test_the_synthetic_replay_shows_zero_maintainer_path_differences(old_tree, tmp_path):
     commands = _synthetic_commands()
     primary = tmp_path / "primary"

@@ -696,7 +696,7 @@ _VERB_ALT_TAIL = (
     r"branch\s+-[dDm]|"
     r"tag\s+-d|"
     r"update-ref|symbolic-ref|filter-branch|"
-    r"reflog\s+expire|gc|prune"
+    r"reflog\s+(?:expire|delete)|gc|prune"
 )
 
 #: nexus-3c92m round 5 (code-review CRITICAL, round-4 re-review): the

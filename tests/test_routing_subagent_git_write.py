@@ -239,6 +239,7 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "git worktree remove w1",
         "git update-ref -d refs/heads/x",
         "git reflog expire --all",
+        "git reflog delete HEAD@{1}",  # nexus-sby49.3: plan 2.1 says the full guard denies it; the verb set missed it
         "git gc",
     ],
     # nexus-3c92m round 4 retired the read-only-spelling refinement: a

@@ -121,7 +121,7 @@ GUARD_ROWS: list[tuple[str, str, str]] = [
     ("git config user.email a@b", "pass", "deny"),
     ("git config --get user.name", "pass", "pass"),
     ("git reflog expire --all", "deny", "deny"),
-    ("git reflog delete HEAD@{1}", "deny", "pass"),  # section 2.1 says the full guard denies it today; the real one passes it (reported in the hand-back)
+    ("git reflog delete HEAD@{1}", "deny", "deny"),
     ("git gc --prune=now", "deny", "deny"),
     ("git prune", "deny", "deny"),
     ("git update-ref -d refs/heads/x", "deny", "deny"),
