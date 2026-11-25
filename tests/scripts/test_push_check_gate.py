@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -379,3 +380,66 @@ def test_the_cluster_check_runs_the_conf_census_with_the_integration_marker_incl
     cmd = gate.command_for("pg-cluster", ["py"], ["py"])
     assert cmd[-3:] == ["-m", "not slow", "tests/test_integration_pg_cluster.py"], "integration is not excluded: it pins the conf lines"
     assert spec.min_passed == 80 and spec.skip_ok == "", "99 tests, no skips, no engine: a pass with skips or a mass skip is vacuous"
+
+
+# ── outbound_paths: what a merge contributes (nexus-igea9) ──
+
+def _run_git(repo: Path, *args: str) -> str:
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@example.com", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, env=env, check=True)
+    return proc.stdout.strip()
+
+
+def _commit(repo: Path, path: str, text: str, msg: str) -> str:
+    (repo / path).parent.mkdir(parents=True, exist_ok=True)
+    (repo / path).write_text(text)
+    _run_git(repo, "add", path)
+    _run_git(repo, "commit", "-q", "-m", msg)
+    return _run_git(repo, "rev-parse", "HEAD")
+
+
+def _stale_branch_repo(tmp_path: Path) -> Path:
+    """Base B on develop; branch ``feature`` from B touches notes/unrelated.md; develop then advances past B touching paths
+    that select checks (files the push never changes relative to develop). HEAD is left on develop."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run_git(repo, "init", "-q", "-b", "develop")
+    _commit(repo, "README.md", "base\n", "base")
+    _run_git(repo, "checkout", "-q", "-b", "feature")
+    _commit(repo, "notes/unrelated.md", "feature\n", "feature work")
+    _run_git(repo, "checkout", "-q", "develop")
+    _commit(repo, "service/src/main/java/dev/nexus/service/db/CatalogRepository.java", "// develop\n", "develop advances")
+    _commit(repo, "docs/agents/catalog-t3-split.md", "develop\n", "develop docs")
+    return repo
+
+
+def test_a_merge_of_a_stale_branch_onto_develop_contributes_only_what_it_brings_to_develop(tmp_path: Path) -> None:
+    repo = _stale_branch_repo(tmp_path)
+    base = _run_git(repo, "rev-parse", "HEAD")            # origin/develop: the push's base
+    _run_git(repo, "merge", "-q", "--no-ff", "-m", "merge stale feature", "feature")   # first parent = develop
+    tip = _run_git(repo, "rev-parse", "HEAD")
+    assert gate.outbound_paths(repo, base, tip) == {"notes/unrelated.md"}
+
+
+def test_a_merge_of_develop_into_the_pushed_branch_contributes_only_what_it_brings_to_develop(tmp_path: Path) -> None:
+    """The other parent order: the pusher merged develop INTO the stale branch (first parent = the branch)."""
+    repo = _stale_branch_repo(tmp_path)
+    base = _run_git(repo, "rev-parse", "HEAD")
+    _run_git(repo, "checkout", "-q", "feature")
+    _run_git(repo, "merge", "-q", "--no-ff", "-m", "merge develop into feature", "develop")   # first parent = feature
+    tip = _run_git(repo, "rev-parse", "HEAD")
+    assert gate.outbound_paths(repo, base, tip) == {"notes/unrelated.md"}
+
+
+def test_a_path_touched_and_reverted_in_separate_commits_still_selects_its_checks(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run_git(repo, "init", "-q", "-b", "develop")
+    _commit(repo, "service/Seam.java", "// one\n", "base")
+    base = _run_git(repo, "rev-parse", "HEAD")
+    _commit(repo, "service/Seam.java", "// two\n", "touch")
+    _commit(repo, "service/Seam.java", "// one\n", "revert")
+    tip = _run_git(repo, "rev-parse", "HEAD")
+    assert _run_git(repo, "diff", "--name-only", base, tip) == "", "the net diff is empty"
+    assert gate.outbound_paths(repo, base, tip) == {"service/Seam.java"}
