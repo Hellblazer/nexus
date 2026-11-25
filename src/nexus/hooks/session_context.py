@@ -114,6 +114,21 @@ from nexus._hook_runtime._io import HookResult
 
 __all__ = ["run"]
 
+# nexus-sby49 audience gates (stdlib only). ``maintainer`` and ``nexus_repo`` tighten (they add text), so
+# an import failure binds them to True, the contract's direction: a broken helper gives the maintainer's
+# full output, never a thinner one. ``account_flag`` loosens and binds to False.
+try:
+    from nexus.hooks._audience import account_flag as _account_flag, maintainer as _maintainer, nexus_repo as _nexus_repo
+except BaseException:  # noqa: BLE001
+    def _maintainer(payload: object) -> bool:
+        return True
+
+    def _nexus_repo(payload: object) -> bool:
+        return True
+
+    def _account_flag() -> bool:
+        return False
+
 # Configuration via environment variables
 DEBUG = os.environ.get('NX_HOOK_DEBUG', '0') == '1'
 NX_TIMEOUT = int(os.environ.get('NX_TIMEOUT', '10'))
@@ -131,6 +146,39 @@ BRIEF_INDEX_LINE: str = (
     "beads (ready, bd usage) before choosing work; memory (T2 titles), map (topic labels) before researching; "
     "caps (tool notes) | rdr (RDR counts) | me (your startup note)"
 )
+
+#: nexus-sby49.3 (I2): the line's parts, so the two topics that need data are named only where the data is. The
+#: full line above is these five joined, and is what a project with a ``.beads/`` directory and an RDR directory gets.
+_INDEX_HEAD: str = "More on demand (`nx brief <topic>` or the `brief` MCP tool): "
+_INDEX_BEADS: str = "beads (ready, bd usage) before choosing work; "
+_INDEX_CORE: str = "memory (T2 titles), map (topic labels) before researching; caps (tool notes)"
+_INDEX_RDR: str = " | rdr (RDR counts)"
+_INDEX_ME: str = " | me (your startup note)"
+
+
+def _has_beads(project_dir: Path) -> bool:
+    """The beads topic is named where the project tracks work in beads (a ``.beads/`` directory) or ``bd`` is on PATH.
+    Names a topic more often than it must on any doubt: a data gate that fails shows the line it always showed."""
+    try:
+        return (project_dir / ".beads").is_dir() or which("bd")
+    except Exception:  # noqa: BLE001 — a gate that cannot be read leaves the topic in
+        return True
+
+
+def _has_rdr_dir(project_dir: Path) -> bool:
+    """The rdr topic is named where the project has an RDR directory (``docs/rdr``, or its ``.nexus.yml`` path)."""
+    try:
+        from nexus.hooks.rdr_verb import _rdr_dir  # noqa: PLC0415 — deferred: only this gate pays for the verb's imports
+
+        return _rdr_dir(project_dir).is_dir()
+    except Exception:  # noqa: BLE001 — a gate that cannot be read leaves the topic in
+        return True
+
+
+def brief_index_line(project_dir: Path) -> str:
+    """The ONE index line for *project_dir*: ``beads`` and ``rdr`` only where the project has beads or an RDR directory."""
+    return (_INDEX_HEAD + (_INDEX_BEADS if _has_beads(project_dir) else "") + _INDEX_CORE
+            + (_INDEX_RDR if _has_rdr_dir(project_dir) else "") + _INDEX_ME)
 
 
 def debug(msg: str) -> None:
@@ -215,19 +263,53 @@ def _render_ready_beads(
 #: T1 inter-agent use was designed five times and faded each time; the survey of
 #: 2026-11-01 found 0 T1 writes in ~45 dispatches across 9 sessions, with the
 #: only top-level mention one capability line deep in this block.
-_T1_TOP_LINES: list[str] = [
-    "## T1: the working layer this session shares with its subagents",
+#:
+#: nexus-sby49.3: one constant per line, each with its own audience in ``conexus/hooks/audience.yaml``. The heading and
+#: the lifetime line are the product's (I1a; the retired-``share_t1`` parenthetical is gone for everyone, I1c). The
+#: dispatch protocol sentence is Sam's own working rule (I1b, D10, nexus-mtheb) and goes only to ``maintainer()``.
+_T1_HEADING: str = "## T1: the working layer this session shares with its subagents"
+_T1_DISPATCH_PROTOCOL: str = (
     "Before a dispatch, `scratch put` the design-of-record and the shared brief context "
     "(ship-when, inputs, prior findings) and name its id in each brief; have agents put "
     "interim findings in T1 under the round tags you give them; read their entries "
-    "before acting on a hand-back.",
+    "before acting on a hand-back."
+)
+_T1_LIFETIME: str = (
     "T1 survives compaction; a `/clear`, `/resume` or fresh restart starts a new scope, "
     "an idle session is swept after 24 h, and flagged entries land in T2 at session end "
-    "and on a move to a new id. A `claude -p` child always has its own T1 "
-    "(`share_t1=True` is retired and raises). Working notes you want after `/clear` go to `scratch` with "
-    "`scope=identity` and tag `working`; session scope stays the layer your subagents share.",
-    "",
-]
+    "and on a move to a new id. A `claude -p` child always has its own T1. "
+    "Working notes you want after `/clear` go to `scratch` with "
+    "`scope=identity` and tag `working`; session scope stays the layer your subagents share."
+)
+
+#: The maintainer's block: what every session had before nexus-sby49.3, less the retired-``share_t1`` parenthetical.
+_T1_TOP_LINES: list[str] = [_T1_HEADING, _T1_DISPATCH_PROTOCOL, _T1_LIFETIME, ""]
+
+
+def _t1_top_lines(payload: object) -> list[str]:
+    """The T1 block for this session: the dispatch protocol sentence only for ``maintainer()``."""
+    if _maintainer(payload):
+        return list(_T1_TOP_LINES)
+    return [_T1_HEADING, _T1_LIFETIME, ""]
+
+
+#: The one NEXUS-REPO line that replaces the hook-log tripwire (plan section 7 Phase 2, change 3): a checkout that
+#: carries the nexus marker is held to nexus's rules whoever opens it, and this account has no maintainer flag, so
+#: nothing outside this checkout is. Printed on every start in such a checkout; silent everywhere else.
+_TRIPWIRE_LINE: str = (
+    "This checkout carries the nexus marker, so nexus's own development rules apply in it, but this account has no "
+    "maintainer flag (`~/.config/nexus/maintainer-profile`), so they apply nowhere else."
+)
+
+
+def _tripwire_lines(payload: object) -> list[str]:
+    """The tripwire line when the repo marker is the only reason this session is a maintainer's; ``[]`` otherwise."""
+    try:
+        if _nexus_repo(payload) and not _account_flag():
+            return [_TRIPWIRE_LINE]
+    except BaseException:  # noqa: BLE001 — a line of text never costs the session its context
+        pass
+    return []
 
 
 def _build_capabilities_block() -> list[str]:
@@ -392,8 +474,9 @@ def run(payload: dict | None) -> HookResult:
     is the one structural deviation. Everything that is reference context (T2 memory, ready beads, the bd primer, the
     capabilities block, the Knowledge Map) is not computed here any more; see the module docstring.
     """
-    # nexus-mtheb: the T1 contract leads the context.
-    output_lines: list[str] = list(_T1_TOP_LINES)
+    # nexus-mtheb: the T1 contract leads the context; its dispatch sentence is the maintainer's (nexus-sby49.3, I1b).
+    audience_payload = payload if isinstance(payload, dict) else {}
+    output_lines: list[str] = _t1_top_lines(audience_payload)
     project_dir = Path(os.environ.get('CLAUDE_PROJECT_DIR', os.getcwd())).resolve()
     repo, usage_repo = repo_names(str(project_dir))
 
@@ -418,6 +501,9 @@ def run(payload: dict | None) -> HookResult:
         except Exception:  # noqa: BLE001 — a hook must never fail; keep the rest of the context
             debug("identity notes line skipped")
 
+    # --- NEXUS-REPO: the marker is the only reason this session is held to nexus's rules (nexus-sby49.3, the tripwire) ---
+    output_lines.extend(_tripwire_lines(audience_payload))
+
     # --- Fire-only: a T2 that cannot be reached, or whose newest entry is stale, is never silent (nexus-8fvp2) ---
     output_lines.extend(_t2_reachability_lines(repo))
 
@@ -425,7 +511,7 @@ def run(payload: dict | None) -> HookResult:
     output_lines.extend(_render_bd_prime(project_dir))
 
     # --- Everything else is on demand: one static line names it ---
-    output_lines.append(BRIEF_INDEX_LINE)
+    output_lines.append(brief_index_line(project_dir))
 
     # --- Hygiene (nexus-1if7b) — actionable maintenance signals ---
     # Strict "in moderation" surface: emit a section only when there's

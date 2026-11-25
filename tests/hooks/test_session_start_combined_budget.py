@@ -83,6 +83,16 @@ def _real_hook_output(monkeypatch, tmp_path: Path, notes: list[str] | None = Non
     """The real ``session_context.run`` output for a session id, in an empty config dir, with no threads due and the notes
     line *notes* (default: the worst case)."""
     notes = _identity_notes_worst_case() if notes is None else notes
+    # nexus-sby49.3: the budget bounds the LARGEST start, the maintainer's in a project with beads and an RDR directory
+    # (the dispatch sentence, the full index line). A user's start is smaller; its own cases are in test_session_context.py.
+    from nexus.hooks import _audience
+
+    flag = tmp_path / "acct" / ".config" / "nexus" / "maintainer-profile"
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.write_text("", encoding="utf-8")
+    monkeypatch.setattr(_audience, "_ACCOUNT_HOME_OVERRIDE", str(tmp_path / "acct"))
+    (tmp_path / ".beads").mkdir(exist_ok=True)
+    (tmp_path / "docs" / "rdr").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
     monkeypatch.chdir(tmp_path)
