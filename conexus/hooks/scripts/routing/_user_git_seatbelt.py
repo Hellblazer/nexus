@@ -76,8 +76,8 @@ _WRAPPER_VALUE_FLAGS: dict[str, frozenset[str]] = {
 }
 #: A command or backtick substitution, blanked to this word so it cannot split the command around it.
 _SUBST = "NXSUBST"
-#: ``<<-? ws* 'EOF'`` / ``"EOF"`` / ``\EOF``: a heredoc whose body is text.
-_QUOTED_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([A-Za-z0-9_]+))")
+#: ``<<-? ws* WORD`` (``'WORD'``, ``"WORD"`` and ``\WORD`` are the quoted forms: their body is text).
+_HEREDOC_MARK_RE = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\([A-Za-z0-9_]+)|([A-Za-z0-9_.\-]+))")
 #: What the word in command position is called when it is git (read, never spawned).
 _GIT_NAMES = frozenset({"git", "git.exe"})
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -184,80 +184,205 @@ def _tokens(text: str) -> "list[str] | None":
         return None
 
 
-def _strip_quoted_heredocs(text: str) -> str:
-    """Drop the body of every heredoc whose delimiter is quoted: that text is data, never code.
+class _Heredoc(NamedTuple):
+    delim: str
+    strip_tabs: bool
+    quoted: bool
 
-    The ``<<'EOF'`` line and the terminator line stay (so the later pass still sees a
-    heredoc); the lines between go. With no terminator line, nothing is dropped, so a
-    stray ``<<'X'`` inside a string cannot hide the commands after it.
+
+def _heredoc_at(text: str, i: int) -> "tuple[_Heredoc, int] | None":
+    """The heredoc whose ``<<WORD`` starts at *i*, and the index after the marker; None for ``<<<`` or no word."""
+    if not text.startswith("<<", i) or text.startswith("<<<", i) or (i > 0 and text[i - 1] == "<"):
+        return None
+    m = _HEREDOC_MARK_RE.match(text, i)
+    if m is None:
+        return None
+    quoted = m.group(2) is not None or m.group(3) is not None or m.group(4) is not None
+    delim = m.group(2) or m.group(3) or m.group(4) or m.group(5)
+    return _Heredoc(delim, m.group(1) == "-", quoted), m.end()
+
+
+def _heredoc_body_end(text: str, pos: int, hd: _Heredoc) -> "tuple[int, int] | None":
+    """``(start, end)`` of the terminator line at or after *pos*, or None when there is none."""
+    n = len(text)
+    while pos <= n:
+        nl = text.find("\n", pos)
+        end = n if nl < 0 else nl
+        line = text[pos:end].rstrip("\r")
+        if (line.lstrip("\t") if hd.strip_tabs else line) == hd.delim:
+            return pos, end
+        if nl < 0:
+            return None
+        pos = nl + 1
+    return None
+
+
+def _end_backtick(text: str, i: int) -> int:
+    """Index of the backtick that closes the one at *i*, or the last index when it never closes."""
+    j = i + 1
+    while j < len(text) and text[j] != "`":
+        j += 2 if text[j] == "\\" else 1
+    return min(j, len(text) - 1)
+
+
+def _end_of_substitution(text: str, j: int) -> "tuple[int, bool]":
+    """``(index after the ``)`` that closes the ``$(`` whose body starts at *j*, whether it closed)``.
+
+    Reads the body the way the shell does for balance: quotes hide parentheses, a nested ``$(`` inside
+    double quotes is its own span, a comment runs to its newline, and the body of a heredoc started on a
+    line is skipped from that line's end to its terminator, so ``fix (partly`` in a message does not
+    leave the span open. An unterminated span runs to the end of the text.
     """
-    lines = text.split("\n")
-    out: list[str] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        out.append(line)
-        i += 1
-        m = _QUOTED_HEREDOC_RE.search(line)
-        if m is None:
+    n = len(text)
+    stack = ["plain"]  # per open paren: the quote state to return to when it closes
+    state = "plain"
+    pending: list[_Heredoc] = []
+    while j < n:
+        ch = text[j]
+        if ch == "\\":
+            j += 2
             continue
-        delim = m.group(2) or m.group(3) or m.group(4)
-        strip_tabs = m.group(1) == "-"
-        j = i
-        while j < len(lines):
-            candidate = lines[j].rstrip("\r")
-            if (candidate.lstrip("\t") if strip_tabs else candidate) == delim:
-                break
+        if state == "sq":
+            if ch == "'":
+                state = "plain"
+        elif state == "dq":
+            if ch == '"':
+                state = "plain"
+            elif ch == "$" and text[j + 1:j + 2] == "(":
+                stack.append("dq")
+                state = "plain"
+                j += 1
+            elif ch == "`":
+                j = _end_backtick(text, j)
+        elif ch == "'":
+            state = "sq"
+        elif ch == '"':
+            state = "dq"
+        elif ch == "`":
+            j = _end_backtick(text, j)
+        elif ch == "$" and text[j + 1:j + 2] == "(":
+            stack.append("plain")
             j += 1
-        if j < len(lines):
-            i = j
-    return "\n".join(out)
+        elif ch == "(":
+            stack.append("plain")
+        elif ch == ")":
+            state = stack.pop()
+            if not stack:
+                return j + 1, True
+        elif ch == "#" and text[j - 1] in " \t\n;&|(":
+            nl = text.find("\n", j)
+            j = n if nl < 0 else nl - 1
+        elif ch == "<":
+            found = _heredoc_at(text, j)
+            if found is not None:
+                pending.append(found[0])
+                j = found[1] - 1
+        elif ch == "\n" and pending:
+            pos, last = j + 1, None
+            for hd in pending:
+                res = _heredoc_body_end(text, pos, hd)
+                if res is None:
+                    break
+                last, pos = res[1], res[1] + 1
+            pending = []
+            if last is not None:
+                j = last
+        j += 1
+    return n, False
+
+
+def _substitutions_in_text(body: str) -> list[str]:
+    """The ``$(...)`` and backtick bodies in text that expands but has no quoting (an unquoted heredoc body)."""
+    found: list[str] = []
+    i, n = 0, len(body)
+    while i < n:
+        c = body[i]
+        if c == "\\":
+            i += 2
+        elif c == "$" and body[i + 1:i + 2] == "(":
+            end, closed = _end_of_substitution(body, i + 2)
+            found.append(body[i + 2:end - 1 if closed else end])
+            i = end
+        elif c == "`":
+            j = _end_backtick(body, i)
+            found.append(body[i + 1:j])
+            i = j + 1
+        else:
+            i += 1
+    return found
 
 
 def _split_substitutions(text: str) -> "tuple[str, list[str]]":
     """``(text with each top-level $(...) / backtick span blanked to one word, the span bodies)``.
 
-    One pass: a nested span is part of its parent's body and is found when that body is
-    read in turn, so the cost stays linear in the depth cap, not exponential in the nesting.
+    One pass over the quote state (an apostrophe inside ``"..."`` is not a single quote), comments (a
+    ``#`` word runs to its newline and is not code) and heredocs: the body of a heredoc is dropped from the
+    returned text, and an unquoted one still contributes the substitutions in it (they run); a quoted one
+    (``<<'EOF'``, found only outside quotes) is text and contributes nothing. A nested span is part of its
+    parent's body and is found when that body is read in turn, so the cost stays linear in the depth cap.
     """
     out: list[str] = []
     bodies: list[str] = []
     i, n = 0, len(text)
-    sq = False
+    state = "plain"
+    pending: list[_Heredoc] = []
     while i < n:
         c = text[i]
-        if sq:
-            out.append(c)
-            sq = c != "'"
-            i += 1
-        elif c == "\\":
+        if c == "\\":
             out.append(text[i:i + 2])
             i += 2
-        elif c == "'":
-            sq = True
+        elif state == "sq":
             out.append(c)
+            if c == "'":
+                state = "plain"
             i += 1
         elif c == "$" and text[i + 1:i + 2] == "(":
-            depth, j = 1, i + 2
-            while j < n and depth:
-                ch = text[j]
-                if ch == "\\":
-                    j += 1
-                elif ch == "(":
-                    depth += 1
-                elif ch == ")":
-                    depth -= 1
-                j += 1
-            bodies.append(text[i + 2:j - 1] if depth == 0 else text[i + 2:])
+            end, closed = _end_of_substitution(text, i + 2)
+            bodies.append(text[i + 2:end - 1 if closed else end])
             out.append(_SUBST)
-            i = j
+            i = end
         elif c == "`":
-            j = i + 1
-            while j < n and text[j] != "`":
-                j += 2 if text[j] == "\\" else 1
+            j = _end_backtick(text, i)
             bodies.append(text[i + 1:j])
             out.append(_SUBST)
             i = j + 1
+        elif state == "dq":
+            out.append(c)
+            if c == '"':
+                state = "plain"
+            i += 1
+        elif c == "'":
+            state = "sq"
+            out.append(c)
+            i += 1
+        elif c == '"':
+            state = "dq"
+            out.append(c)
+            i += 1
+        elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|("):
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl
+        elif c == "<" and (found := _heredoc_at(text, i)) is not None:
+            pending.append(found[0])
+            out.append(text[i:found[1]])
+            i = found[1]
+        elif c == "\n" and pending:
+            pos, terms, last = i + 1, [], None
+            for hd in pending:
+                res = _heredoc_body_end(text, pos, hd)
+                if res is None:
+                    break
+                if not hd.quoted:
+                    bodies.extend(_substitutions_in_text(text[pos:res[0]]))
+                terms.append(text[res[0]:res[1]])
+                last, pos = res[1], res[1] + 1
+            pending = []
+            if last is None:
+                out.append(c)
+                i += 1
+            else:
+                out.append("\n" + "\n".join(terms))
+                i = last
         else:
             out.append(c)
             i += 1
@@ -562,7 +687,6 @@ def _target_dir(cwd: "str | None", dash_c: list[str]) -> "str | None":
 def _scan(text: str, cwd: "str | None", depth: int) -> "Hit | None":
     if depth > _MAX_DEPTH:
         return None
-    text = _strip_quoted_heredocs(text)
     blanked, bodies = _split_substitutions(text)
     for body in bodies:
         hit = _scan(body, cwd, depth + 1)
