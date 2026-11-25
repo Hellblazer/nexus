@@ -221,7 +221,21 @@ def reexec_if_needed() -> None:
     practice, before ``_lib`` / ``_endpoint_resolve``. A resolution failure
     of any kind returns silently: the caller's own version guard is the
     backstop, and a hook that cannot re-exec must still get to print why.
+
+    It acts only when the CALLER is the process's main script (``python3
+    script.py``, which is how hooks.json starts every hook). A script that is
+    merely imported -- a test loading it with ``spec_from_file_location`` --
+    has ``sys.argv[0]`` of someone else (pytest), and exec'ing into that would
+    replace the importer; on Windows ``execv`` is a spawn followed by an exit,
+    so the importer's output is lost and its exit status is 0 (nexus-sby49.2).
+    The check is here, not in each script, so a new caller cannot forget it.
     """
+    try:
+        caller = sys._getframe(1).f_globals.get("__name__")
+    except (AttributeError, ValueError):  # no frame support: behave as before
+        caller = "__main__"
+    if caller != "__main__":
+        return
     if os.environ.get(_MARKER):
         return
     target = resolve()

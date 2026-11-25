@@ -9,6 +9,9 @@ not a Claude Code hook, so the variable is unset and the match is None. The next
 candidate is the installed conexus generation's python, and a test that merely
 loads a script would exec the pytest process into it and end the run mid-file.
 
+(Since nexus-sby49.2 ``reexec_if_needed`` acts only when its caller is the process's main script, so a test that
+imports a script no longer execs; this pin still keeps ``resolve()`` quiet for the tests that run one as a script.)
+
 ``NX_HOOK_PYTHON`` is the first candidate and is the interpreter already running,
 so ``resolve()`` returns it and the re-exec is a no-op, as tests/test_routing_*
 already arrange for the scripts they spawn. Tests that exercise ``resolve()``
