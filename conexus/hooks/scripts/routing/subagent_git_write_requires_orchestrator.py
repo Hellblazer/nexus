@@ -36,18 +36,19 @@ PRIMARY checkout is denied with the hand-back protocol. Allowed:
 - One ssh command whose git runs on a named remote test host (nexus-yc7fs, see
   ``_remote_test_host_command``).
 
-Fail mode is SPLIT by what is at stake (nexus-ays2l item 3, Hal ruling
-2026-07-25):
+Fail mode (nexus-3c92m round 4 retired the older commit/add fail-open split of
+nexus-ays2l item 3): an undeterminable worktree state fails CLOSED for every
+write verb. "I could not tell whether this tree is shared" is not a good enough
+reason to permit silent, unrecoverable loss of the orchestrator's uncommitted
+work. The ``# routing-allow:`` escape remains.
 
-- ``commit`` / ``add`` — hygiene. An undeterminable worktree state fails
-  OPEN, because a flaky ``git rev-parse`` must never wedge agent work over
-  tidiness. ``add`` mutates only the index and destroys nothing.
-- ``checkout`` / ``restore`` / ``switch`` / ``stash`` / ``clean`` / ``reset`` /
-  ``rm`` — destruction. An undeterminable worktree state fails CLOSED. The
-  failure mode here is silent, unrecoverable loss of the orchestrator's
-  uncommitted work, and "I could not tell whether this tree is shared" is not
-  a good enough reason to permit that. The ``# routing-allow:`` escape
-  remains.
+Audience (nexus-sby49): everything above and below is the MAINTAINER's rule,
+the full structure-agnostic form. It applies when ``_audience.maintainer`` is
+true: the account flag file exists, or the payload's checkout carries the nexus
+marker. For anyone else ``_user_git_seatbelt`` denies a short list of
+irrecoverable forms and allows the rest (commit, add, push, rebase, merge...).
+A predicate error or a missing helper answers "maintainer", so a broken helper
+restores this full rule.
 
 nexus-3c92m (2026-08-20), corrected root cause: the FIRST hypothesis here
 (that the incident guard was simply an older pinned plugin release predating
@@ -620,12 +621,36 @@ _interpreter.reexec_if_needed()
 sys.path.insert(0, os.path.dirname(__file__))
 import _lib  # noqa: E402
 
+# nexus-sby49 audience gate. The predicate answers True on any error, and so does
+# this fallback: a broken or missing helper restores the full guard below, never a
+# wider permission. The user-mode seatbelt is a separate module; when it cannot be
+# imported the full guard runs for everyone.
+try:
+    from _audience import (
+        maintainer as _maintainer,
+        note_marker_only as _note_marker_only,
+        remote_test_hosts as _remote_hosts_reader,
+    )
+except BaseException:  # noqa: BLE001
+    def _maintainer(payload: object) -> bool:
+        return True
+
+    def _remote_hosts_reader() -> frozenset[str]:  # loosening: no helper, no exempt host
+        return frozenset()
+
+    def _note_marker_only(payload: object) -> None:
+        return None
+try:
+    import _user_git_seatbelt
+except BaseException:  # noqa: BLE001
+    _user_git_seatbelt = None
+
 RULE_NAME = "subagent_git_write_requires_orchestrator"
 
 #: Index/history writers. These are a HYGIENE concern: ``git add`` mutates
 #: only the index and destroys nothing, ``git commit`` makes history the
-#: orchestrator should own. Undeterminable state fails OPEN for these — a
-#: crash must never wedge agent work over tidiness.
+#: orchestrator should own. (Historical: an undeterminable state used to fail
+#: OPEN for these; since nexus-3c92m round 4 it fails CLOSED like every verb.)
 _INDEX_WRITE_SUBCOMMANDS = {"commit", "add"}
 
 #: WORKING-TREE DESTROYERS (nexus-ays2l). These delete an orchestrator's
@@ -4009,7 +4034,7 @@ def _read_only_form(tokens: list[str], sub: str) -> bool:
 def _in_linked_worktree(cwd: str) -> bool | None:
     """True iff ``cwd`` is inside a linked git worktree (not the primary
     checkout). ``None`` when undeterminable (not a repo, git missing,
-    timeout) — the caller treats None as fail-open."""
+    timeout) — the caller treats None as unproven, which fails CLOSED."""
     try:
         # PATH-only lookup: this runs with cwd=<the project>, where a planted
         # git.exe would win a bare-name spawn on Windows (finding A).
@@ -4246,13 +4271,16 @@ def _spliced_expansion_deny_message(agent_type: str, detail: str, *,
 
 #: The ssh aliases of a remote test host (nexus-yc7fs). A git write sent there
 #: runs in that host's own clone, never in the checkout this guard protects.
-#: ``NX_REMOTE_TEST_HOSTS`` (comma-separated ssh host aliases) names them.
-#: Unset or empty exempts none: an exemption for a name the user never chose
-#: would be fail-open on a security guard, since a bare name can resolve
-#: through DNS or a search domain to a host the user does not mean.
+#: The account-home file ``~/.config/nexus/remote-test-hosts`` (one alias per line
+#: or comma-separated, ``#`` comments) names them. It is read through
+#: ``_audience.remote_test_hosts`` from the OS account's home, never from the
+#: environment (nexus-sby49 D11): a project's ``.claude/settings.json`` ``env``
+#: reaches command hooks, so an env variable would let any repo name its own
+#: exempt host. Unset, missing or unreadable exempts none: an exemption for a
+#: name the user never chose would be fail-open on a security guard, since a bare
+#: name can resolve through DNS or a search domain to a host the user does not mean.
 def _remote_test_hosts() -> frozenset[str]:
-    raw = os.environ.get("NX_REMOTE_TEST_HOSTS", "")
-    return frozenset(h.strip() for h in raw.split(",") if h.strip())
+    return _remote_hosts_reader()
 
 #: ssh flags that run nothing locally. Every other option is refused, since
 #: ProxyCommand, LocalCommand, -F (a config that can set either) and -J (a
@@ -4331,7 +4359,7 @@ def _remote_test_host_command(command: str) -> str | None:
     shell reads the command literally (``_read_literally``), the first word is
     ssh, every option, before or after the host (OpenSSH parses both until the
     remote command starts), is one that runs nothing locally, the host is one
-    of the aliases in ``NX_REMOTE_TEST_HOSTS`` (``user@`` allowed), and the remote command does not name an
+    of the aliases in the remote-test-hosts file (``user@`` allowed), and the remote command does not name an
     onward hop. Known limit: a remote command can still reach other hosts by
     means this does not name; the guard protects against a subagent's git, not
     against a hostile one.
@@ -4562,6 +4590,25 @@ def _scan_command(
     return spliced_fragment, primary_match, relaxed, view
 
 
+def _user_mode(payload: dict[str, Any], command: str) -> None:
+    """The seatbelt for a repository that is not nexus; always exits.
+
+    Text-only forms deny in any cwd; git-state forms deny only when the checkout
+    has something to lose. No telemetry is recorded for a user's repository.
+    """
+    cwd = str(payload.get("cwd") or "") or os.environ.get("CLAUDE_PROJECT_DIR", "")
+    try:
+        hit = _user_git_seatbelt.decide(command, cwd or None)
+    except Exception:  # noqa: BLE001 -- the seatbelt never wedges a user's Bash
+        hit = None
+    if hit is None:
+        _lib.pass_through()
+    _lib.deny(
+        _user_git_seatbelt.deny_text(hit),
+        summary=f"subagent git {hit.label} stopped (cannot be undone).",
+    )
+
+
 def body(payload: dict[str, Any]) -> None:
     agent_id = str(payload.get("agent_id") or "")
 
@@ -4571,6 +4618,14 @@ def body(payload: dict[str, Any]) -> None:
     command = _lib.get_bash_command(payload)
     if not command:
         _lib.pass_through()
+
+    # Audience gate (nexus-sby49). Everything below is the maintainer's full rule.
+    # Anyone else gets the short seatbelt: it denies or passes and never falls
+    # through, unless the seatbelt module could not be imported.
+    if _maintainer(payload):
+        _note_marker_only(payload)
+    elif _user_git_seatbelt is not None:
+        _user_mode(payload, command)
 
     # The chas carve-out (nexus-yc7fs): one ssh command whose git runs on the
     # test host. Checked before both gates because neither can tell a remote

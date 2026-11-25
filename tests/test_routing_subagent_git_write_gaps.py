@@ -35,12 +35,36 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from tests.hooks.audience_harness import flagged_home
+
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 SCRIPT = (
     PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing"
     / "subagent_git_write_requires_orchestrator.py"
 )
+HARNESS = PROJECT_ROOT / "tests" / "hooks" / "audience_harness.py"
 AGENT_ID = "aworker-x-6f59dab8bbb14864"
+
+
+#: nexus-sby49: the guard's full rule is the maintainer's. These tests build their
+#: own repos with no nexus marker, so they run under an account home that carries
+#: the flag (``tests/hooks/audience_harness.py`` is the only seam; the box's real
+#: home never decides a verdict). The marker path is covered in
+#: ``test_routing_subagent_git_write.py`` and ``test_audience.py``.
+_HOME: list[pathlib.Path | None] = [None]
+
+
+@pytest.fixture(autouse=True)
+def _account_home(tmp_path):
+    home = tmp_path / "acct-home"
+    _HOME[0] = pathlib.Path(flagged_home(home))
+    yield
+    _HOME[0] = None
+
+
+def _guard_argv() -> list[str]:
+    assert _HOME[0] is not None
+    return [sys.executable, str(HARNESS), str(_HOME[0]), str(SCRIPT)]
 
 
 @pytest.fixture(autouse=True)
@@ -138,7 +162,7 @@ def _verdict(cmd: str, cwd: pathlib.Path) -> dict:
     }
     env = {**os.environ, "NX_HOOK_PYTHON": sys.executable}
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT)], input=json.dumps(payload), capture_output=True,
+        _guard_argv(), input=json.dumps(payload), capture_output=True,
         text=True, timeout=20, env=env,
     )
     assert proc.returncode == 0, proc.stderr
