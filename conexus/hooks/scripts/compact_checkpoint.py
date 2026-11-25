@@ -226,6 +226,14 @@ _RESUME_DIRECTIVE = (
 )
 
 
+#: The places named in the compaction text, by (the project has a board entry, the project has beads). Tables of words, so no
+#: list literal starts with the name of a program (tests/test_hooks_bare_exec_lint.py).
+_OPEN_SOURCES = {(True, True): "the board, git or beads", (True, False): "the board or git",
+                 (False, True): "git or beads", (False, False): "git"}
+_CHECKED_PLACES = {(True, True): "git, beads and the board", (True, False): "git and the board",
+                   (False, True): "git and beads", (False, False): "git"}
+
+
 def _join(items: list[str], word: str = "and") -> str:
     """``a``, ``a and b``, ``a, b and c`` (*word* ``or`` for a choice)."""
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + f" {word} " + items[-1]
@@ -235,14 +243,14 @@ def _resume_directive(board: bool, beads: bool) -> str:
     """:data:`_RESUME_DIRECTIVE` naming only the places this project has (nexus-sby49.4, S2-2): a board thread and the
     board only with a board entry, beads only with a ``.beads/`` directory; git always. With all three it is the text
     this session's predecessors read."""
-    sources = [w for w, on in (("the board", board), ("git", True), ("beads", beads)) if on]
-    item = f"a summary item {_join(sources, 'or')} still {'show' if len(sources) > 1 else 'shows'} open"
+    sources = _OPEN_SOURCES[(board, beads)]
+    item = f"a summary item {sources} still {'show' if ' ' in sources else 'shows'} open"
     return _RESUME_DIRECTIVE.format(open_items=("a board thread, or " if board else "") + item)
 
 
 def _checked_places(board: bool, beads: bool) -> str:
     """The places a stale checkpoint is checked against: git, and beads and the board where the project has them."""
-    return _join([w for w, on in (("git", True), ("beads", beads), ("the board", board)) if on])
+    return _CHECKED_PLACES[(board, beads)]
 
 
 def _state_places(board: bool, beads: bool) -> str:

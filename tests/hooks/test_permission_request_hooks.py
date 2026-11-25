@@ -48,7 +48,7 @@ def _account(monkeypatch: pytest.MonkeyPatch, home: Path, *, flagged: bool) -> N
     flag = home.joinpath(*_audience.FLAG_PARTS)
     if flagged:
         flag.parent.mkdir(parents=True, exist_ok=True)
-        flag.write_text("")
+        flag.write_text("", encoding="utf-8")
     else:
         home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(_audience, "_ACCOUNT_HOME_OVERRIDE", str(home))

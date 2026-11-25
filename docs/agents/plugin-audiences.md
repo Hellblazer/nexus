@@ -40,7 +40,7 @@ Every `hooks.json` registration, every module that carries text or a predicate, 
 
 The census reads module-level values: a string, a `+` or f-string concatenation, a list, tuple, set or dict that holds a long string, the arguments and the receiver of a call (a `Row(...)` table, `"...".format(x)`), a conditional expression, and a tuple-unpack assignment, leaving out `re.compile` and `frozenset`. **What it cannot see:** text written or joined inside a function (function-local text of any length), text read from a file, and injected text shorter than 40 characters that nobody declared. Those are held by review and by the behaviour leg, which runs the hooks and reads what they print.
 
-A row whose end state is not wired yet is `live: false` and names the phase that wires it. The behaviour leg's allowlist may name only those rows, so an item still to come cannot hide a live leak. Phase 3 (nexus-sby49.4) wired every row: none is `live: false` now.
+A row whose end state is not wired yet is `live: false` and names the phase that wires it. The behaviour leg's allowlist may name only those rows, so an item still to come cannot hide a live leak. Phase 3 wired every row: none is `live: false` now.
 
 ## The behaviour leg
 
