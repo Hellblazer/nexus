@@ -159,6 +159,7 @@ def env(tmp_path: Path, monkeypatch, mod):
     monkeypatch.delenv("FAKE_READY", raising=False)
     monkeypatch.delenv("FAKE_COMMITS", raising=False)
     monkeypatch.setattr(mod, "_nx_command", lambda: [sys.executable, str(standin)])
+    monkeypatch.setattr(mod, "_maintainer", lambda _p: True); monkeypatch.setenv("CLAUDE_PROJECT_DIR", os.getcwd())  # full text (S2-2)
     # The test checkout's own worktrees must not decide where continuation runs.
     real_git_worktrees = mod._git_worktrees
     monkeypatch.setattr(mod, "_git_worktrees", lambda _cwd, _timeout: [])
@@ -1439,7 +1440,7 @@ class TestScript:
         assert roots, "the walk found no imports; it went blind"
         outside = {r for r in roots if r not in sys.stdlib_module_names and not r.startswith("_")}
         assert not outside, outside
-        own = {"_cli_lookup", "_endpoint_resolve", "_identity_lookup", "_resume_pointer", "_session_facts"}
+        own = {"_audience", "_cli_lookup", "_endpoint_resolve", "_identity_lookup", "_resume_pointer", "_session_facts"}
         assert {r for r in roots if r.startswith("_")} <= {"__future__", *own}
         assert all((SCRIPT.parent / f"{m}.py").is_file() for m in own)
         # The sibling the checkpoint shares with the restart script holds to the same rule.

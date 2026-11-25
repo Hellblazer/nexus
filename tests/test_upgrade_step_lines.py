@@ -161,3 +161,32 @@ def test_skip_t3_announces_no_restart_it_does_not_do(ran) -> None:
     pre = next(line for line in out.splitlines() if "Bring the engine, the PDF stack and the runtime" in line)
     assert "under --skip-t3 it skips the engine install, the PDF stack rebuild and the service restart" in pre, pre
     assert "can download" not in pre, pre
+
+
+# --- the beads PRIME file is a person's step, not an unattended one (nexus-sby49.4, S2-9, D3) ---------------------
+
+PRIME_STEP = "Install the beads PRIME file"
+
+
+def _step_names(**kw) -> list[str]:
+    args = dict(dry_run=False, auto_mode=False, skip_t3=True, assume_yes=True, no_beads_prime=False)
+    return [name for name, _detail, _run in up._upgrade_steps(**{**args, **kw})]
+
+
+def test_an_interactive_upgrade_still_installs_the_prime_file(monkeypatch) -> None:
+    monkeypatch.delenv("NX_UPGRADE_UNATTENDED", raising=False)
+    assert PRIME_STEP in _step_names()
+
+
+def test_the_unattended_plain_upgrade_the_lockstep_hook_starts_writes_no_prime_file(monkeypatch) -> None:
+    """The lockstep action runs plain ``nx upgrade`` with NX_UPGRADE_UNATTENDED=1 on a version drift: nobody is there to
+    have asked for a file under their home, so the step is not in the run at all (no 'Step n of m' line either)."""
+    monkeypatch.setenv("NX_UPGRADE_UNATTENDED", "1")
+    names = _step_names()
+    assert PRIME_STEP not in names
+    assert len(names) >= 5, "non-vacuity: the unattended run still has its other steps"
+
+
+def test_the_auto_run_never_had_the_prime_step(monkeypatch) -> None:
+    monkeypatch.delenv("NX_UPGRADE_UNATTENDED", raising=False)
+    assert PRIME_STEP not in _step_names(auto_mode=True)

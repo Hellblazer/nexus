@@ -78,7 +78,8 @@ Scripted runs (``claude -p`` children that load the plugin) set ``NX_STOP_WAKE_G
 children pass ``--setting-sources ""`` and load no plugin, so they never reach this hook.
 
 Every decision is logged to ``<config>/logs/hook.log`` (allow reason, or block plus the matched
-class) for measurement. Any error fails open (exit 0). The avoidable-permission-stop class (a
+class) for measurement, when that directory already exists: the hook never creates it, so a user's home gains no
+file from a Stop hook (nexus-sby49.4, U6c). Any error fails open (exit 0). The avoidable-permission-stop class (a
 step the session could take, put to Sam as a question) is out of scope on purpose.
 
 The script imports only the standard library: it runs at the end of every turn, so its import
@@ -95,6 +96,15 @@ from collections.abc import Callable
 from typing import NamedTuple
 
 KILL_SWITCH_ENV = "NX_STOP_WAKE_GUARD"
+
+# nexus-sby49.4 audience gate (U6b). The CI text (``nx ci wait``, develop and main, the CI board) is fed by nexus's own CI,
+# so only a checkout that carries the nexus marker gets it; every other user gets the same block in neutral words. The
+# predicate tightens (it adds text), so an import that fails binds it to True: a broken helper gives today's full text.
+try:
+    from _audience import nexus_repo as _nexus_repo
+except BaseException:  # noqa: BLE001
+    def _nexus_repo(payload: object) -> bool:
+        return True
 _REASON_CLAUSE_CAP = 240
 _LOG_CLAUSE_CAP = 140
 #: Only the end of the message is read. 600 characters is two or three sentences: the closing
@@ -753,10 +763,14 @@ def decide(payload: object, env: dict[str, str], *, now: float | None = None) ->
     return Decision(False, "no-match", "", detail)
 
 
-def block_reason(cls: str, clause: str) -> str:
+def block_reason(cls: str, clause: str, nexus: bool = True) -> str:
+    """The text the block carries. *nexus* is :func:`_nexus_repo` for the payload: the CI wording (``nx ci wait``, develop
+    and main, the CI board) is only for a checkout that carries the nexus marker (U6b); the default is the full text."""
     quoted = " ".join(clause.split())
     if len(quoted) > _REASON_CLAUSE_CAP:
         quoted = quoted[: _REASON_CLAUSE_CAP - 3] + "..."
+    if cls == CLASS_CI_WAIT_NO_CHANNEL and not nexus:
+        cls = CLASS_CI_WAIT  # a user has no CI board to be subscribed to: the plain wording
     if cls == CLASS_CI_WAIT_NO_CHANNEL:
         return (
             f'Stop-hook wake guard: your last message closes on a CI wait ("{quoted}"). This session is subscribed to '
@@ -778,7 +792,7 @@ def block_reason(cls: str, clause: str) -> str:
         "session: no background task, Monitor or scheduled wakeup is running. Arm the wake now, then end the turn: "
         + ("`nx ci wait <sha> --branch <branch>` as a background command for a push, release or PR's CI (develop "
            "and main read the CI board, any other branch reads GitHub), a Monitor or a background Bash "
-           "until-loop for another run, " if cls == CLASS_CI_WAIT else
+           "until-loop for another run, " if cls == CLASS_CI_WAIT and nexus else
            "a Monitor or a background Bash until-loop for a run or CI, ")
         + "ScheduleWakeup or CronCreate for a timed step. "
         f"{do_now}Never start work the user held back or asked you to wait on, work that needs the user's approval, "
@@ -803,11 +817,13 @@ def _config_dir(env: dict[str, str] | None = None) -> str:
 
 
 def _log(level: str, message: str) -> None:
-    """One line to ``<config>/logs/hook.log``. Never raises, writes nothing to stdout or stderr."""
+    """One line to ``<config>/logs/hook.log`` when that directory exists; never creates it (U6c). Never raises, writes
+    nothing to stdout or stderr."""
     try:
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
         logs = os.path.join(_config_dir(), "logs")
-        os.makedirs(logs, exist_ok=True)
+        if not os.path.isdir(logs):
+            return
         with open(os.path.join(logs, "hook.log"), "a", encoding="utf-8") as handle:
             handle.write(f"{stamp}+00:00 {level} stop-wake-guard: {message}\n")
     except Exception:  # noqa: BLE001 -- logging must never fail the hook
@@ -833,7 +849,8 @@ def main() -> int:
         if decision.block:
             clause = " ".join(decision.clause.split())[:_LOG_CLAUSE_CAP]
             _log("INFO", f'block class={decision.reason} {fields} clause="{clause}"')
-            sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": block_reason(decision.reason, decision.clause)}}))
+            reason = block_reason(decision.reason, decision.clause, nexus=_nexus_repo(payload))
+            sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": reason}}))
             sys.stdout.flush()
         else:
             _log("INFO", f"allow reason={decision.reason} {fields}")

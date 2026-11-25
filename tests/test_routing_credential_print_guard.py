@@ -51,8 +51,10 @@ def _spawn(stdin_text: str) -> subprocess.CompletedProcess:
     )
 
 
-def _run(command: str | None, *, tool_name: str = "Bash") -> subprocess.CompletedProcess:
+def _run(command: str | None, *, tool_name: str = "Bash", cwd: str | None = None) -> subprocess.CompletedProcess:
     payload: dict = {"tool_name": tool_name}
+    if cwd is not None:
+        payload["cwd"] = cwd
     if command is not None:
         payload["tool_input"] = {"command": command}
     return _spawn(json.dumps(payload))
@@ -176,11 +178,21 @@ ALLOWED_SHAPES: list[tuple[str, str]] = [
 ]
 
 
-def test_every_denied_shape_is_denied_and_names_the_helper() -> None:
-    """The redirect names both sanctioned invocations (RDR-219: a message
+def _checkout(root: pathlib.Path, *, marked: bool) -> str:
+    """A directory with a repository entry, and the nexus marker file when *marked*: the payload's cwd decides the audience."""
+    (root / ".git").mkdir(parents=True)
+    if marked:
+        (root / "scripts").mkdir()
+        (root / "scripts" / "agent-worktree-preflight.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    return str(root)
+
+
+def test_every_denied_shape_is_denied_and_names_the_helper(tmp_path: pathlib.Path) -> None:
+    """In a nexus checkout the redirect names both sanctioned invocations (RDR-219: a message
     naming ``claude_credentials.py status`` and ``claude_credentials.py run --``)."""
     bad = []
-    for label, cmd, proc in _each(DENIED_SHAPES, _run):
+    nexus = _checkout(tmp_path / "nexus", marked=True)
+    for label, cmd, proc in _each(DENIED_SHAPES, lambda c: _run(c, cwd=nexus)):
         reason = _reason(proc)
         if (
             _decision(proc) != "deny"
@@ -189,6 +201,25 @@ def test_every_denied_shape_is_denied_and_names_the_helper() -> None:
         ):
             bad.append(f"{label}: {cmd!r} -> {_decision(proc)!r} reason={reason!r}")
     assert not bad, "denied shape(s) not denied with the helper redirect:\n" + "\n".join(bad)
+
+
+def test_a_user_is_denied_the_same_shapes_with_no_wrapper_named(tmp_path: pathlib.Path) -> None:
+    """U7b: the wrapper is the nexus repo's; every other checkout (and a payload with no cwd) is told to ask its operator."""
+    user = _checkout(tmp_path / "user", marked=False)
+    bad = []
+    for cwd in (user, None):
+        for label, cmd, proc in _each(DENIED_SHAPES, lambda c, cwd=cwd: _run(c, cwd=cwd)):
+            reason = _reason(proc)
+            if (_decision(proc) != "deny" or "Ask your operator" not in reason
+                    or any(w in reason for w in ("claude_credentials", "Hellblazer", "RDR-"))):
+                bad.append(f"{label}: {_decision(proc)!r} reason={reason!r}")
+    assert not bad, "\n".join(bad)
+
+
+def test_a_forced_error_in_a_user_checkout_still_denies_with_the_user_wording(tmp_path: pathlib.Path) -> None:
+    proc = _drive_forced_error('security find-generic-password -s "Claude Code-credentials" -w', cwd=_checkout(tmp_path / "u", marked=False))
+    reason = json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "Ask your operator" in reason and "claude_credentials" not in reason
 
 
 def test_routing_allow_escape_does_not_apply() -> None:
@@ -269,10 +300,10 @@ mod._lib.run_hook(mod.body, fail_closed=False, rule_name=mod.RULE_NAME)
 """
 
 
-def _drive_forced_error(command: str) -> subprocess.CompletedProcess:
+def _drive_forced_error(command: str, cwd: str | None = None) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["NX_HOOK_PYTHON"] = sys.executable
-    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, **({"cwd": cwd} if cwd else {})})
     return subprocess.run(
         [sys.executable, "-c", _FAILURE_DRIVER.format(script=str(SCRIPT))],
         input=payload, capture_output=True, text=True, timeout=10, env=env,

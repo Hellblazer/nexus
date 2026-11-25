@@ -41,6 +41,32 @@ NX_SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts
 SN_SCRIPT = Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "auto_approve_sn_mcp.py"
 
 
+def _account(monkeypatch: pytest.MonkeyPatch, home: Path, *, flagged: bool) -> None:
+    """Point the audience helper's account home (its in-process seam) at *home*, with or without the maintainer flag."""
+    from nexus.hooks import _audience
+
+    flag = home.joinpath(*_audience.FLAG_PARTS)
+    if flagged:
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.write_text("")
+    else:
+        home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(_audience, "_ACCOUNT_HOME_OVERRIDE", str(home))
+
+
+@pytest.fixture(autouse=True)
+def _maintainer_account(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The ported hook's wider allowlist keys on the account flag (nexus-sby49.4, U2b), and this machine's real account may or
+    may not carry it. Every test below that is not about the user prompt runs as the maintainer's account."""
+    _account(monkeypatch, tmp_path / "maintainer-home", flagged=True)
+
+
+#: U2b (D2): the destructive or other-party tools a user is prompted for; the account flag keeps the full list.
+_PROMPTED_FOR_USERS = (
+    "memory_delete", "plan_delete", "memory_consolidate", "nx_tidy", "tuple_in", "mailbox_send",
+)
+
+
 def _run_hook(script: Path, tool_name: str) -> str:
     """Pipe a PermissionRequest payload into a hook script, return stdout."""
     payload = json.dumps({"tool_name": tool_name})
@@ -181,6 +207,50 @@ class TestNxPermissionHook:
         data = json.loads(output)
         assert "hookSpecificOutput" in data
         assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
+
+
+class TestUsersArePromptedForDestructiveAndOtherPartyTools:
+    """nexus-sby49.4, U2b (D2): the allowlist for destructive and other-party tools is a loosening, so it keys on the
+    account flag alone. A user (no flag) falls through to Claude Code's own permission prompt: the hook is silent."""
+
+    @pytest.mark.parametrize("event", [None, "PreToolUse", "PermissionRequest"])
+    @pytest.mark.parametrize("tool", _PROMPTED_FOR_USERS)
+    def test_a_user_gets_no_allow_for_the_six_tools(self, monkeypatch, tmp_path: Path, tool: str, event: str | None) -> None:
+        _account(monkeypatch, tmp_path / "user-home", flagged=False)
+        assert _run_nx_hook(f"mcp__plugin_conexus_nexus__{tool}", hook_event_name=event) == ""
+
+    @pytest.mark.parametrize("tool", _PROMPTED_FOR_USERS)
+    def test_the_maintainer_account_keeps_them(self, tool: str) -> None:
+        assert _parse_decision(_run_nx_hook(f"mcp__plugin_conexus_nexus__{tool}")) == "allow"
+        pre = json.loads(_run_nx_hook(f"mcp__plugin_conexus_nexus__{tool}", hook_event_name="PreToolUse"))
+        assert pre["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    def test_a_user_keeps_every_other_allowed_tool(self, monkeypatch, tmp_path: Path) -> None:
+        from nexus.hooks import auto_approve
+
+        _account(monkeypatch, tmp_path / "user-home", flagged=False)
+        prompted = {f"mcp__plugin_conexus_nexus__{t}" for t in _PROMPTED_FOR_USERS}
+        assert prompted <= auto_approve._ALLOWED_TOOLS, "non-vacuity: the six names are in the full list"
+        kept = sorted((auto_approve._ALLOWED_TOOLS | auto_approve._ALLOWED_HOOK_TOOLS) - prompted)
+        assert len(kept) > 40
+        denied = [t for t in kept if _parse_decision(_run_nx_hook(t)) != "allow"]
+        assert not denied, f"a user lost an allow it keeps: {denied}"
+
+    def test_the_prompted_set_is_the_manifests_list(self) -> None:
+        from nexus.hooks import auto_approve
+
+        assert auto_approve._PROMPT_UNLESS_FLAGGED == {f"mcp__plugin_conexus_nexus__{t}" for t in _PROMPTED_FOR_USERS}
+
+    def test_a_broken_audience_helper_never_widens_the_list(self, monkeypatch, tmp_path: Path) -> None:
+        """``account_flag`` loosens, so a failure answers False: the user's prompt, never an allow."""
+        from nexus.hooks import _audience
+
+        def boom() -> str:
+            raise RuntimeError("no account database")
+
+        _account(monkeypatch, tmp_path / "user-home", flagged=False)
+        monkeypatch.setattr(_audience, "account_home", boom)
+        assert _run_nx_hook("mcp__plugin_conexus_nexus__memory_delete") == ""
 
 
 class TestDemotedOperatorsAreNotAutoApproved:

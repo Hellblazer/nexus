@@ -440,16 +440,30 @@ def test_the_advice_names_the_rule_and_the_safe_alternative() -> None:
         assert needle in advice, (row, needle)
 
 
-def test_the_pattern_kill_advice_tells_the_two_incidents_as_they_happened() -> None:
-    """11-04: a laptop pkill -f meant to end an agent's own queued run. 11-03: a SIGTERM to a pid picked
-    out of ps by its command line ended a peer's lab-remote run. It was not a pattern kill."""
+def test_the_pattern_kill_advice_is_neutral_and_keeps_the_safe_procedure() -> None:
+    """U8a: the advice carried two incidents of nexus's own (a peer's lab-remote run); every user reads it, so it says
+    why a pattern kill is unsafe in general terms and keeps the procedure: a pid you started, its parent and cwd checked."""
     advice = next(r.advice for r in daa.ROWS if r.id == "pattern_kill")
-    assert "own queued run" in advice
-    assert "picked out of `ps` by its command line" in advice
-    assert "lab-remote" in advice
-    assert "a pattern kill has ended a peer" not in advice, "the wrong attribution (round 1, W1)"
+    assert "whoever started it" in advice and "another session's or another user's" in advice
+    for word in ("lab-remote", "peer", "laptop", "queued run", "SIGTERM"):
+        assert word not in advice, word
+    assert "Never take a pid from ps or pgrep by its command line." in advice
     assert "found by its parent pid" in advice
     assert "lsof -a -p <pid> -d cwd" in advice, "the pid's working directory is confirmed too, not only its parent"
+
+
+def test_the_branch_delete_advice_is_neutral() -> None:
+    advice = next(r.advice for r in daa.ROWS if r.id == "branch_bulk_delete")
+    assert "216" not in advice and "other sessions" not in advice and "as yours" not in advice
+    assert "one `git branch -D <name>` at a time" in advice
+
+
+def test_a_deny_mode_is_the_maintainers_only() -> None:
+    """U8b (D6): never for users. Whatever mode is set, a call that is not the maintainer's is advised."""
+    row = daa.ROWS[0]
+    assert daa.row_mode(row, "deny", maintainer=False) == "advise"
+    assert daa.row_mode(row, "deny", maintainer=True) == "deny"
+    assert daa.row_mode(daa.Row("x", "s", row.tools, row.predicate, "a", mode="deny"), None, maintainer=False) == "advise"
 
 
 def test_advise_is_the_mode_and_no_row_denies_today() -> None:
@@ -489,7 +503,9 @@ def _env(tmp_path: Path) -> dict[str, str]:
     return env
 
 
-def _run(payload_text: str, tmp_path: Path, *, mode: str | None = None) -> subprocess.CompletedProcess:
+def _run(payload_text: str, tmp_path: Path, *, mode: str | None = None, home: Path | None = None) -> subprocess.CompletedProcess:
+    """*home*: the account home the audience helper reads, through its in-process seam (this machine's own account may
+    carry the maintainer flag, and no environment variable moves it)."""
     if mode is None:
         argv = [sys.executable, str(SCRIPT)]
     else:
@@ -498,9 +514,13 @@ def _run(payload_text: str, tmp_path: Path, *, mode: str | None = None) -> subpr
             "s = importlib.util.spec_from_file_location('daa', sys.argv[1])\n"
             "m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
             "m.MODE = sys.argv[2]\n"
+            "if len(sys.argv) > 3:\n"
+            "    sys.path.insert(0, m._SCRIPTS)\n"
+            "    import _audience\n"
+            "    _audience._ACCOUNT_HOME_OVERRIDE = sys.argv[3]\n"
             "m.main()\n"
         )
-        argv = [sys.executable, "-c", driver, str(SCRIPT), mode]
+        argv = [sys.executable, "-c", driver, str(SCRIPT), mode, *([str(home)] if home else [])]
     return subprocess.run(
         argv, input=payload_text, capture_output=True, text=True, timeout=30, env=_env(tmp_path),
     )
@@ -578,6 +598,24 @@ def test_deny_mode_is_implemented_but_not_active(tmp_path: Path) -> None:
     assert proc.returncode == 0 and proc.stdout == "", "a valid escape lets the call through in deny mode"
     log = (tmp_path / "cfg" / "dropped_writes.jsonl").read_text()
     assert '"outcome":"escape"' in log and '"outcome":"deny"' in log
+
+
+def test_deny_mode_never_denies_a_users_checkout(tmp_path: Path) -> None:
+    """U8b end to end: the same deny-mode run that denies in the nexus checkout only advises in a user's repository."""
+    user = tmp_path / "user-repo"
+    (user / ".git").mkdir(parents=True)
+    payload = json.dumps(_payload("pkill -f pytest", cwd=str(user)))
+    home = tmp_path / "home"
+    home.mkdir()
+    proc = _run(payload, tmp_path, mode="deny", home=home)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert "permissionDecision" not in out and "[pattern_kill]" in out["additionalContext"]
+    flag = home / ".config" / "nexus" / "maintainer-profile"
+    flag.parent.mkdir(parents=True)
+    flag.write_text("")
+    flagged = json.loads(_run(payload, tmp_path, mode="deny", home=home).stdout)["hookSpecificOutput"]
+    assert flagged["permissionDecision"] == "deny", "the maintainer's account still gets the flip"
 
 
 # ---- wiring ---------------------------------------------------------------------------------

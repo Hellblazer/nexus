@@ -141,6 +141,15 @@ _interpreter.reexec_if_needed()
 sys.path.insert(0, os.path.dirname(__file__))
 import _lib  # noqa: E402
 
+# nexus-sby49.4 audience gate (U7b). The redirect that names the Hellblazer/nexus wrapper is for a checkout that carries the
+# nexus marker; every other user is told to ask their operator for an equivalent. ``nexus_repo`` tightens (it adds text),
+# so an import that fails binds it to True: a broken helper gives the full redirect, never a thinner deny.
+try:
+    from _audience import nexus_repo as _nexus_repo  # noqa: E402 -- the sys.path insert above reaches it
+except BaseException:  # noqa: BLE001
+    def _nexus_repo(payload: object) -> bool:
+        return True
+
 RULE_NAME = "credential_print_guard"
 
 #: RDR-219: the credential environment-variable names this guard protects.
@@ -187,6 +196,19 @@ _REDIRECT = (
     "set in the environment. A project without that wrapper asks its operator "
     "for an equivalent (RDR-219)."
 )
+
+#: What every other user reads (U7b): the same refusal, with no wrapper to point at.
+_REDIRECT_USER = (
+    "This command would print a Claude Code credential. Harnesses never read "
+    "the keychain or a credential file directly, and never print the "
+    "automation token. Ask your operator for a helper that checks the token "
+    "and runs a command with it set in the environment without printing it."
+)
+
+
+def _redirect(payload: dict) -> str:
+    return _REDIRECT if _nexus_repo(payload) else _REDIRECT_USER
+
 
 # ---------------------------------------------------------------------------
 # Rule 1: a keychain read naming one of the two credential items.
@@ -451,7 +473,7 @@ def body(payload: dict) -> None:
                 command_fragment=command,
             )
             _lib.deny(
-                f"{_REDIRECT}\n\n(guard error while matching this command; "
+                f"{_redirect(payload)}\n\n(guard error while matching this command; "
                 f"denied on the failure-mode substring check because a "
                 f"protected marker is present: {exc})"
             )
@@ -468,7 +490,7 @@ def body(payload: dict) -> None:
             rule=RULE_NAME, outcome="deny", tool_name="Bash",
             command_fragment=command,
         )
-        _lib.deny(f"{_REDIRECT}\n\nMatched: {reason}.")
+        _lib.deny(f"{_redirect(payload)}\n\nMatched: {reason}.")
         return
     _lib.pass_through()
 

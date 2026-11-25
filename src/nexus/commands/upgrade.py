@@ -224,8 +224,12 @@ def _upgrade_steps(
         ))
         # Generated agents are composed FROM the installed plugins.
         steps.append(("Refresh the generated agents", None, lambda: _refresh_generated_agents(dry_run=dry_run)))
-    # nexus-cnzei.8: the user-level beads PRIME.md when beads is detected.
-    if not auto_mode and not dry_run:
+    # nexus-cnzei.8: the user-level beads PRIME.md when beads is detected. A file under the user's home is a person's
+    # step: the detached plain `nx upgrade` the lockstep hook starts on a version drift (NX_UPGRADE_UNATTENDED) never
+    # writes it; `nx init` and an interactive `nx upgrade` still do (nexus-sby49.4, S2-9, D3).
+    from nexus.upgrade_ladder.unattended import env_unattended  # noqa: PLC0415 — deferred, keeps the cold start light
+
+    if not auto_mode and not dry_run and not env_unattended():
         steps.append((
             "Install the beads PRIME file", None,
             lambda: _install_beads_prime_best_effort(no_beads_prime=no_beads_prime),
