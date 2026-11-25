@@ -51,7 +51,7 @@ def _release_tags() -> list[str]:
     """Every ``v<major>.<minor>.<patch>`` tag this checkout has, newest first ([] on a tagless clone)."""
     proc = subprocess.run(
         ["git", "tag", "--list", "v[0-9]*", "--sort=-version:refname"],
-        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+        cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", check=False,
     )
     return proc.stdout.split() if proc.returncode == 0 else []
 
