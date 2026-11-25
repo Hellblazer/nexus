@@ -71,7 +71,8 @@ def test_importing_a_hook_script_never_execs(rel, execs):
 def test_a_script_run_as_main_still_reexecs(execs, tmp_path):
     probe = tmp_path / "probe_hook.py"
     probe.write_text(
-        f"import sys\nsys.path.insert(0, {str(SCRIPTS)!r})\nimport _interpreter\n_interpreter.reexec_if_needed()\n"
+        f"import sys\nsys.path.insert(0, {str(SCRIPTS)!r})\nimport _interpreter\n_interpreter.reexec_if_needed()\n",
+        encoding="utf-8",
     )
     import runpy
 
@@ -84,7 +85,8 @@ def test_a_script_run_as_main_still_reexecs(execs, tmp_path):
 def test_the_same_probe_imported_under_another_name_does_not_reexec(execs, tmp_path):
     probe = tmp_path / "probe_hook.py"
     probe.write_text(
-        f"import sys\nsys.path.insert(0, {str(SCRIPTS)!r})\nimport _interpreter\n_interpreter.reexec_if_needed()\n"
+        f"import sys\nsys.path.insert(0, {str(SCRIPTS)!r})\nimport _interpreter\n_interpreter.reexec_if_needed()\n",
+        encoding="utf-8",
     )
     spec = importlib.util.spec_from_file_location("probe_hook", probe)
     assert spec is not None and spec.loader is not None
@@ -96,7 +98,8 @@ def test_the_marker_still_stops_a_second_pass_when_run_as_main(execs, tmp_path, 
     monkeypatch.setenv(_interpreter._MARKER, "1")
     probe = tmp_path / "probe_hook.py"
     probe.write_text(
-        f"import sys\nsys.path.insert(0, {str(SCRIPTS)!r})\nimport _interpreter\n_interpreter.reexec_if_needed()\n"
+        f"import sys\nsys.path.insert(0, {str(SCRIPTS)!r})\nimport _interpreter\n_interpreter.reexec_if_needed()\n",
+        encoding="utf-8",
     )
     import runpy
 

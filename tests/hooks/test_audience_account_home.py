@@ -52,7 +52,7 @@ def test_the_windows_profile_api_answers_a_directory_and_ignores_userprofile(tmp
 def test_a_flag_in_a_decoy_home_does_not_make_a_maintainer(tmp_path, monkeypatch):
     flag = tmp_path / ".config" / "nexus" / "maintainer-profile"
     flag.parent.mkdir(parents=True)
-    flag.write_text("")
+    flag.write_text("", encoding="utf-8")
     for name in ("HOME", "USERPROFILE"):
         monkeypatch.setenv(name, str(tmp_path))
     real = _audience.account_home()
