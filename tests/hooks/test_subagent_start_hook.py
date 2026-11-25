@@ -140,38 +140,6 @@ class TestSubagentStartHook:
         assert "| Inbox |" in ctx
         assert "Re-check inbox right before composing any hand-back" in ctx
 
-    def test_a_user_gets_no_git_row_and_no_search_scope_row(self) -> None:
-        """T5 (nexus-sby49.3, U4 and the Search-scope row): outside nexus and with no flag, only Completion and
-        Inbox. The Git row is the prompt half of the maintainer's git guard, which a user does not have."""
-        result = _run_hook()
-        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "| Directive | Rule |" in ctx
-        assert "| Git |" not in ctx
-        assert "NEVER git add/commit" not in ctx
-        assert "| Search scope |" not in ctx
-
-    def test_a_marked_nexus_checkout_gets_the_git_and_search_scope_rows(self, nexus_marked_repo: Path) -> None:
-        payload = {**json.loads(STDIN_PAYLOAD), "cwd": str(nexus_marked_repo)}
-        result = _run_hook(stdin=json.dumps(payload))
-        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "| Git |" in ctx
-        assert "NEVER git add/commit" in ctx
-        assert "orchestrator commits pathspec-limited" in ctx
-        assert "| Search scope |" in ctx
-
-    def test_the_account_flag_alone_gets_the_git_and_search_scope_rows(self, tmp_path: Path) -> None:
-        """SAM-WIDE: Sam's other repos carry the rows because his account does, with no marker in the repo."""
-        result = _run_hook(env_overrides=src_seam_env(_flagged_home(tmp_path)))
-        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "NEVER git add/commit" in ctx
-        assert "| Search scope |" in ctx
-
-    def test_the_relay_bead_field_takes_a_tracking_id(self) -> None:
-        """D10: the field keeps its name, and a user's tracker id is a valid value."""
-        result = _run_hook()
-        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "| Bead | Bead ID with status, a tracking id, or 'none' |" in ctx
-
 
 class TestClaimantIdInjection:
     """RDR-205 "Identity and addressing" (bead nexus-em75s.11): this is the
@@ -503,6 +471,7 @@ class TestWorktreeProjectResolution:
 
 
 class TestBriefCheckInjection:
+    # The user's and the non-nexus maintainer's cases are in test_subagent_start_audience_run.py (no tenant).
     """nexus-yjg4v: an agent that changes code gets the brief check, so the
     questions behind 2026-10-08's four review fix rounds (consumers, the real
     display point, local vs cloud, resource bounds, cache state) are answered
@@ -535,20 +504,6 @@ class TestBriefCheckInjection:
         for question in ("Consumers:", "Final point:", "Modes:", "Bounds:", "State:"):
             assert question in ctx, question
         assert "3. Modes: behaviour in local AND cloud mode" in ctx
-
-    @pytest.mark.parametrize("agent_type", _IMPLEMENTERS)
-    def test_a_user_gets_no_brief_check(self, agent_type: str) -> None:
-        """D10 / T5: the brief check is the maintainer's (nexus_ffa, nexus-yjg4v); a user's implementer gets none."""
-        assert "## Brief check" not in self._ctx(agent_type)
-
-    def test_a_maintainer_outside_nexus_gets_four_renumbered_questions_without_modes(self, tmp_path: Path) -> None:
-        """Question 3 is nexus's own local/cloud axis (NEXUS-REPO): Sam's other repos get 1, 2, 4 and 5, numbered 1 to 4."""
-        ctx = self._ctx("general-purpose", account_home=_flagged_home(tmp_path))
-        assert "## Brief check" in ctx
-        assert "local AND cloud" not in ctx and "Modes:" not in ctx
-        assert "1. Consumers:" in ctx and "2. Final point:" in ctx
-        assert "3. Bounds:" in ctx and "4. State:" in ctx
-        assert "5. " not in ctx.split("## Brief check", 1)[1].split("\n## ", 1)[0]
 
     @pytest.mark.parametrize(
         "agent_type",
