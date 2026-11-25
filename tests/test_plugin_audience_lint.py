@@ -145,11 +145,26 @@ _LONG = "x" * 45
     f'T = {{"k": "{_LONG}"}}',
     f'T = Row("id", "{_LONG}")',
     f'T = Row("id", note="{_LONG}")',
-], ids=["literal", "concatenation", "f-string", "list", "tuple", "dict", "call-arg", "call-keyword"])
+    f'T = "{_LONG} {{}}".format(1)',
+    f'T = "{_LONG}".strip()',
+    f'T = "; ".join(["{_LONG}", "b"])',
+    f'T = "{_LONG}" if FLAG else "short"',
+    f'T = "short" if FLAG else "{_LONG}"',
+    f'A, B = "short", "{_LONG}"',
+    f'A, B = ("short", "{_LONG}")',
+], ids=["literal", "concatenation", "f-string", "list", "tuple", "dict", "call-arg", "call-keyword", "format-receiver",
+        "strip-receiver", "join-argument", "ifexp-body", "ifexp-orelse", "tuple-unpack", "tuple-unpack-parens"])
 def test_the_census_counts_text_in_every_module_level_value_form(source: str) -> None:
     import ast
 
-    assert "T" in am.census(ast.parse(source))
+    assert am.census(ast.parse(source)), source
+
+
+def test_a_tuple_unpack_names_only_the_target_that_holds_the_text() -> None:
+    import ast
+
+    found = am.census(ast.parse(f'A, B = "short", "{_LONG}"'))
+    assert list(found) == ["B"], found
 
 
 @pytest.mark.parametrize("source", [

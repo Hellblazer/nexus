@@ -38,7 +38,7 @@ Every `hooks.json` registration, every module that carries text or a predicate, 
 - an audience import that is not inside a `try`, or whose fallback widens a permission (T9);
 - a predicate called at import time, or outside a wrapped body. The accepted wrappers are `_lib.run_hook`, `_io.never_fail` (directly, through a verb the dispatcher wraps, or through an `mcp` hook tool), a standalone `main()` with a `try`/`except`, and a local `try`/`except` around the call.
 
-The census reads module-level values: a string, a `+` or f-string concatenation, a list, tuple, set or dict that holds a long string, and the arguments of a call (a `Row(...)` table), leaving out `re.compile` and `frozenset`. **What it cannot see:** text built or joined inside a function, text read from a file, and injected text shorter than 40 characters that nobody declared. Those are held by review and by the behaviour leg, which runs the hooks and reads what they print.
+The census reads module-level values: a string, a `+` or f-string concatenation, a list, tuple, set or dict that holds a long string, the arguments and the receiver of a call (a `Row(...)` table, `"...".format(x)`), a conditional expression, and a tuple-unpack assignment, leaving out `re.compile` and `frozenset`. **What it cannot see:** text written or joined inside a function (function-local text of any length), text read from a file, and injected text shorter than 40 characters that nobody declared. Those are held by review and by the behaviour leg, which runs the hooks and reads what they print.
 
 A row whose end state is not wired yet is `live: false` and names the phase that wires it. The behaviour leg's allowlist may name only those rows, so a Phase 3 item cannot hide a live leak.
 
