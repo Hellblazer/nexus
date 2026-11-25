@@ -20,10 +20,10 @@ _log = structlog.get_logger(__name__)
 
 @contextlib.contextmanager
 def _needs_quarantine_routes(verb: str) -> Generator[None, None, None]:
-    """Turn a 404 from an engine older than RDR-207 into a clean CLI error.
+    """Turn a 404 from an engine older than into a clean CLI error.
 
     The quarantine routes (reap, restore, the quarantined list, summaries) are
-    new in the engine carrying RDR-207 Phase 1, and an older engine answers
+    new in the engine that carries them, and an older engine answers
     each with 404. Any other HTTP error propagates unchanged.
     """
     try:
@@ -85,11 +85,11 @@ def memory() -> None:
 @click.argument("content")
 @click.option("--project", "-p", default=None, help="Project namespace (e.g. BFDB); required unless --mine")
 @click.option("--mine", is_flag=True, default=False,
-              help="Work in this identity's own project, identity/<id> (RDR-253): keyed by id, so a rename moves nothing.")
+              help="Work in this identity's own project, identity/<id>: keyed by id, so a rename moves nothing.")
 @click.option("--title", "-t", required=True, help="Entry title/filename")
 @click.option("--tags", default="", help="Comma-separated tags")
 @click.option("--ttl", default="permanent", show_default=True,
-              help="TTL: Nd, Nw, or permanent (nexus-473mx: silence no longer buys a clock)")
+              help="TTL: Nd, Nw, or permanent (silence no longer buys a clock)")
 @click.option(
     "--merge",
     is_flag=True,
@@ -118,16 +118,15 @@ def put_cmd(
 
     Use '-' as CONTENT to read from stdin.
 
-    With ``--merge`` (bead nexus-lhxz4), the new content is folded into the
+    With ``--merge``, the new content is folded into the
     most word-set-overlapping existing entry in the project when overlap is
     at or above ``--merge-threshold`` (non-destructive: both texts are kept),
     instead of inserting a near-duplicate. Without it, the default upsert
     keyed on (project, title) is unchanged.
 
-    RDR-120 P6 follow-up (nexus-w6txl): shares one arbitrated state
+    Shares one arbitrated state
     across host CLI + Cowork-bridged MCP + dev-container CLI. That
-    arbitration was the T2 daemon's job until nexus-i711w Stage 2
-    sub-stage B retired it; the storage service does it now, so there
+    arbitration was the T2 daemon's job until it was retired; the storage service does it now, so there
     is nothing for the caller to start by hand. ``--help`` advertised
     a deleted T2 daemon start verb until that sub-stage's review.
     """
@@ -163,12 +162,12 @@ def put_cmd(
 @click.argument("entry_id", metavar="ID", required=False, type=int)
 @click.option("--project", "-p", default=None, help="Project namespace")
 @click.option("--mine", is_flag=True, default=False,
-              help="Work in this identity's own project, identity/<id> (RDR-253): keyed by id, so a rename moves nothing.")
+              help="Work in this identity's own project, identity/<id>: keyed by id, so a rename moves nothing.")
 @click.option("--title", "-t", default=None, help="Entry title (exact match, or unique prefix)")
 def get_cmd(entry_id: int | None, project: str | None, mine: bool, title: str | None) -> None:
     """Retrieve a memory entry by ID or by --project + --title.
 
-    Title resolution is exact-then-prefix (nexus-e59o): if no entry matches
+    Title resolution is exact-then-prefix: if no entry matches
     --title exactly, a unique prefix match is returned. Ambiguous prefixes
     list the candidates and fail rather than picking silently.
     """
@@ -222,7 +221,7 @@ def _quarantined_hint(db: T2Database, project: str | None, title: str | None) ->
 @click.argument("query")
 @click.option("--project", "-p", default=None, help="Scope search to a project")
 @click.option("--mine", is_flag=True, default=False,
-              help="Work in this identity's own project, identity/<id> (RDR-253): keyed by id, so a rename moves nothing.")
+              help="Work in this identity's own project, identity/<id>: keyed by id, so a rename moves nothing.")
 def search_cmd(query: str, project: str | None, mine: bool) -> None:
     """Full-text keyword search across T2 memory entries (engine-side
     PostgreSQL full-text search)."""
@@ -250,7 +249,7 @@ def search_cmd(query: str, project: str | None, mine: bool) -> None:
 @memory.command("list")
 @click.option("--project", "-p", default=None, help="Filter by project")
 @click.option("--mine", is_flag=True, default=False,
-              help="Work in this identity's own project, identity/<id> (RDR-253): keyed by id, so a rename moves nothing.")
+              help="Work in this identity's own project, identity/<id>: keyed by id, so a rename moves nothing.")
 @click.option("--agent", "-a", default=None, help="Filter by agent name")
 @click.option(
     "--quarantined",
@@ -567,12 +566,12 @@ def rollup_cmd(project: str, dry_run: bool) -> None:
 def expire_cmd() -> None:
     """Quarantine TTL-expired memory entries.
 
-    RDR-207: an entry past its TTL is hidden from every read but kept. See
+    an entry past its TTL is hidden from every read but kept. See
     ``nx memory list --quarantined``, ``nx memory restore`` and
     ``nx memory reap``.
 
     Cross-domain operation: also purges the relevance_log table
-    older than 90 days. RDR-120 P6 follow-up (nexus-w6txl): the
+    older than 90 days. The
     cascade runs client-side via two store-level calls when the CLI
     is talking to the daemon; in direct mode (tests) the same calls
     land on the in-process facade.
@@ -751,7 +750,7 @@ def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days
     """Report what to curate: memory files, T2 rows and reviewer memory.
 
     With no section flag, runs --files, --t2 and --agents. Prints the report and stores
-    it in T2 as <repo>/curation-report-<date> with a 90-day TTL (RDR-238); any other run
+    it in T2 as <repo>/curation-report-<date> with a 90-day TTL; any other run
     (fewer sections, or --cold with any) stores <repo>/curation-report-<date>-<sections>
     instead (-files-t2-agents-cold for all four), so it never replaces the day's default
     report and a default run never replaces a cold one. Report only:

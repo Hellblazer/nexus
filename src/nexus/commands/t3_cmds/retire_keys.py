@@ -636,7 +636,7 @@ def _run_constraints(client: Any, *, add: bool, replace: bool, as_json: bool) ->
 def retire_keys_cmd(tenant: str | None, operator: str | None, dry_run: bool, apply: bool, accept: tuple[str, ...], collection: str | None,
                     batch_size: int | None, max_rps: float | None, add_check: bool, replace: bool, validate: bool,
                     wait_seconds: int | None, as_json: bool) -> None:
-    """Retire the chunk-row metadata keys: sweep a tenant, then add and validate the CHECKs (nexus-6pfgb.43).
+    """Retire the chunk-row metadata keys: sweep a tenant, then add and validate the CHECKs.
 
     \b
     Order, per install:

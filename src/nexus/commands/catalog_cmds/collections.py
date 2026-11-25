@@ -255,7 +255,7 @@ def _registry_row_moved(cat, old_row: dict, new: str) -> bool:
 def rename_collection_cmd(
     old: str, new: str, dry_run: bool, yes: bool, allow_legacy: bool,
 ) -> None:
-    """Rename a collection with full RDR-101 Phase 6 lifecycle.
+    """Rename a collection with full lifecycle.
 
     \b
     Runs the engine's one atomic rename (chunks, T2 stores and catalog
@@ -576,7 +576,6 @@ def collection_gc_cmd(apply: bool) -> None:
       nx catalog collection-gc --apply  # actually delete
 
     \b
-    Filed under nexus-ks40 (catalog/T3 hygiene).
     """
     from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance

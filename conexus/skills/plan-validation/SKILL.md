@@ -17,7 +17,7 @@ mcp__plugin_conexus_nexus__nx_plan_audit(
 )
 ```
 
-## The loop terminates (nexus-ll7zm)
+## The loop terminates
 
 - Count `round_number` yourself. The tool is one stateless subprocess
   call and cannot count.

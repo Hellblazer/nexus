@@ -151,7 +151,7 @@ def trash_cmd(limit: int) -> None:
     purge-trash' physically reclaims it (see that command's grace window) --
     for tombstones made by 'nx catalog delete', and now also 'nx t3 gc'
     (its alive-set protects a tombstoned-but-not-yet-purged document's
-    chunks, nexus-dkymw). The MCP store_delete tool and 'nx collection
+    chunks). The MCP store_delete tool and 'nx collection
     delete'/'prune' can still each remove a document's chunks (or the whole
     document) outside that window; 'restore' cannot undo those. See this
     module's own docstring for the full carve-out.
@@ -221,7 +221,7 @@ def restore_cmd(tumbler_or_title: str) -> None:
     chunks are still there. The MCP store_delete tool and 'nx collection
     delete'/'prune' can each remove chunks (or the whole collection)
     independently of 'nx catalog delete's tombstone window ('nx t3 gc' no
-    longer can — nexus-dkymw's alive-set fix) -- after restoring, confirm
+    longer can — the alive-set fix) -- after restoring, confirm
     with 'nx catalog show's chunk count. See this module's own docstring for
     the full carve-out.
     """

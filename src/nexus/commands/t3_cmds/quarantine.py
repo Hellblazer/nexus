@@ -569,7 +569,7 @@ def _error_for(exc: Exception, pages_done: int) -> tuple[str, int]:
 
 @click.group("quarantine")
 def quarantine_group() -> None:
-    """Operate on ``quarantine-*`` collections (RDR-192)."""
+    """Operate on ``quarantine-*`` collections."""
 
 
 @quarantine_group.command("restore")

@@ -39,7 +39,7 @@ question. Plans requiring one are not offered unless it is supplied.
 
 - Catalog `content_type` is open-ended: `code`, `prose`, `rdr`, `paper`,
   `knowledge`, `blog_post` all occur. Values are not validated, so a wrong
-  one retrieves nothing (nexus-enrmd).
+  one retrieves nothing.
 - Omitting is always safe — type-agnostic plans still match.
 
 ## When to pin dimensions

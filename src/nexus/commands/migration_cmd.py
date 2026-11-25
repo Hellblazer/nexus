@@ -51,7 +51,7 @@ from nexus.migration.state import (
     "another process. Only use if that process actually crashed.",
 )
 def migration_cmd(do_clear: bool, force: bool) -> None:
-    """Inspect or recover the cross-process migration sentinel (RDR-159)."""
+    """Inspect or recover the cross-process migration sentinel."""
     state = read_state()
 
     if do_clear:

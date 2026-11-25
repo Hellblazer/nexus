@@ -1169,13 +1169,12 @@ def set_status(
 
     The code-enforced half of the accept/close lifecycle: the skills call this
     instead of hand-editing frontmatter, closing the ledger-drift class where
-    T2 was advanced to ``accepted``/``closed`` but the RDR file stayed ``draft``
-    (RDR-165 / RDR-166).
+    T2 was advanced to ``accepted``/``closed`` but the RDR file stayed ``draft``.
 
-    RDR-201 P1.4: the requested *new_status* is resolved to the packaged
+
+    the requested *new_status* is resolved to the packaged
     ``rdr-lifecycle`` state-machine table's ``event`` dimension (derived
-    from the table itself, see :func:`_target_status_to_event`, RDR-201
-    P1.5); the file's current frontmatter status binds ``status``. An
+    from the table itself, see :func:`_target_status_to_event`); the file's current frontmatter status binds ``status``. An
     illegal edge REFUSES with the table row's typed
     reason (``illegal-transition`` / ``gate-not-passed`` /
     ``successor-not-named``) instead of the old unconditional flip. The
@@ -1185,8 +1184,8 @@ def set_status(
     ``rdr-close`` runs depend on this command being idempotent.
 
     ``open`` is a retired status word, but ``nx rdr preamble rdr-accept``
-    still advertises it as a live pre-accept synonym for ``draft``
-    (nexus-qsryj). A file whose current status is ``open`` is read as
+    still advertises it as a live pre-accept synonym for ``draft``.
+   A file whose current status is ``open`` is read as
     ``draft`` for the purpose of this resolution (never written back —
     only the requested *new_status* is ever written to the file); one
     line notes the alias so it is visible, not silent.
@@ -3464,7 +3463,7 @@ def _rdr_research_add_retired() -> str:
 def preamble_rdr_research(args: tuple[str, ...]) -> None:
     """Print RDR research context (file Research Findings + T2 entries).
 
-    ``add`` is retired (RDR-240 TD7): it prints the ``research_add`` procedure path and exits nonzero."""
+    ``add`` is retired: it prints the ``research_add`` procedure path and exits nonzero."""
     # Every add form is refused before anything is read or written: split or handed over as one
     # element (nexus-u1jxt.10), with or without text, any case of the verb.
     first = args[0].split()[:1] if args else []

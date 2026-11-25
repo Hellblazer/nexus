@@ -70,7 +70,7 @@ def _raise_engine_floor(exc: httpx.HTTPStatusError) -> None:
     help="Emit the report as JSON on stdout.",
 )
 def sweep_ghosts_cmd(apply: bool, json_out: bool) -> None:
-    """Sweep RDR-204 ghost + referenced-but-empty collections on demand.
+    """Sweep ghost + referenced-but-empty collections on demand.
 
     \b
     Default is dry-run: reports what the sweep WOULD do without writing.

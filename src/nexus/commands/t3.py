@@ -161,24 +161,24 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     """RETIRED — reported a false all-clear; superseded by an existing pair.
 
     \b
-    It swept chunks by their ``source_path`` metadata. RDR-102 D2 hard-removed
-    that key from the chunk schema, so the sweep matched nothing and every run
+    It swept chunks by their ``source_path`` metadata. The chunk schema
+    hard-removed that key, so the sweep matched nothing and every run
     printed a clean "0 stale" no matter how many indexed files had been deleted
     from disk. It also opened the LOCAL catalog by probing for
-    ``documents.jsonl``, a file that has not existed since nexus-i711w — two
+    ``documents.jsonl``, a file that has not existed since the local stores were retired — two
     independent reasons it could not have worked.
 
     \b
     It does not need rebuilding: the catalog-native pipeline already exists and
     covers the work, though NOT strictly — the retired verb swept every
-    collection and ``nx t3 gc`` has no such mode, so the GC half must be looped
-    (nexus-iitif). ``nx catalog prune-stale`` drops documents whose
+    collection and ``nx t3 gc`` has no such mode, so the GC half must be looped.
+   ``nx catalog prune-stale`` drops documents whose
     file_path is missing (resolving relative paths against the owner's
     repo_root, and refusing to classify what it cannot verify), and ``nx t3 gc``
     then collects the chunks those documents no longer reference. Doing it in
     that order also avoids the failure mode a chunk-only sweep creates: chunks
     deleted out from under a live manifest are exactly the dangling-manifest
-    state ``nx doctor`` now flags (nexus-5xn3k). nexus-bm8dd.
+    state ``nx doctor`` now flags.
     """
     _ = (collection, dry_run, confirm)
     raise click.ClickException(
@@ -459,7 +459,7 @@ def _expiry_failure_detail(exc: BaseException) -> str:
     hidden=True,
     expose_value=False,
     callback=_refuse_orphan_window,
-    help="REMOVED (nexus-wbfpw.18). The grace window is fixed in the engine.",
+    help="REMOVED. The grace window is fixed in the engine.",
 )
 @click.option(
     "--dry-run/--no-dry-run",
@@ -477,8 +477,8 @@ def _expiry_failure_detail(exc: BaseException) -> str:
     "--allow-empty-manifest-set",
     is_flag=True,
     default=False,
-    help="Override the empty-manifest-set (nexus-jqrtp) and unknown-collection "
-    "(nexus-v1zdu) refusals; a name with no chunks and no catalog entry is "
+    help="Override the empty-manifest-set and unknown-collection "
+    " refusals; a name with no chunks and no catalog entry is "
     "refused regardless. DANGEROUS: only pass this once you've confirmed "
     "the collection really is fully orphaned, not a fresh/mis-scoped tenant, an "
     "unbackfilled manifest or a mistyped name.",
@@ -487,7 +487,7 @@ def _expiry_failure_detail(exc: BaseException) -> str:
     "--allow-incomplete-index-state",
     is_flag=True,
     default=False,
-    help="Override the RUNFENCE index-state refusal (nexus-g6k6b). "
+    help="Override the RUNFENCE index-state refusal. "
     "DANGEROUS: only pass this once you've confirmed no reindex is "
     "concurrently running against this collection (an in-flight or "
     "fence-failed document's chunks are not garbage — they are a run "
@@ -500,7 +500,7 @@ def gc_cmd(
     allow_empty_manifest_set: bool,
     allow_incomplete_index_state: bool,
 ) -> None:
-    """Quarantine T3 chunks the engine's reapable predicate selects (RDR-192 Step 8).
+    """Quarantine T3 chunks the engine's reapable predicate selects.
 
     \b
     A chunk is reapable when the ENGINE says so (``nexus.chunk_is_reapable``):
@@ -540,7 +540,7 @@ def gc_cmd(
     own ``NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS`` (default 14) and the
     retention this verb stamps on each row it moves (the move time plus
     ``NX_GC_QUARANTINE_DAYS``), so a longer value of that variable keeps
-    knowledge quarantine longer on an engine that carries the stamp (nexus-alsq3).
+    knowledge quarantine longer on an engine that carries the stamp.
     The stamp is sent for a ``knowledge__*`` collection only, because nothing
     else reads it. An older engine ignores the stamp and deletes at its own
     retention, and a row moved before the stamp existed keeps the engine's
@@ -548,7 +548,7 @@ def gc_cmd(
     chunk the engine's reaper moved (tagged ``quarantined_by``) is expired by the
     engine alone, on its own retention. A chunk whose document is re-registered
     is restored automatically by the ``nx index repo`` run. The operator restore
-    verb ``nx t3 quarantine restore`` (nexus-wbfpw.49; on develop, its engine route
+    verb ``nx t3 quarantine restore`` (on develop, its engine route
     in the same engine tag as the reaper) refuses
     this verb's ``gc_quarantine_orphans`` audit rows (they list a sample only), so
     restore a chunk this verb moved with its ``--quarantined-since`` /
@@ -563,10 +563,10 @@ def gc_cmd(
     Refusals (a ``--dry-run`` says which a real run would hit, and exits 1 when
     it names one, so ``nx t3 gc ... --dry-run && nx t3 gc ... --no-dry-run --yes``
     stops where the real run would):
-      - RUNFENCE (nexus-g6k6b): any document in the collection not
+      - RUNFENCE: any document in the collection not
         ``index_state='complete'`` (an in-flight or fence-failed run). Override:
         ``--allow-incomplete-index-state``.
-      - Manifest-less census (RDR-192 R8): ``POST /v1/vectors/manifest-less-census``
+      - Manifest-less census (R8): ``POST /v1/vectors/manifest-less-census``
         is called at the start of every run and again right before the move, and
         ``legacy-unmanifested`` AND ``unclassified`` must both read 0 (as the
         reaper requires). A live legacy note with no manifest row reads
@@ -577,8 +577,7 @@ def gc_cmd(
         ``NX_GC_FLOOR_FRACTION`` (default 0.25) of the collection's chunks is the
         manifest-gap misclassification shape (the engine's own reading: the 100
         minimum counts the reapable set, the fraction divides by every stored
-        chunk). Override: ``NX_GC_FORCE=1``. The ENGINE judges it (nexus-wbfpw.52;
-        ``indexer._prune_deleted_files`` sends it too): the verb passes
+        chunk). Override: ``NX_GC_FORCE=1``. The ENGINE judges it (``indexer._prune_deleted_files`` sends it too): the verb passes
         ``NX_GC_FLOOR_FRACTION``, the 100-chunk minimum and ``NX_GC_FORCE`` on
         the first batch, and the engine judges the floor under its sweep gate on
         the whole reapable set. A pass over the floor is refused by the engine
@@ -586,17 +585,17 @@ def gc_cmd(
         row) with a message naming the floor and ``NX_GC_FORCE=1``. The answer
         comes only with the move, so a ``--dry-run`` does not foresee this
         refusal.
-      - Empty manifest set (nexus-jqrtp): the collection holds chunks but none
+      - Empty manifest set: the collection holds chunks but none
         has a manifest row in it (read off the census: stored chunks minus the
         manifest-less buckets is 0), the shape of a fresh or mis-scoped tenant
         or an unbackfilled manifest. Override: ``--allow-empty-manifest-set``.
-      - Unknown collection (nexus-v1zdu): a name the catalog does not know
+      - Unknown collection: a name the catalog does not know
         that still holds chunks. Override: ``--allow-empty-manifest-set``. A
-        name neither the catalog nor T3 knows is refused up front
-        (nexus-sis0m.3), with no override.
+        name neither the catalog nor T3 knows is refused up front,
+       with no override.
 
     \b
-    Needs an engine that carries the reapable routes (RDR-192 Step 8); against
+    Needs an engine that carries the reapable routes; against
     an older engine the verb refuses with a message saying so.
 
     \b
@@ -959,7 +958,7 @@ def gc_cmd(
     "--only-gapped/--no-only-gapped",
     default=False,
     help=(
-        "Touch ONLY documents with zero manifest rows (nexus-3n7pr). "
+        "Touch ONLY documents with zero manifest rows. "
         "Skips any document that already has >=1 manifest row via a "
         "batched pre-pass, before any T3 read or write -- use this for a "
         "targeted repair pass so healthy manifests are never rewritten. "
@@ -974,7 +973,7 @@ def backfill_manifest_cmd(
     resume: bool,
     only_gapped: bool,
 ) -> None:
-    """Backfill document_chunks manifest from T3 chunk metadata (RDR-108 D2).
+    """Backfill document_chunks manifest from T3 chunk metadata.
 
     \\b
     Reads T3 chunk metadata (doc_id, chunk_index, chunk_text_hash, span
@@ -990,7 +989,7 @@ def backfill_manifest_cmd(
     \\b
     Carve-outs:
       - taxonomy__* collections are skipped (centroids have no chunk_text_hash).
-      - Pre-RDR-053 chunks missing chunk_text_hash raise an error; re-index
+      - Legacy chunks missing chunk_text_hash raise an error; re-index
         that collection before running backfill.
 
     \\b
@@ -1704,7 +1703,7 @@ def census_manifest_less_cmd(
     require_zero: tuple[str, ...],
 ) -> None:
     """Census manifest-less T3 chunks via the engine's read-only census
-    route (RDR-192 Step 2 MVV (a), bead nexus-wbfpw.5).
+    route.
 
     \b
     Classifies every chunk carrying no own-collection manifest row into

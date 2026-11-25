@@ -742,7 +742,7 @@ def repair_note_uris_cmd(
     merge_pass: bool,
     ledger_path: str | None,
 ) -> None:
-    """Repair note URIs that name a collection the note no longer lives in (nexus-bivz3.24).
+    """Repair note URIs that name a collection the note no longer lives in.
 
     \b
     Always prints the census first; writes only with --apply.

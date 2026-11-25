@@ -1017,7 +1017,7 @@ def _current_branch(cwd: Path) -> str:
 
 @click.group("command-context")
 def command_context() -> None:
-    """Preamble context for agent-relay slash commands (RDR-130 P2).
+    """Preamble context for agent-relay slash commands.
 
     Each subcommand corresponds to one slash command and prints the
     markdown context block that the CC injection layer injects before
@@ -1345,8 +1345,8 @@ _DT_SELECTOR_FLAGS = frozenset({
 @command_context.command("devonthink-index")
 @click.argument("args", nargs=-1)
 def devonthink_index(args: tuple[str, ...]) -> None:
-    """Print preamble context for the devonthink-index slash command
-    (nexus-i0cwh): the ``nx dt index`` invocation for the given selector,
+    """Print preamble context for the devonthink-index slash command:
+   the ``nx dt index`` invocation for the given selector,
     DEVONthink MCP reachability, existing knowledge subjects, and the
     page-coverage rule."""
     tokens = [a for a in args if a.strip() and a != "--"]
@@ -1558,7 +1558,7 @@ def test_validate(args: tuple[str, ...]) -> None:
 def nx_preflight(args: tuple[str, ...]) -> None:
     """Print the conexus plugin preflight check output.
 
-    Runs dynamic checks for nx CLI, nx doctor, bd, uv, and CLAUDE.md
+    Runs dynamic checks for the nx CLI, nx doctor, the beads CLI, uv, and CLAUDE.md
     agent readiness.  Reports PASS/FAIL/WARN per dependency.
     """
     print(render_nx_preflight(Path.cwd()))

@@ -13,7 +13,7 @@ Delegates to the **deep-research-synthesizer** agent.
 ## Model Selection
 
 Default: **haiku** (`${CLAUDE_PLUGIN_ROOT}/agents/deep-research-synthesizer.md` pins
-`model: haiku` in its frontmatter since nexus-j6un5.1, and an agent's own
+`model: haiku` in its frontmatter, and an agent's own
 declaration beats the session default, so omitting `model` on the Agent tool
 gets haiku). Pass `model: sonnet` explicitly for the heavy end of the table
 below:
@@ -84,7 +84,7 @@ The agent's method:
 - [ ] Key findings synthesized (not just listed)
 - [ ] Contradictions identified and resolved
 - [ ] Recommendations provided with supporting evidence
-- [ ] Findings persisted to T3 store via `mcp__plugin_conexus_nexus__store_put` (RDR-080 — direct call, no agent spawn)
+- [ ] Findings persisted to T3 store via `mcp__plugin_conexus_nexus__store_put` (direct call, no agent spawn)
 - [ ] Round artifacts persisted to T2 or T3
 
 ## Agent-Specific PRODUCE

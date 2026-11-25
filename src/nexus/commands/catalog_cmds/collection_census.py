@@ -106,7 +106,7 @@ def render_text(rep: dict) -> list[str]:
               help="Name the tenant in the report (so two runs can be told apart); not sent anywhere.")
 @click.option("--json", "as_json", is_flag=True, help="Print the whole report as JSON (the form to store).")
 def collections_census_cmd(tenant_label: str, as_json: bool) -> None:
-    """RDR-229 P1.2: read-only census of this tenant's collection rows against their names.
+    """read-only census of this tenant's collection rows against their names.
 
     One read of the collection registry (every state), no write, no catalog walk. Counts: row vs name for
     content_type, embedding_model, model_version and the quarantine lifecycle (owner differences apart); live label

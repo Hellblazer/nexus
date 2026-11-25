@@ -439,7 +439,7 @@ def enrich() -> None:
     \b
       bib       — backfill bibliographic metadata via Semantic Scholar
       aspects   — extract structured aspects via the synchronous
-                  Claude CLI extractor (RDR-089 P2.2)
+                  Claude CLI extractor
     """
 
 
@@ -476,7 +476,7 @@ def enrich() -> None:
         "academic email required for key issuance). ``openalex`` "
         "queries OpenAlex (no key; set OPENALEX_MAILTO for the polite "
         "pool). ``auto`` picks ``s2`` when S2_API_KEY is set, else "
-        "``openalex``. ``dt`` (RDR-139 Layer C) runs the ``auto`` "
+        "``openalex``. ``dt`` runs the ``auto`` "
         "primary backend and then gap-fills any still-empty ``bib_*`` "
         "field from DEVONthink's CrossRef resolver — strictly "
         "lowest-precedence, never overwriting an S2/OpenAlex value. "
@@ -500,7 +500,7 @@ def enrich() -> None:
         "re-index kept cannot be told apart and may be copied onto the "
         "indexing document's empty row. A document whose chunks disagree "
         "on the id is skipped and reported. A document with no id on any chunk "
-        "(batch-path `nx index pdf --enrich` before nexus-6pfgb.28) is filled "
+        "(batch-path `nx index pdf --enrich` before that change) is filled "
         "from its chunks' year/authors/venue/citation count, only into columns "
         "it leaves empty, with bib_enriched_at and no id."
     ),
@@ -538,19 +538,19 @@ def enrich_bib(
     hold keeps the values it had. ``--limit`` bounds the backend calls only:
     the manifest read and the chunk-owner lookup cover every document still to
     look up.
-    nexus-57mk added the OpenAlex backend so users without a Semantic
+    added the OpenAlex backend so users without a Semantic
     Scholar API key can still enrich.
 
     A document whose catalog row holds the backend's id is skipped, so the
     command is idempotent per backend. A document enriched before the catalog
-    carried bib_* columns (nexus-9l2lg) has the id only on its chunk rows:
+    carried bib_* columns has the id only on its chunk rows:
     when a chunk it alone holds names it as last indexer and carries the id,
     and its attributed chunks agree on the id, it is skipped too, and
     ``--backfill-catalog`` fills its catalog row. Run that first on an old
     collection. A document whose attributed chunks disagree is looked up.
     The verb stops with no change when the catalog cannot answer.
 
-    ``--backfill-catalog`` (nexus-9l2lg) skips the network path entirely: it
+    ``--backfill-catalog`` skips the network path entirely: it
     fills the catalog ``bib_*`` columns from chunk metadata that a prior live
     enrichment already wrote, and makes zero external calls. It is a recovery
     tool; when in doubt use the API lookup above. Fill-only per backend id (a
@@ -1658,7 +1658,7 @@ def _scaled_verify_timeout(evidence_chars: int) -> float:
     type=str,
     default="",
     help=(
-        "Path for the validation-sample failures JSONL (nexus-xwvwx). "
+        "Path for the validation-sample failures JSONL. "
         "Defaults to <nexus config dir>/aspect_validation_failures.jsonl "
         "-- never the current working directory. Names the failures file "
         "only; it must differ from --validation-all-out."
@@ -1669,7 +1669,7 @@ def _scaled_verify_timeout(evidence_chars: int) -> float:
     type=str,
     default="",
     help=(
-        "Path for the all-outcomes validation JSONL (RDR-189 P1): one row "
+        "Path for the all-outcomes validation JSONL: one row "
         "per sampled record with its status, host-bound witness items and "
         "evidence window. Defaults to <nexus config dir>/aspect_validation.jsonl. "
         "Must differ from --validation-out."
@@ -1693,7 +1693,7 @@ def _scaled_verify_timeout(evidence_chars: int) -> float:
     is_flag=True,
     help=(
         "Re-extract EVERY document in the collection, including ones that "
-        "already have an aspect row. This was the default before nexus-ym9ey; "
+        "already have an aspect row. This used to be the default; "
         "on a Claude-CLI-backed collection it re-spends on the whole corpus, "
         "so it is now opt-in. Without it, only documents with NO aspect row "
         "are processed."
@@ -1735,7 +1735,7 @@ def enrich_aspects(
     ``rdr__*`` always uses the deterministic markdown + frontmatter
     parser (rdr-frontmatter-v1; zero API cost).
 
-    ``knowledge__*`` is ROUTED PER DOCUMENT (nexus-kmbys), by a
+    ``knowledge__*`` is ROUTED PER DOCUMENT, by a
     structural heuristic, not a blanket collection-wide choice:
     paper-shaped documents (an Abstract/References heading, "et al.",
     "we propose"/"we present", an arXiv/DOI id -- two or more of these)
@@ -2545,7 +2545,7 @@ def _run_validation_sample(
     write disagreements to ``<nexus config dir>/aspect_validation_failures.jsonl``
     (override with ``validation_out``).
 
-    nexus-vwns1: this previously read the raw source file off disk and
+    this previously read the raw source file off disk and
     handed those bytes to the verifier. For PDFs that yields the
     compressed content-stream / image-object binary, not the extracted
     prose, so the validator verified the claim against different evidence
@@ -2585,7 +2585,7 @@ def _run_validation_sample(
       ``unverifiable`` (evidence window was partial), never
       ``disagreement`` — the summary counts the two separately.
 
-    RDR-189 P1 (nexus-z1d0l.1.6) adds an all-outcomes record. Every sampled
+    adds an all-outcomes record. Every sampled
     record, whatever its outcome (including ``errored``; of the errored codes only
     ``malformed_verify_result`` also writes a failures row), appends one row to ``aspect_validation.jsonl``
     (``validation_all_out``): ``status`` and ``reason_code`` from the checked
@@ -3305,8 +3305,8 @@ async def _verify(claim_json: str, evidence: str) -> dict:
     "--scheme",
     default="",
     help=(
-        "Filter to rows whose source_uri scheme matches (RDR-096 "
-        "P3.2). Common values: 'file', 'nx-note', 'https', "
+        "Filter to rows whose source_uri scheme matches. "
+        "Common values: 'file', 'nx-note', 'https', "
         "'nx-scratch'. Use '' (default) for no filter; rows with "
         "empty / NULL source_uri are excluded when --scheme is set."
     ),
@@ -3433,7 +3433,7 @@ def enrich_aspects_info(collection: str, source_path: str) -> None:
 @click.option(
     "--tumbler", "tumbler", default="", metavar="T",
     help=(
-        "RDR-243 (nexus-rfvyy.6.17): remove the aspect row of the document with this catalog tumbler, "
+        "remove the aspect row of the document with this catalog tumbler, "
         "whatever its collection (the remedy `nx catalog doctor --sensitive-with-aspects` prints). "
         "Takes no COLLECTION, SOURCE_PATH or --all. A task still queued for the document is not removed here."
     ),
@@ -3466,7 +3466,7 @@ def enrich_aspects_delete(
     exits 0. Re-extraction (``nx enrich aspects --re-extract``)
     will repopulate the row when run.
 
-    ``--all`` (nexus-3foc9) removes every aspect row in COLLECTION in
+    ``--all`` removes every aspect row in COLLECTION in
     one shot -- the cleanup step for a collection that was opted OUT
     of extraction (``aspects.docs_collections``): opting out stops new
     writes but leaves rows already written fully visible to
@@ -3810,7 +3810,7 @@ def _print_aspect_record(record, *, field: str = "") -> None:
 def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
     """Display the aspect record for a single document.
 
-    nexus-bkvk: pre-this-verb the only way to inspect aspects was raw
+    pre-this-verb the only way to inspect aspects was raw
     SQL against ~/.config/nexus/memory.db. Resolves the tumbler (or
     title) via the catalog, looks up the aspect row by
     ``(physical_collection, file_path)``, and renders all fields.
@@ -3896,7 +3896,7 @@ def aspects_list_cmd(
 ) -> None:
     """List aspect records for COLLECTION, or the gaps with --missing.
 
-    nexus-bkvk: companion to aspects-show; gives the same data at
+    companion to aspects-show; gives the same data at
     collection-level (preview/audit shape) instead of single-record
     detail. With ``--missing`` the verb inverts to gap detection:
     catalog rows in COLLECTION that don't have a matching aspect row.

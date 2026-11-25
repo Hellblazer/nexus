@@ -119,7 +119,7 @@ def _t1():
 @click.group()
 @click.option("--scope", type=click.Choice(["session", "identity"]), default="session", show_default=True,
               help="session: this session's scratch, cleared when it ends. identity: the scratch of this session's "
-                   "identity (RDR-253), which survives /clear and restart; a delegated child reads its parent's.")
+                   "identity, which survives /clear and restart; a delegated child reads its parent's.")
 @click.pass_context
 def scratch(ctx: click.Context, scope: str) -> None:
     """Temporary scratch space: this session's (cleared when it ends) or, with --scope identity, the identity's."""
@@ -224,7 +224,7 @@ def list_cmd() -> None:
 def flag_cmd(entry_id: str, project: str, title: str) -> None:
     """Mark a scratch entry for SessionEnd flush to T2.
 
-    ID accepts the 8-char prefix 'scratch list' prints (nexus-wzkzr): resolved
+    ID accepts the 8-char prefix 'scratch list' prints: resolved
     via ``_resolve_entry_id``, the same helper ``get`` uses, before reaching
     the backend — neither backend's ``flag`` does prefix fallback itself.
     """
@@ -246,7 +246,7 @@ def flag_cmd(entry_id: str, project: str, title: str) -> None:
 def unflag_cmd(entry_id: str) -> None:
     """Remove the SessionEnd flush marking from a scratch entry.
 
-    ID accepts the 8-char prefix 'scratch list' prints (nexus-wzkzr) — see
+    ID accepts the 8-char prefix 'scratch list' prints — see
     ``flag_cmd``.
     """
     t1 = _t1()
@@ -310,7 +310,7 @@ def delete_cmd(entry_id: str) -> None:
 def clear_cmd(yes: bool) -> None:
     """Remove all T1 scratch entries for the current session.
 
-    nexus-s6e55: T1 is the multi-agent shared bus (RDR-105) — an
+    T1 is the multi-agent shared bus — an
     unconfirmed clear destroys every sibling agent's findings, including
     entries flagged for SessionEnd flush to T2. Guarded like every other
     destructive verb (``store delete``, ``memory delete``, the catalog ``gc``

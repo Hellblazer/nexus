@@ -2397,7 +2397,7 @@ def self_group() -> None:
 @click.option("--extras", "extras", multiple=True,
               help="Extra(s) to ADD, e.g. --extras pdf (repeatable, or "
                    "comma-separated). MERGED with the extras this install "
-                   "already has — never replaces them (nexus-pffc4). With "
+                   "already has — never replaces them. With "
                    "--bootstrap they are the first install's extras.")
 @click.option("--bootstrap", is_flag=True,
               help="First install from nothing: build the released package, at the version "
@@ -2416,7 +2416,7 @@ def install_cmd(
     Holders keep their own tree and converge at their next spawn.
 
     This upgrades the BINARY only. Run `nx upgrade` separately for the
-    migration ladder — they are two commands on purpose (RDR-143 CA-2). A
+    migration ladder — they are two commands on purpose. A
     fresh install needs no `nx upgrade`: `nx init` converges the ladder.
     """
     if dry_run:

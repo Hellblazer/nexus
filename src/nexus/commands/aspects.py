@@ -106,8 +106,8 @@ def aspects_gc(apply: bool) -> None:
 
     \b
     The sweep ATTACHed the local .catalog.db SQLite cache to the local T2 —
-    both substrates were deleted in the RDR-158 P4 retirement, so the verb
-    is an unconditional guided refusal (nexus-ingey precedent: refuse loud
+    both substrates were deleted in the retirement, so the verb
+    is an unconditional guided refusal (precedent: refuse loud
     rather than print a clean bill of health for a sweep that never ran).
     """
     # nexus-ingey: on the service backend delete_orphans was a documented
@@ -154,9 +154,9 @@ def aspects_gc_fixtures(yes: bool) -> None:
 
     \b
     The verb issued raw SQL DELETEs against the local document_aspects and
-    aspect_extraction_queue SQLite tables (RDR-120 §A8 / nexus-yulol). Those
-    stores were deleted in the RDR-158 P4 retirement, so the verb is an
-    unconditional guided refusal. Track: nexus-gmiaf.37.
+    aspect_extraction_queue SQLite tables. Those
+    stores were deleted in the retirement, so the verb is an
+    unconditional guided refusal.
     """
     raise click.UsageError(
         "gc-fixtures is retired: fixture cleanup issued raw SQL DELETEs via "
@@ -182,8 +182,8 @@ def aspects_backfill_source_uri(apply: bool) -> None:
     The verb backfilled ``source_uri`` on the LOCAL SQLite
     ``document_aspects`` so ``migrate_drop_source_path_column`` (4.31.0)
     could proceed. The migration chain it unblocked was deleted in the
-    RDR-158 P4 retirement, and the local ``.db`` is a FROZEN migration
-    source (RDR-176 Gap 2) that this version must never write — the
+    retirement, and the local ``.db`` is a FROZEN migration
+    source that this version must never write — the
     unguarded raw UPDATE this verb carried was the last write path into
     it (Stage 4 critique Critical). Run the repair, if ever needed, on
     the last migration-capable 6.x release, which still ships both the
@@ -204,18 +204,18 @@ def aspects_backfill_source_uri(apply: bool) -> None:
     "--apply",
     is_flag=True,
     default=False,
-    help="Actually delete pre-RDR-096 read-failure rows. Without this "
+    help="Actually delete legacy read-failure rows. Without this "
     "flag the command is a dry-run report only.",
 )
 def aspects_gc_pre_rdr096(apply: bool) -> None:
-    """RETIRED: the pre-RDR-096 read-failure sweep wrote the frozen source.
+    """RETIRED: the legacy read-failure sweep wrote the frozen source.
 
     \b
-    The seven-clause discriminator deleted pre-RDR-096 read-failure rows
+    The seven-clause discriminator deleted legacy read-failure rows
     from the LOCAL SQLite ``document_aspects``. On this version that file
-    is a FROZEN migration source (RDR-176 Gap 2); the raw DELETE this verb
+    is a FROZEN migration source; the raw DELETE this verb
     carried was an unguarded write path into it (Stage 4 critique
-    Critical). The engine's live table cannot hold the pre-RDR-096
+    Critical). The engine's live table cannot hold the legacy
     fingerprint (the going-forward writer contract predates the
     migration), so there is nothing to sweep service-side either.
     """
@@ -306,10 +306,10 @@ def _dead_aspect_tasks(tuples, collection: str | None, *, census: Any = _CENSUS_
 def aspects_requeue_failed(
     collection: str | None, limit: int | None, dry_run: bool,
 ) -> None:
-    """Bulk revive dead tasks of the ``aspects`` queue (nexus-2c51v).
+    """Bulk revive dead tasks of the ``aspects`` queue.
 
-    A task dies when its attempts run out on the backoff-retry ladder
-    (RDR-163), when a worker dead-letters it for a non-retryable error, or
+    A task dies when its attempts run out on the backoff-retry ladder,
+   when a worker dead-letters it for a non-retryable error, or
     when the engine's lease sweep finds it at ``max_attempts``. Once the
     operator fixes the root cause (restored API quota, repaired source
     identity), this verb revives each dead task with ``out`` ``mode=replace``
@@ -332,17 +332,17 @@ def aspects_requeue_failed(
     and the per-task write have no cross-task transaction.
 
     \b
-    Pairs with the RDR-163 ladder: the ladder reduces how often tasks reach
+    Pairs with the ladder: the ladder reduces how often tasks reach
     terminal; this clears the ones that still do. Dead-backlog visibility is
     ``nx doctor --check-aspect-queue``.
 
     A revive is an enqueue, so the dead tasks pass the sensitivity gate
-    first (RDR-243): the task of a document flagged sensitive stays dead and
+    first: the task of a document flagged sensitive stays dead and
     is named on stderr, and when the catalog cannot say, nothing is revived
     and the command exits 1. ``--limit`` counts the tasks revived.
 
-    The retired table's failed rows are not read: the table is gone
-    (nexus-hbnml).
+    The retired table's failed rows are not read: the table is gone.
+
     """
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps

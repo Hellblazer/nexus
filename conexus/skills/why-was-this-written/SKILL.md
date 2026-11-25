@@ -35,7 +35,7 @@ falls through to an inline `claude -p` planner.
 
 ## Required bindings
 
-- `symptom` — one-line description of what is failing. The plan searches on it, and `nx_answer` fills it from the question when you do not bind it yourself. A failing file or directory is not a binding (path scoping was removed from the plan, nexus-7y4v0): put it in the question text so it reaches the search.
+- `symptom` — one-line description of what is failing. The plan searches on it, and `nx_answer` fills it from the question when you do not bind it yourself. A failing file or directory is not a binding (path scoping was removed from the plan): put it in the question text so it reaches the search.
 
 ## Typical intent shapes
 

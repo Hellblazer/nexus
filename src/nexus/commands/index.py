@@ -421,12 +421,12 @@ def index_failures_cmd(
     reason: str | None,
 ) -> None:
     """List, clear, acknowledge, unacknowledge, or list acknowledgments of
-    durable per-file index-failure records (nexus-nukn3).
+    durable per-file index-failure records.
 
     A repo-index run that skips a file it could not extract writes a
     durable row here (file path, error class, reason, run id) instead of
     only a log line and an in-memory counter that die with the process —
-    ``nx index repo``'s systemic-skip floor (nexus-deyd5) reads this same
+    ``nx index repo``'s systemic-skip floor reads this same
     backlog. Pair with ``nx doctor --check-index-failures`` for a
     pass/fail signal, or run this verb directly to see *which* files.
 
@@ -1025,7 +1025,7 @@ def _echo_sensitive_glob_counts(globs: tuple[str, ...], stats: dict, *, since_he
     default=False,
     help="Force re-indexing all files, bypassing staleness check (re-chunks "
          "and re-sends every chunk in place). Does NOT force a Voyage "
-         "re-embed on its own (nexus-4jj40 round 5): the server's own "
+         "re-embed on its own: the server's own "
          "existence-partition still skips the embed call for a chunk whose "
          "text is byte-identical to what is already stored, refreshing "
          "only its metadata. Add --re-embed for the old force-re-embeds-"
@@ -1037,7 +1037,7 @@ def _echo_sensitive_glob_counts(globs: tuple[str, ...], stats: dict, *, since_he
     is_flag=True,
     default=False,
     help="With --force: also force a Voyage re-embed of every chunk, even "
-         "ones whose text is unchanged (the pre-nexus-4jj40 --force "
+         "ones whose text is unchanged (the earlier --force "
          "behaviour). Has no effect without --force -- there is nothing to "
          "re-embed for a file the staleness check already skips. Reserve "
          "for a genuine embedding-model change; a plain reclassification-"
@@ -1064,7 +1064,7 @@ def _echo_sensitive_glob_counts(globs: tuple[str, ...], stats: dict, *, since_he
 @click.option("--debug-timing", "debug_timing", is_flag=True, default=False,
               help="Emit an end-of-run per-stage breakdown to stderr "
                    "(chunking / embed / upload / retry). Silent without the "
-                   "flag — nexus-7niu, vatx Gap 4b. Currently code files only; "
+                   "flag.  Currently code files only; "
                    "prose + PDF stages instrumented in follow-up PRs.")
 @click.option(
     "--corpus",
@@ -3176,7 +3176,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
     default=False,
     help="Force re-indexing, bypassing staleness check (re-chunks and "
          "re-sends every chunk in place). Does NOT force a Voyage "
-         "re-embed on its own (nexus-8143o, extending nexus-4jj40 round "
+         "re-embed on its own (extending round "
          "5's --force/--re-embed split from `repo` to `pdf`/`md`/`rdr`): "
          "the server's own existence-partition still skips the embed call "
          "for a chunk whose text is byte-identical to what is already "
@@ -3189,7 +3189,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
     is_flag=True,
     default=False,
     help="With --force: also force a Voyage re-embed of every chunk, even "
-         "ones whose text is unchanged (the pre-nexus-8143o --force "
+         "ones whose text is unchanged (the earlier --force "
          "behaviour). Has no effect without --force -- there is nothing to "
          "re-embed for a file the staleness check already skips. Reserve "
          "for a genuine embedding-model change; a plain reclassification-"
@@ -3219,7 +3219,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
     type=click.Choice(["fail", "docling"]),
     default=None,
     hidden=True,
-    help="Retired (RDR-237): accepted and ignored for one release, with a notice.",
+    help="Retired: accepted and ignored for one release, with a notice.",
 )
 @click.option(
     "--streaming",
@@ -3233,7 +3233,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
     default=None,
     help=(
         "Resolve catalog identity by URI (e.g. x-devonthink-item://<UUID>) "
-        "INSTEAD of by file path (nexus-y8qtj). Use this to re-index a "
+        "INSTEAD of by file path. Use this to re-index a "
         "document that was originally registered under an out-of-band "
         "identity — a plain path-based re-index misses it and forks a "
         "second catalog Document, leaving the original's chunks live and "
@@ -3249,7 +3249,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
     default=False,
     help=(
         "Accept extracted text that fails the post-extraction quality gate "
-        "(nexus-wi1uv) — e.g. an extractor completing on a formula-dense page "
+        " — e.g. an extractor completing on a formula-dense page "
         "but running words together ('istheasetofthe'). By default that "
         "gate FAILS the run rather than silently indexing unsearchable "
         "garbage. Pass this flag only after reviewing the extraction (or "
@@ -3912,7 +3912,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     default=False,
     help="Force re-indexing, bypassing staleness check (re-chunks and "
          "re-sends every chunk in place). Does NOT force a Voyage "
-         "re-embed on its own (nexus-8143o, extending nexus-4jj40 round "
+         "re-embed on its own (extending round "
          "5's --force/--re-embed split from `repo` to `pdf`/`md`/`rdr`): "
          "the server's own existence-partition still skips the embed call "
          "for a chunk whose text is byte-identical to what is already "
@@ -3925,7 +3925,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     is_flag=True,
     default=False,
     help="With --force: also force a Voyage re-embed of every chunk, even "
-         "ones whose text is unchanged (the pre-nexus-8143o --force "
+         "ones whose text is unchanged (the earlier --force "
          "behaviour). Has no effect without --force -- there is nothing to "
          "re-embed for a file the staleness check already skips. Reserve "
          "for a genuine embedding-model change; a plain reclassification-"
@@ -3939,7 +3939,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     default=None,
     help=(
         "Resolve catalog identity by URI (e.g. x-devonthink-item://<UUID>) "
-        "INSTEAD of by file path (nexus-y8qtj). Use this to re-index a "
+        "INSTEAD of by file path. Use this to re-index a "
         "document that was originally registered under an out-of-band "
         "identity — a plain path-based re-index misses it and forks a "
         "second catalog Document, leaving the original's chunks live and "
@@ -4100,7 +4100,7 @@ _RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}
     default=False,
     help="Force re-indexing, bypassing staleness check (re-chunks and "
          "re-sends every chunk in place). Does NOT force a Voyage "
-         "re-embed on its own (nexus-8143o, extending nexus-4jj40 round "
+         "re-embed on its own (extending round "
          "5's --force/--re-embed split from `repo` to `pdf`/`md`/`rdr`): "
          "the server's own existence-partition still skips the embed call "
          "for a chunk whose text is byte-identical to what is already "
@@ -4113,7 +4113,7 @@ _RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}
     is_flag=True,
     default=False,
     help="With --force: also force a Voyage re-embed of every chunk, even "
-         "ones whose text is unchanged (the pre-nexus-8143o --force "
+         "ones whose text is unchanged (the earlier --force "
          "behaviour). Has no effect without --force -- there is nothing to "
          "re-embed for a file the staleness check already skips. Reserve "
          "for a genuine embedding-model change; a plain reclassification-"

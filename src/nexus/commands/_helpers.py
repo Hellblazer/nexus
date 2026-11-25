@@ -110,11 +110,11 @@ def default_db_path() -> Path:
 def t2_handle() -> Iterator[Any]:
     """Open a T2 handle for the user-facing CLI memory / plan commands.
 
-    RDR-120 P6 follow-up (nexus-w6txl) routed these through a ``T2Client`` so
+    A follow-up routed these through a ``T2Client`` so
     multi-process operators (host CLI + Cowork-bridged MCP server +
     dev-container CLI) shared a single arbitrated SQLite writer rather than
     each opening its own connection and racing the WAL. The daemon that
-    arbitrated them is retired (nexus-i711w Stage 2 sub-stage B); in service
+    arbitrated them is retired (sub-stage B); in service
     mode Postgres is the arbiter and the concern does not arise.
 
     Yields a service-backed ``T2Database``. Tests monkeypatch this helper to

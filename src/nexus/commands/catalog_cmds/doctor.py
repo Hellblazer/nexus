@@ -63,7 +63,7 @@ EXIT_COULD_NOT_CHECK = 3
     "chunk_size_distribution",
     is_flag=True,
     help=(
-        "nexus-6dan: per-collection chunk size stats (p50/p95/p99/max). "
+        "per-collection chunk size stats (p50/p95/p99/max). "
         "FAIL on any chunk > MAX_DOCUMENT_BYTES (Voyage will reject); "
         "WARN when >5% of chunks are < 100 bytes (micro-chunks)."
     ),
@@ -73,7 +73,7 @@ EXIT_COULD_NOT_CHECK = 3
     "chunk_text_dedup",
     is_flag=True,
     help=(
-        "nexus-6dan: collect chunk_text_hash across all collections. "
+        "collect chunk_text_hash across all collections. "
         "Within-collection dupe ratio > 5% signals a chunker bug; "
         "cross-collection dupe count > 100 chunks signals a cross-"
         "ingest investigation lead."
@@ -84,7 +84,7 @@ EXIT_COULD_NOT_CHECK = 3
     "t3_vs_catalog",
     is_flag=True,
     help=(
-        "nexus-6dan: bridge the projection-vs-T3 gap. Reports T3 "
+        "bridge the projection-vs-T3 gap. Reports T3 "
         "collections with no catalog documents (orphan), T3 collections "
         "in catalog projection but with 0 chunks (zombie), and catalog "
         "documents whose physical_collection is gone from T3."
@@ -95,7 +95,7 @@ EXIT_COULD_NOT_CHECK = 3
     "name_vs_embed_dim",
     is_flag=True,
     help=(
-        "nexus-j9ey: detect pre-4.32 mislabeled collections. Samples "
+        "detect pre-4.32 mislabeled collections. Samples "
         "one chunk per conformant T3 collection and compares the "
         "actual embedding dim to the dim implied by the collection's "
         "__<model>__ segment. FAIL on mismatch; suggests `nx collection "
@@ -107,7 +107,7 @@ EXIT_COULD_NOT_CHECK = 3
     "store_put_integrity",
     is_flag=True,
     help=(
-        "nexus-b6enc (GH #1419 Issue 8): store_put-origin integrity. "
+        "store_put-origin integrity. "
         "For content_type='knowledge' docs with no file_path: FAIL on "
         "chunk_count != manifest-row count (drift) and on ghosts (row "
         "with zero manifest AND zero T3 chunks — reported by title + "
@@ -120,7 +120,7 @@ EXIT_COULD_NOT_CHECK = 3
     "link_coverage",
     is_flag=True,
     help=(
-        "nexus-glivh: per-content-type link coverage. FAIL on any content "
+        "per-content-type link coverage. FAIL on any content "
         "type holding >= MIN_TYPE_DOCS documents with ZERO links, which "
         "means no generator has ever run for that type rather than that "
         "its documents are genuinely unrelated. Percentages are REPORTED "
@@ -136,7 +136,7 @@ EXIT_COULD_NOT_CHECK = 3
     "visible_outside_manifest",
     is_flag=True,
     help=(
-        "RDR-192 Step 14 (nexus-wbfpw.26): live(c) regression canary. Per "
+        "live(c) regression canary. Per "
         "knowledge__ collection, takes the census 'superseded' bucket (chunks "
         "with no own-collection manifest row whose owning note is live) and "
         "asks the NORMAL reader, never the physical one, whether each is "
@@ -155,7 +155,7 @@ EXIT_COULD_NOT_CHECK = 3
     "sensitive_in_aspect_eligible",
     is_flag=True,
     help=(
-        "RDR-243 (nexus-rfvyy.6.17): WARN for a sensitive document whose collection has an aspect "
+        "WARN for a sensitive document whose collection has an aspect "
         "extractor or already holds aspect rows. Does not change the exit status. Not applicable "
         "(never a pass) on a tenant with no sensitive documents."
     ),
@@ -165,7 +165,7 @@ EXIT_COULD_NOT_CHECK = 3
     "sensitive_with_aspects",
     is_flag=True,
     help=(
-        "RDR-243 (nexus-rfvyy.6.17): FAIL for a sensitive document that already has an aspect row or "
+        "FAIL for a sensitive document that already has an aspect row or "
         "a queued aspect task; prints `nx enrich delete --tumbler <t>` for each. Not applicable "
         "(never a pass) on a tenant with no sensitive documents. Exits 3 when the row reads "
         "'not checked' (the engine's sensitive list did not answer); a FAIL still exits 1."
@@ -176,7 +176,7 @@ EXIT_COULD_NOT_CHECK = 3
     "sensitive_in_external_embedder",
     is_flag=True,
     help=(
-        "RDR-243 (nexus-rfvyy.8.7): WARN for a sensitive document in a Voyage (external-embedder) "
+        "WARN for a sensitive document in a Voyage (external-embedder) "
         "collection. Does not change the exit status. Not applicable (never a pass) on a tenant "
         "with no sensitive documents."
     ),
@@ -186,7 +186,7 @@ EXIT_COULD_NOT_CHECK = 3
     "sensitivity_mcp_output",
     is_flag=True,
     help=(
-        "RDR-243 (nexus-rfvyy.8.7): report the active sensitivity.mcp_output value (withhold or flag); "
+        "report the active sensitivity.mcp_output value (withhold or flag); "
         "WARN when it is flag. Does not change the exit status."
     ),
 )
@@ -195,7 +195,7 @@ EXIT_COULD_NOT_CHECK = 3
     "uri_residue",
     is_flag=True,
     help=(
-        "RDR-229 P1.2 (nexus-p2m1x.2): count the chroma:// source-URI rows whose segment has no "
+        "count the chroma:// source-URI rows whose segment has no "
         "rdr__/docs__/code__ prefix, split by whether their collection is code/docs/rdr, and the nx-note:// "
         "rows of such a collection with a prefix-free segment, across catalog_documents, document_aspects and "
         "document_highlights. One engine read (engine-service 0.1.200), no catalog walk. WARN on any; never "
@@ -222,20 +222,20 @@ def doctor_cmd(
     uri_residue: bool,
     as_json: bool,
 ) -> None:
-    """RDR-101 catalog doctor surface.
+    """catalog doctor surface.
 
     Every check here works against the SERVICE-owned catalog and T3. The two
     that could not — ``--replay-equality`` and ``--t3-doc-id-coverage``, both
     of which read expectations out of the local ``events.jsonl`` — were removed
-    with the local catalog in nexus-i711w Stage 2 sub-stage C-store.
+    with the local catalog.
 
-      - ``--collections-drift`` (Phase 6, nexus-o6aa.14): every T3
+      - ``--collections-drift``: every T3
         collection and every documents.physical_collection has a row
         in the collections projection.
       - ``--chunk-size-distribution`` / ``--chunk-text-dedup`` /
-        ``--t3-vs-catalog`` / ``--name-vs-embed-dim`` (nexus-6dan) and
+        ``--t3-vs-catalog`` / ``--name-vs-embed-dim`` and
         ``--store-put-integrity``: read-only audits over T3 + catalog.
-      - ``--visible-outside-manifest`` (RDR-192 Step 14, nexus-wbfpw.26): a
+      - ``--visible-outside-manifest``: a
         live(c) regression canary over the census ``superseded`` bucket.
     """
     any_check = (

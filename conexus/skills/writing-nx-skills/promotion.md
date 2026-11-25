@@ -2,7 +2,7 @@ Loaded on demand from the writing-nx-skills skill (SKILL.md § Promoting a Memor
 
 ## Promoting a Memory File
 
-A memory file is read when someone remembers to read it, and its index line has to summarise the whole procedure. Moving a procedure into a skill, a script or a hook fixes that. A move that shrinks the source can also drop a rule, so a promotion follows five parts, in this order (RDR-240).
+A memory file is read when someone remembers to read it, and its index line has to summarise the whole procedure. Moving a procedure into a skill, a script or a hook fixes that. A move that shrinks the source can also drop a rule, so a promotion follows five parts, in this order.
 
 ### The criterion
 

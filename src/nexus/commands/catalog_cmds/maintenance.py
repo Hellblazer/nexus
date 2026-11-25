@@ -90,7 +90,7 @@ def gc_cmd(dry_run: bool, confirm: bool) -> None:
       nx catalog gc                          # report (read-only)
       nx catalog gc --no-dry-run --confirm  # actually delete
 
-    nexus-tnz3: 4.29.1 inverted the default from "delete unless --dry-run"
+    4.29.1 inverted the default from "delete unless --dry-run"
     to "report unless --no-dry-run --confirm" so a forgotten flag no longer
     silently destroys orphan entries.
     """
