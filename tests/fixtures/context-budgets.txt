@@ -6,8 +6,8 @@
 conexus/agents/architect-planner.md 21240
 conexus/agents/code-review-expert.md 26210
 conexus/agents/codebase-deep-analyzer.md 20607
-conexus/agents/debugger.md 18432
-conexus/agents/deep-analyst.md 21279
+conexus/agents/debugger.md 19712
+conexus/agents/deep-analyst.md 22459
 conexus/agents/deep-research-synthesizer.md 25284
 conexus/agents/developer.md 27350
 conexus/agents/strategic-planner.md 24998
@@ -31,7 +31,7 @@ conexus/commands/research.md 1940
 conexus/commands/review-code.md 1778
 conexus/commands/setup.md 5617
 conexus/commands/test-validate.md 1795
-conexus/resources/agent-shared/CONTEXT_PROTOCOL.md 23379
+conexus/resources/agent-shared/CONTEXT_PROTOCOL.md 24587
 conexus/resources/agent-shared/ERROR_HANDLING.md 6668
 conexus/resources/agent-shared/MAINTENANCE.md 3825
 conexus/resources/agent-shared/README.md 2565

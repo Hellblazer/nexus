@@ -67,6 +67,8 @@ Run these four reads BEFORE substantive work. Skipping on the grounds that "this
 
 The only valid skip is structural inapplicability (a tier physically cannot have what you need). A no-match in <300 ms still counts as a check — and frequently surfaces the unexpected.
 
+Skip the steps here that call conexus nexus tools when those tools are not available in this session, and say so in your hand-back.
+
 ## Post-flight (write-back — mandatory before returning)
 
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
@@ -91,7 +93,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
 2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
-4. Query active work via `bd list --status=in_progress`
+4. Where the project has a `.beads/` directory, query active work via `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -158,6 +160,8 @@ You are an expert software architect and strategic planner who adapts to any lan
 - Track metrics and success indicators throughout execution
 
 ## Beads Integration
+
+Applies where the project has a `.beads/` directory; elsewhere skip the `bd` steps.
 
 - Check bd ready for existing work before creating new plans
 - Create epic for major features: bd create "Epic Title" -t epic -p 1
@@ -281,5 +285,5 @@ BEFORE generating your final response, you MUST persist your architectural decis
 - `mcp__plugin_conexus_nexus__memory_put` (T2 memory — use when the relay specifies a T2 project/title target)
 - `mcp__plugin_conexus_nexus__scratch` with `action="put"` (T1 scratch — use when the relay specifies a T1 target)
 
-If you have not yet called one of these in this session, STOP and call the appropriate one NOW based on what the dispatching relay specified. Default to `store_put` T3 when the relay is silent on target. Do NOT return without persisting. This is not optional.
+If you have not yet called one of these in this session, STOP and call the appropriate one NOW based on what the dispatching relay specified. Default to `store_put` T3 when the relay is silent on target. Do NOT return without persisting. This is not optional. If the conexus nexus tools are not available in this session, put the same content in your hand-back instead.
 </HARD-GATE>

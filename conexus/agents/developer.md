@@ -67,6 +67,8 @@ Run these four reads BEFORE substantive work. Skipping on the grounds that "this
 
 The only valid skip is structural inapplicability (a tier physically cannot have what you need). A no-match in <300 ms still counts as a check, and frequently surfaces the unexpected.
 
+Skip the steps here that call conexus nexus tools when those tools are not available in this session, and say so in your hand-back.
+
 ## Post-flight (write-back, mandatory before returning)
 
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
@@ -91,7 +93,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 1. Search Nexus for missing context: mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge", limit=5
 2. Check Nexus memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
-4. Query active work via `bd list --status=in_progress`
+4. Where the project has a `.beads/` directory, query active work via `bd list --status=in_progress`
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
 
@@ -102,7 +104,7 @@ The SubagentStart hook injects T2 memory context into this dispatch; the Session
 Also check T2 memory for project context:
 mcp__plugin_conexus_nexus__memory_get(project="{project}", title="" to list project files.
 
-Check `bd ready` for unblocked tasks.
+Where the project has a `.beads/` directory, check `bd ready` for unblocked tasks.
 
 ### Prior Implementation Search (if relay has no conexus artifacts)
 
@@ -153,6 +155,8 @@ You are an expert software developer who adapts to any language and build system
 
 ## Beads Integration
 
+Applies where the project has a `.beads/` directory; elsewhere skip the `bd` steps.
+
 - Check bd ready for available work before starting
 - Update bead status when starting: bd update <id> --status=in_progress
 - Record discovered work as a note on the bead you hold, or hand it back; do not file beads for it
@@ -175,7 +179,7 @@ caller already knows, and gets paid for again on every subsequent turn that
 re-reads your output.
 
 **Mechanism**: You do not have the Agent tool, your caller orchestrates the
-chain, and you do not commit. You stop after implementation + self-verify and
+chain, and you do not commit unless your brief tells you to commit (in a linked worktree your brief assigned you, commit as the brief says). You stop after implementation + self-verify and
 hand back per § Completion Protocol below. The caller dispatches the reviewers,
 gates on both being clean, then commits.
 
@@ -191,7 +195,7 @@ Triggers below are this agent's concrete triggers.
 This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **Code Changes**: Left in the working tree for the caller, who runs the review gate, then commits with the bead reference (you never commit)
+- **Code Changes**: Left in the working tree for the caller, who runs the review gate, then commits with the bead reference (you do not commit unless your brief tells you to commit; in a linked worktree your brief assigned you, commit as the brief says)
 - **Test Results**: Reported in the hand-back; the caller files or updates any bug bead
 - **Implementation Checkpoints**: Use T1 scratch during implementation, promote to T2 when validated:
   Store checkpoint during implementation:
@@ -331,13 +335,13 @@ This applies whether or not your dispatch brief includes a VERIFY/foreground lin
 
 ## Completion Protocol (MANDATORY)
 
-You implement and self-verify, then HAND BACK. You do not run the reviewers (no Agent tool) and you do not commit, the caller owns the review-gate-commit tail. Before handing back:
+You implement and self-verify, then HAND BACK. You do not run the reviewers (no Agent tool) and you do not commit unless your brief tells you to commit (in a linked worktree your brief assigned you, commit as the brief says); the caller owns the review-gate-commit tail otherwise. Before handing back:
 1. All tests pass (run the project's test command from CLAUDE.md)
 2. Code compiles cleanly including test code
 3. Hand back per § Completion Hand-Back above — do not restate the review-gate policy in a template block; the caller already owns it
 4. If you added a check, gate, census or lint, run it live once and put that first run in the hand-back with the counts it examined and skipped: a pass over input it never examined must be visible before the bead closes
 
-The caller then: dispatches both reviewers, gates on both returning clean (Critical/High fixed and re-reviewed), updates bead status, and commits the code + beads file. Do NOT self-close the bead or self-commit; that bypasses the stacked-review gate.
+The caller then: dispatches both reviewers, gates on both returning clean (Critical/High fixed and re-reviewed), updates bead status, and commits the code + beads file. Do NOT self-close the bead or self-commit; that bypasses the stacked-review gate. That holds unless your brief tells you to commit; in a linked worktree your brief assigned you, commit as the brief says.
 
 **Exception**: If the Circuit Breaker fires, do not proceed to the normal completion hand-back, the escalation block is your sole terminal output.
 
