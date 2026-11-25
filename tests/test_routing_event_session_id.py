@@ -20,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
+from tests.hooks.audience_harness import mark_nexus
+
 ROUTING = pathlib.Path(__file__).parent.parent / "conexus" / "hooks" / "scripts" / "routing"
 SESSION = "m4lej-session-0001"
 
@@ -101,6 +103,7 @@ def test_subagent_git_write_deny_row_carries_session(engine, tmp_path):
     repo = tmp_path / "shared"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    mark_nexus(repo)  # the guard's full rule is the maintainer's (nexus-sby49)
     out = _run(
         "subagent_git_write_requires_orchestrator.py",
         {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"},
@@ -141,6 +144,7 @@ def test_subagent_git_write_escape_row_carries_session(engine, tmp_path):
     repo = tmp_path / "shared"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    mark_nexus(repo)  # the guard's full rule is the maintainer's (nexus-sby49)
     proc = subprocess.run(
         [sys.executable, str(ROUTING / "subagent_git_write_requires_orchestrator.py")],
         input=json.dumps({

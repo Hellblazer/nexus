@@ -192,6 +192,9 @@ _SELF = pathlib.Path(__file__).resolve()
 #: into tmp_path; test_the_real_git_sandbox_keeps_global_and_system_writes_in_the_box
 #: pins that condition (nexus-dsr6a).
 _GUARD_DATA_FILE = (REPO_ROOT / "tests" / "test_routing_subagent_git_write.py").resolve()
+#: The user-mode seatbelt's table does the same: it hands `--global` commands to the decider as text,
+#: and runs no git config of its own (nexus-sby49).
+_SEATBELT_DATA_FILE = (REPO_ROOT / "tests" / "test_user_git_seatbelt.py").resolve()
 
 
 def _tracked_python_files() -> list[pathlib.Path]:
@@ -203,7 +206,7 @@ def _tracked_python_files() -> list[pathlib.Path]:
         and ".venv" not in p.parts
         and "node_modules" not in p.parts
         and p.resolve() != _SELF
-        and p.resolve() != _GUARD_DATA_FILE
+        and p.resolve() not in (_GUARD_DATA_FILE, _SEATBELT_DATA_FILE)
     ]
 
 

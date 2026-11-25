@@ -309,6 +309,9 @@ _ALLOWED: dict[str, list[Site]] = {
         Site("reinstall-tool.sh", "a dev checkout uses", "named for the dev-checkout case only, in a sentence conditional on running from one"),
         Site("reinstall-tool.sh", "For a checkout, run", "printed when nx runs from a source checkout, where the script is in the checkout's scripts directory"),
     ],
+    "conexus/hooks/scripts/_audience.py": [
+        Site("scripts/agent-worktree-preflight.sh", "scripts/agent-worktree-preflight.sh", "the marker file the audience helper probes with os.path.isfile in the payload's checkout to tell a nexus checkout from a user's repository, never printed"),
+    ],
     "conexus/hooks/scripts/routing/credential_print_guard.py": [
         Site("claude_credentials.py", "blob/main/tests/e2e/lib/claude_credentials.py", "the message links the wrapper in its first sentence; the later mentions are the same file"),
     ],
