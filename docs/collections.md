@@ -95,14 +95,14 @@ reuses, and every table that belongs to a collection points at that id. The
 row also holds the attributes: content type, owner, embedding model, model
 version, dimension and lifecycle state. The name is only a label: the string
 you type and read in a command. The engine reads a collection's content
-type, embedding model and lifecycle state from its row; a collection with
-no row falls back to what its name carries (a `quarantine-` prefix marks a
-quarantine copy). The client reads the row in most paths too; a few still
+type, embedding model and lifecycle state from its row; with no row, only a
+`quarantine-` prefix still marks a quarantine copy. The client reads the row in most paths too; a few still
 read what an older name carries (a four-segment name's model token, a
 two-segment name's type prefix), and a minted `c<id>` label carries
 neither. A few checks still compare a model token read from a name: the
-`nx collection rename` guards compare the new name's token (and, for a name
-with none, its type prefix and implied model) with the source's; the engine
+`nx collection rename` guards compare the new name's type prefix, and its
+model (the token it carries, or the one its prefix implies), with the
+source's; the engine
 refuses a conformant new name whose token disagrees with the source row's
 model; and the re-embed job's foreign-origin check reads a source's name
 when that source's row is gone.
@@ -133,11 +133,12 @@ bytes, and not the minted form `c<digits>`, which only the engine assigns. It
 may not contain `/` or `,`, and it may not begin or end with whitespace.
 
 To give a collection a readable label, rename it with `nx collection rename
-OLD NEW`. Three things to know first:
+OLD NEW`. A minted label has no route to a bare readable label without
+`--force-prefix-change`. Three things to know first:
 
 - **A rename sets the collection's content type and owner from the new name.**
   For a `knowledge` collection the owner is its subject. Renaming `c4812` to
-  `distributed-systems-papers` makes `distributed-systems-papers` its
+  `distributed-systems-papers` (possible only with the flag below) makes `distributed-systems-papers` its
   subject, so a later write to `distributed-systems` no longer finds it and
   registers a second collection. Rename a subject's collection only to
   change its subject.
@@ -147,23 +148,25 @@ OLD NEW`. Three things to know first:
   voyage-context-3, `c4812` as voyage-code-3), stops with a prefix or
   model mismatch. `--force-prefix-change` lets it through and switches off
   the model-token check, so use it only when the new name's type and model
-  are right.
+  are right. A conformant four-segment name whose model token matches the
+  row's model passes without the flag, and sets the owner from its owner
+  segment.
 - **What a rename does depends on the engine's gate 3 latch.** Before it, a
   rename rewrites every table that names the collection, gives the
   collection a new registry row and id, and leaves the old name as a
   superseded row that keeps its label taken. From the latch it is refused
   (409 `rename_refused`, nothing changes) until the name-key drop move has
   finished and the engine has restarted once; then it changes one row: the
-  collection keeps its id, no chunk or child row is rewritten (only the
-  `nx-note://` source URIs of its notes follow the label), and the old label
-  has no row. `nx doctor`'s "RDR-229 completion" row counts the gates that
+  collection keeps its id, no chunk or child row is rewritten (the `nx-note://` source URIs of its
+  notes and its queued aspect tasks follow the label), and the old label has
+  no row. `nx doctor`'s "RDR-229 completion" row counts the gates that
   hold and its "RDR-229 collection rename" row names what a refused rename
   waits for. Rule 6 has the rest.
 
 After a one-row rename the old label can stay reserved: from the latch the
 engine refuses it (409 `label_reserved`) for a new registration, a rename
-target, a re-embed target or an import while a name-keyed table still holds
-a row under it for another collection. It frees when the engine drops the
+target, a re-embed target, a supersede successor or an import while a
+name-keyed table still holds a row under it for another collection. It frees when the engine drops the
 name columns (RDR-229 P4.1). Renaming the collection back is allowed.
 
 Never type a four-segment name, a model token or a version to create a
@@ -260,11 +263,12 @@ that skips them leaves rows that fail loud on a foreign key later
 GC owns those and restores from them.
 
 From RDR-229's gate 3 latch (`nx doctor`'s "RDR-229 completion" row counts the
-gates that hold) a rename changes the collection's label only: it keeps its
-`collection_id`, and no chunk or child row is rewritten. The label it left can
+gates that hold) a rename changes the row's label, and its content type and
+owner from the new name (Rule 3): it keeps its `collection_id`, and no chunk
+or child row is rewritten. The label it left can
 stay reserved: while a name-keyed table still holds a row under it for another
-collection, a registration, a rename target, a re-embed target or an import of
-that label is refused (409 `label_reserved`, nothing written) until the engine
+collection, a registration, a rename target, a re-embed target, a supersede
+successor or an import of that label is refused (409 `label_reserved`, nothing written) until the engine
 drops the name columns (P4.1); renaming the collection back is allowed. Before
 the latch a rename runs as before and is not refused. From the latch it is
 refused (409 `rename_refused`, nothing changes) until the name-key drop move has
