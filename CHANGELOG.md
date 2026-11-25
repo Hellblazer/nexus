@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [8.5.7] - 2026-11-25
+
+Pairs with engine-service-v0.1.203 (REQUIRED_ENGINE_VERSION unchanged from 8.5.6). A plugin-only release: the client code is 8.5.6's; the plugin changes below become live at this pin.
+
+### Changed
+
+- **A subagent may run git commit, add, push, rebase and merge in your own repositories.** The plugin's subagent git guard used to deny every git write for everyone. Its full rule now runs only for the nexus maintainer (a `~/.config/nexus/maintainer-profile` flag file under the OS account's home, or a nexus checkout). Anyone else gets a short deny list of what cannot be undone: force pushes and `push --delete`, `--mirror`, `--prune` or a `:branch` / `+branch` refspec; `branch -D` and `-M`; `reflog expire` and `delete`; `gc --prune` and `git prune`; `update-ref -d`; `filter-branch` and `filter-repo`; `stash drop` and `clear`; `worktree remove --force`; config writes of `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `include.*` and `includeIf.*`, and any `--global`, `--system` or host-wide `--file` write. Discarding uncommitted work is denied only when the checkout has something to lose: `checkout -- <path>` and `checkout -f`, `switch -f`, `restore`, `reset --hard`, `--merge` and `--keep`, `rm -f`, `stash`, and `clean` when its own dry run lists files. The README's hooks table has the same list. Until a later release the session-start text for CLI users still tells a subagent never to run `git add` or `git commit`, so a subagent may still obey that line and hand its changes back instead of committing.
+- **The agents run `bd` only where a `.beads/` directory exists, and skip their nexus-tool steps when those tools are absent.** An agent whose brief tells it to commit may commit; the rule that the caller commits after review is otherwise unchanged. `bd` is optional in the plugin README.
+- **`NX_REMOTE_TEST_HOSTS` is no longer read.** The ssh hosts the maintainer's guard exempts come from `~/.config/nexus/remote-test-hosts` (one ssh host alias per line, or comma-separated; `#` starts a comment), because a project's settings `env` reaches command hooks and an environment variable could be set by any repository.
+
 ## [8.5.6] - 2026-11-24
 
 Pairs with engine-service-v0.1.203 (REQUIRED_ENGINE_VERSION moves from 0.1.200 to 0.1.203; the pin carries the work of engine-service-v0.1.201 and v0.1.202 too, which were cut and never pinned alone, and v0.1.202's native binaries lack the `db/rdr229/` resources that v0.1.203 embeds). This is RDR-229's Phase 3 release: the engine registers every collection under an id, a rename rewrites one registry row in place, and the client halves (collection-busy and reserved-label refusals, the restore refusal for an unregistered origin, register-before-document, the `rdr229-restart` boot work) ship here. It also self-hosts MinerU's pipeline weights as release assets (F35), adds the develop-red owner and push-hold workflow, and carries plugin changes that become live at this pin (see conexus/CHANGELOG.md).

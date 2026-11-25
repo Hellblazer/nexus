@@ -1,5 +1,19 @@
 # Changelog
 
+## [8.5.7] - 2026-11-25
+
+Plugin version aligned with conexus 8.5.7. These plugin changes become live at this pin.
+
+- `conexus/hooks/scripts/_audience.py` -- new. Answers who a hook runs for: `maintainer()` (account flag file under the OS account's home, or a nexus marker in the checkout), `nexus_repo()`, `account_flag()`, the `remote-test-hosts` file reader and a once-per-session tripwire, nexus-sby49.2.
+- `conexus/hooks/scripts/routing/_user_git_seatbelt.py` -- new. The git guard's short user-mode deny list (force pushes, forced branch deletes, reflog and gc pruning, hook-path and global config writes, discards of uncommitted work), nexus-sby49.2.
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` -- the full rule runs only for a maintainer; anyone else gets the seatbelt, so a user's subagent can commit, add, push, rebase and merge. `NX_REMOTE_TEST_HOSTS` is no longer read: the exempt ssh hosts come from `~/.config/nexus/remote-test-hosts`, nexus-sby49.2.
+- `conexus/hooks/scripts/routing/registry.yaml` -- stale fail-open text corrected, nexus-sby49.2.
+- `conexus/hooks/scripts/_interpreter.py` -- `reexec_if_needed()` re-execs only when its caller is the process's main script, so importing a hook script no longer replaces the importer, nexus-sby49.2.
+- `conexus/agents/architect-planner.md`, `code-review-expert.md`, `codebase-deep-analyzer.md`, `debugger.md`, `deep-analyst.md`, `deep-research-synthesizer.md`, `developer.md`, `strategic-planner.md`, `substantive-critic.md`, `test-validator.md` -- `bd` steps run only where `.beads/` exists and nexus-tool steps are skipped when the tools are absent; the developer's no-commit rule gains "unless your brief tells you to commit" and the linked-worktree clause, nexus-sby49.2.
+- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` -- `bd` steps conditional on `.beads/`; the implementer no-commit line gains the brief and worktree clauses, nexus-sby49.2.
+- `conexus/resources/agent-shared/RELAY_TEMPLATE.md` -- the `bd list` recovery step is conditional on `.beads/`, nexus-sby49.2.
+- `conexus/skills/orchestration/SKILL.md` -- the no-commit lines gain the brief and worktree clauses, nexus-sby49.2.
+
 ## [8.5.6] - 2026-11-24
 
 Plugin version aligned with conexus 8.5.6. These plugin changes become live at this pin; all are text changes to skills, agents, commands and shared resources.
