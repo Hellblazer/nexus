@@ -217,6 +217,14 @@ def test_the_real_manifests_constants_are_all_readable_from_source(manifest) -> 
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None, reason="the leg runs the hooks' own uv argv")
 
 
+def test_the_real_runs_are_not_skipped_in_ci() -> None:
+    """Non-vacuity: the two direction tests below skip without uv, and every CI runner has it, so a skip there is a failure."""
+    import os
+
+    if os.environ.get("CI"):
+        assert shutil.which("uv") is not None, "uv is missing on a CI runner: the leg's real-run tests would skip and report green"
+
+
 def _run_leg(plugin: Path, only: str, tmp_path: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(LEG), "run", "--plugin", str(plugin), "--posture", "P2", "--account", "harness", "--only", only, "--jobs", "2"],

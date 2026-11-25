@@ -3371,6 +3371,12 @@ plain interactive terminal) is counted in `nx doctor`'s drop meter
 JSONL log — that machinery stays in place only to protect installs still
 running pre-swap code.
 
+**Maintainer-only (nexus-sby49.3):** the routing hooks record an event only when the OS
+account has the maintainer flag (`~/.config/nexus/maintainer-profile`) or the checkout carries the nexus
+marker (`.nexus/dev-process.json`). For anyone else `log_routing_event` returns before it resolves an endpoint, so a
+user's command fragments are never sent to their engine, and this report and `--from-store` have nothing to read
+there.
+
 ---
 
 ### nx hook failures, nx hook replay

@@ -46,7 +46,7 @@ If results exist, incorporate them as supplementary context. If scratch is empty
 ### Relay Validation (All Agents)
 
 If relay received, verify it contains:
-- [ ] Bead ID(s) with current status (or 'none')
+- [ ] Bead ID(s) with current status, a tracking id, or 'none'
 - [ ] Input Artifacts section (nx store/memory/Files)
 - [ ] Deliverable description
 - [ ] Quality criteria checkboxes
@@ -278,7 +278,7 @@ Standard relay structure:
 ## Relay: [Target Agent]
 
 **Task**: [1-2 sentence summary]
-**Bead**: [ID] (status: [status])
+**Bead**: [ID] (status: [status]), [tracking id], or 'none'
 
 ### Input Artifacts
 - nx store: [document titles or "none"]

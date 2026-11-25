@@ -94,7 +94,7 @@ def _run_hook(
     cwd: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {
-        **os.environ,
+        **{k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"},  # the helper's cwd fallback: a nexus session's would make this a nexus repo
         "PATH": os.environ.get("PATH", ""),
         **src_seam_env(_UNFLAGGED_HOME),
         **(env_overrides or {}),

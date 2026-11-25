@@ -26,7 +26,7 @@ Dispatch the **debugger** agent (Agent tool, `subagent_type: conexus:debugger`) 
 ## Relay: debugger
 
 **Task**: Investigate failure using hypothesis-driven debugging
-**Bead**: [fill from active bead above or create bug bead]
+**Bead**: [fill from the active bead or tracking id above, or 'none']
 
 ### Input Artifacts
 - Files: [fill from relevant source and test files]

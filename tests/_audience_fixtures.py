@@ -39,6 +39,8 @@ def _src_audience_is_a_user_by_default(monkeypatch, _unflagged_account_home):
     from nexus.hooks import _audience  # noqa: PLC0415 — the module the src hooks import
 
     monkeypatch.setattr(_audience, "_ACCOUNT_HOME_OVERRIDE", str(_unflagged_account_home))
+    # The payload's cwd falls back to CLAUDE_PROJECT_DIR, so a test with no cwd, launched from a nexus session, would see a nexus repo.
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
 
 
 @pytest.fixture
