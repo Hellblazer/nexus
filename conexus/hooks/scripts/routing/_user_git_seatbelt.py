@@ -41,7 +41,8 @@ never in command position, so ``echo "git reset --hard"`` and
 Accepted gaps (this is a seatbelt against accidents, not a boundary):
 ``bash -c '...'``, ``sh -c`` and ``eval`` strings, ``xargs git``, ``find -exec
 git``, a heredoc fed to a shell, aliases, shell functions, scripts on disk, and
-text shlex cannot tokenise (it fails open). Tests pin the first four.
+text shlex cannot tokenise (it fails open), and a ``-C`` path written with Windows backslashes (read as
+shell escapes, so the checkout is unreadable and a git-state row passes). Tests pin the first four.
 
 Stdlib only.
 """
