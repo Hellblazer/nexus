@@ -16,11 +16,13 @@ A memory file is a candidate when its "How to apply" is any of:
 
 What the memory holds decides where it goes:
 
-| The memory holds | Target | Why | Example |
-| --- | --- | --- | --- |
-| A procedure that needs judgment | Skill | Loads on demand; the model applies it | release checklist, review gate |
-| A fixed sequence with one right answer | Lua script in a procedure library | Runs the same way every time; nothing to misremember | what to check before a push |
-| A bright line that must always hold | Hook | Memory is context, a hook is enforcement | no `git stash`, no full-disk `find` |
+| The memory holds | Target | Why | Example | Audience |
+| --- | --- | --- | --- | --- |
+| A procedure that needs judgment | Skill | Loads on demand; the model applies it | release checklist, review gate | by owner, below |
+| A fixed sequence with one right answer | Lua script in a procedure library | Runs the same way every time; nothing to misremember | what to check before a push | a repo's library: NEXUS-REPO; the shipped one: EVERY-USER |
+| A bright line that must always hold | Hook | Memory is context, a hook is enforcement | no `git stash`, no full-disk `find` | by owner, below |
+
+Every target reaches somebody, so name who. A personal memory rule targets SAM-WIDE (the account flag or the nexus marker). A rule about nexus's own process targets NEXUS-REPO (the marker alone). A rule every user of the plugin gets, EVERY-USER, needs a product decision of record, a ruling or an accepted RDR, and nothing else makes a rule EVERY-USER. A hook target is live only once it has its entry in the plugin's `audience.yaml` (in its hooks directory) and a case in the behaviour leg of the out-of-repo gate; the manifest lint fails a hook with no entry.
 
 A procedure library is a directory of Lua scripts, one `<name>.lua` per procedure, each with a four-line header that names its arguments and the verbs it may call. One runner executes them in a sandbox, through the `procedure_run(name, args)` tool. A procedure only one repo needs goes in that repo's library (`.nexus/procedures/`). A practice every conexus user should follow goes in the library that ships with `nx`. Personal rules stay as memory.
 
@@ -36,7 +38,7 @@ The target cites its source files, each by file path or T2 title. The source shr
 
 ### The loss check
 
-Before the source shrinks, dispatch `substantive-critic` with the target and the whole source file. For a split file, give it the union of the targets and the whole source file, once. The critic first enumerates the source's rules and maps each one to a line in a target, then lists every rule the target lacks. Brief it with "Ship when the list is empty". Empty means the critic reports 0 ship-blockers and lists nothing as lacking. Record the list, empty or not, on the bead. Promote one source file at a time, each with its own check. Unchecked compaction can score below having no context at all (Agentic Context Management), so a short target is not evidence that nothing was lost.
+Before the source shrinks, dispatch `substantive-critic` with the target and the whole source file. For a split file, give it the union of the targets and the whole source file, once. The critic first enumerates the source's rules and maps each one to a line in a target, then lists every rule the target lacks, and every place the target fires that the source did not cover (the over-reach item: a hook that fires for users the rule was never about). Brief it with "Ship when the list is empty". Empty means the critic reports 0 ship-blockers and lists nothing as lacking. Record the list, empty or not, on the bead. Promote one source file at a time, each with its own check. Unchecked compaction can score below having no context at all (Agentic Context Management), so a short target is not evidence that nothing was lost.
 
 ### The empty-list rule
 
