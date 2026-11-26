@@ -3871,15 +3871,27 @@ its acceptance is that test green plus the census pin it lowers.
   per table, the live-label clash that names both ids, and the live-label
   index from `live_label_index_present` on `/v1/status`; tests
   `tests/test_collection_cmd.py:120`, `tests/test_health_collection_ids.py`).
-  Not shipped: `nx collection delete` by id. `delete_cmd` still takes only a
-  name (`@click.argument("name")`, `commands/collection.py:556-559`). Only
-  the engine's delete route takes an id: the route is
-  `CollectionDeleteRoute` (commit 80d3e73a85, P3.5a), and 1b740b8a65 is the
-  repository's delete by id behind it. The catalog client sends only `name`
-  and the optional `keep_quarantine`
-  (`catalog/http_catalog_client.py:813-815`). The by-id delete is deferred:
-  it is item 2 of bead nexus-p2m1x.32 ("delete by label or id", in
-  progress), which the RDR had not cited.
+  `nx collection delete` by label or id shipped later (commits 3c6833a3fd,
+  65b245534f and 4ddee8c813 on develop; item 2 of bead nexus-p2m1x.32).
+  `delete_cmd` takes a label or `--id N`, one of the two
+  (`commands/collection.py:567-572`). `--id` is sent only to an engine that
+  advertises `catalog_collection_delete_by_id_supported` on `/version`,
+  engine-service-v0.1.203 or later
+  (`catalog/engine_writes/collection_delete.py:89`): the flag is in
+  v0.1.202's source, but v0.1.202's native binaries lack `db/rdr229/`. The
+  engine route is `CollectionDeleteRoute` (commit 80d3e73a85, P3.5a), with
+  1b740b8a65 as the repository's delete by id behind it. The client refuses a
+  label held by two live rows and names their ids, and refuses a retired
+  label whose direct successor row is live, naming that successor
+  (`check_label_deletable`, `collection_delete.py:197`). Any other tombstone
+  goes to the engine, which deletes it. So the remedies `nx collection
+  re-embed` prints for a source whose target is retired or gone still work
+  (linda's ruling on the bead, 2026-11-26). The engine's 404
+  `unknown_collection_id`, 409 `collection_superseded` and 409
+  `collection_label_ambiguous` are typed errors on the client. A known
+  consequence, recorded on the bead: a `--keep-source` source whose target is
+  still live has no CLI delete, since the client refuses its label and the
+  engine refuses its id. Test: `tests/test_collection_delete_by_id.py`.
 - P3.R Review gate for Phase 3. The rest of Phase 3 ships as one engine
   cut: the -r13 reland and P3.3 through P3.12 (P3.7's rename refusal, the
   name-key drop move's registration and the one-row rename included) are
@@ -4133,7 +4145,7 @@ reference the registry's name (P4.1).
 | `nx taxonomy project --prune-below-threshold` | Prints the removed count per collection | Prints "N skipped" when the engine lacks exact mode (cloud, until the conexus edge allowlists the flag), "did not confirm exact matching; using the guarded prune" when the verification prune is not echoed, and "N refused" for a collection whose row cannot be read | N/A | `GET /version` reads `taxonomy_prune_exact_supported` | N/A |
 | `lifecycle_state` at registration | `nx collection list` | `nx catalog show` | Existing lifecycle verbs | `nx doctor` row versus name diagnostic | Recovery bundle |
 | RDR-229 completion state and the P3.1 down-step | `nx doctor` rows: the three gates, labels incomplete, CHECKs missing, VALIDATE waits, dangling and self-id tombstones | `/v1/status` `rdr229_completion` (no tenant numbers); the caller's own counts on `GET /v1/catalog/rdr229_completion_counts` | The down-step and re-add SQL, conexus-run inside the window (`docs/runbooks/rdr-229-p31-rollback.md`) | The runbook's verify query; `nexus.rdr229_restamp(table)` finishes an orphaned table | PITR outside the window |
-| `collection_id` and label | `nx collection list` (id, label, attributes; the id column is P3.12's) | `nx catalog show` | `nx collection delete` (by label; by id is deferred, P3.12) | `nx doctor` null-id and label-clash census (P3.12) | Recovery bundle (carries the row from P3.9); tenant backup, `nx backup` (exports the id from P3.1's cut; restores by id from P3.5+P3.7; P3.11) |
+| `collection_id` and label | `nx collection list` (id, label, attributes; the id column is P3.12's) | `nx catalog show` | `nx collection delete` (by label or `--id`, P3.12) | `nx doctor` null-id and label-clash census (P3.12) | Recovery bundle (carries the row from P3.9); tenant backup, `nx backup` (exports the id from P3.1's cut; restores by id from P3.5+P3.7; P3.11) |
 
 ### New Dependencies
 
@@ -4742,3 +4754,4 @@ large, and moved under a ratchet.
 - 2026-11-24: final citation and vocabulary pass (grant 3, nexus-p2m1x; T2 `229-research-339`): the engine and client cites re-read from develop 4e6824e6ae, the dropped `isFileRoutedCollection`, the for_tuple filters and the `quarantine-` prefix census restated as the code has them, the client id-trust trigger on one rule (the name-key drop move's `completed_at` and `ids_stable`), "gate 3" changed to "the latch" where a sentence means the latch, and the 400 list completed (an id over 18 digits, an id key given twice). No Test sentence changed.
 - 2026-11-24: the Versioning sentence on routes follows linda's ruling on nexus-p2m1x.23 (T2 `229-research-340`): a route takes a label or an id in each slot, one form per slot; an id and a label in one slot is a 400; the 409 `collection_id_mismatch` is an internal guard for an id and a label from different sources.
 - 2026-11-24: the fix checks' counted citations (grant 3, nexus-p2m1x; T2 `229-research-341`, from fix checks `229-fix-check-3de92acf1e` and `229-fix-check-6eec323c91`): the re-home pre-check calls `moveUriCollisions` itself (`CollectionRehomeScope.java:159-166`), not `requireCollectionUrisFree`; "gate 3" is "the latch" where the engine refuses a rename (and "once gate 3 has latched" where readers, writers and the drop move's registration read the latched value); item 4's header and Gap 2 separate the draft's counts from the current ones; the client's id trust names `ids_stable`; the Versioning sentence cites the bead's comments of 2026-11-22 11:25 and 2026-11-23 12:53 and the filter and refusal code. No Test sentence changed.
+- 2026-11-26: P3.12 landed in full (grant 3, nexus-p2m1x.32): `nx collection delete` by label or `--id`, 3c6833a3fd, 65b245534f and 4ddee8c813 (in no engine or client tag yet). P3.12's text and the Day 2 table now say what shipped, the 0.1.203 floor and why, the retired-label refusal as ruled on the bead (only a retired label with a live direct successor is refused), and the `--keep-source` consequence. The 2026-11-24 line above describing P3.12 in part stands as the record of that date.
