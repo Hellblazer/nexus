@@ -567,7 +567,7 @@ def _aspects_from_config(*, dry_run: bool, yes: bool = False) -> None:
 @click.argument("name", required=False)
 @click.option("--id", "collection_id", type=click.IntRange(min=1), default=None,
               help="Delete the collection with this ID (the ID column of `nx collection list`) instead of a label. Needs an engine "
-                   "that advertises catalog_collection_delete_by_id_supported (engine-service 0.1.202 or later).")
+                   "that advertises catalog_collection_delete_by_id_supported (engine-service 0.1.203 or later).")
 @click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
 def delete_cmd(name: str | None, collection_id: int | None, yes: bool) -> None:
     """Delete a T3 collection + cascade-purge taxonomy state (irreversible).
@@ -575,8 +575,9 @@ def delete_cmd(name: str | None, collection_id: int | None, yes: bool) -> None:
     Name the collection by its label (``nx collection delete LABEL``) or by its
     ID (``nx collection delete --id N``): exactly one. A label held by two live
     collections is refused, naming their IDs; delete one by ``--id``. A label
-    that a rename or re-embed retired is refused, naming the live successor
-    (the retired row stays in the history). An unknown ID is an error, never a
+    that a rename or re-embed retired is refused when it has a live successor,
+    which the message names (the retired row stays as history); a retired
+    label with none is deleted. An unknown ID is an error, never a
     silent no-op.
 
     Deleting an origin also deletes its rows in its ``quarantine-`` siblings

@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-229 P3.12 (nexus-p2m1x.32): ``nx collection delete`` by label or by ``--id``.
 
-The client half of engine 0.1.202's delete by ``collection_id`` (``CollectionDeleteRoute``). The tests run the real
+The client half of engine 0.1.203's delete by ``collection_id`` (``CollectionDeleteRoute``). The tests run the real
 ``HttpCatalogClient`` over an ``httpx.MockTransport`` that answers as the engine does, with the wire shapes read from the
 route's Java (``CollectionDeleteByIdTest``, ``CollectionDeleteLabelClashTest``):
 
 * 200 ``{deleted, collection_id, name}``;
 * 404 ``unknown_collection_id`` + ``collection_id``;
 * 409 ``collection_superseded`` + ``collection``, ``collection_id``, ``superseded_by`` (the successor's label) and
-  ``successor_collection_id``, for a RETIRED ID (a retired LABEL is deleted with the 200 it always got: the refusal that
-  names the successor is this client's, taken from ``/collections/list`` before anything is sent);
+  ``successor_collection_id``, for a RETIRED ID (a retired LABEL is deleted with the 200 it always got; this client refuses it only
+  when a LIVE successor is found in ``/collections/list``, before anything is sent, and lets a tombstone with none through);
 * 409 ``collection_label_ambiguous`` + ``collection_ids``;
 * ``GET /version`` flag ``catalog_collection_delete_by_id_supported``.
 
@@ -24,11 +24,20 @@ import httpx
 import pytest
 
 from nexus.catalog.engine_writes.collection_delete import (
-    AmbiguousCollectionLabelError, SupersededCollectionDeleteError, UnknownCollectionIdError, check_label_deletable, refusal_of)
+    AmbiguousCollectionLabelError,
+    SupersededCollectionDeleteError,
+    UnknownCollectionIdError,
+    check_label_deletable,
+    refusal_of,
+)
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from tests.test_collection_cmd import (  # noqa: F401 — the fixtures are the module's
-    _invoke, env_creds, mock_db, runner,
+    _invoke,
+    env_creds,
+    mock_db,
+    runner,
 )
+from tests.test_reembed_verb import KEPT_SRC, _kept_tombstoned_world
 
 FLAG = "catalog_collection_delete_by_id_supported"
 DELETE_PATH = "/v1/catalog/collections/delete"
@@ -216,6 +225,60 @@ def test_a_superseded_label_that_still_has_a_live_row_under_it_deletes_the_live_
     assert engine.posts() == [{"name": "knowledge__twin"}]
 
 
+def test_a_retired_label_with_no_live_successor_goes_through_to_the_engines_200(runner, env_creds, mock_db) -> None:
+    """linda's ruling: an empty tombstone, a kept source whose target is gone, a skipped re-entry: only a LIVE successor refuses."""
+    engine = FakeEngine([_row("knowledge__old", 8001, superseded_by="knowledge__gone"), _row("knowledge__other", 8002)])
+    result = _run(runner, mock_db, engine, ["knowledge__old", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert engine.posts() == [{"name": "knowledge__old"}]
+    assert [r["name"] for r in engine.rows] == ["knowledge__other"]
+
+
+def test_the_reembed_skip_remedy_works_when_the_retired_target_has_a_live_successor_too(runner, env_creds, mock_db) -> None:
+    src, tgt, tgt2 = "docs__1-1__bge-base-en-v15-768__v1", "docs__1-1__voyage-model-a__v1", "docs__1-1__voyage-model-b__v1"
+    engine = FakeEngine([_row(src, 1, superseded_by=tgt), _row(tgt, 2, superseded_by=tgt2), _row(tgt2, 3)])
+    result = _run(runner, mock_db, engine, [src, "--yes"])
+    assert result.exit_code == 0, result.output
+    assert engine.posts() == [{"name": src}]
+
+
+@pytest.mark.parametrize("target_row", ["superseded", None, "retired"])
+def test_the_reembed_skip_remedy_delete_of_the_kept_source_succeeds(runner, env_creds, mock_db, target_row) -> None:
+    """``tests/test_reembed_reentry_skip.py``'s scenario (a kept_tombstoned source whose target is retired or gone; the skip line
+    says ``nx collection delete SRC``) run through the delete it names: it must not dead-end on the retired-label refusal."""
+    _jobs, cat = _kept_tombstoned_world(live=0, total=0, target_row=target_row)
+    rows = [{**r, "collection_id": 100 + i} for i, r in enumerate(cat.list_collections())]
+    engine = FakeEngine(rows)
+    result = _run(runner, mock_db, engine, [KEPT_SRC, "--yes"])
+    assert result.exit_code == 0, result.output
+    assert engine.posts() == [{"name": KEPT_SRC}]
+    assert KEPT_SRC not in [r["name"] for r in engine.rows]
+
+
+@pytest.mark.parametrize("why", ["none", "raises", "listing"])
+def test_an_unreadable_registry_is_always_said_on_stderr_and_the_delete_goes_on(runner, env_creds, mock_db, why) -> None:
+    """Fail-open stays, but never silently: a None reader, a reader that raises and a listing that raises each print the note."""
+    engine = FakeEngine([_row("knowledge__alpha", 9001)])
+
+    def reader():
+        if why == "raises":
+            raise ConnectionError("no route to the service")
+        if why == "none":
+            return None
+        cat = engine.catalog()
+        cat.list_collections = lambda *a, **k: (_ for _ in ()).throw(TimeoutError("slow"))  # type: ignore[method-assign]
+        return cat
+
+    with patch("nexus.catalog.factory.make_catalog_reader", side_effect=reader), \
+         patch("nexus.db.service_endpoint.guard_production_write"), \
+         patch("nexus.db.collection_purge._purge_pipeline_db", side_effect=lambda name, counts: counts):
+        result = _invoke(runner, mock_db, ["delete", "knowledge__alpha", "--yes"])
+    out = _flat(result)
+    assert "registry listing" in out and "without the superseded-label and label-clash checks" in out, out
+    if why == "listing":
+        assert result.exit_code == 0 and engine.posts() == [{"name": "knowledge__alpha"}]
+
+
 def test_a_superseded_id_is_refused_by_the_engine_naming_the_successor(runner, env_creds, mock_db) -> None:
     engine = FakeEngine([_row("knowledge__old", 8001, superseded_by="knowledge__new"), _row("knowledge__new", 8002)])
     result = _run(runner, mock_db, engine, ["--id", "8001", "--yes"])
@@ -265,7 +328,7 @@ def test_id_on_an_engine_without_the_flag_refuses_clearly_and_sends_no_delete(ru
     result = _run(runner, mock_db, engine, ["--id", "9001", "--yes"])
     out = _flat(result)
     assert result.exit_code != 0
-    assert FLAG in out and "0.1.150" in out and "0.1.202" in out, "the refusal names the flag, the engine and the floor"
+    assert FLAG in out and "0.1.150" in out and "0.1.203" in out, "the refusal names the flag, the engine and the floor"
     assert "nx collection delete <label>" in out or "delete by label" in out.lower()
     assert engine.posts() == []
     assert not any(p.endswith("/collections/list") for _m, p, _b in engine.requests), "no id-to-label fallback"
@@ -346,17 +409,39 @@ def test_refusal_of_reads_status_and_reason_never_the_status_alone() -> None:
     assert refusal_of(RuntimeError("no response")) is None
 
 
-def test_a_chain_of_tombstones_names_the_live_end_of_the_chain() -> None:
+def test_only_the_direct_successor_counts_a_tombstone_whose_successor_was_itself_superseded_passes() -> None:
+    """The re-embed remedy's case: SRC's target was superseded in turn, so ``nx collection delete SRC`` must work even though a live
+    collection sits at the end of the chain."""
     rows = [_row("a", 1, superseded_by="b"), _row("b", 2, superseded_by="c"), _row("c", 3)]
+    check_label_deletable(rows, "a")
     with pytest.raises(SupersededCollectionDeleteError) as caught:
-        check_label_deletable(rows, "a")
+        check_label_deletable(rows, "b")  # b's direct successor c is live
     assert (caught.value.successor, caught.value.successor_id) == ("c", 3)
     check_label_deletable(rows, "c")  # a live label passes
     check_label_deletable(rows, "no-row-at-all")  # a T3 orphan with no registry row is still deletable
 
 
-def test_a_cycle_of_tombstones_ends_without_a_successor_instead_of_looping() -> None:
+def test_a_cycle_of_tombstones_has_no_live_successor_so_it_passes_instead_of_looping() -> None:
     rows = [_row("a", 1, superseded_by="b"), _row("b", 2, superseded_by="a")]
+    check_label_deletable(rows, "a")  # no live end: the engine's 200 stands, and the walk ended
+
+
+@pytest.mark.parametrize("rows", [
+    pytest.param([_row("old", 1, superseded_by="gone")], id="successor-has-no-row"),
+    pytest.param([_row("old", 1, superseded_by="mid"), _row("mid", 2, superseded_by="gone")], id="chain-ends-in-no-row"),
+    pytest.param([_row("old", 1, superseded_by="mid"), _row("mid", 2, superseded_by="end"), _row("end", 3)],
+                 id="successor-superseded-in-turn-live-end-beyond"),
+    pytest.param([_row("old", 1, superseded_by="tgt"), {**_row("tgt", 2), "lifecycle_state": "retired"}], id="successor-is-retired-state"),
+    pytest.param([_row("old", 1)], id="no-successor-named"),
+])
+def test_check_label_deletable_passes_a_tombstone_with_no_live_successor(rows) -> None:
+    """RDR-229 P3.12, linda's ruling: refuse only when a LIVE successor is found."""
+    check_label_deletable(rows, "old")
+
+
+def test_a_refusal_names_the_successor_and_never_points_at_deleting_it() -> None:
     with pytest.raises(SupersededCollectionDeleteError) as caught:
-        check_label_deletable(rows, "a")
-    assert caught.value.successor_id is None and "no live successor" in str(caught.value)
+        check_label_deletable([_row("old", 1, superseded_by="new"), _row("new", 2)], "old")
+    text = str(caught.value)
+    assert "'new'" in text and "id 2" in text and "stays" in text
+    assert "--id" not in text and "nx collection delete" not in text, "the live collection is not offered for deletion"

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``nx collection delete`` by label or by ``collection_id``: the client half of engine 0.1.202's
+"""``nx collection delete`` by label or by ``collection_id``: the client half of engine 0.1.203's
 ``POST /v1/catalog/collections/delete`` (RDR-229 P3.12, nexus-p2m1x.32; the engine half is P3.5a's ``CollectionDeleteRoute``).
 
 The wire, as the route's Java answers it:
@@ -13,14 +13,16 @@ The wire, as the route's Java answers it:
 * the ``GET /version`` flag :data:`FLAG` says the engine reads ``collection_id`` on this route. An engine without it would ignore
   the key and answer for a body with no label, so the flag is read BEFORE the id is sent, and an unknown answer refuses.
 
-A delete by a retired LABEL is answered 200 by the engine (it removes the tombstone; the empty-tombstone sweep depends on that), so
-the refusal that names the successor is the client's: :func:`check_label_deletable` reads the registry listing and refuses before
-anything is sent. The same check computes a label clash on the client with the census's ``_label_clash``.
+A delete by a retired LABEL is answered 200 by the engine (it removes the tombstone). The client refuses it only when the tombstone
+has a LIVE successor, naming it (the retired row stays as the history); a tombstone with none passes through, so the remedy
+``nx collection delete SRC`` that the re-embed skip lines print still works. Live means the DIRECT successor. :func:`check_label_deletable` reads the registry
+listing and refuses before anything is sent. The same check computes a label clash on the client with the census's ``_label_clash``.
 
 There is no lookup from an id to a label anywhere here: a rename between the lookup and the delete would delete whatever then holds
 the old label. Pure (no ``click``): the CLI turns the errors into its own."""
 from __future__ import annotations
 
+import shlex
 from typing import Any
 
 import structlog
@@ -31,8 +33,10 @@ _log = structlog.get_logger(__name__)
 
 #: The ``GET /version`` flag of the engine's delete by ``collection_id``.
 FLAG: str = "catalog_collection_delete_by_id_supported"
-#: The first engine-service release that carries it (engine-service-v0.1.202, P3.5a's write half). HAND-KEPT; not a gate: the probe is.
-MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 202)
+#: The first SOUND engine-service release that carries it: v0.1.203. The flag and the route are in v0.1.202's source (VersionHandler,
+#: CollectionDeleteRoute; absent at v0.1.201), but v0.1.202's native binaries lack the ``db/rdr229/`` resources, so RDR-229's boot-time
+#: completion work never starts there (CHANGELOG 8.5.6; docs/wire-contract-pending.md "first sound in 0.1.203"); the client release pairs with v0.1.203 (``REQUIRED_ENGINE_VERSION``). HAND-KEPT; not a gate: the probe is.
+MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 203)
 _FLOOR = ".".join(map(str, MIN_ENGINE_VERSION))
 ROUTE: str = "/collections/delete"
 
@@ -53,22 +57,21 @@ class UnknownCollectionIdError(CollectionDeleteRefusedError):
 
 
 class SupersededCollectionDeleteError(CollectionDeleteRefusedError):
-    """The label or id names a retired row. ``successor`` is its live successor's label; ``successor_id`` its id (None when unread)."""
+    """The label or id names a retired row, refused. ``successor`` is its live successor's label and ``successor_id`` its id (None
+    when unread); the client's label check raises it only when a live successor is found. The engine's 409 for a retired ID also
+    comes here, possibly with no successor. The text names the successor for information and says the retired row stays: it is never
+    an offer to delete the successor."""
 
     def __init__(self, label: str, collection_id: int | None, successor: str, successor_id: int | None) -> None:
         self.label, self.collection_id, self.successor, self.successor_id = label, collection_id, successor, successor_id
         who = f"collection {label!r}" + (f" (id {collection_id})" if collection_id is not None else "")
-        if successor and successor_id is not None:
-            by = f"superseded by {successor!r} (id {successor_id})"
-            hint = f" Delete the live collection with `nx collection delete --id {successor_id}`, or leave the tombstone for the history."
-        elif successor:
-            by = f"superseded by {successor!r}"
-            hint = " Delete the live collection by its label, or leave the tombstone for the history."
+        if successor:
+            by = f"superseded by {successor!r}" + (f" (id {successor_id})" if successor_id is not None else "")
+            tail = f"The retired row stays as the history of that move; {successor!r} is the collection that holds the data now."
         else:
             by = "retired and names no live successor"
-            hint = ""
-        super().__init__(f"{who} is {by}, so a delete of it is refused and nothing was deleted: the retired row keeps its place "
-                         f"in the history.{hint}")
+            tail = f"The engine refuses a retired row by its id; `nx collection delete {shlex.quote(label)}` removes it."
+        super().__init__(f"{who} is {by}, so a delete of it is refused and nothing was deleted. {tail}")
 
 
 class AmbiguousCollectionLabelError(CollectionDeleteRefusedError):
@@ -171,51 +174,47 @@ def delete_by_id(cat: Any, collection_id: int) -> dict[str, Any]:
     return result
 
 
-def _successor(rows: list[dict[str, Any]], row: dict[str, Any]) -> tuple[str, int | None]:
-    """The live successor of the retired *row*, as ``(label, id)``: followed by ``superseded_by_id`` when the listing carries it, else by
-    label, through at most a few hops of a chain of tombstones (a cycle ends the walk). ``("", None)`` when none is found."""
-    by_id = {r["collection_id"]: r for r in rows if _is_id(r.get("collection_id"))}
-    seen: set[int] = set()
-    current = row
-    for _ in range(16):
-        nxt: dict[str, Any] | None = None
-        sid = current.get("superseded_by_id")
-        if _is_id(sid) and sid in by_id:
-            nxt = by_id[sid]
-        elif current.get("superseded_by"):
-            label = str(current["superseded_by"])
-            held = [r for r in rows if r.get("name") == label]
-            nxt = next((r for r in held if not r.get("superseded_by")), held[0] if held else None)
-            if nxt is None:
-                return label, None
-        if nxt is None:
-            return "", None
-        if not nxt.get("superseded_by"):
-            cid = nxt.get("collection_id")
-            return str(nxt.get("name") or ""), cid if _is_id(cid) else None
-        key = id(nxt)
-        if key in seen:
-            return "", None
-        seen.add(key)
-        current = nxt
-    return "", None
+def _is_live(row: dict[str, Any]) -> bool:
+    """A row a successor can be: not superseded and not in the ``retired`` lifecycle state."""
+    return not row.get("superseded_by") and row.get("lifecycle_state") != "retired"
+
+
+def _live_successor(rows: list[dict[str, Any]], row: dict[str, Any]) -> dict[str, Any] | None:
+    """The LIVE row that the retired *row* names as its successor, or None. The DIRECT successor only, found by ``superseded_by_id`` when
+    the listing carries it, else by label: a successor that is itself retired (a re-embed's target that was superseded in turn, whatever
+    it was superseded by), has no row, or is in the ``retired`` state is no live successor. That is the engine's own rule for a re-embed
+    re-entry (the target is retired or gone), and the one under which the skip lines' remedy ``nx collection delete SRC`` stays true."""
+    sid, label = row.get("superseded_by_id"), row.get("superseded_by")
+    if _is_id(sid):
+        held = [r for r in rows if r.get("collection_id") == sid]
+    elif label:
+        held = [r for r in rows if r.get("name") == label]
+    else:
+        return None
+    return next((r for r in held if _is_live(r)), None)
 
 
 def check_label_deletable(rows: list[dict[str, Any]], label: str) -> None:
-    """Refuse, from the registry listing *rows* (every lifecycle state), a delete by *label* the engine would not refuse itself.
+    """Refuse, from the registry listing *rows* (every lifecycle state), a delete by *label* in the two cases the client owns.
 
     * two or more LIVE rows (``superseded_by`` empty) under the label: :class:`AmbiguousCollectionLabelError` naming their ids
-      (``_label_clash`` finds it);
-    * rows under the label and none live: :class:`SupersededCollectionDeleteError` naming the live successor's label and id. The
-      engine would remove the tombstone with a 200; the history keeps it.
+      (``_label_clash`` finds it); the engine refuses the same with a 409, so this is only the earlier answer;
+    * rows under the label, none live, and the first of them a retired row whose DIRECT successor is live (a rename's or re-embed's
+      tombstone whose target is still current): :class:`SupersededCollectionDeleteError` naming the successor's label and id. The engine would
+      remove the tombstone with a 200; the history keeps it (linda's ruling, nexus-p2m1x.32).
 
-    A label with no row at all passes (a T3 orphan with no registry row is still deletable), and so does one with exactly one live row."""
+    A tombstone with NO live successor passes through to the engine's 200: an empty tombstone, a ``--keep-source`` or kept_tombstoned
+    source whose target is gone, retired or itself superseded (the remedy ``nx collection re-embed --all`` and ``keep_live_documents_advice`` print is
+    ``nx collection delete SRC``), a cycle. So does a label with no row at all (a T3 orphan with no registry row) and one with exactly
+    one live row."""
     held = [r for r in rows if r.get("name") == label]
     live = [r for r in held if not r.get("superseded_by")]
     if _label_clash(live)["clashing_names"]:
         raise AmbiguousCollectionLabelError(label, sorted((r.get("collection_id") for r in live), key=lambda i: (i is None, i or 0)))
     if held and not live:
         tomb = held[0]
-        succ, succ_id = _successor(rows, tomb)
-        cid = tomb.get("collection_id")
-        raise SupersededCollectionDeleteError(label, cid if _is_id(cid) else None, succ, succ_id)
+        succ = _live_successor(rows, tomb)
+        if succ is not None:
+            cid, sid = tomb.get("collection_id"), succ.get("collection_id")
+            raise SupersededCollectionDeleteError(label, cid if _is_id(cid) else None, str(succ.get("name") or ""),
+                                                  sid if _is_id(sid) else None)

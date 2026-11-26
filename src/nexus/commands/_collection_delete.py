@@ -37,14 +37,19 @@ def collection_busy_message(busy: dict[str, str], retry: str) -> str:
     return f"{head} {advice}, then run `{retry}` again."
 
 
+def _unreadable(why: str) -> None:
+    """Say, on stderr, that the label pre-check could not run. Fail-open stays (the engine decides, and a T3 orphan with no registry row
+    is not in the listing), but never silently: every way the listing cannot be had comes here."""
+    click.echo(f"note: the registry listing could not be read ({why}); deleting without the superseded-label and label-clash checks",
+               err=True)
+
+
 def _registry_rows(cat: Any) -> list[dict[str, Any]] | None:
-    """Every registry row (all lifecycle states) for the label pre-check, or None, said on stderr, when the listing cannot be read.
-    The engine stays the authority: an unreadable listing does not stop a delete (a T3 orphan with no registry row is not in it)."""
+    """Every registry row (all lifecycle states) for the label pre-check, or None, said on stderr, when the listing cannot be read."""
     try:
         return list(cat.list_collections())
     except Exception as exc:  # noqa: BLE001 — boundary: the pre-check is advisory, the delete route decides
-        click.echo(f"note: the registry listing could not be read ({type(exc).__name__}: {exc}); deleting without the superseded-label "
-                   f"and label-clash checks", err=True)
+        _unreadable(f"{type(exc).__name__}: {exc}")
         return None
 
 
@@ -60,18 +65,23 @@ def run_delete(t3: Callable[[], Any], name: str | None, collection_id: int | Non
     by_id = collection_id is not None
     retry = f"nx collection delete --id {collection_id}" if by_id else f"nx collection delete {shlex.quote(name or '')}"
     # What the refusal that is certain says comes before the question: the engine's flag for an id, the registry for a label.
+    reader_failed = False
     try:
         cat = make_catalog_reader()
     except Exception as exc:  # noqa: BLE001 — a label delete goes on to the cascade, which reports the unreachable service itself
         if by_id:
             raise click.ClickException(f"the catalog service is unreachable, so `--id` cannot be sent ({type(exc).__name__}: {exc})") from exc
-        cat = None
+        _unreadable(f"{type(exc).__name__}: {exc}")
+        cat, reader_failed = None, True
     try:
         if by_id:
             if cat is None:
                 raise click.ClickException("the catalog service client is unavailable, so `--id` cannot be sent")
             require_delete_by_id(cat)
-        elif cat is not None and (rows := _registry_rows(cat)) is not None:
+        elif cat is None:
+            if not reader_failed:
+                _unreadable("no catalog service client")
+        elif (rows := _registry_rows(cat)) is not None:
             check_label_deletable(rows, name or "")
     except CollectionDeleteRefusedError as refused:
         raise click.ClickException(str(refused)) from refused
