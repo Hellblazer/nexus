@@ -39,6 +39,7 @@ def _every_path(audience, payload: dict) -> list[str]:
         "telemetry_enabled": lambda: audience.telemetry_enabled(),
         "t1_nudge_enabled": lambda: audience.t1_nudge_enabled(),
         "forced_strict_clause(head)": lambda: audience.forced_strict_clause(payload, head=True),
+        "settings_problems": lambda: audience.settings_problems(payload),
         "remote_test_hosts": lambda: audience.remote_test_hosts(),
         "build_report": lambda: audience.build_report(payload["cwd"], versions={"plugin": "x", "nx": "x"}),
         "show": lambda: _run_show(audience, payload["cwd"], ["show", "--cwd", payload["cwd"]]),
@@ -63,7 +64,7 @@ def test_a_repository_with_no_project_file_runs_no_git_on_any_path(audience_copy
     monkeypatch.setattr(audience_copy, "_ACCOUNT_HOME_OVERRIDE", str(p.home))
     shim = GitShim(tmp_path).install(monkeypatch)
     ran = _every_path(audience_copy, p.payload)
-    assert len(ran) == 19, ran
+    assert len(ran) == 20, ran
     assert shim.calls() == [], "git ran for settings in a repository with no settings file: " + repr(shim.calls())
 
 

@@ -48,11 +48,11 @@ def test_the_manifest_is_true(manifest, hooks_json) -> None:
 
 
 def test_the_lint_examined_the_whole_plugin(manifest, hooks_json) -> None:
-    """Non-vacuity: 23 registrations of 22 distinct argv, and every constant the census sees is classified."""
+    """Non-vacuity: 24 registrations of 23 distinct argv, and every constant the census sees is classified."""
     regs = am.registrations(hooks_json)
-    assert len(regs) == 23 and len(manifest["registrations"]) == 23
-    assert len({tuple(r["argv"]) for r in regs}) == 22, "auto-approve is registered twice with one argv"
-    assert len({r["key"] for r in regs}) == 23, "event plus argv is the key"
+    assert len(regs) == 24 and len(manifest["registrations"]) == 24
+    assert len({tuple(r["argv"]) for r in regs}) == 23, "auto-approve is registered twice with one argv"
+    assert len({r["key"] for r in regs}) == 24, "event plus argv is the key"
     injected = len(manifest["constants"])
     classified = sum(len(m.get("not_injected") or {}) for m in manifest["modules"].values())
     assert injected >= 45 and classified >= 20, (injected, classified)
