@@ -221,7 +221,7 @@ Sam's rulings (T2 above), the current helper
 (`conexus/hooks/audience.yaml`), `docs/agents/plugin-audiences.md`, the
 rework's readers and call sites at d6a0b258b0 (worktree
 `nexus-wt/halcyon-sby49-p3`), the implementer's 22 open choices (T1
-`de007438`, tag `rdr-259-inputs`), the guard fix at 86a5fa0ff1 and its
+tag `rdr-259-inputs`), the guard fix at 86a5fa0ff1 and its
 confirmation record (T2 `nexus/confirm-86a5fa0ff1-nexus-5y47c-2026-11-26-r2`),
 and the current Claude Code docs (Research 6).
 
@@ -1990,7 +1990,7 @@ each machine where he wants strict and telemetry; delete
 - Sam's rulings: T2 `nexus/sam-ruling-audience-model-settings-not-identity-2026-11-25`.
 - Analysis: `~/.local/state/nexus/plans/audience-model-analysis.md` (T2 `nexus/audience-model-analysis-2026-11-25`).
 - Plan of record: `~/.local/state/nexus/plans/plugin-portability-plan.md`; rulings T2 `nexus/sam-ruling-plugin-portability-plan-2026-11-25`.
-- Implementer choices: T1 `de007438` (tag `rdr-259-inputs`).
+- Implementer choices: T1 tag `rdr-259-inputs`.
 - Rework: commit d6a0b258b0 on `feature/nexus-sby49.4-plugin-portability-p3`.
 - Guard fix: 86a5fa0ff1 on `feature/nexus-5y47c-guard-overmatch`; T2 `nexus/confirm-86a5fa0ff1-nexus-5y47c-2026-11-26-r2`.
 - Claude Code docs, fetched 2026-11-25: https://code.claude.com/docs/en/permissions.md, hooks.md, settings.md, settings-reference.md, worktrees.md, sub-agents.md, plugins/manifest-reference.md, plugins/components.md, desktop.md.
