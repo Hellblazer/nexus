@@ -318,9 +318,9 @@ uv starts; a warm hook returns when it is done and pays nothing for the larger l
 
 **Known blocking failure.** When uv can find no Python 3.12 or newer and cannot fetch one
 (offline, behind a proxy that blocks the download, air-gapped), `uv tool run` exits 2 with
-`No interpreter found`. Claude Code treats a hook's exit 2 as blocking on `PreToolUse`,
-`PermissionRequest` and `UserPromptSubmit`, so six of the twenty-two uv-launched entries (the
-three `PreToolUse` guards, both `auto-approve` entries, the mailbox drain) refuse every Bash call, every
+`No interpreter found`. Claude Code treats a hook's exit 2 as blocking on `PreToolUse`
+and `UserPromptSubmit`, so five of the twenty-one uv-launched entries (the
+three `PreToolUse` guards, the `auto-approve` entry, the mailbox drain) refuse every Bash call, every
 edit and write, every conexus tool call and every prompt until Python exists; the `SessionStart` and `SessionEnd`
 entries only print the error. The entries are in exec form (`args` is set, so there is no shell), and an
 exec-form entry cannot turn a launcher failure into a non-blocking code. The remedy is one
@@ -359,8 +359,7 @@ names each handler by its program and verb.
 | `SubagentStart` | `hook_subagent_start` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
 | `SubagentStop` (matcher `.+`) | `hooks/scripts/nx_hook_shim.py subagent-stop-t1-nudge` | When a named agent stops and its own transcript shows no successful T1 put (an MCP `scratch` call with `action=put`, or a Bash `nx scratch put`), return `additionalContext` that gives the agent one more turn with a one-sentence request to write its findings to T1. A warning, not a veto: no `decision` key. Silent on the stop that follows its own nudge (`stop_hook_active`), when the transcript is missing or unparseable, and for harness-internal stops with no `agent_type`, which the `.+` matcher never spawns it for (nexus-mtheb.3) |
 | `Stop` | `hooks/scripts/stop_wake_guard.py` | Continue a turn once when its closing text promises work that nothing will wake: a CI or run wait, a promise to check or do something later, or a timed step, while `background_tasks` and `session_crons` are both empty and `stop_hook_active` is false. Clauses where Sam is the actor, a peer, mailbox, notification or restart is the wake, or that report past tense are dropped first. Returns `hookSpecificOutput.additionalContext` once, which continues the turn without the "Stop hook error" notice a `decision: block` shows (the text quotes the sentence and says to arm a Monitor, a background Bash until-loop, ScheduleWakeup or CronCreate, or to say who the wake is); logs every decision to `hook.log`; fails open. Only the last 600 characters are read, and a message whose last sentence addresses Sam, or waits on an approval, is allowed whole. A missing or non-list `background_tasks`/`session_crons` allows the stop. `NX_STOP_WAKE_GUARD=0` turns it off; set it in the environment of any scripted `claude -p` run that loads this plugin (a run with `--setting-sources ""` loads no plugin and needs nothing), because a one-shot run's final message would otherwise become the continuation (nexus-4cgop) |
-| `PreToolUse` (`mcp__plugin_conexus_.*`) | `hooks/scripts/nx_hook_shim.py auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls; paired with the PermissionRequest entry below because the two events fire in different permission modes |
-| `PermissionRequest` (`mcp__plugin_conexus_.*`) | `hooks/scripts/nx_hook_shim.py auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls |
+| `PreToolUse` (`mcp__plugin_conexus_.*`) | `hooks/scripts/nx_hook_shim.py auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls. Registered on `PreToolUse` only: a `PermissionRequest` answer overrides a user's own `ask` rule, and a `PreToolUse` answer does not (RDR-259, nexus-sby49.5) |
 
 **Why some rows are `nx-hook <verb>` and others are `hook_<name>`.** A
 hook that returns a VERDICT — a `permissionDecision`, a `behavior`, a
@@ -469,7 +468,7 @@ The nexus core server exposes 46 MCP tools and the nexus-catalog server exposes 
 - T2 uses per-call context managers (`T2Database`, HTTP client to the engine's Postgres; the SQLite-backed version retired at RDR-158 P4)
 - A failed call returns an MCP error result (`isError: true`) carrying the tool's `Error: ...` text or `{"error": ...}` JSON (nexus-6b6hq); the `hook_*` tools fail open instead
 
-**Agent frontmatter**: Agents do NOT declare a `tools:` field — Claude Code has a confirmed bug (GitHub #13605, #21560, #25200) where explicit `tools:` in plugin-defined agents filters out MCP tools. Agents inherit all tools from the parent session. The PermissionRequest hook provides runtime enforcement. Agent body text references MCP tool syntax (not CLI commands). See RDR-035.
+**Agent frontmatter**: Agents do NOT declare a `tools:` field — Claude Code has a confirmed bug (GitHub #13605, #21560, #25200) where explicit `tools:` in plugin-defined agents filters out MCP tools. Agents inherit all tools from the parent session. The `PreToolUse` auto-approve hook provides runtime enforcement. Agent body text references MCP tool syntax (not CLI commands). See RDR-035.
 
 **Human CLI**: The `nx` CLI remains the primary interface for human users. All `docs/` documentation uses CLI syntax. The MCP server is transparent to human workflows.
 
@@ -510,7 +509,7 @@ When skills delegate to agents, they use a standardized relay format defined in 
 
 ### Permission Auto-Approval
 
-The plugin's auto-approve hook (`PreToolUse` and `PermissionRequest`, matcher `mcp__plugin_conexus_.*`) approves an explicit allowlist of tool names
+The plugin's auto-approve hook (`PreToolUse`, matcher `mcp__plugin_conexus_.*`) approves an explicit allowlist of tool names
 ([`auto_approve.py`](https://github.com/Hellblazer/nexus/blob/main/src/nexus/hooks/auto_approve.py), one name per line so each grant shows in a diff):
 
 - **nexus MCP tools**: every core tool except `daemon_uninstall`, `setup` and `setup_status`, which keep the application's own prompt
