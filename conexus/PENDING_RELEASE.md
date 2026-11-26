@@ -43,8 +43,9 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v8.5.7)
+## Awaiting the next release (pinned: v8.5.8)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
+
 
 ## Deferred to the next client release

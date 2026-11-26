@@ -343,9 +343,11 @@ deleted, or relied on, on the strength of what is written here.
   earlier entry ("under `skipDangerousModePermissionPrompt` the gate is bypassed
   entirely, so a PermissionRequest auto-approver is redundant") was also read under the
   bypass flag; `skipDangerousModePermissionPrompt` only skips the startup dialog. This has
-  flipped across Claude Code versions; re-measure on every pin bump. The auto-approver
-  (the `nx_hook_shim` auto-approve verb, registered on PreToolUse and PermissionRequest)
-  stays as a hedge whichever way this lands.
+  flipped across Claude Code versions; re-measure on every pin bump. The conexus auto-approver
+  (the `nx_hook_shim` auto-approve verb) is registered on PreToolUse only. Its
+  PermissionRequest registration was removed on purpose: a PermissionRequest `allow`
+  overrides a user's own `ask` rule (measured, T2 nexus_rdr/259-research-26, -51 and -52),
+  so nobody restores it as insurance.
 - **33** — a background subagent calls a Serena writer
   (`mcp__plugin_sn_serena__replace_in_files`) that no allow rule grants, with sn's
   PreToolUse script wired from settings.json. Observed on 2.1.302 on 2026-10-23
