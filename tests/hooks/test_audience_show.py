@@ -31,6 +31,13 @@ def _show(audience, argv, versions=VERSIONS) -> "tuple[int, str]":
     return rc, out.getvalue()
 
 
+def _names(text, path):
+    """The report names *path*, spelled as given or as its real path: the project file is printed under the session root
+    the reader resolved, and on native Windows a temp directory's 8.3 short name is not the long name the reader prints."""
+    shown = os.path.normcase(text)
+    return any(os.path.normcase(spelling) in shown for spelling in (str(path), os.path.realpath(path)))
+
+
 @pytest.fixture
 def pinned(audience_copy, monkeypatch):
     def pin(posture):
@@ -48,8 +55,8 @@ def test_a_plain_repository_shows_every_key_at_its_default(pinned, plain_posture
         if key != "version":
             assert key in text, key
     assert "default" in text and "no problems" in text.lower()
-    assert str(plain_posture.repo / ".nexus" / "project.json") in text
-    assert str(plain_posture.home / ".config" / "nexus" / "conexus.json") in text
+    assert _names(text, plain_posture.repo / ".nexus" / "project.json")
+    assert _names(text, plain_posture.home / ".config" / "nexus" / "conexus.json")
     assert "not present" in text or "absent" in text
 
 

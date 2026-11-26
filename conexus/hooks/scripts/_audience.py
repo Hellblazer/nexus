@@ -585,6 +585,14 @@ def _run_cat_file(root: str, gitdir: str) -> "subprocess.CompletedProcess[bytes]
     )
 
 
+def _run_git(root: str, gitdir: str, *args: str) -> "subprocess.CompletedProcess[bytes]":
+    """One git process with a fixed argv, for the checks that are not the HEAD read (the remote-ref check of ``show``)."""
+    return subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        ["git", "--git-dir", gitdir, *args], cwd=root, stdin=subprocess.DEVNULL, capture_output=True,
+        timeout=GIT_TIMEOUT_S, check=False,
+    )
+
+
 def _parse_batch(out: bytes) -> "bytes | None":
     """The committed file's bytes from ``cat-file --batch`` output, or None when HEAD has no such path.
 
