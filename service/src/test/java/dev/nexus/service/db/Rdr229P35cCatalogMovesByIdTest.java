@@ -496,4 +496,131 @@ class Rdr229P35cCatalogMovesByIdTest {
             return null;
         });
     }
+
+    // ---- the same locks, against a REAL verb (bead nexus-p2m1x.25, follow-up 5 of the census evidence pass, comment of 2026-11-23 21:09) ----------
+
+    /** True while some session waits for a row of the registry: a row-lock waiter holds the tuple lock of the row it waits for. */
+    private boolean someoneWaitsForARegistryRow() {
+        return su(ctx -> ctx.fetchExists(DSL.table(DSL.name("pg_catalog", "pg_locks")),
+            DSL.field(DSL.name("locktype"), String.class).eq("tuple")
+                .and(DSL.field(DSL.name("relation")).eq(DSL.function("to_regclass", Object.class, DSL.inline("nexus.catalog_collections"))))));
+    }
+
+    /**
+     * Starts a real delete by id ({@code deleteCollectionById}, what {@code POST /v1/catalog/collections/delete} runs for a {@code collection_id}; its
+     * first statement is the registry row FOR UPDATE, unbounded, where the delete by label purges the children first) from a second session inside the move's own transaction (after its last write) and
+     * reports what it did: "waiting" when it is held behind the move on the label's registry row, "ran" when it completed beside the move. The
+     * verb is then left to finish once the move commits, and must: a held verb waits, it does not fail ("non-blocking" for the cut, linda). The
+     * verb deletes only the rows of its own collection, so it waits on the registry row and nowhere else: it is the lock set that holds it,
+     * not a row the move happens to have written (the tuple-lock probe names the registry's).
+     */
+    private String aRealDeleteDuring(String tenant, String label, Runnable move) throws Exception {
+        long id = idOf(tenant, label);
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+        java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<Map<String, Integer>>> verb =
+            new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicReference<String> seen = new java.util.concurrent.atomic.AtomicReference<>("timeout");
+        CatalogMoves.afterWritesHookForTests = () -> {
+            var f = pool.submit(() -> repo.deleteCollectionById(tenant, label, id, false));
+            verb.set(f);
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
+            while (System.nanoTime() < deadline) {
+                if (f.isDone()) {
+                    seen.set("ran");
+                    return;
+                }
+                if (someoneWaitsForARegistryRow()) {
+                    seen.set("waiting");
+                    return;
+                }
+                java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(5));
+            }
+            seen.set("timeout; sessions waiting on a lock: " + su(ctx -> ctx.select(DSL.field(DSL.name("wait_event"), String.class),
+                    DSL.field(DSL.name("query"), String.class)).from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")).fetch().toString()));
+        };
+        try {
+            move.run();
+        } finally {
+            CatalogMoves.afterWritesHookForTests = null;
+        }
+        try {
+            assertThat(verb.get()).as("non-vacuity: the hook ran inside the move").isNotNull();
+            // the verb finishes once the move has let go: a wait, never a failure
+            assertThat(verb.get().get(60, java.util.concurrent.TimeUnit.SECONDS)).containsKey("catalog_collections");
+        } finally {
+            pool.shutdownNow();
+        }
+        return seen.get();
+    }
+
+    @Test
+    void aRealDeleteOfACollectionTheDocumentMoveWritesInWaitsBehindTheMove_viaAnAspectRow() throws Exception {
+        String t = tenant();
+        latched.set(false);
+        register(t, COLL_A);
+        register(t, COLL_K);
+        curatorOwner(t, "1.1", "pdfs");
+        String s = registered(t, "1.1", "s", "file:///old/a.pdf", "/old/a.pdf", COLL_A);
+        aspect(t, s, COLL_K, "/old/a.pdf", "file:///old/a.pdf", "filed under K");
+        latched.set(true);
+
+        assertThat(aRealDeleteDuring(t, COLL_K, () -> moves.moveDocument(t, s, "file:///new/a.pdf", "/new/a.pdf", false)))
+            .as("the verb waits for the registry row the move holds").isEqualTo("waiting");
+        boolean stillThere = su(ctx -> ctx.fetchExists(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(t).and(CATALOG_COLLECTIONS.NAME.eq(COLL_K))));
+        assertThat(stillThere).as("and ran after it: K is gone").isFalse();
+    }
+
+    @Test
+    void aRealDeleteOfACollectionTheDocumentMoveWritesInWaitsBehindTheMove_viaAHighlightRow() throws Exception {
+        String t = tenant();
+        latched.set(false);
+        register(t, COLL_A);
+        register(t, COLL_K);
+        curatorOwner(t, "1.1", "pdfs");
+        String s = registered(t, "1.1", "s", "file:///old/a.pdf", "/old/a.pdf", COLL_A);
+        highlight(t, s, COLL_K, "file:///old/a.pdf", "filed under K");
+        latched.set(true);
+
+        assertThat(aRealDeleteDuring(t, COLL_K, () -> moves.moveDocument(t, s, "file:///new/a.pdf", "/new/a.pdf", false)))
+            .as("the verb waits for the registry row the move holds").isEqualTo("waiting");
+    }
+
+    @Test
+    void aRealDeleteOfACollectionTheAbsorbWritesInWaitsBehindTheMove_viaAnAliasingDocument() throws Exception {
+        String t = tenant();
+        latched.set(false);
+        register(t, COLL_A);
+        register(t, COLL_K);
+        curatorOwner(t, "1.1", "pdfs");
+        String s = registered(t, "1.1", "s", "file:///old/a.pdf", "/old/a.pdf", COLL_A);
+        String tt = registered(t, "1.1", "t", "file:///new/a.pdf", "/new/a.pdf", COLL_A);
+        String u = registered(t, "1.1", "u", null, "/u.pdf", COLL_K);
+        su(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, tt)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t)).and(CATALOG_DOCUMENTS.TUMBLER.eq(u)).execute());
+        latched.set(true);
+
+        assertThat(aRealDeleteDuring(t, COLL_K, () -> moves.moveDocument(t, s, "file:///new/a.pdf", "/new/a.pdf", false)))
+            .as("the verb waits for the registry row the absorb holds").isEqualTo("waiting");
+    }
+
+    @Test
+    void aRealDeleteOfACollectionTheOwnerFoldWritesInWaitsBehindTheFold() throws Exception {
+        String t = tenant();
+        latched.set(false);
+        register(t, COLL_A);
+        register(t, COLL_B);
+        register(t, COLL_K);
+        repoOwner(t, "1.1", "proj", HASH_A, OLD_ROOT);
+        registered(t, "1.1", "docs/x.md", null, "docs/x.md", COLL_A);
+        repoOwner(t, "1.2", "proj-renamed", HASH_B, NEW_ROOT);
+        String bx = registered(t, "1.2", "docs/x.md", null, "docs/x.md", COLL_B);
+        String bxUri = su(ctx -> ctx.select(CATALOG_DOCUMENTS.SOURCE_URI).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t)).and(CATALOG_DOCUMENTS.TUMBLER.eq(bx)).fetchOne(CATALOG_DOCUMENTS.SOURCE_URI));
+        aspect(t, bx, COLL_K, "docs/x.md", bxUri, "B's extraction, filed under K");
+        latched.set(true);
+
+        assertThat(aRealDeleteDuring(t, COLL_K, () -> moves.moveOwner(t, "1.1", NEW_ROOT, HASH_B, false)))
+            .as("the verb waits for the registry row the fold holds").isEqualTo("waiting");
+    }
 }
