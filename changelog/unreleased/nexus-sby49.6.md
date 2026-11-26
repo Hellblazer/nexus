@@ -1,3 +1,3 @@
-### Fixed
+### Changed
 
-- **`nx hook auto-approve` answers only `PreToolUse`.** It no longer answers `PermissionRequest` (or an event with no name), so a user's own `ask` rule for a conexus tool prompts again instead of being overridden by the plugin's allowlist.
+- conexus tools are still approved automatically, but a rule you wrote that asks before running one of them is no longer overridden: nx answers the before-tool check only, not the permission dialog. (nexus-sby49.6)

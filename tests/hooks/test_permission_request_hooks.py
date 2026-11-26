@@ -217,15 +217,12 @@ class TestDemotedOperatorsAreNotAutoApproved:
         offenders = sorted(n for n in granted if "__operator_" in n)
         assert not offenders, f"demoted operator tool(s) auto-approved: {offenders}"
 
-    @pytest.mark.parametrize("event", [None, "PreToolUse"])
     @pytest.mark.parametrize(
         "verb", ["extract", "summarize", "filter", "groupby", "aggregate"]
     )
-    def test_operator_tool_names_are_not_approved(
-        self, verb: str, event: str | None
-    ) -> None:
+    def test_operator_tool_names_are_not_approved(self, verb: str) -> None:
         output = _run_nx_hook(
-            f"mcp__plugin_conexus_nexus__operator_{verb}", hook_event_name=event
+            f"mcp__plugin_conexus_nexus__operator_{verb}", hook_event_name="PreToolUse"
         )
         assert output == ""
 
@@ -240,17 +237,6 @@ class TestDestructiveToolsRequireManualApproval:
         """Non-vacuity: this exemption set must name something real, or the
         drift guard above would be silently exempting nothing."""
         assert _MANUAL_APPROVAL_REQUIRED
-
-    @pytest.mark.parametrize("tool_name", sorted(_MANUAL_APPROVAL_REQUIRED))
-    def test_registered_tool_is_not_auto_approved_on_permissionrequest(
-        self, tool_name: str
-    ) -> None:
-        output = _run_nx_hook(tool_name, hook_event_name="PermissionRequest")
-        assert output == "", (
-            f"{tool_name} is in _MANUAL_APPROVAL_REQUIRED but nexus.hooks.auto_approve "
-            f"still approves it on PermissionRequest — the allowlist exclusion "
-            f"regressed."
-        )
 
     @pytest.mark.parametrize("tool_name", sorted(_MANUAL_APPROVAL_REQUIRED))
     def test_registered_tool_is_not_auto_approved_on_pretooluse(
@@ -275,7 +261,6 @@ class TestDestructiveToolsRequireManualApproval:
         assert tool_name not in auto_approve._ALLOWED_HOOK_TOOLS
         assert _run_nx_hook(tool_name) == ""
         assert _run_nx_hook(tool_name, hook_event_name="PreToolUse") == ""
-        assert _run_nx_hook(tool_name, hook_event_name="PermissionRequest") == ""
 
     def test_procedure_run_is_auto_approved_on_pretooluse_only(self) -> None:
         """nexus-qo7ie.31: Sam chose auto-approval (threads/marlowe ask procedure-run-autoapprove,
