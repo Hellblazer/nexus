@@ -401,7 +401,7 @@ class MoveBootWorkTest {
             w.start(MoveBootWork.DEFAULT_INTERVAL);   // steady period 5 s
             Thread.sleep(1_000);   // four warm-up periods, were the warm-up still on
             assertThat(reader.reads.get()).as("one sample at start, none a warm-up period later: the next is 5 s out")
-                .isLessThan(2);
+                .isBetween(1, 1);
         } finally {
             w.close();
         }
@@ -416,8 +416,8 @@ class MoveBootWorkTest {
         try {
             w.start(MoveBootWork.DEFAULT_INTERVAL);
             Thread.sleep(1_000);
-            assertThat(reader.reads.get()).as("a database refusing connections is not hit every 250 ms in the first minute")
-                .isLessThan(2);
+            assertThat(reader.reads.get()).as("sampled once at start, and a database refusing connections is not hit every "
+                + "250 ms in the first minute").isBetween(1, 1);
         } finally {
             w.close();
         }
