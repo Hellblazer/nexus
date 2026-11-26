@@ -40,7 +40,7 @@ import subprocess
 import sys
 import time
 import unicodedata
-from typing import NamedTuple
+from typing import Mapping, NamedTuple
 
 #: In-process test seam. ``None`` reads the real account home; a path replaces it.
 _ACCOUNT_HOME_OVERRIDE: "str | os.PathLike[str] | None" = None
@@ -875,6 +875,42 @@ def telemetry_enabled() -> bool:
         return _user_values()["telemetry"] is True
     except BaseException:  # noqa: BLE001
         return False
+
+
+#: What a telemetry child must not inherit (RDR-259 Decision 9). Each of these names where telemetry goes, which credential
+#: it carries or how it gets there, and a repository can set an environment variable. Compared upper-cased: Windows
+#: environment names ignore case, and a lower-case proxy variable is as live as its upper-case form.
+_TELEMETRY_ENV_STRIPPED = frozenset({
+    "NX_SERVICE_URL", "NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN", "NX_MINT_TOKEN", "NX_MINT_TENANT",
+    "NX_CONFIG_DIR", "XDG_CONFIG_HOME", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "HOME", "USERPROFILE", "NEXUS_CONFIG_DIR",  # replaced below, never inherited
+})
+
+
+def telemetry_child_env(environ: "Mapping[str, str]") -> "dict[str, str] | None":
+    """The environment for a detached telemetry child (RDR-259 Decision 9), or None when the account has no home.
+
+    *environ* is the hook's environment, passed in: this module reads no environment variable but ``CLAUDE_PROJECT_DIR``.
+    The result is a copy of it without the endpoint, token, mint, config-directory and proxy variables, with ``HOME`` and
+    ``USERPROFILE`` set to the account home and ``NEXUS_CONFIG_DIR`` to its ``.config/nexus``, so the child's own endpoint
+    resolver, its data-token mint and its HTTP client see only the account's configuration. A relative
+    ``NX_DROPPED_WRITES_LOG_PATH`` is made absolute (the child starts in the filesystem root). ``NX_DISPATCH_COUNTER`` and
+    the rest pass through. None means the account has no home: the caller sends no telemetry and says so. Never raises.
+    """
+    try:
+        home = account_home()
+        if not home or not os.path.isabs(home):
+            return None
+        env = {k: v for k, v in environ.items() if k.upper() not in _TELEMETRY_ENV_STRIPPED}
+        env["HOME"] = home
+        env["USERPROFILE"] = home
+        env["NEXUS_CONFIG_DIR"] = os.path.join(home, ".config", "nexus")
+        raw = env.get("NX_DROPPED_WRITES_LOG_PATH", "").strip()
+        if raw and not os.path.isabs(raw):
+            env["NX_DROPPED_WRITES_LOG_PATH"] = os.path.abspath(raw)
+        return env
+    except BaseException:  # noqa: BLE001 -- no home we can name is no telemetry
+        return None
 
 
 def t1_nudge_enabled() -> bool:

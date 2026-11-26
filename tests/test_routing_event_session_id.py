@@ -79,8 +79,17 @@ HARNESS = pathlib.Path(__file__).parent / "hooks" / "audience_harness.py"
 
 
 def _telemetry_home(env: dict) -> str:
-    """An account home whose ``conexus.json`` turns the opt-in telemetry on: the rows these tests read are sent only then."""
-    return str(write_user_settings(pathlib.Path(env["NEXUS_CONFIG_DIR"]).parent / "acct-telemetry", telemetry=True))
+    """An account home whose ``conexus.json`` turns the opt-in telemetry on (the rows these tests read are sent only then) and
+    whose ``config.yml`` names the engine: telemetry resolves its endpoint from the account's config directory alone
+    (RDR-259 Decision 9), so the port and token the fixtures hold in ``NX_SERVICE_*`` go there. (The environment's own copy is
+    never read for telemetry; tests/test_telemetry_pin.py proves that with decoys.)"""
+    home = write_user_settings(pathlib.Path(env["NEXUS_CONFIG_DIR"]).parent / "acct-telemetry", telemetry=True)
+    config = pathlib.Path(home) / ".config" / "nexus" / "config.yml"
+    config.write_text(
+        f"credentials:\n  service_url: http://{env['NX_SERVICE_HOST']}:{env['NX_SERVICE_PORT']}\n"
+        f"  service_token: {env['NX_SERVICE_TOKEN']}\n", encoding="utf-8",
+    )
+    return str(home)
 
 
 def _run(script: str, payload: dict, env: dict) -> dict:

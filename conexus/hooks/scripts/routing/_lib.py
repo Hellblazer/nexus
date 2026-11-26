@@ -100,8 +100,11 @@ import _endpoint_resolve as _ep  # noqa: E402 -- must follow the sys.path insert
 # ``telemetry`` in ``conexus.json``, off by default. It sends data, so a helper that cannot be imported binds it to False:
 # a broken helper records nothing.
 try:
-    from _audience import telemetry_enabled as _telemetry_enabled  # noqa: E402 -- same sys.path insert
+    from _audience import telemetry_child_env as _telemetry_child_env, telemetry_enabled as _telemetry_enabled  # noqa: E402 -- same sys.path insert
 except BaseException:  # noqa: BLE001
+    def _telemetry_child_env(environ):
+        return None
+
     def _telemetry_enabled() -> bool:
         return False
 
@@ -623,7 +626,7 @@ def _post_routing_event_http(
 
     Cause vocabulary (nexus-gjv9b review fold-in rounds 3-4, critique
     CRITICAL 1/2, code-review item 1): ``"unresolvable"`` (no
-    endpoint/credential at all — :func:`_engine_endpoint` returned
+    endpoint/credential at all — :func:`_pinned_endpoint` returned
     ``(None, None)``), ``"401"``/``"403"``/``"route_absent"``
     (HTTP 404/405 — the serving engine predates this route entirely, the
     plugin-cut-ahead-of-the-engine case a doctor check must never read
@@ -646,9 +649,9 @@ def _post_routing_event_http(
     (:func:`_poster_main`), never in the hook, so the deadline bounds the
     child's life, not the hook's decision; see :data:`_ROUTING_POST_BUDGET_S`.
     *endpoint* is the ``(base_url, token)`` the hook already resolved;
-    without it this resolves its own.
+    without it this resolves its own, pinned to the account (:func:`_pinned_endpoint`).
     """
-    base_url, token = endpoint if endpoint is not None else _engine_endpoint()
+    base_url, token = endpoint if endpoint is not None else _pinned_endpoint()
     if base_url is None:
         return "unresolvable"
     import threading  # noqa: PLC0415 — stdlib, only needed on this path
@@ -804,7 +807,7 @@ def log_routing_event(
     (:func:`_spawn_poster`) that POSTs the event, and returns at once; it
     never waits on the network. On ANY failure (unresolvable endpoint -- no
     live supervisor lease, no config.yml credentials, no NX_SERVICE_* env,
-    per :func:`_engine_endpoint` -- metered by the hook; timeout, refused
+    per :func:`_pinned_endpoint` -- metered by the hook; timeout, refused
     connection, non-2xx -- metered by the child), a drop is recorded through
     :func:`_record_dropped_routing_event` rather than a JSONL fallback or a
     retry file. The JSONL append and rotation
@@ -845,14 +848,26 @@ def log_routing_event(
 
 
 def _send_routing_event(record: dict) -> None:
-    """Hook side of the write: resolve the endpoint (local file and env reads only), then hand the POST to a
-    detached child. Never touches the network, so the hook's decision does not wait on the engine
+    """Hook side of the write: resolve the endpoint (the account's config directory only, RDR-259 Decision 9), then
+    hand the POST to a detached child. Never touches the network, so the hook's decision does not wait on the engine
     (nexus-njn1a.1). An endpoint that cannot be resolved is a purely local fact and is metered here; a child
     that cannot be started is metered here as ``other``. A POST that fails afterwards is metered by the child."""
-    base_url, token = _engine_endpoint()
+    try:
+        env = _telemetry_child_env(os.environ)
+    except Exception:  # noqa: BLE001 -- no environment, no telemetry
+        env = None
+    if env is None:
+        _record_dropped_routing_event(
+            "telemetry is on, but this account has no home directory, so no telemetry is sent",
+            cause="unresolvable", event=record,
+        )
+        return
+    base_url, token = _ep.pinned_endpoint(pathlib.Path(env["NEXUS_CONFIG_DIR"]))
     if base_url is None:
         _record_dropped_routing_event(
-            "routing_events POST failed: unresolvable", cause="unresolvable", event=record,
+            "telemetry is on, but no engine is configured under the account's config directory; "
+            "an engine named only in the environment is not used for telemetry",
+            cause="unresolvable", event=record,
         )
         return
     if not _spawn_poster(record, base_url, token):
@@ -868,18 +883,16 @@ _CREATE_NO_WINDOW = 0x08000000
 _CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
 
-def _poster_env() -> "dict[str, str]":
-    """The child's environment: this process's, with the two path variables the drop meter reads made
-    absolute (the child starts in the filesystem root, so a relative path would name a different place)."""
-    env = dict(os.environ)
-    for name in ("NEXUS_CONFIG_DIR", "NX_DROPPED_WRITES_LOG_PATH"):
-        raw = env.get(name, "").strip()
-        if raw and not os.path.isabs(raw):
-            try:
-                env[name] = os.path.abspath(raw)
-            except OSError:
-                pass
-    return env
+def _pinned_endpoint() -> "tuple[str, str] | tuple[None, None]":
+    """``(base_url, token)`` for the poster from the account's own config directory, or ``(None, None)``: no account home,
+    or no engine configured there. Reads no environment variable (RDR-259 Decision 9, nexus-sby49.10)."""
+    try:
+        env = _telemetry_child_env(os.environ)
+    except Exception:  # noqa: BLE001 -- no environment, no endpoint
+        return None, None
+    if env is None:
+        return None, None
+    return _ep.pinned_endpoint(pathlib.Path(env["NEXUS_CONFIG_DIR"]))
 
 
 def _spawn_poster(record: dict, base_url: str, token: str) -> bool:
@@ -890,7 +903,9 @@ def _spawn_poster(record: dict, base_url: str, token: str) -> bool:
     POST with it, and stdout and stderr on the null device, so it can never write to the hook's stdout (the
     protocol channel) and holds no pipe the host reads to EOF (a child that inherited it would keep the hook
     "running" until the POST ended). The event, with the bearer token, goes in over stdin, not argv, where
-    ``ps`` would show a command fragment and the token. A pipe write this small does not block. Never raises.
+    ``ps`` would show a command fragment and the token. A pipe write this small does not block. Its environment is
+    :func:`_audience.telemetry_child_env`'s, never the hook's own (RDR-259 Decision 9); an account with no home starts no
+    child. Never raises.
     """
     try:
         import subprocess  # noqa: PLC0415 — stdlib, only needed on this path
@@ -900,7 +915,9 @@ def _spawn_poster(record: dict, base_url: str, token: str) -> bool:
         # Only this interpreter, by absolute path: no name for CreateProcess to search the working directory for.
         argv = [os.path.abspath(sys.executable), os.path.abspath(__file__), _POSTER_ARGV]
         stable_cwd = os.path.abspath(os.sep)
-        env = _poster_env()
+        env = _telemetry_child_env(os.environ)
+        if env is None:
+            return False
         if not _IS_WINDOWS:
             proc = subprocess.Popen(  # noqa: S603 -- argv list, this interpreter and this file, no shell
                 argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

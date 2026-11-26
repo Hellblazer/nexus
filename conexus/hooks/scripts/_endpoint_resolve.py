@@ -881,6 +881,55 @@ def read_data_token_lease(
     return best_token
 
 
+def _same_origin(url: str, other: str) -> bool:
+    """Whether two ``http(s)`` URLs name one scheme, host and port."""
+    import urllib.parse  # noqa: PLC0415 -- lazy: only the telemetry path asks
+
+    try:
+        a, b = urllib.parse.urlsplit(url), urllib.parse.urlsplit(other)
+        default = {"http": 80, "https": 443}
+        return (
+            a.scheme == b.scheme and bool(a.hostname) and a.hostname == b.hostname
+            and (a.port or default.get(a.scheme)) == (b.port or default.get(b.scheme))
+        )
+    except ValueError:
+        return False
+
+
+def pinned_endpoint(config_dir: Path) -> "tuple[str, str] | tuple[None, None]":
+    """``(base_url, token)`` for the telemetry senders, or ``(None, None)``. Never raises.
+
+    *config_dir* is ``<account home>/.config/nexus``, the account home from the OS account database, which the caller
+    passes in. This reads that directory and nothing else: no environment variable, and it never asks
+    :func:`default_config_dir` or :func:`resolve_base_url`, which do. An engine a repository names through
+    ``NX_SERVICE_URL`` or ``NX_SERVICE_HOST``/``NX_SERVICE_PORT`` is not an engine for telemetry (RDR-259 Decision 9).
+
+    Where telemetry may go, in the CLI's order: the saved ``service_url``, else the live local supervisor lease. A fresh
+    data-token lease for that host wins over a static token. Which credential may go there is a second rule
+    (nexus-ec37o): a saved ``service_token`` goes with the saved URL, and the lease's token only to the lease's own
+    endpoint. A URL carrying ``user:password@`` is refused, as the CLI refuses it.
+    """
+    try:
+        lease = read_storage_service_lease(config_dir)
+        if lease is not None and not lease.get("token"):
+            lease = None
+        saved = read_config_yml_credentials(config_dir)
+        url = saved.get("service_url", "").strip().rstrip("/")
+        if url:
+            if has_userinfo(url):
+                return None, None
+            token = read_data_token_lease(config_dir, url) or saved.get("service_token", "").strip()
+            if not token and lease is not None and _same_origin(url, f"http://{lease['host']}:{lease['port']}"):
+                token = lease["token"]
+            return (url, token) if token else (None, None)
+        if lease is not None:
+            url = f"http://{lease['host']}:{lease['port']}"
+            return url, read_data_token_lease(config_dir, url) or lease["token"]
+    except Exception:  # noqa: BLE001 -- telemetry resolution is best effort; unresolvable is the answer
+        pass
+    return None, None
+
+
 def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
     """``(base_url, is_local_supervisor)``, or raise
     :class:`EndpointUnresolvable`.
