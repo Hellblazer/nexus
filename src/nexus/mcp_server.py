@@ -13,7 +13,7 @@ from nexus.mcp.core import (  # noqa: F401
     scratch, scratch_manage,
     collection_list, collection_info, collection_verify,
     answer_plan_delete, answer_plan_save, answer_plan_search,
-    answer_plan_delete, answer_plan_save, answer_plan_search,  # deprecated aliases (nexus-sby49.4)
+    plan_delete, plan_save, plan_search,  # deprecated aliases (nexus-sby49.4)
     _store_list_docs,
     main,
 )

@@ -186,7 +186,7 @@ When your critique reveals Critical issues requiring remediation, your final out
 ```
 ## Next Step: [appropriate agent, developer, architect-planner, or strategic-planner]
 **Task**: Address critical issues: [list]
-**Input Artifacts**: [critique output, beads created, T2 memory path]
+**Input Artifacts**: [critique output, beads created where `.beads/` exists, T2 memory path]
 **Deliverable**: Remediated artifact addressing critical findings
 ```
 
@@ -197,7 +197,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
 
 ### Agent-Specific PRODUCE
 - **Critique Reports**: Include in response
-- **Critical Issues**: Create beads for must-fix items
+- **Critical Issues**: Where `.beads/` exists, create beads for must-fix items
 - **Pattern Analysis**: Store recurring issues: mcp__plugin_conexus_nexus__store_put(content="<pattern analysis>", collection="<subject>", title="critique-pattern-{topic}", tags="critique,pattern"
 - **Improvement Recommendations**: Include in output for caller to act on
 - **Critique Notes**: Use T1 scratch to track issues found during critique:
@@ -217,7 +217,7 @@ Store using these naming conventions:
 **Sequence** (follow strictly):
 1. **Persist Findings**: Write the critique to T2 (memory_put); the gate record is mandatory
 2. **Store in T3**: Store pattern analysis and recurring issues via store_put tool
-3. **Create/Update Beads**: Create beads for critical issues requiring follow-up
+3. **Create/Update Beads**: Where `.beads/` exists, create beads for critical issues requiring follow-up
 4. **Verify Persistence**: Confirm all writes succeeded
 5. **Generate Response**: Only after all above steps complete, generate final critique response
 

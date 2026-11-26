@@ -486,7 +486,7 @@ def index_failures_cmd(
             if exc.response.status_code == 404:
                 raise click.ClickException(
                     "index_failures/acks route not found on this engine -- "
-                    "the engine predates nexus-nukn3's --acks support. "
+                    "the engine predates --acks support. "
                     "Upgrade the engine (nx upgrade / redeploy)."
                 ) from exc
             raise click.ClickException(f"index_failures --acks failed: {exc}.") from exc
@@ -527,7 +527,7 @@ def index_failures_cmd(
                     if exc.response.status_code == 404:
                         raise click.ClickException(
                             "index_failures/list route not found on this "
-                            "engine -- the engine predates nexus-nukn3."
+                            "engine -- the engine predates this route."
                         ) from exc
                     raise click.ClickException(f"index_failures: request failed ({exc}).") from exc
                 except (httpx.HTTPError, RuntimeError) as exc:
@@ -558,8 +558,7 @@ def index_failures_cmd(
                     if exc.response.status_code == 404:
                         raise click.ClickException(
                             "index_failures/acks route not found on this "
-                            "engine -- the engine predates nexus-nukn3's "
-                            "--acks support."
+                            "engine -- the engine predates --acks support."
                         ) from exc
                     raise click.ClickException(f"index_failures --acks failed: {exc}.") from exc
                 except (httpx.HTTPError, RuntimeError) as exc:
@@ -593,8 +592,7 @@ def index_failures_cmd(
                 if exc.response.status_code == 404:
                     raise click.ClickException(
                         "index_failures/acknowledge route not found on this "
-                        "engine -- the engine predates nexus-nukn3's "
-                        "--acknowledge support. Upgrade the engine "
+                        "engine -- the engine predates --acknowledge support. Upgrade the engine "
                         "(nx upgrade / redeploy)."
                     ) from exc
                 raise click.ClickException(f"index_failures --acknowledge failed: {exc}.") from exc
@@ -615,8 +613,7 @@ def index_failures_cmd(
                 if exc.response.status_code == 404:
                     raise click.ClickException(
                         "index_failures/unacknowledge route not found on "
-                        "this engine -- the engine predates nexus-nukn3's "
-                        "--unacknowledge support. Upgrade the engine "
+                        "this engine -- the engine predates --unacknowledge support. Upgrade the engine "
                         "(nx upgrade / redeploy)."
                     ) from exc
                 raise click.ClickException(f"index_failures --unacknowledge failed: {exc}.") from exc
@@ -653,7 +650,7 @@ def index_failures_cmd(
             if exc.response.status_code == 404:
                 raise click.ClickException(
                     "index_failures/trim route not found on this engine -- "
-                    "the engine predates nexus-nukn3's --clear support. "
+                    "the engine predates --clear support. "
                     "Upgrade the engine (nx upgrade / redeploy)."
                 ) from exc
             raise click.ClickException(f"index_failures --clear failed: {exc}.") from exc
@@ -670,8 +667,7 @@ def index_failures_cmd(
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise click.ClickException(
-                "index_failures/list route not found on this engine -- the "
-                "engine predates nexus-nukn3. Upgrade the engine (nx upgrade "
+                "index_failures/list route not found on this engine -- the engine predates this route. Upgrade the engine (nx upgrade "
                 "/ redeploy) to use this verb."
             ) from exc
         raise click.ClickException(f"index_failures: request failed ({exc}).") from exc
@@ -1557,8 +1553,8 @@ def index_repo_cmd(
                 f"{_counts[r]} {_reason_labels.get(r, r)}" for r in _ordered_reasons
             )
             click.echo(
-                f"  ⚠ {len(skips)} file(s) skipped — not registered "
-                f"(nexus-u8n4r): {_breakdown}",
+                f"  ⚠ {len(skips)} file(s) skipped — not registered"
+                f": {_breakdown}",
                 err=True,
             )
 
@@ -1575,7 +1571,7 @@ def index_repo_cmd(
                 return
             click.echo(
                 f"  ℹ {len(mints)} file(s) now have MORE THAN ONE catalog "
-                f"document (nexus-yzij1): this run registered a document for "
+                f"document: this run registered a document for "
                 f"a path another owner already holds. Allowed, not an error. "
                 f"Inspect with 'nx catalog links-for-file <path>'.",
                 err=True,
@@ -1936,7 +1932,7 @@ def index_repo_cmd(
             # referencing detail that is not in the file at all.
             click.echo(
                 f"Note: {skipped_unextractable_files} file(s) could not be "
-                f"extracted and were skipped (nexus-deyd5) — every other "
+                f"extracted and were skipped — every other "
                 f"file indexed normally. See the WARNING/ERROR log line(s) "
                 f"above for the affected path(s) and reason(s).",
                 err=True,
@@ -2002,13 +1998,13 @@ def index_repo_cmd(
         _catalog_hook_failed = (stats or {}).get("catalog_hook_failed", 0)
         if _catalog_hook_failed:
             click.echo(
-                "Warning: the catalog reconcile step failed (RDR-193), so no chunk of this run was written. If the "
+                "Warning: the catalog reconcile step failed, so no chunk of this run was written. If the "
                 "failure came before the commit, nothing was registered or removed. See the catalog_hook_failed log "
                 "line above.",
                 err=True,
             )
             _run_failure = _run_failure or click.ClickException(
-                "the catalog reconcile step failed, so this run wrote no chunks (nexus-u5m5g.7). The --since-head "
+                "the catalog reconcile step failed, so this run wrote no chunks. The --since-head "
                 "base was not advanced. Re-run 'nx index repo' once the catalog service is healthy."
             )
         if manifest_problems_detected:
@@ -2029,7 +2025,7 @@ def index_repo_cmd(
         if pdf_quality_gate_failed:
             _run_failure = _run_failure or click.ClickException(
                 f"{pdf_quality_gate_failed} PDF(s) failed the post-extraction "
-                f"quality gate (nexus-wi1uv) — see the WARNING line(s) above "
+                f"quality gate — see the WARNING line(s) above "
                 f"for the affected file(s). Retry an individual file with "
                 f"'nx index pdf --allow-degraded-extraction <file>' to accept "
                 f"the extraction deliberately, or 'nx index pdf <file>' after "
@@ -2058,7 +2054,7 @@ def index_repo_cmd(
             _pct = f"{skipped_unextractable_files / _attempted:.0%}" if _attempted else "?"
             _run_failure = _run_failure or click.ClickException(
                 f"skipped {skipped_unextractable_files} of {_attempted} files "
-                f"({_pct}) — extraction may be broken (nexus-deyd5). If this "
+                f"({_pct}) — extraction may be broken. If this "
                 f"corpus contains scanned/image-only PDFs, only MinerU reads "
                 f"them (the text-only 'pymupdf' extractor extracts nothing from "
                 f"an image-only page): run 'nx doctor' to check the MinerU install, "
@@ -2129,7 +2125,7 @@ def index_repo_cmd(
                 + ". Wait, then re-run 'nx index repo' to retry."
             )
             _throttle_failure = click.ClickException(
-                f"the service throttled this run's writes (nexus-eoido): "
+                f"the service throttled this run's writes: "
                 f"{chunk_flush_throttled_files} file(s) not indexed, {_wait}"
                 + (
                     "; stopped sending after consecutive throttled flushes"
@@ -2152,7 +2148,7 @@ def index_repo_cmd(
             )
             _run_failure = _run_failure or click.ClickException(
                 f"{chunk_flush_failed_files} file(s) failed to flush chunk "
-                f"uploads this run (nexus-4s1ww) — see the WARNING line "
+                f"uploads this run — see the WARNING line "
                 f"above."
             )
         if _throttle_failure is not None:
@@ -2161,7 +2157,7 @@ def index_repo_cmd(
         if transient_upsert_deferred_files:
             _run_failure = _run_failure or click.ClickException(
                 f"{transient_upsert_deferred_files} file(s) deferred on a transient write "
-                f"error this run (nexus-z0o2p.14) — see the WARNING line above. Re-run "
+                f"error this run — see the WARNING line above. Re-run "
                 f"'nx index repo' to retry."
             )
 
@@ -2201,7 +2197,7 @@ def index_repo_cmd(
             if taxonomy_assign_batches_failed == taxonomy_assign_batches_attempted:
                 _run_failure = _run_failure or click.ClickException(
                     f"all {taxonomy_assign_batches_failed} taxonomy-assign "
-                    f"batch(es) failed this run (nexus-7lw6a) — no chunks "
+                    f"batch(es) failed this run — no chunks "
                     f"received a topic assignment. See the WARNING line "
                     f"above."
                 )
@@ -2209,7 +2205,7 @@ def index_repo_cmd(
                 _run_failure = _run_failure or click.ClickException(
                     f"{taxonomy_assign_batches_failed}/"
                     f"{taxonomy_assign_batches_attempted} taxonomy-assign "
-                    f"batch(es) failed this run (nexus-7lw6a) — "
+                    f"batch(es) failed this run — "
                     f"{taxonomy_assign_chunks_failed} chunk(s) lost their topic "
                     f"assignment; the index itself completed. Re-run once the "
                     f"assign endpoint is healthy to repair. See the WARNING line "
@@ -3118,7 +3114,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
             f"{base} — collection check: unknown (could not confirm "
             f"document {doc_id}'s current catalog collection against this "
             f"run's target {expected_collection!r}); cannot confirm OR "
-            f"rule out a stale --collection mismatch (nexus-2t63u) — "
+            f"rule out a stale --collection mismatch — "
             f"check via 'nx catalog show {doc_id}'."
         )
 
@@ -3138,7 +3134,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
         f"for {doc_id} is {stamped_collection!r}, but this run "
         f"targeted {expected_collection!r}. The manifest was stamped "
         f"under the OLD collection, so chunks already present under "
-        f"the new collection are misreported as missing (nexus-2t63u). "
+        f"the new collection are misreported as missing. "
         f"Re-run the same command again — the collection has now been "
         f"reconciled — or check 'nx catalog show {doc_id}'."
     )
@@ -3176,8 +3172,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
     default=False,
     help="Force re-indexing, bypassing staleness check (re-chunks and "
          "re-sends every chunk in place). Does NOT force a Voyage "
-         "re-embed on its own (extending round "
-         "5's --force/--re-embed split from `repo` to `pdf`/`md`/`rdr`): "
+         "re-embed on its own: "
          "the server's own existence-partition still skips the embed call "
          "for a chunk whose text is byte-identical to what is already "
          "stored, refreshing only its metadata. Add --re-embed for the "
@@ -3912,8 +3907,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     default=False,
     help="Force re-indexing, bypassing staleness check (re-chunks and "
          "re-sends every chunk in place). Does NOT force a Voyage "
-         "re-embed on its own (extending round "
-         "5's --force/--re-embed split from `repo` to `pdf`/`md`/`rdr`): "
+         "re-embed on its own: "
          "the server's own existence-partition still skips the embed call "
          "for a chunk whose text is byte-identical to what is already "
          "stored, refreshing only its metadata. Add --re-embed for the "
@@ -4100,8 +4094,7 @@ _RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}
     default=False,
     help="Force re-indexing, bypassing staleness check (re-chunks and "
          "re-sends every chunk in place). Does NOT force a Voyage "
-         "re-embed on its own (extending round "
-         "5's --force/--re-embed split from `repo` to `pdf`/`md`/`rdr`): "
+         "re-embed on its own: "
          "the server's own existence-partition still skips the embed call "
          "for a chunk whose text is byte-identical to what is already "
          "stored, refreshing only its metadata. Add --re-embed for the "

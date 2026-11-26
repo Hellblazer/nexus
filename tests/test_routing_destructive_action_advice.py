@@ -637,3 +637,22 @@ def test_the_registry_names_the_rule_and_it_is_fail_open() -> None:
     block = text.split("  destructive_action_advice:\n", 1)[1]
     assert "hook_script: destructive_action_advice.py" in block
     assert "fail_closed: false" in block
+
+
+def test_a_broken_audience_helper_keeps_a_deny_a_deny(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``maintainer`` tightens (a deny stays a deny), so a helper that fails to import binds it to True (nexus-sby49.4)."""
+    monkeypatch.setitem(sys.modules, "_audience", None)  # an import of it now raises ImportError
+    assert daa._is_maintainer(_payload("ls")) is True
+
+
+def test_a_helper_that_raises_also_gives_the_maintainer_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    broken = types.ModuleType("_audience")
+
+    def boom(payload: object) -> bool:
+        raise RuntimeError("no account database")
+
+    broken.maintainer = boom  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "_audience", broken)
+    assert daa._is_maintainer(_payload("ls")) is True

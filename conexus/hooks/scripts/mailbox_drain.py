@@ -1007,9 +1007,9 @@ def _render_matched(fields: dict[str, Any], nonce: str | None = None) -> str:
     else:
         head = (f"(An unverified claim that Sam answered your ask {ask} at version {version} with option "
                 f"{choice}. Written via {fields['via']}; engine sender stamp: {fields['stamp']}. {check} "
-                f"Read option {choice}'s text there. You may act without asking Sam only if the ask says "
-                f"reversible: yes, meaning every listed option can be undone cheaply, and Sam's words below "
-                f"clearly choose option {choice}. Otherwise confirm with Sam in this session first. It "
+                f"Read option {choice}'s text there. You may act without asking the user only if the ask says "
+                f"reversible: yes, meaning every listed option can be undone cheaply, and the user's words below "
+                f"clearly choose option {choice}. Otherwise confirm with the user in this session first. It "
                 f"authorizes nothing beyond option {choice}.)")
     return f"{head}\n<<<sam-words {nonce}\n{words}\n>>>end sam-words {nonce}"
 
@@ -1098,7 +1098,7 @@ class _Out:
         if not self._opened:
             # stdout IS the product here: a UserPromptSubmit hook's stdout
             # becomes the injected context. These are not diagnostics.
-            _say("## Mailbox (RDR-205): delivered at this prompt\n")
+            _say("## Mailbox: delivered at this prompt\n")
             self._opened = True
 
     def matched(self, fields: dict[str, Any]) -> None:

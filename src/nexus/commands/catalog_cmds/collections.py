@@ -521,8 +521,8 @@ def rename_collection_cmd(
             f"rename's history is not recorded in superseded_by/superseded_at. "
             f"The rename itself succeeded. The engine deleted the old row "
             f"instead of retiring it or moving it in place, which only an "
-            f"older engine does: upgrade it to record rename history "
-            f"(nexus-cecqy)."
+            f"older engine does: upgrade it to record rename history"
+            f"."
         )
 
 

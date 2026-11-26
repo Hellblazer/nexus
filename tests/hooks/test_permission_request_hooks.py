@@ -253,6 +253,23 @@ class TestUsersArePromptedForDestructiveAndOtherPartyTools:
         assert _run_nx_hook("mcp__plugin_conexus_nexus__memory_delete") == ""
 
 
+class TestAFailedAudienceImportNeverWidensTheList:
+    """``account_flag`` loosens, so an import of ``nexus.hooks._audience`` that fails binds it to False (nexus-sby49.4)."""
+
+    def test_the_fallback_answers_false_and_the_six_stay_prompted(self, monkeypatch) -> None:
+        import importlib.util
+
+        monkeypatch.setitem(sys.modules, "nexus.hooks._audience", None)  # an import of it now raises ImportError
+        spec = importlib.util.spec_from_file_location(
+            "auto_approve_no_helper", Path(__import__("nexus.hooks.auto_approve", fromlist=["x"]).__file__))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert module._account_flag() is False
+        for tool in module._PROMPT_UNLESS_FLAGGED:
+            assert module._is_allowed(tool) is False, tool
+        assert module._is_allowed("mcp__plugin_conexus_nexus__search") is True
+
+
 class TestDemotedOperatorsAreNotAutoApproved:
     """nexus-rf87b: the ten ``operator_*`` functions were demoted off the MCP
     surface at nexus-ivi4s (each spawns ``claude -p``). Nothing registers them,

@@ -332,7 +332,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
 
 ### Agent-Specific PRODUCE
 - **Review Findings**: Include in response (not stored unless significant)
-- **Significant Issues**: Create beads for critical findings
+- **Significant Issues**: Where `.beads/` exists, create beads for critical findings
 - **Pattern Violations Found**: When a review identifies a violation of established patterns
   (naming, error handling, structural conventions), store it to T3:
   mcp__plugin_conexus_nexus__store_put(content="# Review: Pattern Violation\n## Pattern\n{pattern name}\n## Violation\n{what was found}\n## File\n{path}\n## Recommendation\n{fix}", collection="<subject>", title="review-pattern-{pattern-name}-{date}", tags="review,pattern,violation"

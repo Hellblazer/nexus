@@ -1123,7 +1123,7 @@ def implement(args: tuple[str, ...]) -> None:
         parts.append("")
     parts.append(
         "**Note:** Ensure plan has been validated by mcp__plugin_conexus_nexus__nx_plan_audit"
-        " (RDR-080) before implementing."
+        " before implementing."
     )
     parts.append("")
     parts.extend(beads_block(cwd, ["--status=in_progress", "--limit=5"], "### Active Work"))

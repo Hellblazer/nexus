@@ -109,7 +109,7 @@ An agent with nothing checkable to claim (a pure read, a recommendation with no 
 
 The orchestrator re-runs each reported COMMAND once per round, before accepting the round — it never trusts the reported count. Reading the command line and re-running it yourself is the orchestrator's own job: a fabricated `rc=0 12 passed` line for a command that was never run, or a real but too-narrow command that would not have caught the regression it claims to verify, both read identically from the report alone.
 
-A run that was disturbed (a peer deleted its temp directory, a process under it was killed, a shared path vanished) is killed and rerun clean; its numbers are never quoted, and the hand-back says it was disturbed (feedback_destructive_action_guards).
+A run that was disturbed (a peer deleted its temp directory, a process under it was killed, a shared path vanished) is killed and rerun clean; its numbers are never quoted, and the hand-back says it was disturbed.
 
 ## Review Gate (caller side, MANDATORY on every implementation)
 
@@ -131,7 +131,7 @@ The reviewers cannot dispatch and the developer does not commit unless its brief
 - The locked spec, so the reviewer checks implementation against spec, not style.
 - What was NOT changed on purpose, so scope creep is flagged instead of recommended.
 - Verification already run, so the reviewer checks claims instead of re-running suites.
-- Destroys, where the diff touches a path, a value a consumer derives something from, or a plan: any consumer that deletes something derived from what moved (a `rmtree` of a moved printed path's parent once wiped a laptop's `TMPDIR`); what the plan itself destroys, not only what it produces (a worktree plan listed its costs and not the accidental serialisation it removed); and a long walk or batch that emits no progress, which reads as hung and gets stacked with duplicates (feedback_destructive_action_guards).
+- Destroys, where the diff touches a path, a value a consumer derives something from, or a plan: any consumer that deletes something derived from what moved (a `rmtree` of a moved printed path's parent once wiped a laptop's `TMPDIR`); what the plan itself destroys, not only what it produces (a worktree plan listed its costs and not the accidental serialisation it removed); and a long walk or batch that emits no progress, which reads as hung and gets stacked with duplicates.
 - Every added or modified test rated CAN FAIL or CANNOT FAIL, with the concrete production edit that would turn it red.
 
 **Confirmation-pass brief.** It names the findings under confirmation and asks whether each is closed. It does not name new suspect categories or ask the reviewer to pressure-test, enumerate paths or find what was missed; those instructions manufacture findings on any artifact.
@@ -155,12 +155,12 @@ ship-blocking. Report it as a Critical and name the fix line that introduced it.
 
 1. **Consumers.** Every caller and consumer of what changes, including any consumer that deletes something derived from it (grep for them before the first test run, and run any test that deletes a computed path under a throwaway `TMPDIR`), and which of them filter, re-rank or page after it.
 2. **Final point.** Where the output's real final order or display is decided (after boosts, caps, paging), and that the change acts there, not on a proxy.
-3. **Modes.** Behaviour in local and cloud mode, and which was measured. A mode nobody measured is measured first or left unchanged.
+3. **Modes.** Behaviour in each mode the code runs in, and which was measured. A mode nobody measured is measured first or left unchanged.
 4. **Bounds.** Which pool, permit, memory or thread limit the change draws on, and its size against that limit on small and large boxes.
 5. **State.** Every cache or shared state touched, who invalidates it, the invalidate-versus-in-flight-fill race, the first-write and empty cases, the test reset hooks.
-6. **Destroys.** Name what the action destroys, not only what it produces: a push produces a commit and can cancel or replace a verdict someone is waiting on, a branch switch can revert a peer's uncommitted files (feedback_destructive_action_guards).
+6. **Destroys.** Name what the action destroys, not only what it produces: a push produces a commit and can cancel or replace a verdict someone is waiting on, a branch switch can revert a peer's uncommitted files.
 
-**Shared-host clauses.** Every developer, test or debugger brief that touches a test host or the laptop carries these four, verbatim or tightened, because the agent cannot infer them and a stop message arrives after the script has started (feedback_destructive_action_guards):
+**Shared-host clauses.** Every developer, test or debugger brief that touches a test host or the laptop carries these four, verbatim or tightened, because the agent cannot infer them and a stop message arrives after the script has started:
 
 - Delete only paths your own commands created and recorded, by exact name; use your own directory (`~/tmp/<owner>/`), never a shared filename prefix; never delete by glob or by modification time.
 - No `pkill`, `killall` or `kill $(pgrep ...)` anywhere, the laptop included; signal only a pid you started yourself (from your own `$!` or background task id), found by its parent pid, after checking its parent and its working directory (`ps -p <pid> -o pid,ppid,args`, `lsof -a -p <pid> -d cwd`), never one picked out of `ps` by its command line.

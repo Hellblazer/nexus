@@ -133,7 +133,7 @@ def _deadline_for() -> Callable[[Any], Any]:
 
 @click.group("group")
 def group_group() -> None:
-    """Groups: who answers a board topic. form, set, disband, override, join, leave, list, ack-times."""
+    """Groups: who answers a board topic. Subcommands: form, set, disband, override, join, leave, list, ack-times."""
 
 
 @group_group.command("form")

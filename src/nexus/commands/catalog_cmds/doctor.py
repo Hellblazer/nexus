@@ -222,7 +222,7 @@ def doctor_cmd(
     uri_residue: bool,
     as_json: bool,
 ) -> None:
-    """catalog doctor surface.
+    """Run the catalog doctor checks.
 
     Every check here works against the SERVICE-owned catalog and T3. The two
     that could not — ``--replay-equality`` and ``--t3-doc-id-coverage``, both
@@ -1917,7 +1917,7 @@ def _run_link_coverage() -> dict:
 
 
 def _print_link_coverage_text(report: dict) -> None:
-    click.echo("Link coverage by content type (nexus-glivh):")
+    click.echo("Link coverage by content type:")
     if report.get("error"):
         click.echo(f"  ✗ {report['error']}")
         return
@@ -1939,7 +1939,7 @@ def _print_link_coverage_text(report: dict) -> None:
     if report["failures"]:
         click.echo(
             "  Remediate with: nx catalog generate-links --dry-run  "
-            "(measure the volume BEFORE writing; see nexus-ybj1b)"
+            "(measure the volume BEFORE writing)"
         )
     click.echo(
         "  Note: a low percentage is NOT flagged. Measured 2026-08-23, the "

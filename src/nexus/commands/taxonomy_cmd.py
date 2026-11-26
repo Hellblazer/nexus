@@ -1202,7 +1202,7 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
     if not _DOC_ID_HEX_RE.match(doc_id):
         raise click.UsageError(
             f"DOC_ID {doc_id!r} is not a valid chunk chash: expected 64 lowercase "
-            "hex characters (RDR-194 D1). topic_assignments.doc_id is a chunk "
+            "hex characters. topic_assignments.doc_id is a chunk "
             "chash, not a free-form identifier; pass the chash that "
             "`nx search --json` reports (its id field), not a title or tumbler."
         )
@@ -1223,8 +1223,8 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
         if not source_collection:
             raise click.UsageError(
                 f"Resolved topic id={topic_id} for label '{topic_label}' has no "
-                "collection on record — cannot assign without a source_collection "
-                "(RDR-194 D1). This indicates a corrupt topics row, not a normal "
+                "collection on record — cannot assign without a source_collection"
+                ". This indicates a corrupt topics row, not a normal "
                 "user error."
             )
         # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
@@ -1442,7 +1442,7 @@ def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
 def split_cmd(topic_label: str, k: int, collection: str) -> None:
     """Split a topic into k sub-topics via KMeans clustering.
 
-    the T3 fetch + MiniLM reembed + KMeans
+    The T3 fetch + MiniLM reembed + KMeans
     clustering happens locally (compute phase), then the pure-T2 persist
     (DELETE parent assignments + INSERT children) is routed through the
     daemon via t2_index_write.  Centroid vector operations happen locally
@@ -2460,7 +2460,7 @@ def _review_auto(
                 click.echo(
                     "NOTE: --yes no longer skips the destructive-action "
                     "confirmation by itself; pass --apply-destructive as "
-                    "well to apply deletes/merges unattended (nexus-afnht).",
+                    "well to apply deletes/merges unattended.",
                     err=True,
                 )
             try:
@@ -3498,8 +3498,7 @@ def _run_fix_doc_count(collection: str, *, apply: bool) -> None:
             if exc.response.status_code == 404:
                 click.echo(
                     "doc_count-drift fix cannot run: the deployed engine has no "
-                    "/topics/recount_doc_count route (bead nexus-c0g6e, GH #1529 — "
-                    "needs the engine tag carrying "
+                    "/topics/recount_doc_count route (needs the engine tag carrying "
                     "taxonomy-016-doc-count-drift-functions.xml; see "
                     "https://github.com/Hellblazer/nexus/blob/main/docs/wire-contract-pending.md). Deploy an engine carrying it "
                     "and re-run.",
@@ -3707,8 +3706,7 @@ def backfill_source_collection_cmd(apply_: bool) -> None:
     """
     raise click.UsageError(
         "taxonomy backfill-source-collection is retired: it ran raw SQL "
-        "over the local SQLite topic_assignments, which was deleted in the "
-        "RDR-158 P4 retirement, and the engine exposes no equivalent "
+        "over the local SQLite topic_assignments, which was deleted in the move to the Postgres service, and the engine exposes no equivalent "
         "read-then-update API. If a pre-migration install still holds "
         "legacy NULL source_collection rows, run the backfill on the last "
         "migration-capable 6.x release before migrating."

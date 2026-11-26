@@ -163,7 +163,7 @@ def _echo_result(result: dict, older_than_days: int) -> None:
 def _raise_engine_floor(exc: httpx.HTTPStatusError) -> None:
     raise click.ClickException(
         "nx catalog purge-trash: this engine does not yet expose "
-        "POST /v1/catalog/purge-trash (needs the nexus-3ck2g engine "
+        "POST /v1/catalog/purge-trash (needs a newer engine "
         "release — the nexus.purge_trash sweep gained a caller route in "
         "that release). Upgrade the deployed engine-service, then re-run."
     ) from exc
@@ -348,7 +348,7 @@ def _fail_on_partial_purge(result: dict, older_than_days: int) -> None:
         f"race. A shortfall of 1-2 on an actively-used catalog is plausibly "
         f"that.\n"
         f"  - A larger shortfall is not: it means the purge applied a "
-        f"different population than it measured (nexus-ff85q).\n"
+        f"different population than it measured.\n"
         f"Re-run the dry-run (`nx catalog purge-trash --older-than-days "
         f"{older_than_days}`) to see the current eligible count; purge-trash "
         f"is idempotent, so re-running the execute is safe either way."

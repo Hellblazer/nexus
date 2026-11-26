@@ -581,7 +581,7 @@ def catalog_register(
             return _fail({
                 "error": (
                     f"refusing to register {_registered_path!r}: it sits under "
-                    f"an agent worktree or system temp dir (nexus-u8n4r) and "
+                    f"an agent worktree or system temp dir and "
                     f"owner {owner!r}'s repo_root is not itself rooted there — "
                     f"the ephemeral checkout will vanish and leave a permanent "
                     f"orphan. If this is a deliberate throwaway owner rooted "

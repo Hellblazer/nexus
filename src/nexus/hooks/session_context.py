@@ -331,12 +331,12 @@ def _build_capabilities_block() -> list[str]:
         "`query` MCP tool: document-level, catalog-aware (`author`, `content_type`, "
         "`subtree`, `follow_links`, `depth`), taxonomy-boosted",
         "`nx_answer` MCP tool: reduce many documents (minutes); `search`/`query`: lookups (seconds)",
-        "`answer_plan_save`/`answer_plan_search` MCP tools: T2 library of nx_answer's retrieval plans (implementation plans go in beads)",
+        "`answer_plan_save`/`answer_plan_search` MCP tools: T2 library of nx_answer's retrieval plans (never implementation plans)",
         "`scratch` MCP tool: T1, shared with this session's subagents (see the T1 block above)",
         "`search`/`links`/`link` MCP tools (nexus-catalog): metadata-first; "
         "`chash:` spans preferred for link creation",
         "`nx enrich bib COLLECTION` (Semantic Scholar) | `nx enrich aspects "
-        "COLLECTION` (RDR-089 aspects)",
+        "COLLECTION` (aspects)",
         "Pagination: search/store_list/memory_search page; footer shows `offset=N`",
         "MCP prefix: `mcp__plugin_conexus_nexus__` "
         "(e.g. `mcp__plugin_conexus_nexus__search`)",

@@ -630,7 +630,7 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
             "~/.config/nexus/logs/mcp.log + ~/.config/nexus/logs/watchdog.log"
         )
         click.echo(
-            "  to identify the gap. See RDR-094 §Day 2 Operations."
+            "  to identify the gap. See the Day 2 Operations notes in the docs."
         )
         for hit in payload["silent_deaths"]:
             click.echo(
@@ -929,8 +929,8 @@ def _run_check_plan_library() -> None:
         failed = failed or parity.failed
     if non_dimensional:
         click.echo(
-            f"  WARN: {non_dimensional} non-dimensional row(s) "
-            "(legacy / pre-RDR-078 seeds).",
+            f"  WARN: {non_dimensional} non-dimensional row(s)"
+            ".",
             err=True,
         )
         warnings += 1
@@ -1786,9 +1786,9 @@ def _run_check_post_store_hooks() -> None:
     install_default_hooks(registry)
 
     chains: list[tuple[str, list]] = [
-        ("Single-doc chain (RDR-070)", registry._single),
-        ("Batch chain (RDR-095)", registry._batch),
-        ("Document-grain chain (RDR-089)", registry._document),
+        ("Single-doc chain", registry._single),
+        ("Batch chain", registry._batch),
+        ("Document-grain chain", registry._document),
     ]
     total = 0
     for label, hooks in chains:
@@ -1852,13 +1852,13 @@ def _run_check_storage_boundary(
         result.catalog_constructions > CATALOG_CONSTRUCTION_BASELINE
     )
     click.echo(
-        f"Storage-boundary lint (RDR-120 P0.A / RDR-128 P0c / RDR-146 P0.1):\n"
+        f"Storage-boundary lint:\n"
         f"  violations:                {result.total_violations}\n"
         f"  catalog-allowlist count:   {result.catalog_allowlist_count}\n"
         f"  sqlite allowlisted connects: {result.sqlite_allowlisted_connects}\n"
         f"  T2Database constructions:  {result.t2database_constructions}\n"
         f"  catalog constructions:     {result.catalog_constructions}"
-        f" (RDR-146 baseline {CATALOG_CONSTRUCTION_BASELINE},"
+        f" (baseline {CATALOG_CONSTRUCTION_BASELINE},"
         f" cutover surface)"
     )
 
@@ -1880,7 +1880,7 @@ def _run_check_storage_boundary(
 
     if catalog_over_baseline:
         click.echo(
-            f"\nRDR-146: catalog constructions ({result.catalog_constructions}) "
+            f"\nCatalog constructions ({result.catalog_constructions}) "
             f"exceed the baseline ({CATALOG_CONSTRUCTION_BASELINE}). A new direct "
             f"Catalog(...) site was added in consumer code — route catalog writes "
             f"through the catalog factory (make_catalog_writer / "
@@ -1920,7 +1920,7 @@ def _run_check_storage_boundary(
         if catalog_over_baseline:
             click.echo(
                 f"FAIL: catalog constructions ({result.catalog_constructions}) "
-                f"exceed the RDR-146 baseline ({CATALOG_CONSTRUCTION_BASELINE}).",
+                f"exceed the baseline ({CATALOG_CONSTRUCTION_BASELINE}).",
                 err=True,
             )
         _sys.exit(1)
@@ -3216,8 +3216,7 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Verify MinerU is importable. MinerU is part of the on-demand "
-         "pdf extra (a default dependency in earlier releases "
-         "until then), so on an install without PDF support this reports "
+         "pdf extra, so on an install without PDF support this reports "
          "N/A and names the command that installs it. Otherwise it surfaces "
          "a corrupt install at doctor-time instead of waiting for the first "
          "math-PDF index to fail, including a cv2 that cannot load (MinerU "
@@ -3261,8 +3260,8 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Sample chunks per collection, embed their stored text again with "
-         "the collection's model, and compare with the stored vector "
-         ". Exits 1 when any sampled chunk falls below cosine "
+         "the collection's model, and compare with the stored vector. "
+         "Exits 1 when any sampled chunk falls below cosine "
          "0.99 or any collection could not be probed. Costs one embedding "
          "call per sampled chunk.",
 )
@@ -4083,14 +4082,14 @@ def _run_check_resources() -> None:
         )
     click.echo(
         "Known sources of POSIX semaphore exhaustion on this project:\n"
-        "  - nexus-ze2a: MinerU workers leak semaphores.\n"
+        "  - MinerU workers leak semaphores.\n"
         "    Workaround: `nx mineru stop` (stops the server's process group but\n"
         "    spares its multiprocessing resource tracker, which unlinks the\n"
         "    group's semaphores as it exits; a tracker that survives is reported,\n"
         "    never SIGKILLed, because killing it leaks them).\n"
-        "  - nexus-dc57: orphan chroma children from earlier nexus sessions.\n"
+        "  - Orphan chroma children from earlier nexus sessions.\n"
         "    Workaround: kill orphan chromas (`ps aux | grep 'chroma run'`).\n"
-        "  - nexus-9h1s: multiprocessing.resource_tracker subprocesses\n"
+        "  - Multiprocessing.resource_tracker subprocesses\n"
         "    re-parented to init (PPID=1) after ungraceful MCP shutdowns.\n"
         "    A tracker ignores SIGTERM by design and exits once the workers\n"
         "    holding its pipe are gone; the sweep kills the workers, waits,\n"
@@ -4289,7 +4288,7 @@ def _run_check_harness_grant() -> None:
     click.echo(
         "[!] Harness dispatch grant: NX_HARNESS_CLAUDE_OAUTH_TOKEN is present -- "
         "LLM dispatch (claude -p children) authenticates via the harness "
-        "grant, not the operator's own login (RDR-219). Expected only "
+        "grant, not the operator's own login. Expected only "
         "under a harness launched through the nexus repo's Claude MCP grant wrapper."
     )
 
@@ -4546,8 +4545,8 @@ def _collect_quota_report() -> dict:
     from nexus.cross_encoder import cross_encoder_available  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
     cross_encoder_info = {
         "available": cross_encoder_available(),
-        "backend": "server-side (engine: voyage-rerank-2.5 or ms-marco cross-encoder, RDR-188)",
-        "client_role": "none (rerank caller retired nexus-9o6y2.19; salience caller retired nexus-0hqez)",
+        "backend": "server-side (engine: voyage-rerank-2.5 or ms-marco cross-encoder)",
+        "client_role": "none (the rerank and salience callers are retired)",
         "default_local_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     }
 
@@ -4566,7 +4565,7 @@ def _collect_quota_report() -> dict:
 def _format_quota_report(report: dict) -> str:
     """Human-readable form of :func:`_collect_quota_report` output."""
     lines: list[str] = []
-    lines.append("Quota headroom report (nexus-c590)")
+    lines.append("Quota headroom report")
     lines.append("")
 
     # ── Vector store ────────────────────────────────────────────────────
@@ -4739,7 +4738,7 @@ def _run_check_taxonomy() -> None:
             # engine carrying /links/drift vs. start one).
             click.echo(
                 "✗ taxonomy check cannot run: the deployed engine has no "
-                "/links/drift route (added for nexus-ypori) — deploy an engine "
+                "/links/drift route — deploy an engine "
                 "carrying it and re-run. Unverifiable is not a pass.",
                 err=True,
             )

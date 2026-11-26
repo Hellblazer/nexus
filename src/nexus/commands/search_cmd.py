@@ -457,7 +457,7 @@ def search_cmd(
     if _knob != "rerank-2.5" or os.environ.get("NX_EMBEDDINGS_RERANKER_MODEL"):
         click.echo(
             "note: embeddings.rerankerModel / NX_EMBEDDINGS_RERANKER_MODEL no longer "
-            "selects the rerank model — reranking runs server-side (RDR-188). Set "
+            "selects the rerank model — reranking runs server-side. Set "
             "NX_RERANK_MODEL in the engine's environment instead.",
             err=True,
         )

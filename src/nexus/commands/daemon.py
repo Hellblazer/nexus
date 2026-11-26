@@ -488,7 +488,7 @@ service_group.add_command(_note_uri_pairs_cmd, "note-uri-pairs")
 def service_install_cmd(autostart: bool, force: bool) -> None:
     """Install the storage-service autostart entry for the current user.
 
-    the service that serves every tier (engine
+    The service that serves every tier (engine
     binary + local Postgres) previously had no reboot-persistence. Thin wrapper
     over :func:`nexus.daemon.installer.install_autostart` with ``tier="service"``
     (the same structured-result translation the retired T2 daemon installer used).
@@ -532,7 +532,7 @@ def service_install_cmd(autostart: bool, force: bool) -> None:
 def service_uninstall_cmd(autostart: bool) -> None:
     """Remove the storage-service autostart entry for the current user.
 
-    completes the install/uninstall pair so the unit a user
+    Completes the install/uninstall pair so the unit a user
     installs can be cleanly removed via ``nx`` (not stranded). Thin wrapper over
     :func:`nexus.daemon.installer.uninstall_autostart` with ``tier="service"``,
     as the retired T2 daemon uninstaller did.
@@ -2514,7 +2514,7 @@ def restart_stale_cmd(dry_run: bool) -> None:
         if still:
             click.echo(
                 "engine: the running service is not on the release's engine after every leg ran; "
-                "exiting 1 (nexus-n8gpr).",
+                "exiting 1.",
                 err=True,
             )
             sys.exit(1)

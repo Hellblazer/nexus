@@ -503,7 +503,7 @@ def _echo_mutation_report(eligible: list[dict], excluded: list[dict], capability
     elif capability == "unavailable":
         click.echo(
             "\nThe --execute deactivate mutation arm requires an engine build "
-            "carrying the nexus-cw262 owner-deactivate route (not yet deployed "
+            "carrying the owner-deactivate route (not yet deployed "
             "here) — re-run after the connected engine is upgraded. Command "
             f"once available: {_EXECUTE_COMMAND}"
         )

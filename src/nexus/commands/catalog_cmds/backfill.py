@@ -537,10 +537,10 @@ def backfill_meta_cmd(
                 f"  {name}: examined {st.examined}, held {st.present}, skipped (shared) {st.shared}, "
                 f"{'stamped' if apply else 'would stamp'} {st.stamped}, residue {sum(st.residue.values())}{why}"
             )
-        click.echo(f"  {report.repo_owners} repository owner(s) seen for the repo-collection tags rule (nexus-6pfgb.43)"
+        click.echo(f"  {report.repo_owners} repository owner(s) seen for the repo-collection tags rule"
                    + ("; the owner or collection listing FAILED, so the rule was off." if report.repo_listing_failed else "."))
         if report.tags_legacy_strings_left:
-            click.echo(f"  {report.tags_legacy_strings_left} legacy tags strings left for the array rung (nexus-6pfgb.38).")
+            click.echo(f"  {report.tags_legacy_strings_left} legacy tags strings left for the array rung.")
         if report.lookups_failed:
             click.echo(f"  {report.lookups_failed} documents had an owner or row lookup fail; their row-sourced keys were withheld.")
         if report.ttl_first_sign_checked:
@@ -549,7 +549,7 @@ def backfill_meta_cmd(
                 f"  {len(held)} note(s) held today by catalog_ttl_stale's first sign alone (the row's TTL differs from the "
                 "catalog's while the row's indexed_at is not later than put_at plus five minutes, or the row has no "
                 "indexed_at: a pre-.18 import's permanent row, or a note whose owner changed its TTL with a new-client "
-                "re-put). RDR-236 Step 1 stops holding them; the catalog's TTL is the authority."
+                "re-put). The index stops holding them; the catalog's TTL is the authority."
             )
             for n in held:
                 click.echo(

@@ -19,9 +19,9 @@ from nexus.mcp.core import (  # noqa: F401
     answer_plan_save,
     answer_plan_search,
     answer_plan_delete,
-    answer_plan_save,  # deprecated alias, removed one client release after nexus-sby49.4
-    answer_plan_search,  # deprecated alias
-    answer_plan_delete,  # deprecated alias
+    plan_save,  # deprecated alias, removed one client release after nexus-sby49.4
+    plan_search,  # deprecated alias
+    plan_delete,  # deprecated alias
     procedure_run,
     traverse,
     operator_extract,

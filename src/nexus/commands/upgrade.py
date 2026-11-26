@@ -41,8 +41,8 @@ _log = structlog.get_logger()
     "no_beads_prime",
     is_flag=True,
     default=False,
-    help="Do not install/refresh the user-level beads PRIME.md this run "
-    ". Explicit decline always wins; for a standing "
+    help="Do not install/refresh the user-level beads PRIME.md this run. "
+    "Explicit decline always wins; for a standing "
     "opt-out use `nx config set beads_prime.manage false`.",
 )
 def upgrade(

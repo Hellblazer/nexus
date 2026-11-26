@@ -743,7 +743,7 @@ def _owner_roots_for_zero_content_check(cat: "CatalogReader", never_chunked_entr
 # off this classification alone. This note names the actual authority
 # without claiming FK-safety here or touching verify's exit code.
 _RDR145_EXEMPT_NOTE = (
-    "Legitimate store_put note by design (RDR-145) -- NOT a claim that "
+    "Legitimate store_put note by design -- NOT a claim that "
     "these are unrepairable. chunk_count is a cached value and can be "
     "stale; `nx t3 backfill-manifest --dry-run --only-gapped` is the "
     "authority for whether a given doc in this population is actually a "
@@ -875,8 +875,8 @@ def _never_chunked_breakdown(
             "by_collection": _rows(rdr145_ghost_counts),
             "tumblers": sorted(rdr145_ghost_tumblers),
             "note": (
-                "store_put-origin notes with NO chunks in T3 under their title "
-                "(nexus-1uekf): nothing to backfill -- the title is the only "
+                "store_put-origin notes with NO chunks in T3 under their title"
+                ": nothing to backfill -- the title is the only "
                 "surviving record. Disposition (re-create or tombstone) is a "
                 "human decision; `nx catalog doctor --store-put-integrity` "
                 "reports the same population by the same lookup."
@@ -1177,7 +1177,7 @@ def _emit_verify_report(
             exempt = never_chunked["rdr145_exempt"]
             if exempt["total"]:
                 click.echo(
-                    f"  {exempt['total']} RDR-145 exempt (store_put-origin "
+                    f"  {exempt['total']} exempt (store_put-origin "
                     "notes with chunks in T3 but no manifest — legitimate by "
                     "design, backfillable):"
                 )
@@ -1203,8 +1203,7 @@ def _emit_verify_report(
             if zero_content["total"]:
                 click.echo(
                     f"  {zero_content['total']} zero-content-by-design — "
-                    "will never chunk (zero-byte, binary or whitespace-only "
-                    "source, nexus-rqsh1/nexus-5j8fp); producer no longer registers these; "
+                    "will never chunk; producer no longer registers these; "
                     "remedy is tombstone, not re-index:"
                 )
                 for row in zero_content["by_collection"]:
@@ -1217,7 +1216,7 @@ def _emit_verify_report(
             if unclassified["total"]:
                 click.echo(
                     f"  {unclassified['total']} zero-chunk, unclassified — "
-                    "candidate data loss, see nexus-cdypx:"
+                    "candidate data loss:"
                 )
                 for row in unclassified["by_collection"]:
                     click.echo(f"    {row['count']:5d}  {row['physical_collection']}")

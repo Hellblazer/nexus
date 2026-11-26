@@ -44,7 +44,9 @@ _leg = _load_leg()
 
 #: Names the lexicon's ``nexus-xxxx`` pattern catches that are component or marker names, not bead ids.
 _COMPONENT_NAMES = frozenset({"nexus-catalog", "nexus-service", "nexus-managed", "nexus-plugins", "nexus-repo", "nexus-backups", "nexus-continuation"})
-_PUBLIC_DOCS_URL = re.compile(r"https://github\.com/Hellblazer/nexus/\S*")
+_PUBLIC_DOCS_URL = re.compile(r"(?:https://)?github\.com/Hellblazer/nexus\S*")
+#: The maintainer's private memory files (``feedback_<topic>``), which no user has: a skill that cites one points nowhere.
+_PRIVATE_MEMORY_FILE = re.compile(r"\bfeedback_[a-z0-9_]+(?:\.md)?", re.IGNORECASE)
 #: nexus's own branch pair, named together as the two a command is for.
 _BRANCH_PAIR = re.compile(r"\bdevelop (?:and|or) main\b|\bmain (?:and|or) develop\b|\bdevelop, main\b", re.IGNORECASE)
 
@@ -53,7 +55,7 @@ def hits(text: str) -> list[str]:
     """Lexicon terms in *text*, leaving out component names and public-docs links."""
     text = _PUBLIC_DOCS_URL.sub("", text)
     found = [h for h in _leg.lexicon_hits(text) if h.lower() not in _COMPONENT_NAMES]
-    return found + [m.group(0) for m in _BRANCH_PAIR.finditer(text)]
+    return found + [m.group(0) for m in _BRANCH_PAIR.finditer(text)] + [m.group(0) for m in _PRIVATE_MEMORY_FILE.finditer(text)]
 
 
 # --- S2-3: the MCP tool descriptions -------------------------------------------------------------
@@ -138,6 +140,67 @@ def test_no_nx_command_help_names_a_person_branch_or_id() -> None:
     assert not found, "\n".join(found)
 
 
+#: Words that open a sentence a reader expects capitalised; one lowercase after a full stop is a sentence that lost its subject.
+_SENTENCE_OPENERS = r"(?:the|a|an|it|its|this|these|those|every|each|both|all|added|adds|completes|migrates|form|pre-this-verb)"
+
+
+def _help_problems(text: str, *, command_help: bool) -> list[str]:
+    """Punctuation faults a person sees in rendered help: a space before a full stop or comma, leading punctuation,
+    unbalanced parentheses, a sentence (or, for a command's own help, a paragraph) that starts lowercase."""
+    text = text.replace("\b", "")
+    out = []
+    if re.search(r"\S [.,](?![.\w/])", text):
+        out.append("a space before a full stop or comma")
+    if re.match(r"\s*[.,;:)]", text):
+        out.append("starts with punctuation")
+    if text.count("(") != text.count(")"):
+        out.append("unbalanced parentheses")
+    if re.search(rf"(?<!e\.g)(?<!i\.e)[.!?]\s+{_SENTENCE_OPENERS}\b", text):
+        out.append("a sentence starts lowercase")
+    if command_help:
+        for paragraph in re.split(r"\n[ \t]*\n", text.strip("\n")):
+            if paragraph[:1].isspace():
+                continue  # an indented block is a table or an example, not prose
+            word = re.match(r"[a-z]+(?=[\s:,.]|$)", paragraph)
+            if word and not paragraph.startswith(("nx ", "e.g", "i.e")):
+                out.append(f"a paragraph starts lowercase: {paragraph[:30]!r}")
+    return out
+
+
+def _help_faults(cmd: click.Command, path: str):
+    for text in (cmd.help, cmd.short_help, cmd.epilog):
+        if text:
+            for fault in _help_problems(text, command_help=text is cmd.help):
+                yield f"{path}: {fault}"
+    for p in cmd.params:
+        if getattr(p, "help", None):
+            for fault in _help_problems(p.help, command_help=False):
+                yield f"{path} {p.name}: {fault}"
+    if isinstance(cmd, click.Group):
+        for name, sub in cmd.commands.items():
+            yield from _help_faults(sub, f"{path} {name}")
+
+
+def test_no_nx_help_text_has_a_punctuation_or_capitalisation_fault() -> None:
+    from nexus.cli import main  # noqa: PLC0415
+
+    faults = list(_help_faults(main, "nx"))
+    assert not faults, "\n".join(faults)
+
+
+def test_the_help_fault_check_catches_each_class_it_names() -> None:
+    cases = {
+        "Do not install the file this run . Explicit decline.": "a space before a full stop or comma",
+        ". Explicit decline of the prompt.": "starts with punctuation",
+        "Unpaged by default (every matching subspace.": "unbalanced parentheses",
+        "Reads the table. the engine fills the rest.": "a sentence starts lowercase",
+    }
+    for text, fault in cases.items():
+        assert fault in _help_problems(text, command_help=False), text
+    assert any("a paragraph starts lowercase" in f for f in _help_problems("Fine.\n\nthe service starts.", command_help=True))
+    assert _help_problems("Fine (e.g. a chunker). Costs (t3_gc, ...).", command_help=True) == []
+
+
 def test_the_cli_walk_reads_answer_plan_and_its_hidden_nx_plan_alias() -> None:
     """Group C renamed ``nx plan`` to ``nx answer-plan`` and kept the old group as a hidden alias; both are walked, none excluded."""
     from nexus.cli import main  # noqa: PLC0415
@@ -206,6 +269,171 @@ def test_a_planted_name_fails_the_string_scan(tmp_path: Path) -> None:
     assert [h for _, t in _runtime_strings(f) for h in hits(t)] == ["Sam"]
 
 
+# --- Fix round 1: every string a command, the MCP server or a hook prints, and the plan library's text ---------------------
+
+_LOG_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical", "log", "bind"})
+
+#: Lexicon terms the CLI's own runtime strings may carry, each with its reason.
+_CLI_VOCABULARY: dict[str, str] = {
+    "bd": "`nx command-context` reports whether the beads tracker is installed; naming it there is the report",
+}
+#: Wording the ask-answer frame keeps because something else pins it: the opening phrase of the frame and the nonce
+#: delimiters are quoted by the drain tests (``_MATCHED``, ``<<<sam-words``) and by the maintainer's own instructions, which
+#: tell the model what the frame looks like.
+_PINNED_FRAME_LITERALS = ("An unverified claim that Sam answered your ask", "sam-words")
+
+
+def _visible_strings(path: Path):
+    """``(line, text)`` for each string constant of *path* a person can read: not a docstring, not the argument of a log call,
+    and not a bare token (an identifier, a regular expression, a route name has no space)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    skip: set[int] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.body \
+                and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant):
+            skip.add(id(n.body[0].value))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in _LOG_METHODS:
+            skip.update(id(a) for a in ast.walk(n) if isinstance(a, ast.Constant))
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in skip and re.search(r"\s", n.value.strip()):
+            yield n.lineno, n.value
+
+
+def _string_hits(files: list[Path], root: Path, exempt: dict[str, str] | None = None,
+                 literals: tuple[str, ...] = ()) -> tuple[int, list[str]]:
+    examined = 0
+    found: list[str] = []
+    for f in files:
+        rel = f.relative_to(root).as_posix()
+        for lineno, text in _visible_strings(f):
+            examined += 1
+            for literal in literals:
+                text = text.replace(literal, "")
+            found.extend(f"{rel}:{lineno}: {h}" for h in hits(text) if h.lower() not in (exempt or {}))
+    return examined, found
+
+
+def _command_modules() -> list[Path]:
+    return sorted(COMMANDS.rglob("*.py"))
+
+
+def test_no_command_runtime_string_names_an_internal_id_or_person() -> None:
+    """click.echo text, raised error messages and ``nx doctor`` rows, in every command module (the four modules of S2-6 are
+    read more closely above)."""
+    files = _command_modules()
+    examined, found = _string_hits(files, ROOT / "src" / "nexus", _CLI_VOCABULARY)
+    assert len(files) >= 80 and examined >= 5000, f"the scan read {len(files)} modules, {examined} strings"
+    assert not found, "a command prints:\n" + "\n".join(found)
+
+
+def test_no_mcp_runtime_string_names_an_internal_id_or_person() -> None:
+    """Error text a tool returns to a session (the docstrings are the tool descriptions, read above)."""
+    files = sorted((ROOT / "src" / "nexus" / "mcp").glob("*.py"))
+    examined, found = _string_hits(files, ROOT / "src" / "nexus")
+    assert len(files) >= 3 and examined >= 500, f"the scan read {len(files)} modules, {examined} strings"
+    assert not found, "an MCP tool returns:\n" + "\n".join(found)
+
+
+#: The hook modules whose output no behaviour-leg scenario reaches (an event that fires only on a plugin-only release, a mail
+#: delivery, the brief tool's capability block) and so the leg's lexicon never sees.
+_HOOK_TEXT_FILES = (
+    "conexus/hooks/scripts/version_lockstep_hook.py",
+    "conexus/hooks/scripts/mailbox_drain.py",
+    "src/nexus/hooks/mailbox_drain.py",
+    "src/nexus/hooks/session_context.py",
+)
+#: `bd` appears in the session-start text only under its `.beads/` gate (the data gate of the audience manifest).
+_HOOK_VOCABULARY: dict[str, str] = {"bd": "named only where the project has `.beads/` (the manifest's data gate), as in the skills"}
+
+
+def test_no_event_conditional_hook_string_names_an_internal_id_or_person() -> None:
+    files = [ROOT / rel for rel in _HOOK_TEXT_FILES]
+    examined, found = _string_hits(files, ROOT, _HOOK_VOCABULARY, _PINNED_FRAME_LITERALS)
+    assert examined >= 100, f"the scan read {examined} strings"
+    assert not found, "a hook injects:\n" + "\n".join(found)
+
+
+def test_the_ask_answer_frame_keeps_only_the_pinned_words_naming_a_person() -> None:
+    """The drain tests and the maintainer's instructions quote the frame's opening phrase and its ``sam-words`` delimiters;
+    nothing else in it names a person."""
+    path = ROOT / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
+    fn = next(n for n in ast.walk(ast.parse(path.read_text(encoding="utf-8"))) if isinstance(n, ast.FunctionDef) and n.name == "_render_matched")
+    strings = " ".join(t for lineno, t in _visible_strings(path) if fn.lineno <= lineno <= fn.end_lineno)
+    assert "An unverified claim that Sam answered your ask" in strings and "sam-words" in strings, "non-vacuity: the frame still carries them"
+    for literal in _PINNED_FRAME_LITERALS:
+        strings = strings.replace(literal, "")
+    assert "Sam" not in strings, "the frame names the maintainer outside its pinned words"
+
+
+def test_a_planted_id_fails_each_added_string_scan(tmp_path: Path) -> None:
+    (tmp_path / "m.py").write_text(
+        '"""Docstring naming RDR-1 is not read."""\n'
+        'import click, structlog\n'
+        'log = structlog.get_logger()\n'
+        'def f():\n'
+        '    log.info("a log line naming nexus-abcde is not shown")\n'
+        '    click.echo("the engine predates nexus-abcde")\n'
+        '    click.echo("bd not found")\n'
+        '    click.echo("a message for Sam")\n'
+        '    x = "nexus-token"\n'
+        '    raise click.ClickException("see RDR-077 for the rest")\n',
+        encoding="utf-8")
+    examined, found = _string_hits([tmp_path / "m.py"], tmp_path, _CLI_VOCABULARY)
+    assert examined == 4
+    assert [h.split(": ")[1] for h in found] == ["nexus-abcde", "Sam", "RDR-077"]
+    pinned = tmp_path / "frame.py"
+    pinned.write_text('S = "An unverified claim that Sam answered your ask, see <<<sam-words and Sam"\n', encoding="utf-8")
+    assert [h.split(": ")[1] for h in _string_hits([pinned], tmp_path, None, _PINNED_FRAME_LITERALS)[1]] == ["Sam"]
+
+
+def test_a_private_memory_file_name_is_a_lexicon_hit() -> None:
+    assert hits("see feedback_destructive_action_guards for why") == ["feedback_destructive_action_guards"]
+    assert hits("the file feedback_test_runs_before_push.md holds it") == ["feedback_test_runs_before_push.md"]
+    assert hits("a feedback loop, and user_id") == []
+
+
+def _plan_strings(path: Path):
+    """Every string of a plan template or the purposes table: the name, description and tags reach a user through
+    ``answer_plan_search`` and ``nx answer-plan list``."""
+    import yaml  # noqa: PLC0415
+
+    def walk(node, where=""):
+        if isinstance(node, str):
+            yield where, node
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                yield from walk(v, f"{where}.{k}")
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                yield from walk(v, f"{where}[{i}]")
+
+    yield from walk(yaml.safe_load(path.read_text(encoding="utf-8")))
+
+
+def _plan_hits(files: list[Path], root: Path) -> tuple[int, list[str]]:
+    examined = 0
+    found: list[str] = []
+    for f in files:
+        for where, text in _plan_strings(f):
+            examined += 1
+            found.extend(f"{f.relative_to(root).as_posix()}{where}: {h}" for h in hits(text))
+    return examined, found
+
+
+def test_no_plan_template_names_an_internal_id_in_text_a_user_reads() -> None:
+    files = sorted((PLUGIN / "plans").rglob("*.y*ml"))
+    examined, found = _plan_hits(files, PLUGIN)
+    assert len(files) >= 14 and examined >= 150, f"the scan read {len(files)} files, {examined} strings"
+    assert not found, "the plan library carries:\n" + "\n".join(found)
+
+
+def test_a_planted_id_fails_the_plan_scan(tmp_path: Path) -> None:
+    (tmp_path / "p.yml").write_text("name: x\ntags: builtin-template,rdr-078,nexus-abcde,analyze\nplan_json:\n  steps: [{tool: search}]\n", encoding="utf-8")
+    examined, found = _plan_hits([tmp_path / "p.yml"], tmp_path)
+    assert examined >= 3
+    assert [h.split(": ")[1] for h in found] == ["rdr-078", "nexus-abcde"]
+
+
 # --- S2-4, I4, S2-7: the plugin's markdown ---------------------------------------------------------
 
 
@@ -262,7 +490,6 @@ def test_a_planted_id_fails_the_description_scan(tmp_path: Path) -> None:
 _PROCESS_VOCABULARY: dict[str, str] = {
     "bd": "the beads tracker command, named only under its `.beads/` gate (the text says what to do without one)",
     "orchestrator": "the role that dispatches agents and reads their hand-backs, a process term",
-    "local and cloud": "the mode phrase of the brief check every dispatch answers",
 }
 
 #: Literals a user types or reads that the lexicon would flag: the `nx doctor` row label and a `--kind` value. Removed
@@ -349,10 +576,10 @@ def test_the_scanned_surfaces_are_the_ones_the_plugin_ships() -> None:
     unread = {
         "hooks": "its injected text is read by the behaviour leg, which drives the scripts",
         "launch": "launcher code, no prose a session loads",
-        "plans": "retrieval-plan seed templates read by the plan loader, not text a session loads",
+        "plans": "read by the plan-library scan above: a template's name, description and tags reach users through answer_plan_search",
         "daemon": "service unit templates",
         "registry.yaml": "a machine table",
-        "mcp": "server launch configuration",
+        "mcp": "the plugin's MCP server declaration (a command and arguments), no prose",
         "evals": "plugin evaluation cases, run by the maintainer's harness, never loaded into a session",
         "retrieval-agents.txt": "a registry file nothing reads (its own header says so)",
     }

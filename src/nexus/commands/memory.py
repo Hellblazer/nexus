@@ -20,7 +20,7 @@ _log = structlog.get_logger(__name__)
 
 @contextlib.contextmanager
 def _needs_quarantine_routes(verb: str) -> Generator[None, None, None]:
-    """Turn a 404 from an engine older than into a clean CLI error.
+    """Turn a 404 from an engine without the quarantine routes into a clean CLI error.
 
     The quarantine routes (reap, restore, the quarantined list, summaries) are
     new in the engine that carries them, and an older engine answers
@@ -31,7 +31,7 @@ def _needs_quarantine_routes(verb: str) -> Generator[None, None, None]:
     except httpx.HTTPStatusError as exc:
         if exc.response is not None and exc.response.status_code == 404:
             raise click.ClickException(
-                f"nx memory {verb}: the engine predates RDR-207 quarantine "
+                f"nx memory {verb}: the engine predates quarantine "
                 "(no such route); this verb needs a newer engine."
             ) from exc
         raise
@@ -566,7 +566,7 @@ def rollup_cmd(project: str, dry_run: bool) -> None:
 def expire_cmd() -> None:
     """Quarantine TTL-expired memory entries.
 
-    an entry past its TTL is hidden from every read but kept. See
+    An entry past its TTL is hidden from every read but kept. See
     ``nx memory list --quarantined``, ``nx memory restore`` and
     ``nx memory reap``.
 

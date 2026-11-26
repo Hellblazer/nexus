@@ -1104,8 +1104,8 @@ def _converge_ladder_best_effort() -> None:
     "no_beads_prime",
     is_flag=True,
     default=False,
-    help="Do not install/refresh the user-level beads PRIME.md this run "
-    ". Explicit decline always wins, like --no-autostart; "
+    help="Do not install/refresh the user-level beads PRIME.md this run. "
+    "Explicit decline always wins, like --no-autostart; "
     "for a standing opt-out use `nx config set beads_prime.manage false`.",
 )
 @click.pass_context

@@ -240,7 +240,7 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
                 _fail(f"Error: {text}\n"
                 "The borrowed T1 (scratch) session token was revoked (its owner "
                 "exited), and this process re-minted its own token for the "
-                "session (nexus-k9sec) -- the retry on the fresh token still "
+                "session -- the retry on the fresh token still "
                 "failed authorization, so the token was not the cause. Reconnect "
                 "the conexus MCP/extension; if the same failure recurs "
                 "immediately, the service-side auth state needs direct "
@@ -250,7 +250,7 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
             return (
                 _fail(f"Error: {text}\n"
                 "The MCP session's T1 (scratch) session token had rotated, and "
-                "the automatic self-heal (nexus-g5hzk) DID adopt a fresh token "
+                "the automatic self-heal DID adopt a fresh token "
                 "and retry — the retry itself still failed authorization. The "
                 "owner incarnation and its refresh loop are NOT implicated; a "
                 "session token adopted but the request still failed "
@@ -262,8 +262,8 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
         if HEAL_REMINT_SUFFIX in text:
             return (
                 _fail(f"Error: {text}\n"
-                "The session-lease self-heal (nexus-g5hzk) found nothing "
-                "fresher, but the data-token re-mint (nexus-wrwb7) DID mint a "
+                "The session-lease self-heal found nothing "
+                "fresher, but the data-token re-mint DID mint a "
                 "fresh bearer and retried — the retry still failed "
                 "authorization. With the bearer freshly minted, the SESSION "
                 "token in the lease is the likely stale credential (its owner "
@@ -278,7 +278,7 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
                 "The MCP session's T1 (scratch) session token is no longer valid, "
                 "AND the automatic self-heal already failed: on this 401 the store "
                 "re-read the owner-republished session lease and found no fresh "
-                "token to adopt (nexus-g5hzk — no lease, expired, or unchanged). "
+                "token to adopt. "
                 "That means the token's owner incarnation is gone or its refresh "
                 "loop died — reconnect the conexus MCP/extension so a fresh "
                 "session-scoped token is minted. A bare CLI self-heals on its "
@@ -834,8 +834,7 @@ def _retry_deferred_t1_mint() -> None:
         raise RuntimeError(
             "T1 scratch is unavailable: the storage service could not mint a "
             f"session token ({exc}). Start it (`nx daemon service start`) and "
-            "retry — this failure affects T1 scratch only. (In cloud mode T3 "
-            "has a separate probe-cache limitation: nexus-5t1jp.)"
+            "retry — this failure affects T1 scratch only."
         ) from exc
 
     if not _DEFERRED_T1_MINT:
@@ -11096,7 +11095,7 @@ THEY DO NOT RETURN CONTENT. To get text, chain into store_get_many.
       - Output: {ids, tumblers, distances, collections}
       - `corpus` accepts the same forms as `search` above: "all", a
         prefix, a full collection name, or a comma-separated list.
-      - Scope filter guidance (bead nexus-sgrg): prefer `corpus=<collection>`
+      - Scope filter guidance: prefer `corpus=<collection>`
         for project scoping. The `author` filter matches the catalog
         `author` column, which is rarely populated for RDR/docs; setting
         `author=<repo-name>` almost always returns zero rows. Only use

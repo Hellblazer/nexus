@@ -126,13 +126,13 @@ def list_cmd(show_all: bool) -> None:
     state). ID is the registry's ``collection_id``, ``-`` on a
     row no stamp has given one yet.
 
-    every column is read from the
+    Every column is read from the
     collection's catalog row, never derived from its name, so a row whose
     name disagrees with its columns is visible rather than hidden behind a
     consistent-looking name. A collection with no catalog row prints ``-``
     in every column; a catalog row with no chunks prints 0.
 
-    a collection retired by a re-embed job keeps its catalog
+    A collection retired by a re-embed job keeps its catalog
     row as a tombstone (superseded_by names the successor). An empty tombstone
     is not a collection and is left out unless ``--all``; one still holding
     chunks is listed, with STATE ``superseded-><successor>``. A rename on
@@ -395,7 +395,7 @@ def aspects_cmd(
 ) -> None:
     """Show or set a collection's engine-side ``aspects_enabled`` attribute.
 
-    the tenant-wide, engine-hosted
+    The tenant-wide, engine-hosted
     home for the docs__ aspect-extraction opt-in, read by every machine
     indexing this collection. Round-2 critic decision (T2 critique-nexus-
     l46pu-tenant-wide-aspects-enabled item 1): the ENGINE IS AUTHORITATIVE
@@ -439,7 +439,7 @@ def aspects_cmd(
             local_answer = docs_collection_opted_in(name)
             click.echo(
                 f"{name}: aspects_enabled has no opinion on this engine yet "
-                "(never set, or an engine older than nexus-l46pu) — falling "
+                " — falling "
                 f"back to local config.yml, which resolves to {local_answer} "
                 "for this machine"
             )
@@ -1112,8 +1112,7 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
                 f"{new!r} encodes {new_model!r}. rename never re-embeds — the "
                 f"vectors would silently stay {old_model!r} under a name claiming "
                 f"{new_model!r}. Cross-model moves re-index from source into the "
-                f"{new_model!r}-named collection (nx index repo / nx index pdf — "
-                f"the RDR-162 vector-ETL pipeline retired at RDR-155 P4b). "
+                f"{new_model!r}-named collection. "
                 f"Pass --force-prefix-change ONLY if you know the vectors are "
                 f"already {new_model!r}."
             )
@@ -2692,7 +2691,7 @@ def reembed_cmd(
       nx collection re-embed --all --skip NAME  the same, leaving NAME out (repeatable)
       nx collection re-embed --status [JOB]     jobs; --pause/--resume/--abort JOB act on one
 
-    rebuild embeddings for every chunk in NAME that has a
+    Rebuild embeddings for every chunk in NAME that has a
     live catalog document, using --to MODEL. Chunk ids, document text,
     and metadata are preserved; only the vector changes. A chunk with no
     live document (no owner, or owned only by a deleted document) is left
@@ -2708,7 +2707,7 @@ def reembed_cmd(
     vector server-side (voyage-context-3 chunks the retired
     client path embedded with document context).
 
-    a different MODEL, or --all, runs a job on the local
+    A different MODEL, or --all, runs a job on the local
     engine. It moves each live document, one transaction apiece, into the
     sibling collection that carries the profile's model, then supersedes and
     deletes the source (--keep-source keeps it). The plan states the token
@@ -2796,8 +2795,7 @@ def reembed_cmd(
                 f"--to {target_model!r} "
                 f"cannot take effect on {name!r}. Cross-model moves "
                 f"re-index from source into a {target_model}-named "
-                f"collection (nx index repo / nx index pdf — the RDR-162 "
-                f"vector-ETL pipeline retired at RDR-155 P4b). Plain "
+                f"collection. Plain "
                 f"'nx collection rename' does NOT re-embed and would "
                 f"corrupt the name-encoded model contract."
             )
@@ -3072,7 +3070,7 @@ def merge_candidates_cmd(
     """
     if create_link:
         raise click.ClickException(
-            "--create-link is deferred per RDR-087 §bridge-link workflow. "
+            "--create-link is deferred (bridge links are made by hand). "
             "Use `nx catalog link` manually after reviewing the candidates."
         )
     from nexus.merge_candidates import run_merge_candidates  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost

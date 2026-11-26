@@ -466,8 +466,7 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
     except VectorServiceError as exc:
         if exc.code == 404:
             raise click.ClickException(
-                "The connected engine predates POST /v1/vectors/reapable (RDR-192 Step 8, bead "
-                "nexus-wbfpw.17); upgrade to an engine tag that carries it (compare the deployed "
+                "The connected engine predates POST /v1/vectors/reapable; upgrade to an engine tag that carries it (compare the deployed "
                 "engine's version against nexus.engine_version.REQUIRED_ENGINE_VERSION)."
             ) from exc
         raise click.ClickException(f"Failed to list reapable chunks for {col_name!r}: {exc}") from exc

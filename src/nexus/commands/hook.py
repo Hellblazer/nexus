@@ -116,7 +116,7 @@ def mailbox_arm_cmd(session_id: str) -> None:
     (:mod:`nexus.session_marker`) consistent for whichever session next
     reads it.
 
-    the per-prompt re-arm this command served (a
+    The per-prompt re-arm this command served (a
     live watcher-lock liveness check gating whether to print) was deleted
     with the CLI watcher loop itself; nothing calls this command
     automatically any more (the ``UserPromptSubmit`` drain hook is now the
@@ -378,8 +378,8 @@ def routing_stats_cmd(
     click.echo()
     if selftest_excluded:
         click.echo(
-            f"Note: {selftest_excluded} fail-ladder self-test event(s) excluded "
-            "(suite-written test_rule/unknown pairs; see nexus-mzvwa.9)."
+            f"Note: {selftest_excluded} fail-ladder self-test event(s) excluded"
+            "."
         )
     if active is None:
         click.echo("Note: no hooks.json found — registration cross-check skipped.")

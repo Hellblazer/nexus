@@ -789,7 +789,7 @@ def register_cmd(
     if should_skip_ephemeral_registration(_registered_path, _owner_repo_root):
         raise click.ClickException(
             f"refusing to register {_registered_path!r}: it sits under an "
-            f"agent worktree or system temp dir (nexus-u8n4r) and owner "
+            f"agent worktree or system temp dir and owner "
             f"{owner!r}'s repo_root is not itself rooted there — the "
             f"ephemeral checkout will vanish and leave a permanent orphan. "
             f"If this is a deliberate throwaway owner rooted in a "
@@ -1137,7 +1137,7 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
         click.echo(
             f"Deleted: {lines.label(t, flagged, f'{t} ({entry.title})')}. Links preserved. "
             "Content stops appearing in search once the engine's tombstone "
-            "read-filter is deployed (nexus-3ck2g). Undo with "
+            "read-filter is deployed. Undo with "
             f"'nx catalog restore {t}' until 'nx catalog purge-trash' "
             "physically reclaims it — since catalog-026 that keeps this "
             "doc's row, manifest, and chunks together for the whole "

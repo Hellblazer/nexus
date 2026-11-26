@@ -100,7 +100,7 @@ When invoking the strategic-planning skill after design approval, use this struc
 - Files: none (design is in T2 memory)
 
 ### Deliverable
-Phased implementation plan with beads for task tracking
+Phased implementation plan with, where the project has a `.beads/` directory, beads for task tracking
 
 ### Quality Criteria
 - [ ] Every task has exact file paths and test commands

@@ -44,7 +44,7 @@ def note_uri_pairs_cmd(config_dir_str: str | None, check: bool) -> None:
     if config_dir_str is None and not local_install:
         raise click.ClickException(
             "this install uses a managed or cloud service, which has no local PostgreSQL cluster to ask. "
-            "Run the query as the operator's diagnostic role; the Cloud steps of 'If the RDR-231 note-URI "
+            "Run the query as the operator's diagnostic role; the Cloud steps of 'If the note-URI "
             f"backfill halts startup' are at {RUNBOOK_URL}"
         )
     config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()

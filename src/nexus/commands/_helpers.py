@@ -697,7 +697,7 @@ def _emit_superseded_swept_info() -> bool:
     if swept:
         click.echo(
             f"  swept {swept} superseded T3 chunk(s) left behind by a "
-            f"changed re-index (nexus-39upx)"
+            f"changed re-index"
         )
     # nexus-4pj54: a multi-batch document's sweep is deferred to its
     # completion stamp. A failed or fenced run drops it (discarded); a run
@@ -711,7 +711,7 @@ def _emit_superseded_swept_info() -> bool:
         click.echo(
             f"  superseded-chunk sweep not run for {discarded} failed/fenced "
             f"and {pending} unfinished document(s); their dropped chunks may stay "
-            f"in T3 until the engine reaper collects them (nexus-4pj54)"
+            f"in T3 until the engine reaper collects them"
         )
         pending_ids = stats.get("deferred_pending_doc_ids", [])
         if pending_ids:

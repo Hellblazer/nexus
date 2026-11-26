@@ -556,7 +556,7 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
         "guard": "SCOPED, not root-cause: this repo's OWN tracked host-run harnesses are "
                  "guarded from reintroducing this class, via an exact-allowlist lint over every "
                  "nx index/nx store/nx collection/store_put site in the nexus repo's end-to-end test and "
-                 "script trees (https://github.com/Hellblazer/nexus/blob/main/tests/test_host_harness_scratch_scope_lint.py, nexus-8tnz2 census: "
+                 "script trees (https://github.com/Hellblazer/nexus/blob/main/tests/test_host_harness_scratch_scope_lint.py census: "
                  "all 34 existing files/150 sites are already read-only, container-isolated, or NX_LOCAL "
                  "under a sandboxed HOME/config dir — a NEW site must be reviewed rather than "
                  "silently joining the census). This does NOT address the OBSERVED live "
@@ -583,7 +583,7 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
     },
     "tombstone-orphaned": {
         "status": "shipped-with-residuals",
-        "guard": "worktree/temp indexing refused at registration (nexus-u8n4r) — covers the "
+        "guard": "worktree/temp indexing refused at registration — covers the "
                  "owner_root_gone population; file_missing after a legitimate index is lifecycle, "
                  "swept by housekeeping (miss_count), not a write-time gap",
         "where": "nexus.repo_identity.should_skip_ephemeral_registration, wired at doc_indexer, indexer, pipeline_stages",
@@ -591,7 +591,7 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
     },
     "tombstone-zero-content": {
         "status": "shipped",
-        "guard": "unchunkable sources (zero-byte, binary, whitespace-only) never registered (nexus-rqsh1, nexus-5j8fp)",
+        "guard": "unchunkable sources (zero-byte, binary, whitespace-only) never registered",
         "where": "nexus.classifier.looks_like_binary_content and is_whitespace_only_text at the indexer's registration guard; "
                  "catalog_cmds.integrity._is_zero_content_by_design mirrors it",
         "residual_beads": [],
@@ -605,7 +605,7 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
     "drop-orphan-collections": {
         "status": "shipped-with-residuals",
         "guard": "SCOPED, not root-cause (same honesty note as tombstone-vanished above): the "
-                 "same lint (https://github.com/Hellblazer/nexus/blob/main/tests/test_host_harness_scratch_scope_lint.py, nexus-8tnz2) prevents "
+                 "same lint (https://github.com/Hellblazer/nexus/blob/main/tests/test_host_harness_scratch_scope_lint.py) prevents "
                  "THIS repo's own tracked harnesses from creating new T3-orphan collections "
                  "(chunks present in T3, zero catalog documents — live or tombstoned — "
                  "referencing them). It does nothing about the observed live population's actual, "
@@ -613,8 +613,7 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
                  "regardless of source — already-accumulated debris, or whatever an unguarded "
                  "external producer adds next — via the SAME classify_t3_orphan_collections() "
                  "function `nx catalog doctor --t3-vs-catalog` and `nx catalog verify` also "
-                 "consume. Never drops a tombstoned-only collection (nexus-8tnz2 fix-round "
-                 "CRITICAL 2) — only a confirmed 'orphan' (zero live AND zero tombstoned docs).",
+                 "consume. Never drops a tombstoned-only collection — only a confirmed 'orphan' (zero live AND zero tombstoned docs).",
         "where": "write-time (this repo's own harnesses only): "
                  "https://github.com/Hellblazer/nexus/blob/main/tests/test_host_harness_scratch_scope_lint.py; classification: "
                  "nexus.commands.catalog_cmds.t3_orphans.classify_t3_orphan_collections",
@@ -905,7 +904,7 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
     if vanished_empty or vanished_has:
         click.echo(
             f"\nVanished collections ({len(vanished_empty)} tombstone candidate(s), "
-            f"{len(vanished_has)} diagnosis-only — non-empty manifest, nexus-3ck2g, never auto-deleted):"
+            f"{len(vanished_has)} diagnosis-only — non-empty manifest, never auto-deleted):"
         )
         if vanished_empty:
             click.echo("  Tombstone candidates:")
@@ -930,7 +929,7 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
     ):
         click.echo(
             f"\nZero-count live documents ({len(zc_recount)} recount, "
-            f"{len(zc_exempt)} RDR-145 exempt, {len(zc_reindex)} reindex candidate(s), "
+            f"{len(zc_exempt)} exempt, {len(zc_reindex)} reindex candidate(s), "
             f"{len(zc_zero_content)} zero-content-by-design, "
             f"{len(zc_orphaned)} orphaned path, {len(zc_store_put)} store_put origin, "
             f"{len(zc_unresolvable)} unresolvable provenance):"
@@ -939,7 +938,7 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
             click.echo("  Recount candidates (manifest non-empty; resync):")
             _echo_sample(zc_recount, _CAP_ACTION, _label_zero_count)
         if zc_exempt:
-            click.echo("  RDR-145 exempt (store_put notes; no action):")
+            click.echo("  Exempt (store_put notes; no action):")
             _echo_sample(zc_exempt, _CAP_INFO, _label_zero_count)
         if zc_reindex:
             click.echo("  Reindex candidates (source file present):")
@@ -957,12 +956,12 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
             worktree_n = sum(1 for r in zc_orphaned if _is_worktree_or_tempdir_path(r.get("resolved_path", "")))
             click.echo(
                 f"    {worktree_n} of {len(zc_orphaned)} orphaned-path row(s) are worktree/temp-dir "
-                "paths (nexus-wq1e4 confirmed-safe signal)."
+                "paths."
             )
             click.echo(f"    by reason: {_format_reason_counts(_count_by_reason(zc_orphaned))}")
         if zc_store_put:
             click.echo(
-                "  Store_put origin (nexus-sdp0u signature; recognizable, "
+                "  Store_put origin (recognizable by its signature, "
                 "NOT genuinely-unknown provenance — see `nx t3 backfill-manifest "
                 "--dry-run --only-gapped`):"
             )

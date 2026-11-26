@@ -3072,7 +3072,8 @@ def test_mcp_shim_imports():
         search, query, store_put, store_get, store_list, store_delete,
         memory_put, memory_get, memory_delete, memory_search, memory_consolidate,
         scratch, scratch_manage, collection_list, collection_info,
-        collection_verify, answer_plan_save, answer_plan_search,
+        collection_verify, answer_plan_save, answer_plan_search, answer_plan_delete,
+        plan_save, plan_search, plan_delete,  # deprecated old names, importable for one client release (nexus-sby49.4)
         catalog_search, catalog_show, catalog_list, catalog_register,
         catalog_update, catalog_link, catalog_links, catalog_unlink,
         catalog_link_audit, catalog_link_bulk, catalog_link_query,

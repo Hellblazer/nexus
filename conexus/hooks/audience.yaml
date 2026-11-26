@@ -799,7 +799,7 @@ constants:
   audience: EVERY-USER
   gate: data
   evidence: 'S2-2: names the board and bd; Phase 3 gates the board and beads words on what the project has'
-  target_state: the board and bd words only where a board entry or .beads/ exists
+  target_state: the board and bd words only where a board entry or .beads/ exists; with no checkpoint to read, inject cannot ask the service, so the board is named for the maintainer (maintainer() true) and not for anyone else
   phase: '3'
 - id: hooks/scripts/compact_checkpoint.py:_CRON_NOTE
   audience: EVERY-USER
@@ -887,7 +887,7 @@ rules:
   gate: data
   evidence: The compaction text names the threads board and `bd list --status=in_progress` (compact_checkpoint.py:1272-1276, 1376-1377), whether
     or not the project has either
-  target_state: the board and bd words only where a board entry or .beads/ exists
+  target_state: the board and bd words only where a board entry or .beads/ exists; with no checkpoint to read, inject cannot ask the service, so the board is named for the maintainer (maintainer() true) and not for anyone else
   phase: '3'
 - id: U6c
   module: hooks/scripts/stop_wake_guard.py

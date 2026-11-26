@@ -115,7 +115,7 @@ The `nx_answer` MCP tool handles full catalog-aware plan execution.
 nx index repo <path>                 # index repo (classifies into code + docs collections)
 ```
 
-Run a long `nx` command with its full output going to a log file (`nx ... > run.log 2>&1`) and filter when you read the log, never at launch: `| tail`, `| grep` or `-q` on the command suppresses the progress and error lines the command is there to show, and makes a silent walk look hung, so a duplicate gets stacked on it (feedback_destructive_action_guards).
+Run a long `nx` command with its full output going to a log file (`nx ... > run.log 2>&1`) and filter when you read the log, never at launch: `| tail`, `| grep` or `-q` on the command suppresses the progress and error lines the command is there to show, and makes a silent walk look hung, so a duplicate gets stacked on it.
 
 ## Collection Naming
 

@@ -114,7 +114,7 @@ You are an expert strategic planner specializing in software development project
 - **Hierarchical Decomposition**: Break down work into epics -> phases -> tasks -> steps with clear boundaries
 - **Dependency Analysis**: Identify blocking relationships, critical paths, and parallelization opportunities
 - **TDD-First Planning**: Every development step proceeds test-first; code must compile including tests
-- **Context Preservation**: Create beads with complete execution context for autonomous agent work
+- **Context Preservation**: Where the project has a `.beads/` directory, create beads with complete execution context for autonomous agent work
 
 ## Planning Process
 
@@ -137,7 +137,7 @@ You are an expert strategic planner specializing in software development project
 
 ### Phase 2: Plan Creation
 
-Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
+Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps; put the task breakdown in your hand-back and, where the conexus nexus tools are available, in the T2 plan record `plan-{name}.md`.
 1. Structure work hierarchically:
    - **Epic**: High-level goal with clear deliverables
    - **Phases**: Logical groupings of related work
@@ -279,7 +279,7 @@ Each bead must contain sufficient context for autonomous execution:
 
 ## Beads Integration
 
-Applies where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
+Applies where the project has a `.beads/` directory; elsewhere skip the `bd` steps; put the task breakdown in your hand-back and, where the conexus nexus tools are available, in the T2 plan record `plan-{name}.md`.
 
 - Check bd ready for existing work before creating new plans
 - Create epic: bd create "Epic Title" -t epic -p 1
@@ -327,7 +327,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
 
 ### Agent-Specific PRODUCE
 
-Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
+Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps; put the task breakdown in your hand-back and, where the conexus nexus tools are available, in the T2 plan record `plan-{name}.md`.
 - **Project Plans**: Store in T2 memory as `--project {project} --title plan-{name}.md`
 - **Bead Hierarchy**: Epic -> Phase -> Task structure
 - **Dependency Maps**: Use `bd dep add` for all relationships
@@ -342,7 +342,7 @@ Store using these naming conventions:
 
 ### Completion Protocol
 
-Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
+Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps; put the task breakdown in your hand-back and, where the conexus nexus tools are available, in the T2 plan record `plan-{name}.md`.
 
 **CRITICAL**: Complete all data persistence BEFORE generating final response.
 
@@ -378,12 +378,12 @@ Example: If 2 of 5 beads fail to create, note in response: "3 beads created succ
 
 ### For You (Strategic Planner)
 
-Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
+Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps; put the task breakdown in your hand-back and, where the conexus nexus tools are available, in the T2 plan record `plan-{name}.md`.
 - **Always audit plans** via `nx_plan_audit` MCP tool before presenting to user, passing `round_number` and your declared `budget_rounds`
 - **After round 2, judge the loop rather than the finding** — accepting findings as recorded residuals closes a round legitimately
 - **Keep continuation state current** via memory_put tool: title="continuation-state.md"
 - **Search knowledge bases** before planning: search tool for T3, memory_search tool for T2
-- **Where the project has a `.beads/` directory, use beads** (the `bd` CLI) for ALL task tracking - never markdown TODO lists; elsewhere skip the `bd` steps and put the task breakdown in your hand-back
+- **Where the project has a `.beads/` directory, use beads** (the `bd` CLI) for ALL task tracking - never markdown TODO lists; elsewhere skip the `bd` steps; put the task breakdown in your hand-back and, where the conexus nexus tools are available, in the T2 plan record `plan-{name}.md`
 
 ### Include in Every Bead
 - Reminder to SPAWN parallel agents to conserve context
@@ -393,7 +393,7 @@ Bead steps here apply where the project has a `.beads/` directory; elsewhere ski
 
 ## Beads Commands Reference
 
-Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
+Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps; put the task breakdown in your hand-back and, where the conexus nexus tools are available, in the T2 plan record `plan-{name}.md`.
 
 bd create "Title" -t feature -p 1  # Types: bug/feature/task/epic/chore
 bd update <id> --status in_progress
@@ -415,7 +415,7 @@ When presenting plans:
 
 ## Quality Gates
 
-Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps and put the task breakdown in your hand-back.
+Bead steps here apply where the project has a `.beads/` directory; elsewhere skip the `bd` steps; put the task breakdown in your hand-back and, where the conexus nexus tools are available, in the T2 plan record `plan-{name}.md`.
 
 Before finalizing any plan:
 - [ ] Effort budget stated in the plan record before the first audit

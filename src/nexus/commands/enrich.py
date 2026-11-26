@@ -538,7 +538,7 @@ def enrich_bib(
     hold keeps the values it had. ``--limit`` bounds the backend calls only:
     the manifest read and the chunk-owner lookup cover every document still to
     look up.
-    added the OpenAlex backend so users without a Semantic
+    Added the OpenAlex backend so users without a Semantic
     Scholar API key can still enrich.
 
     A document whose catalog row holds the backend's id is skipped, so the
@@ -1768,8 +1768,8 @@ def enrich_aspects(
         # Candidate-string derivation for the hint.
         if split_candidate_collection_name(collection)[0] == "docs":
             click.echo(
-                "Note: docs__* collections are extracted only when opted in "
-                "(nexus-kk4ut): nx config set aspects.docs_collections "
+                "Note: docs__* collections are extracted only when opted in"
+                ": nx config set aspects.docs_collections "
                 f"'{collection}' (glob patterns allowed). Their prose files "
                 "then get general-prose-v1. Academic PDFs belong in "
                 "knowledge__<name> via 'nx index pdf --collection "
@@ -3337,7 +3337,7 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
         # file-routed collection. The filter still matches that residue literally, but an operator who
         # typed the old scheme for a note would see an empty list and no reason.
         click.echo(
-            "Note: a note's source_uri scheme is now 'nx-note' (RDR-231); 'chroma' matches only "
+            "Note: a note's source_uri scheme is now 'nx-note'; 'chroma' matches only "
             "legacy residue rows. Use --scheme nx-note for notes."
         )
     if scheme:
@@ -3810,7 +3810,7 @@ def _print_aspect_record(record, *, field: str = "") -> None:
 def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
     """Display the aspect record for a single document.
 
-    pre-this-verb the only way to inspect aspects was raw
+    Pre-this-verb the only way to inspect aspects was raw
     SQL against ~/.config/nexus/memory.db. Resolves the tumbler (or
     title) via the catalog, looks up the aspect row by
     ``(physical_collection, file_path)``, and renders all fields.
@@ -3896,7 +3896,7 @@ def aspects_list_cmd(
 ) -> None:
     """List aspect records for COLLECTION, or the gaps with --missing.
 
-    companion to aspects-show; gives the same data at
+    Companion to aspects-show; gives the same data at
     collection-level (preview/audit shape) instead of single-record
     detail. With ``--missing`` the verb inverts to gap detection:
     catalog rows in COLLECTION that don't have a matching aspect row.

@@ -795,7 +795,7 @@ def _index_dt_content_record(
             f"boilerplate ({cleaned.data_uris_removed} inline data URI(s), "
             f"{cleaned.consent_runs_removed} cookie-consent block(s) removed) — "
             "the source is likely a raw web archive; consider a reader-view "
-            "capture for better quality (nexus-mok9x)."
+            "capture for better quality."
         )
     if not cleaned.text.strip():
         # Everything was boilerplate: indexing an empty husk would register a
@@ -834,7 +834,7 @@ def _index_dt_content_record(
                     f"  NOTE: {uuid} was previously indexed with boilerplate — "
                     "this re-index adds clean chunks but the stale dirty chunks "
                     "remain live in raw search until the delete-then-index "
-                    "sweep runs (recipe: nexus-mok9x)."
+                    "sweep runs."
                 )
         cache_path.write_text(front, encoding="utf-8")
         count = index_markdown(
@@ -1726,7 +1726,7 @@ def index_cmd(
             "\n  A 'dt_stamp_ambiguous_file_path' event is a DIFFERENT "
             "failure: several catalog documents share that file_path and "
             "none carried the URI, so nothing was stamped rather than the "
-            "wrong row being stamped (nexus-yzij1). That event names every "
+            "wrong row being stamped. That event names every "
             "candidate tumbler — pick the one that is the record before "
             "running the recovery command, because here the tool genuinely "
             "cannot tell which it is.",

@@ -182,10 +182,9 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     """
     _ = (collection, dry_run, confirm)
     raise click.ClickException(
-        "nx t3 prune-stale is RETIRED (nexus-bm8dd).\n"
+        "nx t3 prune-stale is RETIRED.\n"
         "\n"
-        "It swept T3 chunks by source_path metadata. RDR-102 D2 removed that "
-        "key from the chunk schema, so the sweep has matched nothing since — "
+        "It swept T3 chunks by source_path metadata. A later schema change removed that key from the chunk schema, so the sweep has matched nothing since — "
         "and reported a clean '0 stale' on every collection rather than saying "
         "it could not look. A verb that cannot find anything must not be "
         "mistaken for one that found nothing.\n"
@@ -195,7 +194,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
         "  nx t3 gc -c COLLECTION --no-dry-run --yes\n"
         "\n"
         "Prune first, GC second: deleting chunks while their document still "
-        "references them leaves a dangling manifest (nexus-5xn3k).\n"
+        "references them leaves a dangling manifest.\n"
         "\n"
         "NOTE: `nx t3 gc` REQUIRES -c — the orphan diff is per-collection, so "
         "there is no sweep-every-collection mode to replace the one this verb "
@@ -203,7 +202,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
         "every collection, enumerate and loop:\n"
         "  nx collection list | awk '{print $1}' | xargs -I{} "
         "nx t3 gc -c {} --no-dry-run --yes\n"
-        "(nexus-iitif tracks whether gc should gain an all-collections mode.)"
+        ""
     )
 
 
@@ -212,7 +211,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
 _GC_LISTING_PAGE = 300
 
 _ORPHAN_WINDOW_REMOVED = (
-    "--orphan-window was removed (nexus-wbfpw.18). nx t3 gc now takes its candidates from the "
+    "--orphan-window was removed. nx t3 gc now takes its candidates from the "
     "engine's reapable machinery, whose grace window (30 days, counted from when the chunk last "
     "lost an owner) is fixed in the engine and not tunable from a client, so there is no window "
     "to pass. Run the verb without the flag; `nx store list --reapable -c COLLECTION` shows what "
@@ -220,9 +219,7 @@ _ORPHAN_WINDOW_REMOVED = (
 )
 
 _GC_NO_ROUTE_MESSAGE = (
-    "The connected engine predates the reapable routes (POST /v1/vectors/reapable and the "
-    "reapable-aware gc_quarantine_orphans; RDR-192 Step 8, beads nexus-wbfpw.16 and "
-    "nexus-wbfpw.17), so nx t3 gc cannot run. Upgrade to an engine tag that carries them "
+    "The connected engine predates the reapable routes, so nx t3 gc cannot run. Upgrade to an engine tag that carries them "
     "(compare the deployed engine's own version against REQUIRED_ENGINE_VERSION in "
     "nexus.engine_version)."
 )
@@ -250,7 +247,7 @@ def _census_blocker_totals(census: dict, collection: str) -> dict[str, int]:
     if missing:
         raise click.ClickException(
             f"The manifest-less census for {collection!r} carried no {', '.join(missing)} total; "
-            f"refusing to act without it (RDR-192 R8)."
+            f"refusing to act without it."
         )
     return {b: int(totals[b]) for b in _GC_CENSUS_BLOCKERS}
 
@@ -263,8 +260,8 @@ def _census_scope_total(census: dict, collection: str) -> int:
     if raw is None:
         raise click.ClickException(
             f"The manifest-less census for {collection!r} carried no scope_chunk_total; refusing to "
-            f"act without it, since the fraction floor and the empty-manifest guard both read it "
-            f"(RDR-192 R8)."
+            f"act without it, since the fraction floor and the empty-manifest guard both read it"
+            f"."
         )
     return int(raw)
 
@@ -284,7 +281,7 @@ def _census_blocker_reasons(collection: str, blockers: dict[str, int], *, prior:
             f"legacy note with no manifest row reads reapable once old, and the engine route takes "
             f"no exclusion list, so moving this collection could quarantine a live note. Inspect "
             f"with `nx t3 census-manifest-less -c {shlex.quote(collection)}`, re-put those notes (so each has a "
-            f"manifest row), then re-run (RDR-192 R8)."
+            f"manifest row), then re-run."
         )
     if blockers["unclassified"]:
         reasons.append(
@@ -292,7 +289,7 @@ def _census_blocker_reasons(collection: str, blockers: dict[str, int], *, prior:
             f"cannot classify is a collection state nobody has understood, so the reapable "
             f"verdict on it cannot be trusted; the reaper refuses on it too. Inspect with "
             f"`nx t3 census-manifest-less -c {shlex.quote(collection)}` (it exits 1 on unclassified) and "
-            f"resolve the rows, then re-run (RDR-192 R8)."
+            f"resolve the rows, then re-run."
         )
     return reasons
 
@@ -548,8 +545,7 @@ def gc_cmd(
     chunk the engine's reaper moved (tagged ``quarantined_by``) is expired by the
     engine alone, on its own retention. A chunk whose document is re-registered
     is restored automatically by the ``nx index repo`` run. The operator restore
-    verb ``nx t3 quarantine restore`` (on develop, its engine route
-    in the same engine tag as the reaper) refuses
+    verb ``nx t3 quarantine restore`` refuses
     this verb's ``gc_quarantine_orphans`` audit rows (they list a sample only), so
     restore a chunk this verb moved with its ``--quarantined-since`` /
     ``--quarantined-before`` window or explicit ``--chash`` values. Each engine batch commits on its own, so a run that stops part
@@ -646,7 +642,7 @@ def gc_cmd(
         click.echo(
             f"Failed to verify index-run state for {collection!r}: {exc}. Refusing to compute "
             f"candidates without it — an in-flight or fence-failed document's chunks are not "
-            f"garbage (nexus-g6k6b)."
+            f"garbage."
         )
         raise click.exceptions.Exit(1)
 
@@ -660,7 +656,7 @@ def gc_cmd(
         click.echo(
             f"  {len(incomplete_docs)} document(s) in {collection!r} are "
             f"not index_state='complete' ({_states}). That blocks a move until they "
-            f"resolve or --allow-incomplete-index-state is passed (nexus-g6k6b); a run "
+            f"resolve or --allow-incomplete-index-state is passed; a run "
             f"with nothing to move is not blocked and goes straight to the quarantine expiry."
         )
 
@@ -739,14 +735,14 @@ def gc_cmd(
             f"the listing names {len(candidates)} reapable chunk(s) in '{collection}' but the census "
             f"reads scope_chunk_total = {scope_chunk_total}. The two disagree, so the floor and the "
             f"empty-manifest guard have no denominator; refusing rather than moving on an "
-            f"unverifiable collection (RDR-192 R8)."
+            f"unverifiable collection."
         )
     if scope_chunk_total > 0 and owned_chunks <= 0 and not allow_empty_manifest_set:
         reasons.append(
             f"the catalog manifest for '{collection}' names NONE of the {scope_chunk_total} "
             f"chunk(s) it holds, so every one reads as an orphan candidate. That is "
             f"indistinguishable from a fresh/mis-scoped tenant or an unbackfilled manifest "
-            f"without deciding the collection's disposition first (nexus-jqrtp). Investigate "
+            f"without deciding the collection's disposition first. Investigate "
             f"with `nx t3 backfill-manifest -c {shlex.quote(collection)}` or 'nx catalog reconcile', or, if "
             f"the collection really is fully orphaned, re-run with --allow-empty-manifest-set."
         )
@@ -1496,7 +1492,7 @@ _EXIT_ENGINE_ERROR = 5
 #: message and the help text below both name the mechanism, not a date).
 _NO_ROUTE_MESSAGE = (
     "This engine does not carry the manifest-less-census route "
-    "(RDR-192 S2, bead nexus-wbfpw.4) -- the connected engine predates "
+    " -- the connected engine predates "
     "that route. Upgrade to an engine tag that carries it (compare the "
     "deployed engine's own version against REQUIRED_ENGINE_VERSION in "
     "nexus.engine_version)."

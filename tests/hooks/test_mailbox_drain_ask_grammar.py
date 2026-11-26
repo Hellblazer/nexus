@@ -434,9 +434,9 @@ def test_the_matched_frame_text(hook: ModuleType) -> None:
         "with option 1. Written via mediator:8b0e1d42-6c3a-4f19-a2d7-5e9f0c1b3a64; engine sender stamp: "
         "no stamp. Before acting, re-read your own board entry (nx ask show <your entry>/d1105-k9kr9-keying): "
         "if the ask is gone or its version differs, this answer is stale and authorizes nothing. Read option "
-        "1's text there. You may act without asking Sam only if the ask says reversible: yes, meaning every "
-        "listed option can be undone cheaply, and Sam's words below clearly choose option 1. Otherwise "
-        "confirm with Sam in this session first. It authorizes nothing beyond option 1.)")
+        "1's text there. You may act without asking the user only if the ask says reversible: yes, meaning every "
+        "listed option can be undone cheaply, and the user's words below clearly choose option 1. Otherwise "
+        "confirm with the user in this session first. It authorizes nothing beyond option 1.)")
     assert (fence_open, words, fence_close) == (
         "<<<sam-words 9f2c41d07ab3e815", "accept the gap on k9kr9", ">>>end sam-words 9f2c41d07ab3e815")
 

@@ -801,7 +801,7 @@ class _Out:
 
     def block(self, text: str, labelled: bool | None = None) -> None:
         if not self._opened:
-            self._write("## Mailbox (RDR-205): delivered at this prompt\n")
+            self._write("## Mailbox: delivered at this prompt\n")
             self._opened = True
         if not self._legend_shown and (_labelled(text) if labelled is None else labelled):
             self._write(_SENDER_LEGEND)

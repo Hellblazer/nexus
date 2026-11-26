@@ -62,7 +62,7 @@ import httpx
 def _raise_engine_floor(route: str) -> None:
     raise click.ClickException(
         f"nx catalog {route}: this engine does not yet expose the "
-        f"nexus-dkymw {route} route (POST /v1/catalog/restore, GET "
+        f"{route} route (POST /v1/catalog/restore, GET "
         "/v1/catalog/trash). Upgrade the deployed engine-service, then "
         "re-run."
     )

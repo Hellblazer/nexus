@@ -71,7 +71,7 @@ def _print_tuple_error(e: Exception) -> None:
 
 @click.group(name="tuple")
 def tuple_group() -> None:
-    """shared tuple space: out / rd / in / ack (with an optional reply) / nack / renew / release / templates / dictionary / list / stats / directory."""
+    """Shared tuple space: out / rd / in / ack (with an optional reply) / nack / renew / release / templates / dictionary / list / stats / directory."""
 
 
 @tuple_group.command(name="out")
@@ -887,10 +887,9 @@ def _census_template_name(row: Any, templates: list[dict[str, Any]]) -> str | No
 def tuple_list_cmd(prefix: str | None, limit: int | None, after: str | None, json_out: bool) -> None:
     """Concrete tuple subspaces that exist.
 
-    Unpaged by default (every matching subspace). Pass --limit to page
-    (a scalability research pass over this design: a truncated page
-    prints a "next: --after=<cursor>" hint line (or, under --json, the
-    array's last element is {"next_cursor": "..."}).
+    Unpaged by default (every matching subspace). Pass --limit to page: a
+    truncated page prints a "next: --after=<cursor>" hint line (or, under
+    --json, the array's last element is {"next_cursor": "..."}).
     """
     try:
         if limit is None:

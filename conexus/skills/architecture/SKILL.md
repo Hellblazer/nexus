@@ -87,7 +87,7 @@ Architecture design with execution plan
 ### Quality Criteria
 - [ ] Component boundaries clearly defined
 - [ ] Interfaces specified
-- [ ] Execution plan created with beads
+- [ ] Execution plan created (with beads where the project has a `.beads/` directory)
 ```
 
 For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
@@ -106,8 +106,8 @@ The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-
 - [ ] All requirements addressed in design
 - [ ] Component boundaries clearly defined
 - [ ] Interfaces specified
-- [ ] Execution plan created with beads
-- [ ] Beads created for trackable work
+- [ ] Execution plan created (with beads where the project has a `.beads/` directory)
+- [ ] Where the project has a `.beads/` directory, beads created for trackable work
 - [ ] Risks identified with mitigations
 - [ ] Ready for `mcp__plugin_conexus_nexus__nx_plan_audit` validation
 

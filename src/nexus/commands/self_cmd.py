@@ -2096,8 +2096,7 @@ def _converge_legacy_install(
         # so report it rather than returning a success that migrated nothing.
         raise click.ClickException(
             "this nx looks like a packaged uv-tool install, but "
-            "migrate_legacy.sh found no legacy tree to converge. Since "
-            "nexus-orhp5 both sides resolve the uv tools directory by the "
+            "migrate_legacy.sh found no legacy tree to converge. Both sides now resolve the uv tools directory by the "
             "same rule, so the likeliest causes are that `uv` is absent or "
             "unresolvable here, or the tree was removed between the two "
             "checks. Nothing was changed."
@@ -2178,7 +2177,7 @@ def _windows_converge_legacy_install(
     if generation is None:
         raise click.ClickException(
             "this nx looks like a packaged uv-tool install, but the migration "
-            "found no legacy tree to converge. Since nexus-orhp5 both sides "
+            "found no legacy tree to converge. Both sides now "
             "resolve the uv tools directory by the same rule, so the likeliest "
             "causes are that `uv` is absent or unresolvable here, or the tree "
             "was removed between the two checks. Nothing was changed."

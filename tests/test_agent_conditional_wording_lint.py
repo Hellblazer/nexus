@@ -30,6 +30,10 @@ document" and no check read where an else-branch sends the work (T2 nexus/rca-un
    answer-plan``) together with implementation, pipeline, phase, epic, dispatch or "starting structure" carries
    a negation: the library holds retrieval plans, never those.
 6. One ``.beads/`` condition has one else-branch per file.
+7. A line that requires "beads created" (a checklist item, a deliverable) sits under the ``.beads/``
+   condition like a ``bd`` command does (rule 1); a negated mention ("no beads created") is not a requirement.
+8. The injected hook text (the SubagentStart tool block, the SessionStart capabilities list) never says
+   implementation plans go in beads: a user without ``.beads/`` has no such place.
 """
 from __future__ import annotations
 
@@ -165,14 +169,33 @@ DEFINED_TERMS: dict[str, str] = {}
 #: The portability conditions: a line with one of these is a guard, and what follows its else marker is
 #: the else-branch. A guard's else-branch must go somewhere; "otherwise" elsewhere in prose is not read.
 CONDITION = re.compile(r"\.beads/|are not available in this session|plan document|there are no beads", re.I)
-ELSE_BRANCH = re.compile(r"(?:^|[;:.,(]\s*|\s-\s)(?:elsewhere|otherwise)\b[,:]?\s+(?P<clause>(?:[^.;)]|\.(?=\S))+)", re.I)
+_CLAUSE = r"(?P<clause>(?:[^.;)]|\.(?=\S))+)"
+#: "elsewhere ...", "otherwise ...", ", and elsewhere ...", "in other projects ..." after a clause break or a dash.
+ELSE_BRANCH = re.compile(
+    r"(?:^|[;:.,(]\s*|\s-\s)(?:and\s+)?(?:elsewhere|otherwise|in (?:any )?other projects?)\b[,:]?\s+" + _CLAUSE, re.I)
+#: "If no `.beads/` ..., <else clause>": the guard is the negative, the clause after its comma is the else-branch.
+NO_BEADS_IF = re.compile(r"\bif (?:there is |the project has |a project has )?no `?\.beads/`?[^,;:]*[,;:]\s*" + _CLAUSE, re.I)
+#: A bullet that starts "- Elsewhere:" or "- Otherwise:"; its guard is on the bullet before it.
+ELSE_BULLET = re.compile(r"^\s*[-*]\s+(?:elsewhere|otherwise|in (?:any )?other projects?)\b[,:]?\s+" + _CLAUSE, re.I)
 DESTINATION = re.compile(
     r"`mcp__plugin_\w"  # a backticked MCP tool
     r"|`[\w.${}-]+(?:/[\w.${}-]*)+`"  # a backticked path
     r"|`[\w.-]+\.(?:md|yaml|yml|json|toml|py|txt)`"  # a backticked file
-    r"|hand[- ]?back|hand it back|hand (?:it|them) back|\bskip\b|\bskipped\b",
+    r"|hand[- ]?back|hand it back|hand (?:it|them) back",
     re.I,
 )
+#: "skip the `bd` steps": a skip names where the work goes only when nothing follows it but the skipped thing.
+SKIP = re.compile(r"\bskip(?:ped|ping)?\b\s+(?:the |these |those |all |them |it )?(?:`?bd`?\s+|bead\s+|beads\s+)?(?:steps?|commands?|calls?)?\b", re.I)
+
+
+def names_a_destination(clause: str, terms: dict[str, str]) -> bool:
+    """A destination (tool, path, file, hand-back, defined term), or a skip with nothing after it that sends the work elsewhere."""
+    if DESTINATION.search(clause) or any(t.lower() in clause.lower() for t in terms):
+        return True
+    skip = SKIP.search(clause)
+    if skip is None:
+        return False
+    return not re.search(r"[A-Za-z]{3,}", clause[skip.end():].replace("entirely", "").replace("altogether", ""))
 
 
 def resolve_defined_terms(terms: dict[str, str], root: pathlib.Path = PROJECT_ROOT) -> list[str]:
@@ -187,13 +210,19 @@ def resolve_defined_terms(terms: dict[str, str], root: pathlib.Path = PROJECT_RO
 
 
 def else_branches(text: str) -> list[tuple[int, str]]:
-    """``(line number, clause)`` for each else-branch on a line that carries a portability condition."""
+    """``(line number, clause)`` for each else-branch of a portability condition: on the condition's own line, after an
+    "If no `.beads/`" guard, or in a bullet whose guard is on a bullet within the three lines before it."""
     found = []
-    for number, line in enumerate(text.splitlines(), 1):
-        if not CONDITION.search(line):
-            continue
-        for match in ELSE_BRANCH.finditer(line):
-            found.append((number, match.group("clause").strip()))
+    lines = text.splitlines()
+    for number, line in enumerate(lines, 1):
+        if CONDITION.search(line):
+            for match in ELSE_BRANCH.finditer(line):
+                found.append((number, match.group("clause").strip()))
+            for match in NO_BEADS_IF.finditer(line):
+                found.append((number, match.group("clause").strip()))
+        bullet = ELSE_BULLET.match(line)
+        if bullet and any(CONDITION.search(prior) for prior in lines[max(0, number - 4):number - 1]):
+            found.append((number, bullet.group("clause").strip()))
     return found
 
 
@@ -201,31 +230,69 @@ def aimless_else_branches(text: str, defined_terms: dict[str, str] | None = None
     """``(examined, [(line number, clause)])`` for the else-branches that name no destination."""
     terms = DEFINED_TERMS if defined_terms is None else defined_terms
     branches = else_branches(text)
-    bad = [
-        (n, clause)
-        for n, clause in branches
-        if not DESTINATION.search(clause) and not any(t.lower() in clause.lower() for t in terms)
-    ]
-    return len(branches), bad
+    return len(branches), [(n, clause) for n, clause in branches if not names_a_destination(clause, terms)]
 
 
 #: A line that names the plan-library tools or the CLI group over them.
 PLAN_LIBRARY = re.compile(r"(?<![A-Za-z0-9])(?:answer_)?plan_(?:save|search|delete)\b|\bnx (?:answer-)?plan\b(?!_)")
 #: What the library does not hold.
-NOT_THE_LIBRARY = re.compile(r"implementation|pipeline|phase[sd]?\b|epic|starting structure|dispatch|multiple agents", re.I)
+NOT_THE_LIBRARY = re.compile(r"implementation|(?<!retrieval )pipeline|phase[sd]?\b|epic|starting structure|dispatch|multiple agents", re.I)
 NEGATION = re.compile(r"\b(?:not|never|no|without|instead of)\b|n't", re.I)
+#: A negation counts only within this many words of the claim it negates ("never implementation plans"), not anywhere on the line.
+NEGATION_WINDOW = 6
+
+
+def _negated(line: str, claim: re.Match[str]) -> bool:
+    before = re.findall(r"[\w'-]+", line[: claim.start()])[-NEGATION_WINDOW:]
+    after = re.findall(r"[\w'-]+", line[claim.end():])[:NEGATION_WINDOW]
+    return any(NEGATION.search(w) for w in before + after)
 
 
 def plan_library_conflations(text: str) -> tuple[int, list[tuple[int, str]]]:
-    """``(examined, [(line number, line)])``: plan-tool lines, and those that offer the library as implementation work."""
+    """``(examined, [(line number, line)])``: plan-tool lines, and those that offer the library as implementation work
+    (a claim word with no negation within ``NEGATION_WINDOW`` words of it)."""
     examined = 0
     bad = []
     for number, line in enumerate(text.splitlines(), 1):
         if not PLAN_LIBRARY.search(line):
             continue
         examined += 1
-        if NOT_THE_LIBRARY.search(line) and not NEGATION.search(line):
+        if any(not _negated(line, claim) for claim in NOT_THE_LIBRARY.finditer(line)):
             bad.append((number, line.strip()[:160]))
+    return examined, bad
+
+
+#: "beads created", "create all beads": a requirement that the work leaves beads behind.
+BEAD_REQUIREMENT = re.compile(r"\b(?:all |the )?beads? created\b|\bcreate (?:all |the |epic and task )?beads\b", re.I)
+#: A mention that denies the requirement ("no beads created", "MUST NOT create beads"): not a requirement.
+BEAD_DENIAL = re.compile(r"\b(?:no|not|never)\b[^.]{0,20}$|\bnot\b", re.I)
+
+
+def unguarded_bead_requirements(text: str) -> tuple[int, list[tuple[int, str]]]:
+    """``(examined, [(line number, line)])`` for the lines that require beads created and sit under no ``.beads/`` condition
+    (the line itself, or an earlier line of its section, names the directory)."""
+    examined = 0
+    bad = []
+    in_fence = False
+    guarded = False
+    denying = False
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence and re.match(r"#{1,6} ", line):
+            guarded = False
+            denying = bool(re.search(r"\b(?:does not|do not|don't|never|must not)\b", line, re.I))
+        if CONDITIONAL in line:
+            guarded = True
+        if denying:
+            continue
+        for claim in BEAD_REQUIREMENT.finditer(line):
+            if BEAD_DENIAL.search(line[: claim.start()]) or re.search(r"\bMUST NOT\b", line):
+                continue
+            examined += 1
+            if not guarded:
+                bad.append((number, line.strip()[:160]))
+            break
     return examined, bad
 
 
@@ -324,6 +391,73 @@ def test_a_file_with_two_different_beads_else_branches_is_flagged_and_a_repeated
     assert len(beads_else_branches(same)) == 1
 
 
+def test_the_else_branch_forms_the_first_lint_missed_are_read():
+    """Code review item 3: each form below sent the work nowhere nameable and passed unread."""
+    for text in (
+        "If no `.beads/` directory, track the work in the plan document.\n",
+        "Where `.beads/` exists, file a bead, and elsewhere keep a list in the task log.\n",
+        "Where `.beads/` exists, file a bead; in other projects keep the list in a notes file.\n",
+        "Where the project has `.beads/`, file a bead.\n- Elsewhere: keep the list in the task log.\n",
+    ):
+        examined, bad = aimless_else_branches(text)
+        assert examined == 1 and len(bad) == 1, text
+
+
+def test_the_new_else_forms_pass_when_they_name_a_destination():
+    for text in (
+        "If no `.beads/` directory, skip the `bd` steps.\n",
+        "Where `.beads/` exists, file a bead, and elsewhere put the list in your hand-back.\n",
+        "Where `.beads/` exists, file a bead; in other projects write it with `mcp__plugin_conexus_nexus__memory_put`.\n",
+        "Where the project has `.beads/`, file a bead.\n- Elsewhere: put the list in your hand-back.\n",
+    ):
+        examined, bad = aimless_else_branches(text)
+        assert examined == 1 and bad == [], text
+
+
+def test_a_skip_followed_by_an_undefined_term_is_not_a_destination():
+    for line in (
+        "Where `.beads/` exists, file a bead; elsewhere skip the `bd` steps and keep the list in the task log.",
+        "Where `.beads/` exists, file a bead; elsewhere skip the `bd` steps and track it in the plan.",
+    ):
+        examined, bad = aimless_else_branches(line + "\n")
+        assert examined == 1 and len(bad) == 1, line
+    for line in (
+        "Where `.beads/` exists, file a bead; elsewhere skip the `bd` steps.",
+        "Where `.beads/` exists, file a bead; elsewhere skip them entirely.",
+        "Where `.beads/` exists, file a bead; elsewhere skip the `bd` steps and put the list in your hand-back.",
+    ):
+        assert aimless_else_branches(line + "\n") == (1, []), line
+
+
+def test_a_negation_must_sit_next_to_the_claim_not_anywhere_on_the_line():
+    for line in (
+        "`plan_search` is not slow but fast, and in the end returns the pipeline template for this task.",
+        "It is not available offline; use `answer_plan_save` to keep the phase list.",
+    ):
+        examined, bad = plan_library_conflations(line + "\n")
+        assert examined == 1 and len(bad) == 1, line
+    for line in (
+        "`answer_plan_search` finds saved retrieval plans, never implementation plans.",
+        "Implementation, pipeline, and phased-execution plans do not go in `answer_plan_save`.",
+        "Do not use `plan_search` as a starting structure.",
+    ):
+        assert plan_library_conflations(line + "\n")[1] == [], line
+
+
+def test_an_unguarded_beads_created_requirement_is_flagged_and_a_guarded_or_denied_one_is_not():
+    bad_text = "## Done\n\n- [ ] Beads created for all tasks\n"
+    assert unguarded_bead_requirements(bad_text) == (1, [(3, "- [ ] Beads created for all tasks")])
+    assert unguarded_bead_requirements("## A\n\n6. Create beads for trackable work items\n")[1] != []
+    assert unguarded_bead_requirements("## Does NOT\n\n- Create beads (that happens later)\n") == (0, [])
+    assert unguarded_bead_requirements("## A\n\nCreate all beads, then verify.\n")[1] != []
+    ok = "## A\n\nWhere the project has a `.beads/` directory:\n\n- [ ] Beads created for all tasks\n"
+    assert unguarded_bead_requirements(ok) == (1, [])
+    assert unguarded_bead_requirements("## A\n\n- **If no:** Continue, no beads created\n") == (0, [])
+    assert unguarded_bead_requirements("## A\n\nYou MUST NOT create beads yourself.\n") == (0, [])
+    assert unguarded_bead_requirements("## A\n\n- [ ] Where `.beads/` exists, beads created for the tasks\n") == (1, [])
+    assert unguarded_bead_requirements("## A\n\n`.beads/`\n\n## B\n\n- [ ] Beads created\n")[1] != []  # a new heading resets the guard
+
+
 # -- the real files ------------------------------------------------------------------------------------
 
 
@@ -365,3 +499,28 @@ def test_each_file_has_one_beads_else_branch():
             problems.append(f"{path.relative_to(PROJECT_ROOT)}: {sorted(branches)}")
     assert with_a_branch >= 10, f"only {with_a_branch} files carry a .beads/ else-branch: the lint is blind"
     assert problems == [], "\n".join(problems)
+
+
+def test_no_line_requires_beads_created_outside_the_beads_condition():
+    examined = 0
+    problems: list[str] = []
+    for path in wide_files():
+        n, bad = unguarded_bead_requirements(path.read_text(encoding="utf-8"))
+        examined += n
+        problems += [f"{path.relative_to(PROJECT_ROOT)}:{ln}: {text}" for ln, text in bad]
+    assert examined >= 5, f"only {examined} bead requirements were examined: the lint is blind"
+    assert problems == [], "\n".join(problems)
+
+
+def test_the_injected_hook_text_never_says_implementation_plans_go_in_beads():
+    """The SubagentStart tool block and the SessionStart capabilities line reach every user; a user without `.beads/` has no
+    such place, so the text says what the library does not hold, not where the other plans go."""
+    texts = [
+        (PROJECT_ROOT / "src" / "nexus" / "hooks" / "subagent_start.py").read_text(encoding="utf-8"),
+        (PROJECT_ROOT / "src" / "nexus" / "hooks" / "session_context.py").read_text(encoding="utf-8"),
+    ]
+    carrying = [t for t in texts if "retrieval plans" in t or "retrieval only" in t]
+    assert len(carrying) == 2, "non-vacuity: both files describe the plan library"
+    for t in texts:
+        assert not re.search(r"implementation plans go in", t), "an implementation plan has no place for a user without beads"
+        assert "never implementation plans" in t

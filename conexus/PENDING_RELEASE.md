@@ -48,16 +48,16 @@ it is until moved back deliberately.
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/skills/rdr-close/SKILL.md`: one clause: the Step 6 target is found by its attributes and minted on first write, not rendered, nexus-p2m1x.30.
-- `conexus/agents/architect-planner.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
-- `conexus/agents/code-review-expert.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
-- `conexus/agents/codebase-deep-analyzer.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
-- `conexus/agents/debugger.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
-- `conexus/agents/deep-analyst.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
-- `conexus/agents/deep-research-synthesizer.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
-- `conexus/agents/developer.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
-- `conexus/agents/strategic-planner.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
-- `conexus/agents/substantive-critic.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
-- `conexus/agents/test-validator.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/agents/architect-planner.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan; the internal RDR and bead ids are removed from the body; where a bead is required it is gated on `.beads/`, nexus-sby49.4.
+- `conexus/agents/code-review-expert.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan; the internal RDR and bead ids are removed from the body; where a bead is required it is gated on `.beads/`, nexus-sby49.4.
+- `conexus/agents/codebase-deep-analyzer.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan; the internal RDR and bead ids are removed from the body; where a bead is required it is gated on `.beads/`, nexus-sby49.4.
+- `conexus/agents/debugger.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan; the internal RDR and bead ids are removed from the body; where a bead is required it is gated on `.beads/`, nexus-sby49.4.
+- `conexus/agents/deep-analyst.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan; the internal RDR and bead ids are removed from the body; where a bead is required it is gated on `.beads/`, nexus-sby49.4.
+- `conexus/agents/deep-research-synthesizer.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan; the internal RDR and bead ids are removed from the body; where a bead is required it is gated on `.beads/`, nexus-sby49.4.
+- `conexus/agents/developer.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan; the internal RDR and bead ids are removed from the body; where a bead is required it is gated on `.beads/`, nexus-sby49.4.
+- `conexus/agents/strategic-planner.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` (retrieval plans only); without `.beads/` the planner skips the `bd` steps, puts the task breakdown in its hand-back and, where the conexus nexus tools are available, in the T2 plan record `plan-{name}.md`; the internal ids are removed from the body, nexus-sby49.4.
+- `conexus/agents/substantive-critic.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan; the internal RDR and bead ids are removed from the body; where a bead is required it is gated on `.beads/`, nexus-sby49.4.
+- `conexus/agents/test-validator.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan; the internal RDR and bead ids are removed from the body; where a bead is required it is gated on `.beads/`, nexus-sby49.4.
 - `conexus/resources/agent-shared/RELAY_TEMPLATE.md`: the Bead field also takes a tracking id (D10), nexus-sby49.3.
 - `conexus/hooks/scripts/routing/_lib.py`: `log_routing_event` records only under `maintainer()`, so a user's command fragments no longer reach their engine as routing_events rows, nexus-sby49.3.
 - `conexus/hooks/scripts/_audience.py`: three lazy imports carry a `noqa: PLC0415` reason so the byte copy under `src/` passes the repo's ruff job (comment only), nexus-sby49.3.
@@ -119,5 +119,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/resources/rdr/TEMPLATE.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 - `conexus/resources/rdr_process/AUDIT-PROMPT.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 - `conexus/resources/rdr_process/INCIDENT-TEMPLATE.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/hooks/scripts/mailbox_drain.py`: the mailbox header and the ask-answer frame name no internal id, and the frame says "the user" except in its pinned opening phrase and delimiters, nexus-sby49.4.
+- `conexus/hooks/scripts/version_lockstep_hook.py`: the plugin-only-release nudge no longer cites an internal id, nexus-sby49.4.
+- `conexus/skills/brainstorming-gate/SKILL.md`: the relay's deliverable names beads only where the project has a `.beads/` directory, nexus-sby49.4.
 
 ## Deferred to the next client release

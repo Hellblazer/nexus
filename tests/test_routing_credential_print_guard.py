@@ -45,6 +45,7 @@ def _spawn(stdin_text: str) -> subprocess.CompletedProcess:
     exercises this checkout rather than the box's installed generation."""
     env = os.environ.copy()
     env["NX_HOOK_PYTHON"] = sys.executable
+    env.pop("CLAUDE_PROJECT_DIR", None)  # the audience falls back to it when the payload has no cwd
     return subprocess.run(
         [sys.executable, str(SCRIPT)],
         input=stdin_text, capture_output=True, text=True, timeout=10, env=env,
@@ -335,3 +336,22 @@ def test_a_forced_error_with_no_marker_passes_through() -> None:
     proc = _drive_forced_error("echo hello world")
     assert proc.returncode == 0
     assert proc.stdout == "", f"expected empty stdout, got: {proc.stdout!r}"
+
+
+def test_a_broken_audience_helper_gives_the_full_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``nexus_repo`` tightens (it adds the redirect text), so an import that fails binds it to True (nexus-sby49.4)."""
+    import importlib.util
+
+    monkeypatch.setitem(sys.modules, "_audience", None)  # an import of it now raises ImportError
+    spec = importlib.util.spec_from_file_location("credential_print_guard_no_helper", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module._nexus_repo({"cwd": "/nowhere"}) is True
+
+
+def test_a_payload_with_no_cwd_is_not_decided_by_the_test_runners_project_dir(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The audience falls back to ``CLAUDE_PROJECT_DIR`` when the payload has no cwd; ``_spawn`` scrubs it, so a runner started
+    from a nexus checkout (which sets it) cannot turn the user case into the maintainer's (nexus-sby49.4)."""
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", _checkout(tmp_path / "nexus", marked=True))
+    proc = _run(DENIED_SHAPES[2][1], cwd=None)
+    assert _decision(proc) == "deny" and "Ask your operator" in _reason(proc), _reason(proc)

@@ -28,7 +28,7 @@ A procedure library is a directory of Lua scripts, one `<name>.lua` per procedur
 
 A script target counts only once `procedure_run` ships in a released package and, for a repo library, the repo root enabled. Until then the source stays whole, or the target is a skill.
 
-A file that holds both kinds, a fixed part and a judgment part, is split by part. Each part gets its own target, and the source keeps what no target holds. Example: `feedback_test_runs_before_push.md` holds a fixed sequence, what to check before a push, and a judgment part. The fixed sequence becomes a script (`preflight`) and the judgment part becomes a skill. Until the script can run, the fixed part stays in the source or goes into the skill with the judgment part. The source shrinks once every target that holds a part is live (see the empty-list rule).
+A file that holds both kinds, a fixed part and a judgment part, is split by part. Each part gets its own target, and the source keeps what no target holds. Example: a standing-rules memory file on pushing holds a fixed sequence, what to check before a push, and a judgment part. The fixed sequence becomes a script (`preflight`) and the judgment part becomes a skill. Until the script can run, the fixed part stays in the source or goes into the skill with the judgment part. The source shrinks once every target that holds a part is live (see the empty-list rule).
 
 For a hook target, read the `hook-development` skill (plugin-dev) and write the test first: a test that trips on the bright line, before the hook exists.
 

@@ -126,9 +126,8 @@ def aspects_gc(apply: bool) -> None:
     #     claiming a clean sweep here would be a different lie from the one
     #     being fixed.
     raise click.UsageError(
-        "aspects gc is retired: the orphan sweep ATTACHed the local SQLite "
-        ".catalog.db to the local T2, and both substrates were deleted in "
-        "the RDR-158 P4 retirement (service/Postgres is the only backend).\n"
+        "aspects gc is retired: the orphan sweep ATTACHed the local SQLite"
+        ".catalog.db to the local T2, and both substrates were deleted in the move to the Postgres service (service/Postgres is the only backend).\n"
         "\n"
         "On the service backend, aspect rows orphaned by a document delete "
         "cannot accumulate: document_aspects.doc_id is FK-bound to "
@@ -137,7 +136,7 @@ def aspects_gc(apply: bool) -> None:
         "NOT covered by that FK: the source_uri-keyed sweep this verb "
         "performed. source_uri is a path string, not a tumbler reference, and "
         "is deliberately unconstrained — so this command can neither run nor "
-        "certify that class clean. Track: nexus-ingey."
+        "certify that class clean."
     )
 
 
@@ -161,9 +160,8 @@ def aspects_gc_fixtures(yes: bool) -> None:
     raise click.UsageError(
         "gc-fixtures is retired: fixture cleanup issued raw SQL DELETEs via "
         "SQLite cursors, and the local SQLite document_aspects / "
-        "aspect_extraction_queue stores were deleted in the RDR-158 P4 "
-        "retirement (service/Postgres is the only backend; raw cursors are "
-        "unavailable over HTTP). Track: nexus-gmiaf.37"
+        "aspect_extraction_queue stores were deleted in the move to the Postgres service (service/Postgres is the only backend; raw cursors are "
+        "unavailable over HTTP)."
     )
 
 
@@ -192,9 +190,9 @@ def aspects_backfill_source_uri(apply: bool) -> None:
     raise click.UsageError(
         "aspects backfill-source-uri is retired: it repaired the local "
         "SQLite document_aspects ahead of a migration chain that was "
-        "deleted in the RDR-158 P4 retirement, and on this version the "
-        "local .db is a frozen migration source that must not be written "
-        "(RDR-176 Gap 2). If a pre-migration install still needs the "
+        "deleted in the move to the Postgres service, and on this version the "
+        "local .db is a frozen migration source that must not be written"
+        ". If a pre-migration install still needs the "
         "repair, run it on the last migration-capable 6.x release."
     )
 
@@ -220,10 +218,9 @@ def aspects_gc_pre_rdr096(apply: bool) -> None:
     migration), so there is nothing to sweep service-side either.
     """
     raise click.UsageError(
-        "aspects gc-pre-rdr096 is retired: it deleted pre-RDR-096 rows "
+        "aspects gc-pre-rdr096 is retired: it deleted rows written before document-grain aspects "
         "from the local SQLite document_aspects, which on this version is "
-        "a frozen migration source that must not be written (RDR-176 "
-        "Gap 2). If a pre-migration install still needs the sweep, run it "
+        "a frozen migration source that must not be written. If a pre-migration install still needs the sweep, run it "
         "on the last migration-capable 6.x release."
     )
 
