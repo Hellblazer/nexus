@@ -69,6 +69,7 @@ from nexus.commands.scratch import scratch
 from nexus.commands.self_cmd import self_group
 from nexus.commands.search_cmd import search_cmd
 from nexus.commands.service_cmd import service
+from nexus.commands.settings_cmd import settings_group
 from nexus.commands.store import store
 from nexus.commands.stranded_cmd import stranded_group
 from nexus.commands.t3 import t3 as t3_group
@@ -365,6 +366,7 @@ main.add_command(run_cmd, name="run")
 main.add_command(scratch)
 main.add_command(search_cmd, name="search")
 main.add_command(self_group, name="self")
+main.add_command(settings_group, name="settings")
 main.add_command(service, name="service")
 main.add_command(store)
 main.add_command(stranded_group, name="stranded")
