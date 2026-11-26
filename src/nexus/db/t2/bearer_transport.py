@@ -25,6 +25,7 @@ Also not read, because OpenSSL or ``httpx`` would take them from the environment
 
 from __future__ import annotations
 
+import os
 import ssl
 import threading
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -66,7 +67,6 @@ _lock = threading.Lock()
 
 
 def _build_context(ca_bundle: str) -> ssl.SSLContext:
-    import os  # noqa: PLC0415 — deferred: only the build needs it
     import sys  # noqa: PLC0415 — deferred: only the build needs it
 
     import certifi  # noqa: PLC0415 — deferred: only the build needs it
@@ -124,6 +124,19 @@ def reset_for_tests() -> None:
     global _slot
     with _lock:
         _slot = None
+
+
+def _after_fork_in_child() -> None:
+    """A thread that does not exist in a forked child may have held ``_lock`` at fork time and will
+    never release it, and every bearer-carrying client build (httpx and the pooled T3 transport alike)
+    takes it: the child gets a fresh one. The built context itself is plain read-only state and is kept.
+    ``nexus.db.pooled_http`` does the same for its own locks."""
+    global _lock
+    _lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):  # POSIX; Windows has no fork to guard
+    os.register_at_fork(after_in_child=_after_fork_in_child)
 
 
 # ── the proxy ────────────────────────────────────────────────────────────────

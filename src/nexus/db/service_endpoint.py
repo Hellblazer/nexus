@@ -762,7 +762,8 @@ def _stored_credential(name: str) -> tuple[str, str, str | None] | None:
     """``(value, source, bound_url)`` for a credential in ``get_credential`` precedence
     (env, then config.yml), or ``None``. An env value is unbound; a saved one is bound to
     the saved ``service_url`` (else the default managed endpoint)."""
-    from nexus.config import CREDENTIALS, get_credential, nexus_config_dir, persisted_credentials  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus import config as _config  # noqa: PLC0415 — deferred to avoid circular import; the module attribute for nexus_config_dir (nexus-78blw)
+    from nexus.config import CREDENTIALS, get_credential, persisted_credentials  # noqa: PLC0415 — deferred to avoid circular import
 
     value = (get_credential(name) or "").strip()
     if not value:
@@ -770,7 +771,7 @@ def _stored_credential(name: str) -> tuple[str, str, str | None] | None:
     env_var = CREDENTIALS.get(name, name.upper())
     if os.environ.get(env_var, ""):
         return value, env_var, None
-    saved = persisted_credentials(nexus_config_dir())
+    saved = persisted_credentials(_config.nexus_config_dir())
     return value, f"the saved {name}", bound_origin_for_saved(saved.get("service_url"))
 
 

@@ -203,7 +203,7 @@ def _send_event(tmp_path: Path, env: dict[str, str]):
     child_env.update(env)
     return subprocess.run(
         [sys.executable, "-c", _SEND, str(_ROUTING_DIR)],
-        env=child_env, capture_output=True, text=True, timeout=120,
+        env=child_env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
     )
 
 
