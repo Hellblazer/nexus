@@ -143,8 +143,8 @@ _WORKTREE_ADD_FLAGS: dict[str, bool] = {"--detach": False, "-q": False, "--quiet
 _INERT_HEADS = frozenset({
     "grep", "egrep", "fgrep", "cat", "head", "tail", "wc", "ls", "echo", "printf",
     "cut", "tr", "pwd", "basename", "dirname", "realpath", "readlink", "stat",
-    "file", "test", "true", "false", ":", "nl", "date", "sleep", "diff", "cmp",
-    "sha256sum", "shasum", "md5", "md5sum", "du", "which", "mkdir",
+    "test", "true", "false", ":", "nl", "date", "sleep", "diff", "cmp",
+    "sha256sum", "shasum", "md5", "md5sum", "du", "which",
 })
 _TEXT_PRODUCERS = frozenset({"echo", "printf"})
 #: Words that start a command again, or close a compound, or open a loop.
@@ -156,6 +156,14 @@ _BAD_ASSIGN_RE = re.compile(
     r"PATH|IFS|HOME|SHELL|ZDOTDIR|CDPATH|PAGER|EDITOR|VISUAL|TMPDIR|"
     r"PERL.*|RUBY.*|CLASSPATH|JAVA_TOOL_OPTIONS)"
 )
+#: zsh ties these lowercase names to the environment or to a search path (`path=` is `$PATH`),
+#: or gives them a meaning of their own: assigning one changes what a later command runs.
+_ZSH_SPECIAL_NAMES = frozenset({
+    "path", "fpath", "cdpath", "manpath", "module_path", "mailpath", "psvar", "watch", "argv",
+    "fignore", "histchars", "ifs", "options", "commands", "aliases", "galiases", "saliases",
+    "functions", "parameters", "signals", "status", "pipestatus",
+})
+_PLAIN_LOWER_RE = re.compile(r"[a-z][a-z0-9_]*")
 _CONFIG_WORD_RE = re.compile(r"(?<![\w.-])config(?![\w.-])")
 _AS_IF_PIPED_TO_SH = " | sh"
 _EXEC_RE = re.compile(
@@ -701,6 +709,41 @@ _HELP_FLAGS = frozenset({"-a", "--all", "-g", "--guides", "-c", "--config"})
 _OUTPUT_OK = frozenset({"--output-indicator-new", "--output-indicator-old", "--output-indicator-context"})
 
 
+def _assign_class(name: str) -> str:
+    """``bad``: a name that changes what a later command runs (the unchanged guard decides).
+    ``ok``: one uppercase letter or a plain lowercase name, which nothing reads. ``other``: any
+    other name (an uppercase word is an environment variable some tool may read), which may
+    stand beside no write."""
+    if _BAD_ASSIGN_RE.fullmatch(name) or name in _ZSH_SPECIAL_NAMES:
+        return "bad"
+    if (len(name) == 1 and name.isupper()) or _PLAIN_LOWER_RE.fullmatch(name):
+        return "ok"
+    return "other"
+
+
+def _mkdir_ok(args: list[_Word], hooks: "Hooks") -> bool:
+    """``mkdir [-p] <abs>...`` with every path under a temporary root and outside every repository,
+    or under a worktree this process proves to be a linked one. Anywhere else it makes a
+    directory in a tree the guard protects."""
+    paths = [a for a in args if not (a.lit and a.text == "-p")]
+    if not paths:
+        return False
+    for a in paths:
+        path = _clean_abs(a)
+        if path is None:
+            return False
+        if under_temp_root(path) and outside_every_repo(path):
+            continue
+        parent = os.path.dirname(path)
+        while parent and parent != os.path.dirname(parent):
+            if hooks.is_wt_root(parent):
+                break
+            parent = os.path.dirname(parent)
+        else:
+            return False
+    return True
+
+
 def _before_double_dash(args: list[_Word]) -> list[_Word]:
     for n, w in enumerate(args):
         if w.lit and w.text == "--":
@@ -712,8 +755,8 @@ def _ro_options_safe(sub: str, args: list[_Word]) -> bool:
     """False for an option of a read-only subcommand that runs a program or writes a file.
     git reads any unique prefix of a long option, so these are allowlists or prefix tests."""
     opts = _before_double_dash(args)
-    if sub in ("grep", "ls-remote", "help") and not all(w.safe_value for w in opts):
-        return False  # an unquoted `$X` could be `-Osh`
+    if sub in ("grep", "ls-remote", "help") and not all(w.lit for w in opts):
+        return False  # a `$X`, quoted or not, could be `-Osh` or `--upload-pack=...`
     for w in opts:
         t = w.text
         if not w.lit or not t.startswith("-") or t == "-":
@@ -1094,6 +1137,8 @@ class _Run:
                 words.pop(0)
             self._subst(_substitutions(words) + _substitutions(w for _o, w in seg.redirects), env, ctx)
             if not words:
+                # a redirect with no command (`> file`) still truncates or creates the file
+                self.file_writes = self.file_writes or _redirect_kinds(seg, env)[0]
                 prev_op = seg.op
                 continue
             if _first_plain(words[0]) == "for":
@@ -1115,8 +1160,11 @@ class _Run:
                 m = _ASSIGN_RE.match(first)
                 if not m:
                     break
-                if _BAD_ASSIGN_RE.fullmatch(m.group(1)):
+                kind = _assign_class(m.group(1))
+                if kind == "bad":
                     bad_assign = True
+                elif kind == "other":
+                    self.other = True
                 value_parts = words[0].parts[1:]
                 if first[m.end():]:
                     value_parts = (("u", first[m.end():]),) + value_parts
@@ -1173,6 +1221,8 @@ class _Run:
                     self.created.add(res.created)
                 if res is not None and res.moves_head:
                     self.head_moves = True
+            elif name == "mkdir":
+                res = _Res("read") if _mkdir_ok(rw[1:], hooks) else None  # else: any other command
             elif name == "printf" and any(a.text == "-v" for a in rw[1:]):
                 raise _Refuse  # `printf -v V ...` sets a variable the later commands read
             elif name in _INERT_HEADS or (name == "sed" and _sed_print_only(rw[1:])):

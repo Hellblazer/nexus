@@ -819,6 +819,33 @@ def _state_probes() -> list[str]:
         # a shallow primary
         "git fetch --depth=1 origin pull/1/head",
         "git fetch --unshallow origin pull/1/head",
+        # SB5: an assignment that changes what the next command runs (zsh ties the lowercase names)
+        *[
+            name + "=/tmp/evil; git -C {wt} add -A"
+            for name in (
+                "path", "cdpath", "fpath", "manpath", "module_path", "mailpath", "psvar", "watch", "fignore",
+                "histchars", "ifs", "GNUPGHOME", "PS4", "SHELLOPTS", "LESSOPEN", "NULLCMD", "READNULLCMD",
+                "TMPPREFIX", "PWD", "OLDPWD", "UID", "USERNAME", "Path", "FOO",
+            )
+        ],
+        "cdpath=/tmp/evil && git -C {wt} add -A",
+        "git -C {wt} add -A && path=/tmp/evil",
+        # a redirect with no command truncates or creates the file
+        "> {wt}/.git && git -C {wt} add -A",
+        "git -C {wt} add -A && > {primary}/f.txt",
+        "git -C {wt} add -A && >> {primary}/f.txt",
+        "cd {wt} && > {primary}/f.txt && git add -A",
+        # an inert head that writes a path
+        "mkdir {primary}/zz && git -C {wt} add -A",
+        "git -C {wt} add -A && mkdir {primary}/zz",
+        "mkdir -p {primary}/a/b && cd {wt} && git add -A",
+        "mkdir zz && git -C {wt} add -A",
+        "file -C -m {primary}/x && git -C {wt} add -A",
+        # a read-only subcommand whose option word the guard cannot read
+        "X=--open-files-in-pager=" + q + "git stash" + q + "; git grep " + D + "X y add",
+        'X=x; git grep "--open-files-in-pager=' + D + 'X" y add',
+        'X=-Osh; git grep "' + D + 'X" y add',
+        'X=--upload-pack=x; git ls-remote "' + D + 'X" . add',
     ]
 
 
@@ -826,3 +853,21 @@ def test_every_state_change_probe_of_the_two_reviews_is_denied(primary, worktree
     cmds = _fill(_state_probes(), wt=worktree, primary=primary, box=scratch)
     leaked = [c for c in cmds if not _denied(c, primary)]
     assert not leaked, leaked
+
+
+def test_the_sb5_allowlists_still_admit_what_the_den7_rows_use(primary, worktree, scratch):
+    """A single-letter name, a plain lowercase name, and mkdir under a temp root or the worktree stay admitted."""
+    admitted = _fill(
+        [
+            "W={wt}; git -C " + D + "W add -A",
+            "w={wt}; git -C " + D + "w add -A",
+            "wt_dir={wt}; git -C " + D + "wt_dir add -A",
+            "mkdir -p {wt}/new && git -C {wt} add -A",
+            "cd {wt} && mkdir -p {wt}/new && git add -A",
+            "mkdir -p {box}/r9 && cd {box}/r9 && git init -q -b main",
+            "git -C {wt} grep -n add -- x",
+        ],
+        wt=worktree, primary=primary, box=scratch,
+    )
+    refused = [c for c in admitted if _denied(c, primary)]
+    assert not refused, refused
