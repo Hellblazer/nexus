@@ -405,14 +405,20 @@ a *background worker* is a pg_background process in the database.
   applies the override to a run that already exists with
   `dml_utils.set_migration_run_sleep_ms`, since dml_utils keeps the value it
   was created with;
-- `statement_timeout_ms`, NOT NULL and positive: one budget for the
-  completion transaction's re-check, shared by its table-wide run and every
-  tenant's warm run (each run gets what is left), and then a fresh bound for
-  `on_complete`, whose `lock_timeout` is min(5 s, half of it), at least 1 ms.
-  The completion transaction can so run about twice it. A registrant sizes it
-  for the sum of the tenants' warm runs: a re-check that does not fit times out
-  as a transient `RECHECK` failure and loops on the backoff, each retry
-  repeating the first pass;
+- `statement_timeout_ms`, NOT NULL and positive: one budget of database time
+  for the completion transaction's re-check, shared by its table-wide run and
+  every tenant's warm run (each run gets what is left; the round trips to the
+  database are not charged), and then a fresh bound for `on_complete`, whose
+  `lock_timeout` is min(5 s, half of it), at least 1 ms. The database can so
+  spend about twice it in the completion transaction. The wall time the
+  transaction holds the move's registry row is not bounded by it: for a move
+  that is not table-wide-only each tenant's run adds about four round trips. A
+  verification that reads only the catalogs declares it with the leading comment
+  `/* nexus:table-wide-only */`, and its re-check runs the table-wide run alone,
+  a constant number of round trips whatever the tenant count (the swaps'). A
+  registrant sizes it for the sum of the tenants' warm runs: a re-check that
+  does not fit times out as a transient `RECHECK` failure and loops on the
+  backoff, each retry repeating the first pass;
 - `verify_statement_timeout_ms`, NOT NULL and positive, default 60000
   (`datamoves-002-1`; Sam, 2026-11-21, T2
   `nexus/sam-ruling-split-move-bounds-2026-11-21`): the statement timeout of
@@ -566,10 +572,12 @@ move:
    is not paused, failed, completed or superseded, so a pause or a superseding
    row committed after the last read matches nothing and nothing else runs.
    Then the transaction re-checks, warm, under `statement_timeout_ms` as one
-   shared budget: the verification table-wide, then once per tenant under a
-   transaction-local `nexus.tenant`, over the first pass's tenants plus those
-   the catalogs name now (`nexus.service_tokens` and, on a table partitioned one
-   tenant per leaf, the leaves); the session is checked to carry no tenant
+   shared budget of database time: the verification table-wide, then once per
+   tenant under a transaction-local `nexus.tenant`, over the first pass's
+   tenants plus those the catalogs name now (`nexus.service_tokens` and, on a
+   table partitioned one tenant per leaf, the leaves), except that a
+   table-wide-only verification (above) is run table-wide alone; the session is
+   checked to carry no tenant
    before and after. A row found rolls the transaction back as
    `VERIFICATION_NONEMPTY` (permanent); an error, a timeout or a lock wait rolls
    it back as a `RECHECK` failure. The re-check is point-in-time: a write
@@ -1592,3 +1600,4 @@ the first registered move.
 - 2026-11-20: wording to reviewed code (grant 3), RDR-229 P2.10 (nexus-p2m1x.15, reviews T2 nexus/review-p2m1x15-2026-11-20-r2 and nexus/critique-p2m1x15-2026-11-20-r2): the owner-read policy also covers a tenant-scoped support table a move's template or verification joins (`catalog_collections_owner_read`, which RDR-229 D2's `vectors-065` adds and P2.10 reuses), and the boot check covers it through `DrivingTableIsolationCheck.SUPPORT_TABLES`.
 - 2026-11-24: wording to the tree at the 8.5.6 docs audit (nexus-856): the per-leaf Critical Assumption and the cloud pg_background Critical Assumption are marked verified (the leaf tests in `DataMoveWorkerIntegrationTest`; the 2026-11-19 live install and AMI re-bake), the Prerequisites that waited on Phase 1 Step 4, Step 3c and Activation Step 1 are ticked, and Activation Step 1 says it was done. No design change; status unchanged.
 - 2026-11-26: wording to landed, reviewed code (grant 3), nexus-p2m1x.48, a2f8ced290 and b0b5aa7d7e: the `MoveBootWork` sampler runs every 250 ms for the first 60 s after it starts and every 5 s after that (it was every 5 s from the start, so a move registered after the first sample showed up to 5 s late); a sample that cannot read the registry is retried at 5 s.
+- 2026-11-26: wording to reviewed code (grant 3), nexus-p2m1x.21 residual, feature/rdr229-nextcut-recheck (commits 83ffd850a4, 572ad66f5a): the re-check's shared `statement_timeout_ms` is a budget of database time, not a wall clock over round trips (T2 nexus/review-83ffd850a4-nexus-p2m1x.21-2026-11-26 and critique-83ffd850a4-nexus-p2m1x.21-2026-11-26; a 78 ms RTT fork walk spent it at the 4th of 6 tenants); a verification that reads only the catalogs declares `/* nexus:table-wide-only */` and its re-check runs no per-tenant statement; the wall hold of the registry row for any other move is not bounded by it. No bound or constant changed.
