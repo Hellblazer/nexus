@@ -94,7 +94,12 @@ public final class GcCollectionReads {
      * which {@code PgVectorRepository#asRestoreBusy} answers as the typed 503 {@code quarantine_restore_busy} those routes always had.
      */
     public static <T> T attemptRestore(Gate gate, String origin, String sibling, java.util.function.Function<String, T> attempt) {
-        return RenameFollow.run(gate == Gate.SIBLING && sibling != null ? sibling : origin, attempt);
+        // A collection delete holds each quarantine sibling's registry row FOR UPDATE and then waits for the origin; a mover holds the origin FOR KEY SHARE
+        // and then writes into the sibling, whose row the chunk's foreign key key-shares. With the sibling's id below the origin's the two wait on each other,
+        // and PostgreSQL ends one of them with 40P01 (nexus-p2m1x.23). The delete runs under its own DeadlockRetry; the mover's transaction is one idempotent
+        // unit with no side effect outside the database, so it is run again here, up to the belt's attempts, whichever of the two is the victim.
+        return DeadlockRetry.run("gc " + origin,
+            () -> RenameFollow.run(gate == Gate.SIBLING && sibling != null ? sibling : origin, attempt));
     }
 
     /**
