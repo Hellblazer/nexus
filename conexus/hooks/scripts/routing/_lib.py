@@ -699,10 +699,9 @@ def _post_routing_event_once(
                 "Content-Type": "application/json",
             },
         )
-        if not _ep.bearer_may_use_proxy(base_url):
-            # nexus-ec37o: a plain-http bearer (the lease token always) never goes through a proxy.
-            # This is the detached one-shot poster, so the process-wide opener is ours to set.
-            urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))
+        # nexus-ec37o: the proxy and CA of config.yml, never the environment's; no proxy over plain http.
+        # This is the detached one-shot poster, so the process-wide opener is ours to set.
+        urllib.request.install_opener(_ep.bearer_opener(base_url, _default_config_dir()))
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed internal engine URL, not user input
             if 200 <= resp.status < 300:
                 return ""

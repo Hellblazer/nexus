@@ -354,27 +354,46 @@ def test_without_a_proxy_in_the_environment_nothing_changes(name, engine, monkey
     assert engine.seen
 
 
-class TestHttpsKeepsTheProxy:
-    """An https request can only be tunnelled by a proxy (CONNECT carries ciphertext), so
-    corporate proxy settings keep working for the managed service."""
+class TestOnlyConfigNamesAProxy:
+    """The proxy of a bearer-carrying request is ``network.https_proxy`` of ``config.yml``: a variable in the
+    environment names none (``tests/test_ec37o_netcfg_suite.py`` holds every caller as a process against a
+    real TLS-terminating proxy), and a configured proxy serves https only."""
 
-    def test_an_httpx_client_tunnels_https_through_the_proxy(self, proxy) -> None:
-        from nexus.db.t2.shared_ssl import direct_cleartext_mounts, get_shared_ssl_context
+    def test_an_httpx_client_ignores_the_environment_and_tunnels_https_through_the_configured_proxy(
+        self, proxy, tmp_path, monkeypatch,
+    ) -> None:
+        from nexus.db import bearer_transport as bt
 
-        with httpx.Client(verify=get_shared_ssl_context(), mounts=direct_cleartext_mounts()) as client:
+        # ``proxy`` named every proxy variable; the config names the same recorder, so the request tunnels
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        (cfg / "config.yml").write_text(f"network:\n  https_proxy: {proxy.url}\n", encoding="utf-8")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+        with httpx.Client(**bt.bearer_httpx_kwargs()) as client:
             with pytest.raises(httpx.HTTPError):
                 client.get("https://127.0.0.1:9/x", headers={"Authorization": f"Bearer {_TOKEN}"})
         assert [m for m, _, _ in proxy.seen] == ["CONNECT"]
         assert all(auth == "" for _, _, auth in proxy.seen), "the bearer is inside the tunnel, never in the CONNECT"
 
-    def test_the_pooled_opener_drops_only_the_http_proxy(self, proxy) -> None:
+    def test_the_environment_proxy_is_not_used_when_config_names_none(self, proxy, tmp_path, monkeypatch) -> None:
+        from nexus.db import bearer_transport as bt
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        with httpx.Client(**bt.bearer_httpx_kwargs()) as client:
+            with pytest.raises(httpx.HTTPError):
+                client.get("https://127.0.0.1:9/x", headers={"Authorization": f"Bearer {_TOKEN}"})
+        assert proxy.seen == [], "the environment named this proxy and a bearer request must not use it"
+
+    def test_the_pooled_opener_reads_the_proxy_from_config(self, proxy, tmp_path, monkeypatch) -> None:
         import urllib.request
 
         from nexus.db.pooled_http import build_opener
 
-        opener = build_opener(lambda sock: None)
-        handler = next(h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler))
-        assert "http" not in handler.proxies and handler.proxies.get("https") == proxy.url
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        assert not [h for h in build_opener(lambda sock: None).handlers if isinstance(h, urllib.request.ProxyHandler)]
+        (tmp_path / "config.yml").write_text(f"network:\n  https_proxy: {proxy.url}\n", encoding="utf-8")
+        handler = next(h for h in build_opener(lambda sock: None).handlers if isinstance(h, urllib.request.ProxyHandler))
+        assert handler.proxies == {"https": proxy.url}
 
     @pytest.mark.parametrize(
         ("url", "allowed"),
@@ -382,13 +401,22 @@ class TestHttpsKeepsTheProxy:
          ("http://127.0.0.1:9", False), ("http://svc.example", False), ("http://u:p@127.0.0.1", False), ("", False)],
     )
     def test_the_rule(self, url, allowed) -> None:
-        assert se.bearer_may_use_proxy(url) is allowed
+        assert (se.bearer_proxy_for(url, "http://proxy:1") == "http://proxy:1") is allowed
+        assert se.bearer_proxy_for(url, "") is None
 
 
-def test_the_mounts_are_empty_when_no_proxy_is_set(monkeypatch) -> None:
-    from nexus.db.t2.shared_ssl import direct_cleartext_mounts
+def test_a_configured_proxy_leaves_a_plain_http_bearer_direct(engine, proxy, tmp_path, monkeypatch) -> None:
+    """``network.https_proxy`` is for https: a loopback http bearer never meets it (the lease token travels so)."""
+    from nexus.db import http_vector_client as hvc
 
-    for var in _PROXY_VARS:
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr("urllib.request.getproxies", lambda: {})
-    assert direct_cleartext_mounts() == {}
+    (tmp_path / "config.yml").write_text(f"network:\n  https_proxy: {proxy.url}\n", encoding="utf-8")
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("NX_SERVICE_URL", engine.url)
+    monkeypatch.setenv("NX_SERVICE_TOKEN", _TOKEN)
+    hvc.reset_connection_pool_for_tests()
+    for name in sorted(CLIENTS):
+        try:
+            CLIENTS[name](engine.url, _TOKEN)
+        except Exception:  # noqa: BLE001 — the stand-in engine answers `{}`; what is asserted is where the request went
+            pass
+    assert engine.seen and proxy.seen == [], (engine.seen, proxy.seen)

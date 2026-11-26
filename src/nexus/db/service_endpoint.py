@@ -717,18 +717,17 @@ def require_secure_transport(url: str, *, url_source: str | None = None) -> None
     raise InsecureServiceTransportError(insecure_message(url_source or describe_url_source()))
 
 
-def bearer_may_use_proxy(url: str) -> bool:
-    """True only for an https endpoint, where a proxy can only tunnel ciphertext (CONNECT).
+def bearer_proxy_for(url: str, proxy: str) -> str | None:
+    """*proxy* (the ``network.https_proxy`` of ``config.yml``) for a bearer request to *url*, else ``None``.
 
-    A plain-http request is sent direct, whatever ``HTTP_PROXY`` / ``ALL_PROXY`` name: a proxy
-    would read its ``Authorization`` header, and the supervisor lease token (loopback http
-    only, by its binding) and every cleartext bearer travel that way. A URL that does not
-    normalize gets no proxy either. The clients apply this as
-    :func:`nexus.db.t2.shared_ssl.direct_cleartext_mounts` (httpx), an empty ``ProxyHandler``
-    (urllib) or :func:`nexus.db.pooled_http.build_opener`, and the plugin's mirror of this
-    function (nexus-ec37o)."""
+    Only an https endpoint may use a proxy. A plain-http request is sent direct whatever the
+    configuration names: a proxy would read its ``Authorization`` header, and the supervisor
+    lease token (loopback http only, by its binding) travels that way. A URL that does not
+    normalize gets no proxy either. The proxy comes from ``config.yml`` and never from the
+    environment (see :mod:`nexus.db.bearer_transport`); the plugin's mirror of this function is
+    ``_endpoint_resolve.bearer_proxy_for`` (nexus-ec37o)."""
     origin = normalize_origin(url)
-    return origin is not None and origin[0] == "https"
+    return proxy if proxy and origin is not None and origin[0] == "https" else None
 
 
 def _stored_credential(name: str) -> tuple[str, str, str | None] | None:

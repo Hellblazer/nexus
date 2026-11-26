@@ -6,7 +6,8 @@
     rule as a stored credential: a lease is bound to its host, not to a transport, so a data token
     goes only over https or to a loopback host.
 (b) A request that carries a bearer over plain http goes direct, whatever ``HTTP_PROXY`` /
-    ``HTTPS_PROXY`` / ``ALL_PROXY`` name: the drains (the wheel verb and the plugin script, each a
+    ``HTTPS_PROXY`` / ``ALL_PROXY`` name, and whatever ``network.https_proxy`` of ``config.yml``
+    names (that proxy serves https only): the drains (the wheel verb and the plugin script, each a
     real process) and the routing poster child. The supervisor lease token travels that way on
     every path, so a proxy recorder on a port-0 socket must see none of these requests.
 """
@@ -106,6 +107,20 @@ class TestDrainsSendABearerDirect:
         assert proxy.seen == [], proxy.seen
 
 
+@_BOTH
+def test_a_configured_proxy_never_serves_a_plain_http_bearer(tmp_path, engine, proxy, argv) -> None:
+    """``network.https_proxy`` is for https. The saved token goes to its plain-http (loopback) URL direct."""
+    real = engine()
+    real.rows = [_row("px16", body="configured proxy mail")]
+    _save(tmp_path, url=_url(real))
+    path = tmp_path / "config" / "config.yml"
+    path.write_text(path.read_text(encoding="utf-8") + f"network:\n  https_proxy: {proxy.url}\n", encoding="utf-8")
+    res = _drain(tmp_path, argv, _via(proxy))
+    assert "configured proxy mail" in res.stdout, res.stderr
+    assert set(real.auth) == {f"Bearer {_SAVED}"}, real.auth
+    assert proxy.seen == [], proxy.seen
+
+
 class TestDataTokenIsHeldToTheCleartextRule:
     @_REFUSED
     def test_a_data_token_lease_is_not_sent_over_plain_http_off_the_machine(
@@ -153,8 +168,8 @@ class TestRoutingPoster:
 
 
 def test_the_plugin_script_and_the_routing_hook_import_the_proxy_rule_from_one_module() -> None:
-    """The routing poster and the drain script call ``_endpoint_resolve.bearer_may_use_proxy``, the
-    stdlib mirror the parity test holds to the CLI's text; no third copy of the rule exists."""
+    """The routing poster and the drain script call ``_endpoint_resolve.bearer_proxy_for`` (through
+    ``bearer_opener``), the stdlib mirror the parity test holds to the CLI's text; no third copy of the rule exists."""
     scripts = Path(_ROUTING_DIR).parent
-    hits = [p.name for p in scripts.rglob("*.py") if "def bearer_may_use_proxy" in p.read_text(encoding="utf-8")]
+    hits = [p.name for p in scripts.rglob("*.py") if "def bearer_proxy_for" in p.read_text(encoding="utf-8")]
     assert hits == ["_endpoint_resolve.py"], hits

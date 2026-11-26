@@ -40,7 +40,7 @@ DEFAULT_TENANT: str = "default"
 # bounded wait as the nine mixin adopters (call sites unchanged — only
 # the alias target moved to the gated resolver).
 from nexus.db.client_identity import client_identity_headers
-from nexus.db.t2.shared_ssl import direct_cleartext_mounts, get_shared_ssl_context
+from nexus.db.bearer_transport import bearer_httpx_kwargs
 from nexus.db.service_endpoint import (
     resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,
 )
@@ -199,8 +199,7 @@ class HttpTokenStore:
         # generation that may have been removed since the process started.
         return httpx.Client(
             base_url=self._base_url, headers=headers, timeout=30.0,
-            verify=get_shared_ssl_context(),
-            mounts=direct_cleartext_mounts(),  # nexus-ec37o: no proxy for a plain-http bearer
+            **bearer_httpx_kwargs(),  # nexus-ec37o: the proxy and CA come from config.yml, never the environment
             event_hooks={"request": [stamp_request]},
         )
 

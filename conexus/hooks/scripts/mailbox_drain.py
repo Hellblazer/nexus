@@ -754,11 +754,8 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
 
     def _do() -> None:
         try:
-            handlers: list[urllib.request.BaseHandler] = []
-            if is_local or not _ep.bearer_may_use_proxy(base_url):
-                # nexus-ec37o: a plain-http bearer (the lease token always) never goes through a proxy
-                handlers.append(urllib.request.ProxyHandler({}))
-            opener = urllib.request.build_opener(*handlers)
+            # nexus-ec37o: the proxy and CA of config.yml, never the environment's; no proxy over plain http
+            opener = _ep.bearer_opener(base_url, _config_dir())
             with opener.open(req, timeout=call_timeout) as resp:  # noqa: S310 — fixed engine URL
                 outcome["body"] = json.loads(resp.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError as exc:
@@ -807,11 +804,8 @@ def _get(base_url: str, token: str, route: str, params: dict[str, str],
 
     def _do() -> None:
         try:
-            handlers: list[urllib.request.BaseHandler] = []
-            if is_local or not _ep.bearer_may_use_proxy(base_url):
-                # nexus-ec37o: a plain-http bearer (the lease token always) never goes through a proxy
-                handlers.append(urllib.request.ProxyHandler({}))
-            opener = urllib.request.build_opener(*handlers)
+            # nexus-ec37o: the proxy and CA of config.yml, never the environment's; no proxy over plain http
+            opener = _ep.bearer_opener(base_url, _config_dir())
             with opener.open(req, timeout=call_timeout) as resp:  # noqa: S310 — fixed engine URL
                 outcome["body"] = json.loads(resp.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError as exc:

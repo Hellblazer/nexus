@@ -4185,11 +4185,11 @@ def _check_static_service_token() -> list[HealthResult]:
     if not url:
         return [HealthResult(label=label, ok=True,
                              detail="not applicable — no service_url configured")]
-    from nexus.db.service_endpoint import bearer_may_use_proxy, bound_static_service_token  # noqa: PLC0415 — deferred, same reason
+    from nexus.db.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred
+    from nexus.db.service_endpoint import bound_static_service_token  # noqa: PLC0415 — deferred
     token, refused = bound_static_service_token(url)  # nexus-ec37o: sent only to the origin it was issued for
     if refused or not token:
         return [HealthResult(label=label, ok=not refused, detail=f"not probed: {refused}" if refused else "not applicable — no static service_token configured")]
-
     import hashlib  # noqa: PLC0415 — branch-local
     import httpx  # noqa: PLC0415 — branch-local, avoids module-load cost
 
@@ -4197,7 +4197,7 @@ def _check_static_service_token() -> list[HealthResult]:
     fingerprint = hashlib.sha256(token.encode()).hexdigest()[:8]
     armed = bool((get_credential("mint_token") or "").strip())
     try:
-        resp = httpx.get(f"{url}/v1/_whoami", headers={"Authorization": f"Bearer {token}"}, timeout=10.0, verify=get_shared_ssl_context(), trust_env=bearer_may_use_proxy(url))  # nexus-ec37o: no proxy for a plain-http bearer
+        resp = httpx.get(f"{url}/v1/_whoami", headers={"Authorization": f"Bearer {token}"}, timeout=10.0, **bearer_httpx_kwargs(url))  # nexus-ec37o: proxy and CA from config.yml, never the env
     except httpx.HTTPError as exc:
         return [HealthResult(label=label, ok=False, warn=True,
                              detail=f"could not verify against {host}: {type(exc).__name__}")]

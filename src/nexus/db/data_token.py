@@ -259,11 +259,11 @@ from nexus._log_safe_url import (
 )
 from nexus._winsec import make_user_dir, open_private
 from nexus.db import gateway_hold
+from nexus.db.bearer_transport import bearer_opener
 from nexus.db.request_gate import before_request
 from nexus.db.engine_reasons import error_reason
 from nexus.db.service_endpoint import (
     InsecureServiceTransportError,
-    bearer_may_use_proxy,
     bound_mint_credential,
     is_loopback_host,
     require_secure_transport,
@@ -1143,8 +1143,9 @@ def _default_poster(
         method="POST",
     )
     before_request()  # nexus-ldf2s: a mint is a request like any other
-    # nexus-ec37o: the mint credential never goes through a proxy over plain http (loopback only)
-    opener = urllib.request.build_opener(*([] if bearer_may_use_proxy(url) else [urllib.request.ProxyHandler({})]))
+    # nexus-ec37o: the mint credential uses the proxy and CA of config.yml, never the environment's,
+    # and no proxy at all over plain http (loopback only)
+    opener = bearer_opener(url)
     try:
         with opener.open(req, timeout=_mint_transport_timeout.get()) as resp:  # noqa: S310 — fixed https/http scheme from configured base_url
             raw = resp.read()

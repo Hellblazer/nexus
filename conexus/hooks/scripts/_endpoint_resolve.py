@@ -740,8 +740,28 @@ _FLOW_LINES_MAX = 40
 def read_config_yml_credentials(
     config_dir: Path, keys: tuple[str, ...] = ("service_url", "service_token"),
 ) -> dict[str, str]:
+    """:func:`read_config_yml_section` for the ``credentials:`` block."""
+    return read_config_yml_section(config_dir, "credentials", keys)
+
+
+#: The keys of the ``network:`` section a bearer-carrying request reads (nexus-ec37o); the CLI's
+#: ``nexus.db.bearer_transport.NETWORK_KEYS``.
+NETWORK_KEYS = ("https_proxy", "ca_bundle")
+
+
+def read_config_yml_network(config_dir: Path) -> dict[str, str]:
+    """``{"https_proxy": ..., "ca_bundle": ...}`` from the ``network:`` block of *config_dir*'s
+    ``config.yml`` (``nx config set network.https_proxy``), an absent key absent. The proxy and CA
+    a bearer-carrying request may use come from here and never from the environment."""
+    return read_config_yml_section(config_dir, "network", NETWORK_KEYS)
+
+
+def read_config_yml_section(
+    config_dir: Path, section: str, keys: tuple[str, ...],
+) -> dict[str, str]:
     """Bounded, stdlib-only extraction of ``service_url``/``service_token``
-    (or the other *keys* asked for) from the persisted ``config.yml``.
+    (or the other *keys* asked for) from the *section* block (``credentials``, or ``network``)
+    of the persisted ``config.yml``.
 
     NOT a general YAML parser -- this module cannot import ``nexus`` or a
     third-party YAML library (nexus-vg6d4). It is a line-oriented scan
@@ -791,11 +811,11 @@ def read_config_yml_credentials(
         indent = len(line) - len(line.lstrip(" "))
         stripped = line.strip()
         if not in_credentials:
-            if stripped == "credentials:":
+            if stripped == f"{section}:":
                 in_credentials = True
                 cred_indent = indent
-            elif indent == 0 and stripped.startswith("credentials:") and stripped[len("credentials:"):].strip().startswith("{"):
-                flow = stripped[len("credentials:"):].strip()
+            elif indent == 0 and stripped.startswith(f"{section}:") and stripped[len(f"{section}:"):].strip().startswith("{"):
+                flow = stripped[len(f"{section}:"):].strip()
                 inside = _flow_body(flow)
                 for more in lines[number + 1: number + _FLOW_LINES_MAX]:
                     if inside is not None:
@@ -1054,16 +1074,91 @@ def require_secure_transport(url: str, *, url_source: str | None = None) -> None
     raise CredentialRefused(insecure_message(url_source or describe_url_source()))
 
 
-def bearer_may_use_proxy(url: str) -> bool:
-    """True only for an https endpoint, where a proxy can only tunnel ciphertext.
+def bearer_proxy_for(url: str, proxy: str) -> str | None:
+    """*proxy* (``network.https_proxy`` of ``config.yml``) for a bearer request to *url*, else ``None``.
 
-    A plain-http request is sent direct, whatever ``HTTP_PROXY`` / ``ALL_PROXY`` name: a proxy
-    would read its ``Authorization`` header, and the supervisor lease token (loopback http
-    only, by its binding) and every cleartext bearer travel that way. A URL that does not
-    normalize gets no proxy either. Mirrors ``nexus.db.service_endpoint.bearer_may_use_proxy``;
-    the drains and the routing poster build an empty ``ProxyHandler`` for a URL it refuses."""
+    Only an https endpoint may use a proxy: a plain-http request is sent direct whatever the
+    configuration names, because a proxy would read its ``Authorization`` header (the supervisor
+    lease token travels over loopback http, always). A URL that does not normalize gets no proxy
+    either. The proxy comes from ``config.yml`` and never from the environment (a repository's
+    ``.claude/settings.json`` can set ``HTTPS_PROXY``). Mirrors
+    ``nexus.db.service_endpoint.bearer_proxy_for`` (parity-tested)."""
     origin = normalize_origin(url)
-    return origin is not None and origin[0] == "https"
+    return proxy if proxy and origin is not None and origin[0] == "https" else None
+
+
+#: System CA bundles tried, in order, when the interpreter's own default path (which is where
+#: OpenSSL looks when nothing is set) names no file: a uv or other standalone CPython hard-codes a
+#: build-tree path. System files only; the environment names none of them.
+_SYSTEM_CA_BUNDLES = (
+    "/etc/ssl/cert.pem",                      # macOS, Alpine, OpenBSD
+    "/etc/ssl/certs/ca-certificates.crt",     # Debian, Ubuntu
+    "/etc/pki/tls/certs/ca-bundle.crt",       # RHEL, Fedora
+    "/etc/ssl/ca-bundle.pem",                 # openSUSE
+)
+
+
+def bearer_ssl_context(ca_bundle: str = "") -> Any:
+    """A client ``ssl.SSLContext`` for a bearer-carrying request, with NO environment in it.
+
+    ``ssl.create_default_context()`` ends in ``set_default_verify_paths()``, where OpenSSL reads
+    ``SSL_CERT_FILE`` and ``SSL_CERT_DIR``: a repository's env can name a CA there. This context
+    loads the roots the environment would have been the default for instead: the interpreter's
+    compiled-in bundle and directory (``ssl.get_default_verify_paths().openssl_cafile`` and
+    ``openssl_capath``, which no variable changes), else a well-known system bundle, plus the
+    Windows ROOT and CA stores. ``SSLKEYLOGFILE`` is not read. *ca_bundle* (``network.ca_bundle``) adds
+    roots: a file, or a directory of hashed certificates. A failure to load it raises ``OSError``."""
+    import ssl  # noqa: PLC0415 — deferred: only a request builds a context
+
+    paths = ssl.get_default_verify_paths()
+    cafile = next((c for c in (paths.openssl_cafile, *_SYSTEM_CA_BUNDLES) if c and os.path.isfile(c)), None)
+    # Not ``ssl.create_default_context()``: with no cafile it ends in ``set_default_verify_paths()``, where
+    # OpenSSL reads ``SSL_CERT_FILE`` / ``SSL_CERT_DIR``, and it opens the file ``SSLKEYLOGFILE`` names.
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # verify_mode CERT_REQUIRED and check_hostname on
+    if sys.version_info >= (3, 13):  # what create_default_context added in 3.13
+        ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN | ssl.VERIFY_X509_STRICT
+    if cafile is not None:
+        try:
+            ctx.load_verify_locations(cafile=cafile)
+        except (OSError, ssl.SSLError):
+            pass
+    capath = paths.openssl_capath
+    if capath and os.path.isdir(capath):
+        try:
+            ctx.load_verify_locations(capath=capath)
+        except OSError:
+            pass
+    if sys.platform == "win32":
+        for store in ("ROOT", "CA"):
+            try:
+                certs = [c for c, enc, trust in ssl.enum_certificates(store) if enc == "x509_asn" and (trust is True or ssl.Purpose.SERVER_AUTH.oid in trust)]
+            except (OSError, AttributeError):
+                continue
+            if certs:
+                ctx.load_verify_locations(cadata=b"".join(certs))
+    if ca_bundle:
+        if os.path.isdir(ca_bundle):
+            ctx.load_verify_locations(capath=ca_bundle)
+        else:
+            ctx.load_verify_locations(cafile=ca_bundle)
+    return ctx
+
+
+def bearer_opener(url: str, config_dir: Path | None = None) -> Any:
+    """A urllib opener for a bearer-carrying request to *url*: the proxy and extra CA of
+    *config_dir*'s ``config.yml`` (default: :func:`default_config_dir`), never the environment's.
+
+    ``ProxyHandler`` with an explicit mapping reads no proxy variable (``{}`` is no proxy), and the
+    ``HTTPSHandler`` carries :func:`bearer_ssl_context`. Mirrors
+    ``nexus.db.bearer_transport.bearer_opener``."""
+    import urllib.request  # noqa: PLC0415 — deferred: only a request builds an opener
+
+    net = read_config_yml_network(config_dir if config_dir is not None else default_config_dir())
+    proxy = bearer_proxy_for(url, net.get("https_proxy", ""))
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"https": proxy} if proxy else {}),
+        urllib.request.HTTPSHandler(context=bearer_ssl_context(net.get("ca_bundle", ""))),
+    )
 
 
 def stored_credential(

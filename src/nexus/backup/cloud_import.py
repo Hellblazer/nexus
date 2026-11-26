@@ -186,10 +186,10 @@ class ImportClient:
         self._shown = log_endpoint(self._base)
         self._creds = credentials
         if http is None:
-            from nexus.db.t2.shared_ssl import direct_cleartext_mounts  # noqa: PLC0415 - deferred, heavy
+            from nexus.db.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 - deferred, heavy
 
-            # nexus-ec37o: no proxy for a plain-http bearer
-            http = httpx.Client(timeout=_PAGE_TIMEOUT, mounts=direct_cleartext_mounts())
+            # nexus-ec37o: the proxy and CA come from config.yml, never the environment
+            http = httpx.Client(timeout=_PAGE_TIMEOUT, **bearer_httpx_kwargs())
         self._http = http
         self._sleep = sleep
         self._monotonic = monotonic

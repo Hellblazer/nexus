@@ -27,7 +27,7 @@ _SCRIPTS = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
 
 PURE = (
     "normalize_origin", "origins_equal", "is_loopback_host", "bound_origin_for_saved",
-    "choose_bound_token", "mismatch_message", "insecure_message", "bearer_may_use_proxy",
+    "choose_bound_token", "mismatch_message", "insecure_message", "bearer_proxy_for",
 )
 
 MANAGED = "https://api.conexus-nexus.com"
@@ -135,10 +135,11 @@ def test_mismatch_message_names_each_source_once_without_a_doubled_article(hook)
 
 
 @pytest.mark.parametrize("url", URLS)
-def test_bearer_may_use_proxy_agrees_and_is_https_only(hook, url):
-    assert cli.bearer_may_use_proxy(url) == hook.bearer_may_use_proxy(url)
+@pytest.mark.parametrize("proxy", ["", "http://proxy.corp:3128"])
+def test_bearer_proxy_for_agrees_and_is_https_only(hook, url, proxy):
+    assert cli.bearer_proxy_for(url, proxy) == hook.bearer_proxy_for(url, proxy)
     origin = cli.normalize_origin(url)
-    assert cli.bearer_may_use_proxy(url) is (origin is not None and origin[0] == "https")
+    assert cli.bearer_proxy_for(url, proxy) == (proxy if proxy and origin is not None and origin[0] == "https" else None)
 
 
 # ── the IO wrappers, against one config directory and one environment ────────

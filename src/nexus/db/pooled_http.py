@@ -9,8 +9,8 @@ handshake and started TCP slow-start cold: measured against the real cloud,
 0.23-0.43 s on a new connection against 0.073 s on a reused one, and a search
 issues ~28 such requests, many of them in parallel.
 
-This module keeps urllib's machinery (proxy resolution from the environment,
-redirects, the ``HTTPErrorProcessor`` that raises ``urllib.error.HTTPError``)
+This module keeps urllib's machinery (the proxy handler, built from ``config.yml``
+and never the environment since nexus-ec37o, redirects, the ``HTTPErrorProcessor`` that raises ``urllib.error.HTTPError``)
 and replaces only the one step that opens and discards a connection. The
 handler classes below override ``do_open`` to take a connection from a
 process-wide pool keyed by the RESOLVED endpoint, so:
@@ -287,9 +287,8 @@ def _after_fork_in_child() -> None:
     """Make the child safe to use the transport: an empty pool, and fresh
     module locks (a thread that does not exist in the child may have held any
     of them at fork time, and it will never release it)."""
-    global _ssl_context_lock, _handler_classes_lock
+    global _handler_classes_lock
     _POOL.reset_after_fork()
-    _ssl_context_lock = threading.Lock()
     _handler_classes_lock = threading.Lock()
 
 
@@ -386,35 +385,14 @@ def _buffered_response(
 
 # ── the handlers ──────────────────────────────────────────────────────────────
 
-_ssl_context_lock = threading.Lock()
-_ssl_context_slot: tuple[tuple[Any, ...], Any] | None = None
-
-
 def _shared_ssl_context() -> Any:
-    """The process-wide client SSL context, rebuilt when the trust environment
-    (``SSL_CERT_FILE`` / ``SSL_CERT_DIR``) or the default-context factory
-    (``ssl._create_default_https_context``, which a caller may replace to
-    install its own trust policy) changes. Same construction as
-    ``http.client``'s own default, which is what ``HTTPSHandler`` would build."""
-    import ssl  # noqa: PLC0415 — deferred import — keeps module load light
+    """The process-wide client SSL context: every request through this pool may carry a bearer,
+    so it is :func:`nexus.db.bearer_transport.bearer_ssl_context` (certifi's bundle plus
+    ``network.ca_bundle`` of ``config.yml``), which reads no trust variable from the environment
+    (nexus-ec37o). One context for the whole pool, as it is a pool key."""
+    from nexus.db.bearer_transport import bearer_ssl_context  # noqa: PLC0415 — deferred import — keeps module load light
 
-    global _ssl_context_slot
-    env = (
-        os.environ.get("SSL_CERT_FILE"),
-        os.environ.get("SSL_CERT_DIR"),
-        ssl._create_default_https_context,  # noqa: SLF001 — the documented override point
-    )
-    with _ssl_context_lock:
-        if _ssl_context_slot is None or _ssl_context_slot[0] != env:
-            create = getattr(http.client, "_create_https_context", None)
-            if create is not None:
-                ctx = create(http.client.HTTPSConnection._http_vsn)  # noqa: SLF001
-            else:  # pragma: no cover — future CPython without the private helper
-                import ssl  # noqa: PLC0415 — deferred import — keeps module load light
-
-                ctx = ssl.create_default_context()
-            _ssl_context_slot = (env, ctx)
-        return _ssl_context_slot[1]
+    return bearer_ssl_context()
 
 
 _handler_classes: dict[OnConnect, tuple[type, type]] = {}
@@ -582,8 +560,7 @@ def build_opener(on_connect: OnConnect) -> Any:
     ``on_connect(sock)`` runs right after every NEW connection's ``connect()``
     (TCP keepalive options live there); pass a stable module-level function,
     the handler classes are built once per distinct callable. The OPENER is
-    built per call, as before: it carries the proxy handler, which reads the
-    environment fresh each time.
+    built per call: it carries the proxy handler, read from ``config.yml`` each time.
     """
     import urllib.request  # noqa: PLC0415 — deferred import — keeps module load light
 
@@ -591,9 +568,9 @@ def build_opener(on_connect: OnConnect) -> Any:
         classes = _handler_classes.get(on_connect)
         if classes is None:
             classes = _handler_classes[on_connect] = _make_handler_classes(on_connect)
-    # nexus-ec37o: every request here may carry a bearer, and a plain-http one carries it in
-    # the clear, so the environment's ``http`` proxy is never used (see
-    # ``nexus.db.service_endpoint.bearer_may_use_proxy``); an ``https`` request keeps its
-    # proxy, which can only tunnel ciphertext.
-    proxies = {k: v for k, v in urllib.request.getproxies().items() if k != "http"}
-    return urllib.request.build_opener(urllib.request.ProxyHandler(proxies), *classes)
+    # nexus-ec37o: every request here may carry a bearer, so the proxy is ``network.https_proxy`` of
+    # ``config.yml`` and never the environment's (``bearer_proxy_handler``); an ``http`` request
+    # is never proxied.
+    from nexus.db.bearer_transport import bearer_proxy_handler  # noqa: PLC0415 — deferred import — keeps module load light
+
+    return urllib.request.build_opener(bearer_proxy_handler(), *classes)
