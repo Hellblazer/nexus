@@ -83,9 +83,6 @@ final class VerifyingFinisher implements MoveFinisher {
     /** The longest {@code lock_timeout} of {@code on_complete}, in milliseconds; a move with a shorter statement bound gets half of it. */
     static final int LOCK_TIMEOUT_CEILING_MS = 5_000;
 
-    /** The re-check's deadline of a move with no statement bound ({@link DataMove#unbounded}): none, each run is set to statement_timeout 0. */
-    private static final long NO_DEADLINE = Long.MAX_VALUE;
-
     private static final Table<?> MOVES = DSL.table(DSL.name("nexus", "data_moves"));
 
     /** PostgreSQL's default {@code deadlock_timeout}, in milliseconds: the server setting the drop's lock wait must stay under. */
@@ -605,7 +602,7 @@ final class VerifyingFinisher implements MoveFinisher {
      * then table-wide; the order here does not matter, every run is made). The per-tenant runs are not redundant: a verification that
      * reads a row-security-scoped table or helper sees nothing without a tenant, so the table-wide run is empty whatever the table
      * holds and the tenant's own run is the check. The whole re-check shares {@code statement_timeout_ms}: each run gets what is left
-     * of it (so do the catalog reads of the tenant re-read, each bounded by what is left when it starts), and the move's own statement and lock bounds are set again for {@code on_complete}, which gets a fresh
+     * of it (the catalog reads of the tenant re-read are bounded by all of it and charged to it), and the move's own statement and lock bounds are set again for {@code on_complete}, which gets a fresh
      * {@code statement_timeout_ms} (so the transaction can run up to twice that, plus the UPDATE). The first pass has warmed what
      * the runs read, but only what the verification itself reads: the registrant writes the verification to read what
      * {@code on_complete} reads (the table, and the index or foreign-key side it will scan), or the first pass warms nothing for it.
@@ -628,6 +625,13 @@ final class VerifyingFinisher implements MoveFinisher {
      * {@code DataMoveSplitBoundsIntegrationTest} pins both sides (runs whose sum fits complete; runs each under the bound whose sum
      * is over it time out and complete nothing).
      *
+     * <p><b>What the budget counts.</b> The time the database spends on the runs, not the round trips to it ({@link RecheckBudget}):
+     * a wall clock over the re-check also charged {@code set_config}, {@code SET LOCAL statement_timeout} and the count's own trips
+     * of every tenant, so the cost grew as RTT x (6 + 3 x tenants) and a database an RTT away, or a store with many tenants,
+     * timed out with every statement fast ({@code VerifyingFinisherRecheckLatencyIntegrationTest}). The hold on the registry row
+     * still grows with the round trips of the tenants (they are not free in wall time), but the budget that decides a failure
+     * does not.
+     *
      * <p><b>Errors.</b> The re-check runs under the transaction's {@code lock_timeout}, so a wait behind an ACCESS EXCLUSIVE holder
      * raises 55P03, and a deadlock or a serialization failure is possible: these are stage {@code RECHECK}, classified as
      * {@code on_complete}'s are (transient), never {@code VERIFICATION}, where they would be permanent. A row it finds is
@@ -646,18 +650,24 @@ final class VerifyingFinisher implements MoveFinisher {
             if (seam != null) {
                 seam.accept(tx);
             }
+            long tripBegan = System.nanoTime();
             requireNoTenant(tx, move, "before the re-check");
-            long deadline = move.unbounded() ? NO_DEADLINE : System.nanoTime() + move.statementTimeoutMs() * 1_000_000L;
+            RecheckBudget budget = move.unbounded() ? RecheckBudget.unbounded() : RecheckBudget.of(move.statementTimeoutMs());
+            budget.observeRoundTrip(System.nanoTime() - tripBegan);
             // a move over a table that is not tenant-scoped has no tenant list, and keeps none; the catalog reads of the re-read
-            // are bounded by what is left of the budget when they start
-            clampToBudget(tx, deadline);
+            // are bounded by the whole budget and charged to it (a constant number of statements, whatever the tenant count)
+            clampToBudget(tx, budget);
+            long readBegan = System.nanoTime();
             List<String> listed = tenants.isEmpty() ? tenants
                 : MoveTenants.reread(tx, move.drivingSchema(), move.drivingTable(), tenants);
+            budget.chargeWall(System.nanoTime() - readBegan);
             Map<String, Long> found = new LinkedHashMap<>();
-            runWithinBudget(tx, c, move, null, deadline, found);
+            runWithinBudget(tx, c, move, null, budget, found);
             for (String tenant : listed) {
+                tripBegan = System.nanoTime();
                 setTenant(tx, tenant);
-                runWithinBudget(tx, c, move, tenant, deadline, found);
+                budget.observeRoundTrip(System.nanoTime() - tripBegan);
+                runWithinBudget(tx, c, move, tenant, budget, found);
             }
             if (!listed.isEmpty()) {
                 setTenant(tx, "");
@@ -695,22 +705,28 @@ final class VerifyingFinisher implements MoveFinisher {
     }
 
     /** The statement timeout for what follows, the budget that is left (at least 1 ms). */
-    private static void clampToBudget(DSLContext tx, long deadline) {
-        PgSession.setLocal(tx, "statement_timeout",
-            deadline == NO_DEADLINE ? "0" : Long.toString(Math.max(1L, (deadline - System.nanoTime()) / 1_000_000L)));
+    private static void clampToBudget(DSLContext tx, RecheckBudget budget) {
+        PgSession.setLocal(tx, "statement_timeout", budget.statementTimeoutSetting());
     }
 
     /** One re-check run, under what is left of the budget; a tenant of {@code null} is the table-wide run. */
-    private static void runWithinBudget(DSLContext tx, Connection c, DataMove move, String tenant, long deadline,
+    private static void runWithinBudget(DSLContext tx, Connection c, DataMove move, String tenant, RecheckBudget budget,
                                         Map<String, Long> found) throws SQLException {
-        long leftMs = deadline == NO_DEADLINE ? Long.MAX_VALUE : (deadline - System.nanoTime()) / 1_000_000L;
-        if (leftMs <= 0) {
+        if (budget.leftMs() <= 0) {
             throw new RecheckFailed(FailureHandler.Stage.RECHECK, new SQLException("statement_timeout_ms spent", "57014"),
                 "the verification in the completion transaction of " + move.label() + " used all of statement_timeout_ms="
                     + move.statementTimeoutMs() + " before " + (tenant == null ? "the table-wide run" : "tenant " + tenant));
         }
-        PgSession.setLocal(tx, "statement_timeout", deadline == NO_DEADLINE ? "0" : Long.toString(leftMs));
-        long rows = MoveSql.countRows(c, move.verification(), tenant, COUNT_CAP);
+        long tripBegan = System.nanoTime();
+        clampToBudget(tx, budget);
+        budget.observeRoundTrip(System.nanoTime() - tripBegan);
+        long[] executeNanos = new long[1];
+        long rows;
+        try {
+            rows = MoveSql.countRowsTimed(c, move.verification(), tenant, COUNT_CAP, executeNanos);
+        } finally {
+            budget.chargeRun(executeNanos[0]);
+        }
         if (rows > 0) {
             found.put(tenant == null ? "table-wide" : "tenant " + tenant, rows);
         }

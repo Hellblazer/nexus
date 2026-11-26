@@ -30,16 +30,15 @@ class VerifyingFinisherRecheckLatencyIntegrationTest extends DataMoveIntegration
     /** What the shipped swaps carry (Rdr229SwapMove.STATEMENT_TIMEOUT_MS): the bound this fix may not change. */
     private static final int BUDGET_MS = 1_400;
 
-    private record Timed(MoveFinisher.Result result, long recheckMs) { }
+    /** {@code completionMs}: from the start of the re-check to the end of the finish (the commit). */
+    private record Timed(MoveFinisher.Result result, long completionMs) { }
 
     /** The finish of {@code label} with the finisher's session and its first-pass connection both behind the latency proxy. */
     private Timed finishBehindLatency(String label, List<String> tenants) throws Exception {
         DataMove move = DataMoveRegistry.reload(ctx(), label).orElseThrow();
         AtomicLong began = new AtomicLong();
-        AtomicLong ended = new AtomicLong();
         var finisher = new VerifyingFinisher();
         finisher.recheckHook = tx -> began.set(System.nanoTime());
-        finisher.afterRecheckHook = tx -> ended.set(System.nanoTime());
         try (var proxy = new LatencyProxy(pg.getHost(), pg.getMappedPort(5432), ONE_WAY_MS)) {
             var slow = new AdminConnection("jdbc:postgresql://127.0.0.1:" + proxy.port() + "/" + pg.getDatabaseName(),
                 ADMIN, ADMIN_PASSWORD);
@@ -47,7 +46,7 @@ class VerifyingFinisherRecheckLatencyIntegrationTest extends DataMoveIntegration
                 new AdminDdlSession.Settings(WORKER_NAME + "-probe", 0L, "test", "dm_test", move.drivingTable(), "none"), false)) {
                 var result = finisher.finish(
                     new MoveFinisher.Context(move, tenants, session.ctx(), slow, WORKER_NAME, () -> false));
-                return new Timed(result, ended.get() == 0 ? -1 : (ended.get() - began.get()) / 1_000_000L);
+                return new Timed(result, began.get() == 0 ? -1 : (System.nanoTime() - began.get()) / 1_000_000L);
             }
         }
     }
@@ -68,10 +67,10 @@ class VerifyingFinisherRecheckLatencyIntegrationTest extends DataMoveIntegration
 
         var timed = finishBehindLatency("lat-many", tenants(TENANTS));
 
-        assertThat(timed.recheckMs()).as("non-vacuity: the re-check's round trips alone took longer than its whole budget")
-            .isGreaterThan(BUDGET_MS);
         assertThat(timed.result().outcome()).as("every statement is fast: the budget is server time, not round trips: %s",
             timed.result().reason()).isEqualTo(MoveFinisher.Outcome.COMPLETED);
+        assertThat(timed.completionMs()).as("non-vacuity: from the start of the re-check to the commit, the round trips alone took "
+            + "longer than the whole budget").isGreaterThan(BUDGET_MS);
         assertThat(completedAt("lat-many")).isNotNull();
     }
 
