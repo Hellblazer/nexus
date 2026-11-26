@@ -47,4 +47,6 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/hooks.json` (nexus-sby49.5): the PermissionRequest auto-approve entry is removed; auto-approve answers on PreToolUse only, so a user's own `ask` rule for a conexus tool prompts again (RDR-259 S4).
+
 ## Deferred to the next client release
