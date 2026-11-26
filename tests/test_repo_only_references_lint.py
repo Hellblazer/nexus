@@ -283,10 +283,6 @@ _ALLOWED: dict[str, list[Site]] = {
     "prose-edit/README.md": [
         Site(".claude/skills/site-page/SKILL.md", "A repository with `.claude/skills/site-page/SKILL.md` gets", "names the optional file a USER'S repository may carry; the sentence says a repository without it is fine"),
     ],
-    "src/nexus/hooks/subagent_start.py": [
-        Site("scripts/agent-worktree-preflight.sh", "run `scripts/agent-worktree-preflight.sh [required-sha]`", "the Preflight row text; emitted only when the project has the script (_worktree_preflight_row checks os.path.isfile)"),
-        Site("scripts/agent-worktree-preflight.sh", "_WORKTREE_PREFLIGHT_SCRIPT: str =", "the path the hook probes with os.path.isfile in the project's directory, never printed on its own"),
-    ],
     "src/nexus/catalog/types.py": [
         Site("tests/fixtures", 'FIXTURE_PATH_MARKER: str = "tests/fixtures"', "a path-fragment marker matched against indexed file paths, never shown"),
     ],
@@ -314,9 +310,6 @@ _ALLOWED: dict[str, list[Site]] = {
     ],
     "src/nexus/hooks/_audience.py": [
         Site("scripts/agent-worktree-preflight.sh", "scripts/agent-worktree-preflight.sh", "a byte copy of the plugin helper above: the marker file probed with os.path.isfile in the payload's checkout, never printed"),
-    ],
-    "conexus/hooks/scripts/routing/credential_print_guard.py": [
-        Site("claude_credentials.py", "blob/main/tests/e2e/lib/claude_credentials.py", "the message links the wrapper in its first sentence; the later mentions are the same file"),
     ],
     "src/nexus/storage_boundary_lint.py": [
         # Path constants the storage-boundary lint matches against its own checkout; none is printed.
@@ -1277,19 +1270,20 @@ def test_every_github_link_this_lint_asks_for_names_something_in_the_tree() -> N
     assert not missing, "\n".join(missing)
 
 
-def test_the_credential_guard_deny_message_links_the_wrapper_it_names() -> None:
-    """The guard ships to every user of the plugin; the wrapper it names exists only in the nexus repo, so the
-    message carries the GitHub link (a bare file name reads as something to run; the bare-name rule sees it too)."""
+def test_the_credential_guard_deny_message_names_no_repo_only_file() -> None:
+    """The guard ships to every user of the plugin and its deny says what to do in the guard's own neutral voice
+    (RDR-259: a project that has a helper names it in its settings, which the deny prints after a source label). So
+    the one deny constant carries no path into a nexus checkout, and the wrapper the nexus repo uses is not named."""
     src = (REPO_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "credential_print_guard.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     messages = [
         n.value
         for n in ast.walk(tree)
-        if isinstance(n, ast.Constant) and isinstance(n.value, str) and "claude_credentials.py status" in n.value
-        and "Harnesses never read" in n.value
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and "Harnesses never read" in n.value
     ]
     assert len(messages) == 1, messages
-    assert "https://github.com/Hellblazer/nexus/blob/main/tests/e2e/lib/claude_credentials.py" in messages[0]
+    assert "claude_credentials" not in messages[0]
+    assert not repo_only_paths(messages[0], REPO_ROOT)
 
 
 def test_an_installed_users_own_file_of_the_same_name_is_still_a_repo_only_path_when_it_exists_here(tmp_path: Path) -> None:
