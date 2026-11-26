@@ -60,7 +60,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/agents/test-validator.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan; the internal RDR and bead ids are removed from the body; where a bead is required it is gated on `.beads/`, nexus-sby49.4.
 - `conexus/resources/agent-shared/RELAY_TEMPLATE.md`: the Bead field also takes a tracking id (D10), nexus-sby49.3; a one-line pointer to the orchestration skill's reference.md for what a brief gives a subagent about git, nexus-5y47c.
 - `conexus/hooks/scripts/routing/_lib.py`: `log_routing_event` records only under `maintainer()`, so a user's command fragments no longer reach their engine as routing_events rows, nexus-sby49.3.
-- `conexus/hooks/scripts/_audience.py`: three lazy imports carry a `noqa: PLC0415` reason so the byte copy under `src/` passes the repo's ruff job (comment only), nexus-sby49.3.
+- `conexus/hooks/scripts/_audience.py`: the settings reader (RDR-259): one `SETTINGS` table, `.nexus/project.json` and `conexus.json` checked and bounded, every problem reported, the strictness keys also read from `HEAD`, the session-root and cwd-checkout copies, `integration_branch`, and `python3 _audience.py show`, nexus-sby49.8.
 - `conexus/README.md`: the relay example's Bead field takes a tracking id, nexus-sby49.3.
 - `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md`: the relay validation and the relay example take a tracking id in the Bead field, nexus-sby49.3.
 - `conexus/commands/debug.md`: the relay's Bead field takes a tracking id, nexus-sby49.3.
