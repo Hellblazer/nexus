@@ -1245,10 +1245,13 @@ The key moves table by table in strangler order:
   stamped unlocked and exempt by ruling (`StrictWriterCensus.java:30-31`).
   The retiring verbs lock the row harder: supersede and
   rename FOR UPDATE, by the id when the request names one, and a delete by id
-  FOR UPDATE with its quarantine siblings' rows FOR KEY SHARE, where a delete
-  by label key-shares them until its own row delete
+  FOR UPDATE with its quarantine siblings' rows FOR UPDATE in one ordered
+  statement, where a delete by label takes the siblings FOR UPDATE and the
+  origin FOR KEY SHARE, in id order; a rename's retag key-shares each
+  sibling's row before it reads the rows
   (`CollectionSelectors.java:70-76`; `CollectionTombstones.java:58-95`;
-  `CollectionDeleteFence.java:30-42`, `:69-90`). The read-only routes
+  `CollectionDeleteFence.java:22-50`, `:69-98`; `QuarantineOrigin.java`,
+  `keyShareSiblings`). The read-only routes
   need no guard, and the code's exempt routes have nothing to guard
   (`CollectionSelectors.java:96-131`; T2 `229-research-311`,
   `229-research-335`).
@@ -3421,10 +3424,10 @@ its acceptance is that test green plus the census pin it lowers.
     level by `CollectionVerbsByIdGapTest`; T2 `229-research-327`); a 500 `collection_id_mismatch` marks a registry
     inconsistency. A delete by id takes the re-embed start guard shared
     first, then the origin's row FOR UPDATE with its quarantine siblings'
-    rows FOR KEY SHARE in one `collection_id` order and with no lock bound (a
+    rows FOR UPDATE in one `collection_id` order and with no lock bound (a
     bound would be a new wire answer), and only then runs the 404 and 409
-    checks of the row of that id (`CollectionDeleteFence.java:30-42`,
-    `:104-117`). A rename or supersede that cannot lock its registry row
+    checks of the row of that id (`CollectionDeleteFence.java:34-50`,
+    `:100-125`). A rename or supersede that cannot lock its registry row
     within 10 s answers 503 `rename_busy`, with nothing changed
     (`CollectionTombstones.java:41`, `:110`; `HttpUtil.java:661-669`; the
     one-row rename takes its rows in one ordered statement under the same
@@ -3550,8 +3553,8 @@ its acceptance is that test green plus the census pin it lowers.
     source or its target, matched by the locked row's id and, for an end
     whose stored id names no live row, by the label the job recorded; the
     re-embed runner's own delete of its source at cutover is not refused
-    (`CollectionDeleteRoute.java:62-73`; `CollectionDeleteFence.java:44-52`,
-    `:128-157`; `ReembedJobHold.java:41-47`; `ReembedJobRepository.java:55`;
+    (`CollectionDeleteRoute.java:62-73`; `CollectionDeleteFence.java:52-60`,
+    `:136-165`; `ReembedJobHold.java:41-47`; `ReembedJobRepository.java:55`;
     `HttpUtil.java:997-1001`; `CatalogRepository.java:10464-10466`;
     `ReembedRunner.java:647`). Second, a re-embed start that re-enters a kept
     source
@@ -4756,3 +4759,4 @@ large, and moved under a ratchet.
 - 2026-11-24: the fix checks' counted citations (grant 3, nexus-p2m1x; T2 `229-research-341`, from fix checks `229-fix-check-3de92acf1e` and `229-fix-check-6eec323c91`): the re-home pre-check calls `moveUriCollisions` itself (`CollectionRehomeScope.java:159-166`), not `requireCollectionUrisFree`; "gate 3" is "the latch" where the engine refuses a rename (and "once gate 3 has latched" where readers, writers and the drop move's registration read the latched value); item 4's header and Gap 2 separate the draft's counts from the current ones; the client's id trust names `ids_stable`; the Versioning sentence cites the bead's comments of 2026-11-22 11:25 and 2026-11-23 12:53 and the filter and refusal code. No Test sentence changed.
 - 2026-11-26: P3.12 landed in full (grant 3, nexus-p2m1x.32): `nx collection delete` by label or `--id`, 3c6833a3fd, 65b245534f and 4ddee8c813 (in no engine or client tag yet). P3.12's text and the Day 2 table now say what shipped, the 0.1.203 floor and why, the retired-label refusal as ruled on the bead (only a retired label with a live direct successor is refused), and the `--keep-source` consequence. The 2026-11-24 line above describing P3.12 in part stands as the record of that date.
 - 2026-11-26: citations to landed, reviewed code (grant 3), nexus-p2m1x.48, a2f8ced290 and b0b5aa7d7e: the `MoveBootWork.java` and `MoveBootWorkTest.java` line cites (the announce and retainAnnounced block, the validation-in-flight block, the entry publisher, the restarted-engine builds line and its test) follow the sampler's new warm-up code, which shifted them; no wording changes.
+- 2026-11-26: the delete's lock modes follow the quarantine lane's fix round (grant 3, nexus-p2m1x.23 and .27; the commits of feature/rdr229-nextcut-quarantine, unpublished until the stack lands; T2 `nexus/nextcut-quarantine-lane-2026-11-26`): a delete by id takes the origin's row and its quarantine siblings' rows FOR UPDATE in one `collection_id`-ordered statement, a delete by label the siblings FOR UPDATE and the origin FOR KEY SHARE in the same order, and a rename's retag key-shares each sibling's row before it reads the rows; the `CollectionDeleteFence.java` cites are re-read from that tree.
