@@ -35,11 +35,18 @@ import java.util.List;
  * the latch ({@code leafDetail}, {@code withOwners} and {@code manifestDetail} pass {@code gate3} on). {@code Rdr229P35cLegacySurveyByIdTest}
  * pins the survey; this class pins that the validator hands its own gate to it, which a validator built with {@link Gate3#never()} does not.
  *
- * <p>State, after P3.7's one-row rename: the registry row of the collection bears a new label and keeps its id; the chunk rows keep the old
- * name; the manifest row's name is the new label (a manifest row written after the rename, here set with triggers off, the state once
- * the name keys are gone) and the same id. By name the manifest row meets no chunk (the names differ): {@code manifest_without_chunk}. By id
- * it meets its chunk, whose text is not the chash's digest: {@code text_mismatch}. The bad chunk is listed under the registry's CURRENT
- * label from the latch, and under its stored name before it.
+ * <p>State. The chunk and the manifest row sit under the collection's name and id; the registry row is then renamed in place (the id stays).
+ * <b>Leaf test: a reachable state.</b> The chunk keeps its old name, as after P3.7's one-row rename, so the bad chunk is listed under its stored
+ * name before the latch and under the registry's current label from it; its owner's manifest row still names the old label too, as G17 has every
+ * writer take a manifest row's name from its chunk ({@code ManifestChunkNames}, {@code CatalogRepository.insertManifestChunkRows},
+ * {@code ManifestReplace}).
+ * <b>Manifest test: a SYNTHETIC state.</b> Its manifest row names the NEW label while the chunk keeps the old name, so by name the row meets no
+ * chunk ({@code manifest_without_chunk}) and by id it meets its chunk ({@code text_mismatch}). No Phase 3 writer produces a manifest row and a
+ * chunk of one id under two names: G17 keeps them equal, and the ids are stamped in the same statements. Because they stay equal, the name join
+ * and the id join give the same answer on every state a Phase 3 install can hold, so no reachable state discriminates them; this one is
+ * written directly, with triggers off. It still pins what it can: that the validator hands its own gate to {@code LegacyChunkSurvey.manifestCounts}
+ * and {@code manifestDocs} (a validator that drops it reads the name, and this test goes red); the survey's own id join is
+ * {@code Rdr229P35cLegacySurveyByIdTest}'s. The test says nothing about a state a writer can reach.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ChashConstraintValidatorLatchedGateTest {
@@ -109,19 +116,9 @@ class ChashConstraintValidatorLatchedGateTest {
                 .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, DOC).set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, legacy).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLLECTION)
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, collectionId).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL).execute();
-            // the one-row rename: the registry row bears the new label and keeps its id; the manifest row is the one written under the new
-            // label (triggers off, as the state is once the name keys are gone). Done while the CHECKs are off: a NOT VALID CHECK still
-            // refuses an UPDATE of a row with a 16-byte chash.
+            // the one-row rename: the registry row bears the new label and keeps its id; every child row keeps the old name (G17)
             RegistryRenameSupport.dropForeignKeysOntoTheRegistry(ctx);
             RegistryRenameSupport.rename(ctx, TENANT, COLLECTION, RENAMED);
-            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
-            try {
-                int n = ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, RENAMED)
-                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(DOC)).execute();
-                assertThat(n).as("setup: the manifest row names the new label").isEqualTo(1);
-            } finally {
-                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
-            }
             PgContainerHelper.readdChashOctetChecksNotValid(su);
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
@@ -131,6 +128,28 @@ class ChashConstraintValidatorLatchedGateTest {
     void stop() {
         if (svcDs != null) svcDs.close();
         if (pg != null) pg.stop();
+    }
+
+    /**
+     * Writes {@code name} into the manifest row's name column directly: triggers off (session_replication_role) and the legacy-width CHECKs off for
+     * the update, because a NOT VALID CHECK still refuses an UPDATE of a row with a 16-byte chash.
+     */
+    private void setManifestName(String name) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.alterTable(CHUNKS).dropConstraintIfExists("chunks_chash_octet_check").execute();
+            ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraintIfExists("catalog_document_chunks_chash_octet_check").execute();
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+            try {
+                int n = ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, name)
+                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(DOC)).execute();
+                assertThat(n).as("setup: the manifest row's name is written").isEqualTo(1);
+            } finally {
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+                PgContainerHelper.readdChashOctetChecksNotValid(su);
+            }
+        }
     }
 
     private ChashConstraintValidator validator(Gate3 gate3) {
@@ -188,12 +207,19 @@ class ChashConstraintValidatorLatchedGateTest {
      * By name the row (named by the new label) meets no chunk (named by the old); by id it meets its chunk.
      */
     @Test
-    void aLatchedValidatorJoinsTheManifestRowOfARenamedCollectionToItsChunkById() throws Exception {
-        Refusals byName = refusals(Gate3.never());
-        assertThat(byName.manifest().detail().reasonCounts()).as("control: by name the manifest row meets no chunk")
-            .containsOnlyKeys("manifest_without_chunk");
+    void aLatchedValidatorJoinsTheManifestRowOfARenamedCollectionToItsChunkById_onASyntheticState() throws Exception {
+        setManifestName(RENAMED);   // synthetic: see the class comment; undone below so the leaf test's state is the reachable one
+        Refusals byName;
+        Refusals byId;
+        try {
+            byName = refusals(Gate3.never());
+            assertThat(byName.manifest().detail().reasonCounts()).as("control: by name the manifest row meets no chunk")
+                .containsOnlyKeys("manifest_without_chunk");
 
-        Refusals byId = refusals(() -> true);
+            byId = refusals(() -> true);
+        } finally {
+            setManifestName(COLLECTION);
+        }
 
         assertThat(byId.manifest().detail().reasonCounts()).as("latched: the manifest row meets its chunk on the id")
             .containsOnlyKeys("text_mismatch").containsEntry("text_mismatch", 1L);

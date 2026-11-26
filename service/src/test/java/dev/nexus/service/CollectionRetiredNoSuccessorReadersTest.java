@@ -9,6 +9,7 @@ import dev.nexus.service.CollectionRouteFixture.Resp;
 import dev.nexus.service.db.Chash;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DynamicContainer;
 import org.junit.jupiter.api.DynamicNode;
 import org.junit.jupiter.api.DynamicTest;
@@ -36,41 +37,104 @@ import static org.assertj.core.api.Assertions.assertThat;
  * check refusing, and per-reader tests over today's 409", T2 {@code nexus_rdr/229-research-328}, corrected there) and that shipped only for
  * the re-embed readers ({@code ReembedRetiredNoSuccessorTest}); the RDR's P3.5c landing line says the rest are carried on this bead.
  *
+ * <p><b>What this pins, and what it does not.</b> It is the real-engine wiring complement to the stub-backed sweep in
+ * {@code CollectionSelectorFilterRowsTest}: it sends the id of a no-successor tombstone to every READ route of every store and asserts the
+ * route-boundary 409 each reader class answers. That is "per-reader tests over today's 409" read as the 409 a client sees from each reader,
+ * which is what Sam's wording and the RDR's landing line name. It does NOT pin each reader's own id path: the boundary refuses before any
+ * reader's SQL runs, so this sweep stays green if a reader reverts to name SQL (the latched-id tests of the readers are
+ * {@code Rdr229P35c*ReadersByIdTest} and its siblings).
+ *
  * <p>The state is the R7 one: a tombstone that holds data and names no successor (its successor was deleted, so its {@code
  * superseded_by_id} is its own id, and its stored {@code superseded_by} text names a dead label). Today's 409 by id answers {@code
  * collection_superseded} with the retired collection's label and id and NO {@code superseded_by} or {@code successor_collection_id}; the
- * successor fields appear only when a live successor exists ({@code CollectionSupersededBody}). This class sends that id to every READ
- * route of every store the census lists, on the real engine, and asserts the body each reader class answers: the catalog, vector,
- * taxonomy, aspect, chash, remap, telemetry and pipeline readers, one dynamic test per route, with a live id as each route's control (it is
- * not refused as superseded, so the refusal is the tombstone's and the route could have answered otherwise).
+ * successor fields appear only when a live successor exists ({@code CollectionSupersededBody}). Each census route runs with a live id as its
+ * control (it is not refused as superseded and does not fail with a 5xx, so the refusal is the tombstone's), in both gate states: the route
+ * boundary does not read the gate, and the two states pin that it does not start to.
  *
- * <p>Two more reader classes answer the same 409 and are pinned below with the same tombstone: the delete's verdict ({@code
- * CollectionDeleteRoute}, by id) and the handler's own read of the retired row inside its transaction, reached when the row is retired in
- * the gap between the route boundary and the handler ({@code CollectionRetiredIdException}, answered by {@code HttpUtil}).
+ * <p>Which census routes are readers is classified here, not guessed: {@link #POST_READS} and {@link #POST_WRITES} partition the census's POST
+ * routes, every GET route is a reader, and {@link #theCensusIsClassified_andTheSweepCoversEveryReader} fails when a new route is in neither set.
+ *
+ * <p>Two more paths answer the same 409 and are pinned below with the same tombstone: the delete's verdict ({@code CollectionDeleteRoute}) and
+ * the in-transaction registry read ({@code CollectionRetiredIdException}, answered by {@code HttpUtil}). The latter is a WRITE-route case
+ * (a topic insert, whose handler reads the row in its own transaction), not a reader class: no read route re-reads the registry row inside
+ * a transaction of its own.
  *
  * <p>The label-addressed read of such a tombstone is not here: it answers as it did (200), and its refusal is the next paired cut's
  * ({@code RetiredLabelReadGuard}, bead nexus-p2m1x.25, comments of 2026-11-24 10:52 and 10:53).
- *
- * <p>Each route runs with gate 3 not held and held: the route boundary does not read the gate, and the two states pin that it does not
- * start to.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CollectionRetiredNoSuccessorReadersTest {
 
     /** The POST routes of the census that only read (every GET route of the census is a read). */
-    private static final Set<String> POST_READS = Set.of(
+    static final Set<String> POST_READS = Set.of(
         "/v1/vectors/search", "/v1/vectors/query", "/v1/vectors/search-per-collection", "/v1/vectors/hybrid-search",
-        "/v1/vectors/search-metadata-scoped", "/v1/vectors/search-aspect-scoped", "/v1/vectors/get",
-        "/v1/vectors/get-all-metadata", "/v1/vectors/store-get", "/v1/vectors/get-embeddings", "/v1/vectors/store-list",
-        "/v1/vectors/manifest-less-census", "/v1/vectors/reapable",
-        "/v1/taxonomy/assignments/cross-preview", "/v1/taxonomy/assignments/unassigned", "/v1/taxonomy/meta/last_discover_batch");
+        "/v1/vectors/search-metadata-scoped", "/v1/vectors/search-topic-scoped", "/v1/vectors/search-graph-hop",
+        "/v1/vectors/search-aspect-scoped", "/v1/vectors/get", "/v1/vectors/get-all-metadata", "/v1/vectors/store-get",
+        "/v1/vectors/get-embeddings", "/v1/vectors/store-list", "/v1/vectors/manifest-less-census", "/v1/vectors/reapable",
+        "/v1/taxonomy/assignments/cross-preview", "/v1/taxonomy/assignments/unassigned", "/v1/taxonomy/meta/last_discover_batch",
+        "/v1/taxonomy/centroids/query", "/v1/pipeline/pages", "/v1/pipeline/chunks");
+
+    /** The POST routes of the census that write, embed or start a job: not readers. (Re-embed's two are {@code ReembedRetiredNoSuccessorTest}'s.) */
+    static final Set<String> POST_WRITES = Set.of(
+        "/v1/catalog/collections/set_aspects_enabled",
+        "/v1/catalog/collections/supersede",
+        "/v1/catalog/collections/rehome",
+        "/v1/catalog/collections/rehome/status",
+        "/v1/catalog/collections/rename",
+        "/v1/catalog/collections/delete",
+        "/v1/catalog/gc_audit/record",
+        "/v1/catalog/index-run/begin",
+        "/v1/catalog/index-run/begin-many",
+        "/v1/catalog/manifest/write",
+        "/v1/catalog/manifest/append",
+        "/v1/catalog/manifest/append_many",
+        "/v1/catalog/manifest/write_many",
+        "/v1/catalog/import/chunk",
+        "/v1/vectors/upsert-chunks",
+        "/v1/vectors/store-delete",
+        "/v1/vectors/update-metadata",
+        "/v1/vectors/embed",
+        "/v1/vectors/gc/quarantine-orphans",
+        "/v1/vectors/gc/restore-rereferenced",
+        "/v1/vectors/gc/expire-quarantine",
+        "/v1/vectors/gc/quarantine-restore",
+        "/v1/vectors/reembed/plan",
+        "/v1/vectors/reembed/jobs",
+        "/v1/taxonomy/topics/insert",
+        "/v1/taxonomy/assignments/assign",
+        "/v1/taxonomy/assignments/assign_from_chashes",
+        "/v1/taxonomy/purge_collection",
+        "/v1/taxonomy/meta/record",
+        "/v1/taxonomy/topics/persist_split",
+        "/v1/taxonomy/topics/persist_rebuild",
+        "/v1/taxonomy/topics/persist_discovered",
+        "/v1/taxonomy/centroids/upsert",
+        "/v1/taxonomy/centroids/delete",
+        "/v1/taxonomy/centroids/purge",
+        "/v1/aspects/delete",
+        "/v1/aspects/salient_sentences/set_by_key",
+        "/v1/aspects/upsert",
+        "/v1/aspects/highlights/upsert",
+        "/v1/remap/clear_leg",
+        "/v1/remap/record_batch",
+        "/v1/pipeline/create",
+        "/v1/pipeline/delete_collection",
+        "/v1/pipeline/progress",
+        "/v1/pipeline/extraction_meta",
+        "/v1/pipeline/complete",
+        "/v1/pipeline/fail",
+        "/v1/pipeline/mark_uploaded",
+        "/v1/pipeline/reset_uploaded",
+        "/v1/pipeline/clear_wal",
+        "/v1/pipeline/delete",
+        "/v1/telemetry/relevance/log",
+        "/v1/telemetry/hook_failures/record");
 
     /** The census rows that are readers, in census order. */
     private static List<Route> readers() {
         List<Route> out = new ArrayList<>();
         for (Route r : CollectionRouteCensus.ROUTES) {
-            boolean read = "GET".equals(r.method()) || POST_READS.contains(r.path());
-            if (read && r.slots().size() == 1 && !r.slots().get(0).nested() && r.engine() == CollectionRouteCensus.Engine.STANDARD) {
+            if ("GET".equals(r.method()) || POST_READS.contains(r.path())) {
                 out.add(r);
             }
         }
@@ -82,8 +146,6 @@ class CollectionRetiredNoSuccessorReadersTest {
     String tombstone;
     long liveId;
     long tombstoneId;
-    final AtomicInteger examined = new AtomicInteger();
-    final Map<String, Integer> examinedByStore = new TreeMap<>();
 
     @BeforeAll
     void start() throws Exception {
@@ -112,19 +174,48 @@ class CollectionRetiredNoSuccessorReadersTest {
     }
 
     @AfterAll
-    void floor() {
-        try {
-            assertThat(readers().size()).as("non-vacuity: the census has its reader routes").isGreaterThanOrEqualTo(40);
-            assertThat(examined.get()).as("every reader route ran in both gate states, by store " + examinedByStore)
-                .isEqualTo(2 * readers().size());
-            for (String store : List.of("CatalogHandler.java", "VectorHandler.java", "TaxonomyHandler.java", "AspectHandler.java",
-                    "ChashHandler.java", "RemapHandler.java", "TelemetryHandler.java", "PipelineHandler.java")) {
-                assertThat(examinedByStore.getOrDefault(store, 0)).as("non-vacuity: the " + store + " readers").isPositive();
-            }
-        } finally {
-            System.err.printf("retired_no_successor_readers examined=%d by_store=%s%n", examined.get(), examinedByStore);
-            if (fx != null) fx.close();
+    void stop() {
+        if (fx != null) fx.close();
+    }
+
+    /** The routes the {@code @Test} methods below send need the production regime; the sweep sets its own gate per route. */
+    @BeforeEach
+    void latched() {
+        fx.gate3.set(true);
+    }
+
+    /**
+     * The census is classified and the sweep covers all of it: every POST route is a reader or a write (a new route must be put in one), the
+     * two sets name routes the census has, every reader is a one-slot STANDARD-engine row the request builder below can send, and the number
+     * of readers is exactly what the sweep runs per gate state.
+     */
+    @Test
+    void theCensusIsClassified_andTheSweepCoversEveryReader() {
+        Set<String> census = new java.util.TreeSet<>();
+        Set<String> posts = new java.util.TreeSet<>();
+        for (Route r : CollectionRouteCensus.ROUTES) {
+            census.add(r.method() + " " + r.path());
+            if ("POST".equals(r.method())) posts.add(r.path());
         }
+        for (String path : POST_READS) assertThat(census).as("POST_READS names a census route").contains("POST " + path);
+        for (String path : POST_WRITES) assertThat(census).as("POST_WRITES names a census route").contains("POST " + path);
+        assertThat(java.util.stream.Stream.concat(POST_READS.stream(), POST_WRITES.stream()).distinct().count())
+            .as("no path is both a reader and a write").isEqualTo(POST_READS.size() + POST_WRITES.size());
+        Set<String> unclassified = new java.util.TreeSet<>(posts);
+        unclassified.removeAll(POST_READS);
+        unclassified.removeAll(POST_WRITES);
+        assertThat(unclassified).as("every census POST route is classified as a reader or a write here: classify the new route").isEmpty();
+
+        List<Route> readers = readers();
+        for (Route r : readers) {
+            assertThat(r.slots()).as(r.label() + " is a one-slot reader").hasSize(1);
+            assertThat(r.slots().get(0).nested()).as(r.label()).isFalse();
+            assertThat(r.engine()).as(r.label()).isEqualTo(CollectionRouteCensus.Engine.STANDARD);
+        }
+        assertThat(readers.size()).as("the readers the sweep runs, in each gate state").isEqualTo(53);
+        assertThat(readers.stream().map(Route::handler).distinct().sorted().toList()).as("non-vacuity: every store has readers").containsExactly(
+            "AspectHandler.java", "CatalogHandler.java", "ChashHandler.java", "PipelineHandler.java", "RemapHandler.java",
+            "TaxonomyHandler.java", "TelemetryHandler.java", "VectorHandler.java");
     }
 
     private static String request(Route route, long id) {
@@ -150,24 +241,14 @@ class CollectionRetiredNoSuccessorReadersTest {
                 byStore.computeIfAbsent(route.handler(), k -> new ArrayList<>()).add(DynamicTest.dynamicTest(route.label(), () -> {
                     fx.gate3.set(gate3);
                     Resp control = send(route, liveId);
+                    assertThat(control.status()).as("control: a live id does not fail the route: " + control.body()).isLessThan(500);
                     assertThat(control.status() == 409 && "collection_superseded".equals(control.reason()))
                         .as("control: a live id is not refused as superseded: " + control.body()).isFalse();
 
                     Resp r = send(route, tombstoneId);
 
                     assertThat(r.status()).as("%s by the id of a tombstone with no successor: %s", route.label(), r.body()).isEqualTo(409);
-                    assertThat(r.reason()).isEqualTo("collection_superseded");
-                    assertThat(r.json().path("error").asText()).isEqualTo("collection_superseded");
-                    assertThat(r.json().path("collection").asText()).as(r.body()).isEqualTo(tombstone);
-                    assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(tombstoneId);
-                    assertThat(r.json().has("superseded_by")).as("no successor, no superseded_by: %s", r.body()).isFalse();
-                    assertThat(r.json().has("successor_collection_id")).as("no successor_collection_id: %s", r.body()).isFalse();
-                    assertThat(r.json().path("message").asText()).as("the message names none: %s", r.body())
-                        .contains("names no live successor");
-                    examined.incrementAndGet();
-                    synchronized (examinedByStore) {
-                        examinedByStore.merge(route.handler(), 1, Integer::sum);
-                    }
+                    NoSuccessorBodyAsserts.assertBareMarker(r.json(), route.label(), tombstone, tombstoneId);
                 }));
             }
             List<DynamicNode> stores = new ArrayList<>();
@@ -211,10 +292,7 @@ class CollectionRetiredNoSuccessorReadersTest {
         Resp r = fx.post(DELETE, "{\"collection_id\":" + xId + "}");
 
         assertThat(r.status()).as(r.body()).isEqualTo(409);
-        assertThat(r.reason()).isEqualTo("collection_superseded");
-        assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(xId);
-        assertThat(r.json().has("superseded_by")).as("no successor: %s", r.body()).isFalse();
-        assertThat(r.json().has("successor_collection_id")).isFalse();
+        NoSuccessorBodyAsserts.assertBareMarker(r.json(), "delete by id", x, xId);
         assertThat(fx.exists(x)).as("the refused delete removed nothing").isTrue();
         assertThat((int) (Integer) fx.asSuperuser(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(fx.tenant).and(CHUNKS.COLLECTION.eq(x)))))
             .as("and its chunk is still there").isEqualTo(1);
@@ -250,19 +328,16 @@ class CollectionRetiredNoSuccessorReadersTest {
         assertThat(supersedeStatus.get()).as("setup: the hook retired the row").isEqualTo(200);
         assertThat(successorDeleteStatus.get()).as("setup: and deleted its successor").isEqualTo(200);
         assertThat(r.status()).as(r.body()).isEqualTo(409);
-        assertThat(r.reason()).isEqualTo("collection_superseded");
-        assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(xId);
-        assertThat(r.json().has("superseded_by")).as("the delete's own verdict: no successor: %s", r.body()).isFalse();
-        assertThat(r.json().has("successor_collection_id")).isFalse();
+        NoSuccessorBodyAsserts.assertBareMarker(r.json(), "the delete's own verdict", x, xId);
         assertThat(fx.exists(x)).as("the refused delete removed nothing").isTrue();
     }
 
     /**
-     * The handler's own read of the retired row, inside its transaction: a hook retires the row (a supersede, then the deletion of its
+     * A WRITE-route case, not a reader class: the handler's own read of the retired row, inside its transaction: a hook retires the row (a supersede, then the deletion of its
      * successor) between the boundary, which found it live, and the handler, so the 409 is the transaction's own, not the boundary's.
      */
     @Test
-    void aWriteByAnIdRetiredWithNoSuccessorBetweenTheBoundaryAndTheHandlerAnswers409NamingNoSuccessor() {
+    void aWriteRouteByAnIdRetiredWithNoSuccessorBetweenTheBoundaryAndTheHandlerAnswers409NamingNoSuccessor() {
         String a = registered("gap-a");
         String b = registered("gap-b");
         seedChunk(a);   // the tombstone holds data, so it outlives the successor the hook deletes
@@ -287,11 +362,7 @@ class CollectionRetiredNoSuccessorReadersTest {
         assertThat(deleteStatus.get()).as("setup: and deleted its successor").isEqualTo(200);
         assertThat(fx.exists(a)).as("setup: the tombstone is still there").isTrue();
         assertThat(r.status()).as(r.body()).isEqualTo(409);
-        assertThat(r.reason()).isEqualTo("collection_superseded");
-        assertThat(r.json().path("collection").asText()).isEqualTo(a);
-        assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(x);
-        assertThat(r.json().has("superseded_by")).as("the handler's own read of the retired row: no successor: %s", r.body()).isFalse();
-        assertThat(r.json().has("successor_collection_id")).isFalse();
+        NoSuccessorBodyAsserts.assertBareMarker(r.json(), "the handler's own read of the retired row", a, x);
         assertThat((int) (Integer) fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.COLLECTION.eq(a)))).isZero();
     }
 }

@@ -506,13 +506,27 @@ class Rdr229P35cCatalogMovesByIdTest {
                 .and(DSL.field(DSL.name("relation")).eq(DSL.function("to_regclass", Object.class, DSL.inline("nexus.catalog_collections"))))));
     }
 
+    /** True while any session of the cluster waits on a heavyweight lock. */
+    private boolean someoneWaitsOnALock() {
+        return su(ctx -> ctx.fetchExists(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")),
+            DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")));
+    }
+
+    /** The relations on which some session holds a tuple (row-lock waiter) lock, by name, for a failure message. */
+    private String relationsOfTupleLocks() {
+        return su(ctx -> ctx.select(DSL.field(DSL.name("pg_class", "relname"), String.class))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_class")))
+            .join(DSL.table(DSL.name("pg_catalog", "pg_locks"))).on(DSL.field(DSL.name("pg_class", "oid")).eq(DSL.field(DSL.name("pg_locks", "relation"))))
+            .where(DSL.field(DSL.name("pg_locks", "locktype"), String.class).eq("tuple")).fetch(0, String.class).toString());
+    }
+
     /**
      * Starts a real delete by id ({@code deleteCollectionById}, what {@code POST /v1/catalog/collections/delete} runs for a {@code collection_id}; its
      * first statement is the registry row FOR UPDATE, unbounded, where the delete by label purges the children first) from a second session inside the move's own transaction (after its last write) and
-     * reports what it did: "waiting" when it is held behind the move on the label's registry row, "ran" when it completed beside the move. The
-     * verb is then left to finish once the move commits, and must: a held verb waits, it does not fail ("non-blocking" for the cut, linda). The
-     * verb deletes only the rows of its own collection, so it waits on the registry row and nowhere else: it is the lock set that holds it,
-     * not a row the move happens to have written (the tuple-lock probe names the registry's).
+     * reports what it did: "waiting" when it holds the tuple lock of a registry row and waits, "ran" when it completed beside the move, "waiting
+     * elsewhere: ..." when it waits on another relation (a row the move wrote: the lock set did not hold it). The verb is then left to finish once
+     * the move commits, and must: a held verb waits, it does not fail. These tests pin the move's LOCK SET (which collections' registry rows it
+     * holds), not the id-versus-name path of the move's reads; a lock set resolved by name would hold the same rows in this state.
      */
     private String aRealDeleteDuring(String tenant, String label, Runnable move) throws Exception {
         long id = idOf(tenant, label);
@@ -523,7 +537,7 @@ class Rdr229P35cCatalogMovesByIdTest {
         CatalogMoves.afterWritesHookForTests = () -> {
             var f = pool.submit(() -> repo.deleteCollectionById(tenant, label, id, false));
             verb.set(f);
-            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
             while (System.nanoTime() < deadline) {
                 if (f.isDone()) {
                     seen.set("ran");
@@ -533,11 +547,15 @@ class Rdr229P35cCatalogMovesByIdTest {
                     seen.set("waiting");
                     return;
                 }
+                if (someoneWaitsOnALock()) {
+                    // a waiter that holds the tuple lock of the registry row is the verb (checked again: the lock is taken before the wait shows);
+                    // any other is waiting on something the move wrote, which says nothing about the registry row
+                    seen.set(someoneWaitsForARegistryRow() ? "waiting" : "waiting elsewhere: " + relationsOfTupleLocks());
+                    return;
+                }
                 java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(5));
             }
-            seen.set("timeout; sessions waiting on a lock: " + su(ctx -> ctx.select(DSL.field(DSL.name("wait_event"), String.class),
-                    DSL.field(DSL.name("query"), String.class)).from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
-                .where(DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")).fetch().toString()));
+            seen.set("timeout: the verb neither finished nor waited");
         };
         try {
             move.run();

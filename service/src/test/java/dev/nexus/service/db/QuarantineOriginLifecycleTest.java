@@ -62,6 +62,21 @@ class QuarantineOriginLifecycleTest extends AtomicWriteTestBase {
         }
     }
 
+    /** {@link #taggedRow} with the origin's id written as a JSON string: the same text for every reader of the tag, a different JSON value. */
+    private void taggedRowWithTextualId(String tenant, String sibling, String seed, String origin) throws Exception {
+        String hex = Chash.ofText(sibling + "/" + seed).toHex();
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("origin_collection", origin);
+        try (Connection su = pg.createConnection("")) {
+            Long originId = DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(origin))
+                .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
+            meta.put(QuarantineOrigin.ORIGIN_ID_KEY, String.valueOf(originId));
+            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), tenant, sibling, List.of(hex),
+                List.of(seed), List.of(new float[384]), List.of(meta));
+        }
+    }
+
     @Test
     void theRowDecides_andARowLessNameFallsBackToItsPrefix() throws Exception {
         String t = newTenant();
@@ -154,8 +169,11 @@ class QuarantineOriginLifecycleTest extends AtomicWriteTestBase {
         row(t, sibling, "quarantine");
         String origin = col("o");
         row(t, origin, "live");
-        taggedRow(t, sibling, "one", origin);
-        taggedRow(t, sibling, "two", origin);
+        // The tag's id is a rename's invariant (the origin keeps its id), so a retag cannot be seen to write it by its value. Both rows are
+        // seeded with the id as a JSON STRING, the one pre-existing shape a retag changes: it matches by the same text, and a retag that writes
+        // the key leaves a JSON number behind, one that does not leaves the string.
+        taggedRowWithTextualId(t, sibling, "one", origin);
+        taggedRowWithTextualId(t, sibling, "two", origin);
         String renamedSibling = col("rs");
         String renamedOrigin = col("ro");
         long originId;
@@ -195,6 +213,7 @@ class QuarantineOriginLifecycleTest extends AtomicWriteTestBase {
             for (var m : tags) {
                 var node = json.readTree(m.data());
                 assertThat(node.path("origin_collection").asText()).as("the tag names the new label").isEqualTo(renamedOrigin);
+                assertThat(node.path(QuarantineOrigin.ORIGIN_ID_KEY).isNumber()).as("the retag wrote the id key (a JSON number; it was a string): " + node).isTrue();
                 assertThat(node.path(QuarantineOrigin.ORIGIN_ID_KEY).asLong(-1)).as("and the origin's id, which a rename keeps")
                     .isEqualTo(originId);
             }
