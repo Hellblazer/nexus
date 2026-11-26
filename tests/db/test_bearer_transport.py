@@ -230,11 +230,18 @@ class TestPluginTrust:
         _handshake(hook.bearer_ssl_context(str(pki[0].pem)), origin)
         assert not log.exists(), "the key log file named by the environment was opened"
 
-    def test_the_default_roots_still_verify_a_public_certificate_chain(self, hook) -> None:
-        """The interpreter's own bundle loads: the context holds roots, so a real site's chain can verify."""
-        ctx = hook.bearer_ssl_context()
-        assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
-        assert len(ctx.get_ca_certs()) > 0, "no trust roots loaded: every https call would fail"
+    def test_the_default_roots_load(self) -> None:
+        """The interpreter's own bundle (or a system one, or the Windows stores) loads: the context holds roots, so a
+        real site's chain can verify. A bare interpreter, as the plugin runs: ``import nexus`` would inject truststore."""
+        import subprocess
+
+        code = (
+            "import sys, ssl; sys.path.insert(0, sys.argv[1]); import _endpoint_resolve as ep; ctx = ep.bearer_ssl_context(); "
+            "print(ctx.verify_mode == ssl.CERT_REQUIRED, ctx.check_hostname, len(ctx.get_ca_certs()))"
+        )
+        out = subprocess.run([sys.executable, "-I", "-c", code, str(_SCRIPTS)], capture_output=True, text=True, timeout=60)
+        verify, hostname, roots = out.stdout.split()
+        assert (verify, hostname) == ("True", "True") and int(roots) > 0, (out.stdout, out.stderr[-300:])
 
 
 class TestPluginOpener:

@@ -641,6 +641,13 @@ def test_https_connections_are_pooled_and_verified(tmp_path, monkeypatch) -> Non
         .not_valid_before(now - datetime.timedelta(minutes=1))
         .not_valid_after(now + datetime.timedelta(hours=1))
         .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), False)
+        # a CA too: it is the trust root in config.yml (the Windows OS verifier will not anchor on a non-CA leaf)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+        .add_extension(x509.KeyUsage(
+            digital_signature=True, key_cert_sign=True, crl_sign=False, content_commitment=False, key_encipherment=False,
+            data_encipherment=False, key_agreement=False, encipher_only=False, decipher_only=False,
+        ), True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), False)
         .sign(key, hashes.SHA256())
     )
     cert_pem = tmp_path / "cert.pem"

@@ -85,8 +85,7 @@ def _ca_env(pem: Path, directory: Path) -> dict[str, str]:
     (directory / pem.name).write_bytes(pem.read_bytes())
     return {
         "SSL_CERT_FILE": str(pem), "SSL_CERT_DIR": str(directory), "REQUESTS_CA_BUNDLE": str(pem), "CURL_CA_BUNDLE": str(pem),
-        "SSLKEYLOGFILE": str(directory / "keys.log"),
-    }
+    }  # no SSLKEYLOGFILE: a request with no bearer still reads it, and on Windows uv's CPython dies opening the file (no OPENSSL_Applink)
 
 
 def _kind(caller) -> str:
