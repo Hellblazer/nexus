@@ -68,7 +68,11 @@ class _Server:
 
     def __init__(self, bind: str = "127.0.0.1") -> None:
         self.requests: list[tuple[str, str | None]] = []
-        #: set to a base URL and every request is answered ``redirect_code`` to that URL plus the request path
+        #: set to a base URL and every request but the T3 client's unauthenticated ``/version`` compatibility
+        #: probe is answered ``redirect_code`` to that URL plus the request path. The probe is answered normally:
+        #: it carries no bearer, and a redirected probe fails the T3 caller before its prefetch thread has sent
+        #: the bearer-carrying request this test is about, so what reached the bound origin would depend on a race
+        #: (the mint POST lost it on chas every run, nexus-ec37o re-land).
         self.redirect_to: str | None = None
         self.redirect_code = 302
         outer = self
@@ -79,7 +83,7 @@ class _Server:
                 if length:
                     self.rfile.read(length)
                 outer.requests.append((self.path, self.headers.get("Authorization")))
-                if outer.redirect_to is not None:
+                if outer.redirect_to is not None and self.path != "/version":
                     self.send_response(outer.redirect_code)
                     self.send_header("Location", outer.redirect_to + self.path)
                     self.send_header("Content-Length", "0")
