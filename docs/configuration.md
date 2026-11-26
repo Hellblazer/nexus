@@ -54,6 +54,25 @@ Hold one kind of credential. The CLI prefers a static `service_token` when both 
 
 Export both in your shell profile or process manager. You do not supply a Voyage key in managed-cloud mode (the service owns it).
 
+### A saved credential goes only to the service it was issued for
+
+A credential you saved (`service_token`, `mint_token`), the local supervisor's lease token and a data-token lease are each tied to one service origin (scheme, host and port), and `nx` and the plugin hooks send one only to that origin. A project's `.claude/settings.json` can set `NX_SERVICE_URL`, `NX_SERVICE_HOST` or `NX_SERVICE_PORT`, and the hooks, the MCP server and every `nx` the model runs would otherwise attach your saved token to whatever host that names.
+
+- A saved `service_token` or `mint_token` is tied to the `service_url` saved beside it. With no saved `service_url` it is tied to `https://api.conexus-nexus.com`.
+- The supervisor lease token is tied to the local engine's own address, so an env URL or an `NX_SERVICE_PORT` that names another address does not get it.
+- When the URL in use is another origin, nothing is sent and the command stops with a message like: `NX_SERVICE_URL names a service that the saved service_token was not issued for, so that credential is not sent there. Export NX_SERVICE_TOKEN for this service, or point it at the service the credential belongs to (nx config set service_url).` The message names where the URL came from and never prints the URL itself.
+- To use another service (a staging or self-hosted one), either `nx config set service_url <its URL>` together with its token, or export `NX_SERVICE_TOKEN` for it. A second local engine on another port needs its own `NX_SERVICE_TOKEN`.
+- Plain `http` to a host that is not this machine is refused whenever a token would be sent, and there is no switch to allow it. A LAN or docker-network engine needs `https`, or a loopback address (`localhost`, `127.0.0.1`, `[::1]`, for example through a port forward). Origins are compared exactly: `localhost` and `127.0.0.1` are different origins.
+- A request that carries a token over plain `http` (the local engine's lease token above all) goes straight to the engine whatever `http_proxy`, `https_proxy` or `all_proxy` name, so the supervisor lease token never meets a proxy. `https` traffic, for example a data token to the managed service, still uses a configured proxy, and the proxy sees only a `CONNECT` with no credential in it.
+- A URL the client cannot read as an origin (one carrying `user:password@`, a backslash or a `%`) is refused for any token, and the password is never echoed to the terminal or a log.
+
+Known limits, accepted and not detected:
+
+1. A token you export yourself (`NX_SERVICE_TOKEN`, `NX_MINT_TOKEN`) is yours to point anywhere, so a project that also sets `NX_SERVICE_URL` sends it to that URL. Export a token only in a shell you trust with the URL it should reach.
+2. An env URL with no credential still lets a project name a host. Today no mailbox drain, T2 scan, MCP call or `nx` data command sends a request to it without a credential (the T3 client's unauthenticated `/version` compatibility probe is the one request that goes out), but a project that points `NX_SERVICE_URL` at a host it controls is not stopped by this binding from choosing where an unauthenticated read goes.
+
+Neither limit is closed by a check in the client; both are the user's own statement of where a token or a read should go.
+
 ### Migration-source credentials — RETIRED as of 7.0.0
 
 `CHROMA_API_KEY`, `CHROMA_DATABASE` and `CHROMA_TENANT` are **inert**. Setting them does nothing.
