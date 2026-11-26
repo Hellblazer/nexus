@@ -968,7 +968,7 @@ class TestGatewayRetry:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
-        store = HttpTupleStore(base_url="http://mock.test")
+        store = HttpTupleStore(base_url="https://mock.test")
 
         calls: list[str] = []
 
@@ -985,7 +985,7 @@ class TestGatewayRetry:
             }]})
 
         store._client = httpx.Client(
-            base_url="http://mock.test", transport=httpx.MockTransport(handler),
+            base_url="https://mock.test", transport=httpx.MockTransport(handler),
         )
 
         rows = store.rd("mailbox/x", {"to": "x"}, timeout_s=5)

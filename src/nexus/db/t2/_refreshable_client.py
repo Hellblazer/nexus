@@ -81,10 +81,13 @@ from nexus.db.gateway_backoff import (
 from nexus.rate_brake import DEADLINE_OUTCOME_HEADER, parse_retry_after
 from nexus.db.service_endpoint import (
     DEFAULT_LEASE_WAIT_BUDGET_S,
+    CredentialOriginMismatchError,
+    InsecureServiceTransportError,
     discover_lease_with_wait,
     guard_production_write,
     has_ever_resolved_lease,
     resolve_service_endpoint,
+    select_service_token,
 )
 
 _log = structlog.get_logger(__name__)
@@ -256,7 +259,7 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
     return isinstance(exc, (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError))
 
 
-def _resolve_token_only(*, wait_budget_s: float = 0.0) -> str:
+def _resolve_token_only(base_url: str, *, wait_budget_s: float = 0.0) -> str:
     """Resolve just the bearer token, WITHOUT requiring host/port to also
     be independently resolvable (nexus-bikit.4 adoption finding).
 
@@ -274,6 +277,10 @@ def _resolve_token_only(*, wait_budget_s: float = 0.0) -> str:
     construct ``HttpMemoryStore(base_url=<explicit>, tenant=...)`` relying on
     ``NX_SERVICE_TOKEN`` alone, with no ``NX_SERVICE_PORT`` set in the parent
     process's environment (only in a subprocess env dict for the JVM child).
+
+    *base_url* is the origin the credential must have been issued for
+    (nexus-ec37o, :func:`~nexus.db.service_endpoint.select_service_token`);
+    a mismatch raises :class:`~nexus.db.service_endpoint.CredentialOriginMismatchError`.
 
     Mirrors :func:`resolve_service_endpoint`'s ``service_url``-configured
     branch specifically: ``get_credential("service_token")`` (which itself
@@ -303,19 +310,18 @@ def _resolve_token_only(*, wait_budget_s: float = 0.0) -> str:
     local-supervisor leg — see :meth:`RefreshableHttpStoreMixin._invalidate_and_reresolve`,
     the only caller that passes a nonzero value.
     """
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
-
-    token = (get_credential("service_token") or "").strip()
-    if not token:
-        _, lease_token = discover_lease_with_wait(budget_s=wait_budget_s)
-        token = lease_token or ""
-    if not token:
-        from nexus.db.service_endpoint import mint_armed  # noqa: PLC0415 — deferred to avoid circular import
-
-        if mint_armed():
-            # nexus-xzeml: the data-token override supplies the bearer.
-            return ""
-    if not token:
+    # nexus-ec37o: a stored credential (saved service_token, supervisor lease
+    # token, mint credential) goes only to the origin it was issued for, so a
+    # base_url taken from the environment cannot pull one to another host.
+    # Mismatch raises CredentialOriginMismatchError. A zero budget leaves the
+    # lease read to select_service_token's own (the touch guard attributes the
+    # peek to this function).
+    lease = (lambda: discover_lease_with_wait(budget_s=wait_budget_s)) if wait_budget_s > 0 else None
+    picked = select_service_token(base_url, lease=lease)
+    if picked is not None and picked[1] == "mint_token":
+        # nexus-xzeml: the data-token override supplies the bearer.
+        return ""
+    if picked is None:
         raise RuntimeError(
             "no service token is resolvable: base_url was supplied "
             "explicitly but no token was — set NX_SERVICE_TOKEN, run "
@@ -323,7 +329,7 @@ def _resolve_token_only(*, wait_budget_s: float = 0.0) -> str:
             "supervisor with 'nx daemon service start' (publishes a "
             "discoverable lease)."
         )
-    return token
+    return picked[0]
 
 
 def _resolve_endpoint_with_evidence_gate() -> tuple[str, str]:
@@ -373,18 +379,20 @@ def _resolve_endpoint_with_evidence_gate() -> tuple[str, str]:
     return resolve_service_endpoint_with_evidence_gate()
 
 
-def _resolve_token_only_with_evidence_gate() -> str:
+def _resolve_token_only_with_evidence_gate(base_url: str) -> str:
     """The ``_resolve_token_only`` analog of
     :func:`_resolve_endpoint_with_evidence_gate` — same evidence-gated
     bounded-wait retry, for the narrower ``base_url``-pinned-but-token-
     omitted construction path (see :func:`_resolve_token_only`'s
     docstring for when that shape occurs)."""
     try:
-        return _resolve_token_only()
+        return _resolve_token_only(base_url)
+    except (CredentialOriginMismatchError, InsecureServiceTransportError):
+        raise  # a refusal is final: waiting for a lease cannot change the origin
     except RuntimeError:
         if not has_ever_resolved_lease():
             raise
-        return _resolve_token_only(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
+        return _resolve_token_only(base_url, wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
 
 
 class _EndpointRegistrar:
@@ -575,7 +583,7 @@ class RefreshableHttpStoreMixin:
             base_url = resolved_url
             _token = _token or resolved_token
         elif _token is None:
-            _token = _resolve_token_only_with_evidence_gate()
+            _token = _resolve_token_only_with_evidence_gate(base_url)
 
         self._base_url = base_url.rstrip("/")
         self._tenant = tenant
@@ -900,7 +908,7 @@ class RefreshableHttpStoreMixin:
             # base_url pinned, token not -- mirror __init__'s matching
             # branch: resolve ONLY the token, never demand host/port also
             # be independently resolvable.
-            self._token = _resolve_token_only(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
+            self._token = _resolve_token_only(self._base_url, wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
         else:
             base_url, token = resolve_service_endpoint(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
             self._base_url = base_url.rstrip("/")

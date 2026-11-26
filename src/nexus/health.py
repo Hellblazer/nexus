@@ -4185,10 +4185,10 @@ def _check_static_service_token() -> list[HealthResult]:
     if not url:
         return [HealthResult(label=label, ok=True,
                              detail="not applicable — no service_url configured")]
-    token = (get_credential("service_token") or "").strip()
-    if not token:
-        return [HealthResult(label=label, ok=True,
-                             detail="not applicable — no static service_token configured")]
+    from nexus.db.service_endpoint import bound_static_service_token  # noqa: PLC0415 — deferred, same reason
+    token, refused = bound_static_service_token(url)  # nexus-ec37o: sent only to the origin it was issued for
+    if refused or not token:
+        return [HealthResult(label=label, ok=not refused, detail=f"not probed: {refused}" if refused else "not applicable — no static service_token configured")]
 
     import hashlib  # noqa: PLC0415 — branch-local
     import httpx  # noqa: PLC0415 — branch-local, avoids module-load cost
