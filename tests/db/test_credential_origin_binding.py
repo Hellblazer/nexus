@@ -104,6 +104,7 @@ def test_saved_token_with_saved_url_goes_to_that_url():
     )
 
 
+@pytest.mark.expects_unresolvable_endpoint  # the refusal is the point
 def test_saved_token_with_no_saved_url_binds_to_the_default_managed_endpoint():
     _save({"service_token": "saved"})
     assert se.select_service_token(MANAGED + "/", lease=_no_lease) == ("saved", "the saved service_token")
@@ -111,6 +112,7 @@ def test_saved_token_with_no_saved_url_binds_to_the_default_managed_endpoint():
         se.select_service_token("https://other.example.com", lease=_no_lease)
 
 
+@pytest.mark.expects_unresolvable_endpoint  # the refusal is the point
 def test_saved_token_is_refused_for_an_env_url_naming_another_host(monkeypatch):
     _save({"service_url": MANAGED, "service_token": "saved"})
     monkeypatch.setenv("NX_SERVICE_URL", DECOY)
@@ -132,6 +134,7 @@ def test_env_token_is_unbound(monkeypatch):
     assert se.select_service_token(DECOY, lease=_no_lease) == ("from-env", "NX_SERVICE_TOKEN")
 
 
+@pytest.mark.expects_unresolvable_endpoint  # the refusal is the point
 def test_lease_token_goes_only_to_the_lease_origin():
     lease = lambda: (LEASE_URL, "lease-tok")  # noqa: E731
     assert se.select_service_token(LEASE_URL, lease=lease) == ("lease-tok", "the supervisor lease token")
@@ -152,6 +155,7 @@ def test_no_credential_at_all_returns_none():
     assert se.select_service_token(DECOY, lease=_no_lease) is None
 
 
+@pytest.mark.expects_unresolvable_endpoint  # the refusal is the point
 def test_mint_credential_applies_only_to_its_origin():
     _save({"service_url": MANAGED, "mint_token": "mint-secret"})
     assert se.select_service_token(MANAGED, lease=_no_lease) == ("", "mint_token")
@@ -169,6 +173,7 @@ def test_bound_mint_credential(monkeypatch):
     assert se.bound_mint_credential(DECOY) == "env-mint"  # an env credential is unbound
 
 
+@pytest.mark.expects_unresolvable_endpoint  # the refusal is the point
 def test_a_bearer_never_goes_over_cleartext_http_off_this_machine(monkeypatch):
     monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
     with pytest.raises(se.InsecureServiceTransportError) as err:
@@ -180,6 +185,7 @@ def test_a_bearer_never_goes_over_cleartext_http_off_this_machine(monkeypatch):
         se.select_service_token("not a url", lease=_no_lease)
 
 
+@pytest.mark.expects_unresolvable_endpoint  # the refusal is the point
 def test_cleartext_rule_covers_the_mint_credential(monkeypatch):
     monkeypatch.setenv("NX_MINT_TOKEN", "m")
     with pytest.raises(se.InsecureServiceTransportError):
