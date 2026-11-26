@@ -379,7 +379,7 @@ class CollectionDeleteFenceTest {
         DeadlockRetry.setRetryListenerForTests(retries::add);
         try {
             for (int round = 0; round < 8; round++) {
-                String[] c = originWithSibling();   // a sibling too: the siblings' key shares are in the same ordered lock
+                String[] c = originWithSibling();   // a sibling too: the sibling's row is in the same ordered FOR UPDATE statement as the origin's
                 String origin = c[0];
                 long originId = idOf(origin);
                 Future<Map<String, Integer>> first;

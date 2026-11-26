@@ -14,7 +14,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 
 /**
  * The tolerant registry read of a maintenance or ledger write (RDR-229 P3.5a row 14, nexus-p2m1x.23): the rows of the collections
- * a write names BY ID, {@code FOR KEY SHARE} in {@code collection_id} order, with no refusal. {@link CollectionRegistry#requireIdsAndLabelsForWrite}
+ * a write names BY ID, {@code FOR KEY SHARE} in {@code collection_id} order ({@link #forUpdateIfPresent}: {@code FOR UPDATE}, for the quarantine
+ * siblings a delete removes rows from), with no refusal. {@link CollectionRegistry#requireIdsAndLabelsForWrite}
  * refuses a row that is gone (404) or retired (409), which is right for a client write and wrong where the id is only a record: a
  * job's stored end, a chunk's stored collection id. Here a row that is gone is simply not returned, and the caller decides (skip
  * the write, refuse its own way); a retired row is returned and carries {@link CollectionRow#isSuperseded}.

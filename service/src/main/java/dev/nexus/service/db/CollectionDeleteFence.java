@@ -22,21 +22,28 @@ import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
  * <p><b>The quarantine siblings.</b> The delete removes the origin's rows from its quarantine siblings ({@code QuarantineOrigin.deleteRowsOf}),
  * and unregisters a sibling it empties. Those are writes under collections whose registry rows the transaction never read: a verb that
  * holds a sibling's row {@code FOR UPDATE} (a restore, a rename) and a writer of the sibling that holds it {@code FOR KEY SHARE} could both
- * be mid-flight against rows the delete is about to remove. {@link #lockOriginAndSiblings} reads the origin's row and every sibling's row
- * {@code FOR UPDATE} (the origin {@code FOR KEY SHARE} on the label path) in {@code collection_id} order (the canonical order, so a verb that locks the origin and a sibling
- * {@code FOR UPDATE} in id order meets the delete in the same order, and neither waits on the other while holding what it wants), before the
- * first child-row statement of the delete.
+ * be mid-flight against rows the delete is about to remove. {@link #lockOriginAndSiblings} and {@link #lockInIdOrder} take the origin's row and every
+ * sibling's row, the siblings {@code FOR UPDATE} (the origin {@code FOR UPDATE} on the by-id path, {@code FOR KEY SHARE} on the label path), in
+ * {@code collection_id} order, before the first child-row statement of the delete. That is the order of a verb that locks a sibling and the origin in id
+ * order, and the opposite of a mover and a rename's retag, which take the origin first and the sibling after: when the sibling's id is
+ * BELOW the origin's, the delete holds the sibling and waits for the origin while the other holds the origin and waits for the sibling, a 40P01. That
+ * window is not closed by lock order; each side retries its own transaction (the delete's {@code manifestWriteTxn}, the rename's, the movers' through
+ * {@code GcCollectionReads.attemptRestore}). The reaper holds no registry row before it writes the sibling, so it cannot close the cycle: it waits behind the
+ * delete for its lock bound and is counted as a {@code LOCK_TIMEOUT} skip.
  *
  * <p><b>The lock order of a delete by id</b> (B1 of the row 14 and row 16 merge). {@link #lockByIdFirst} takes, in this order: (1) the per-tenant
  * start guard, {@code pg_advisory_xact_lock_shared}, FIRST, before any registry row (a start holds it exclusive and then wants the origin's row
  * {@code FOR KEY SHARE}: a delete that held the row first and then waited for the guard would close a cycle with it, 40P01); (2) the origin's
  * row {@code FOR UPDATE} and its quarantine siblings' rows {@code FOR UPDATE} too (nexus-p2m1x.23 residual (b): two deletes whose origins share a
- * sibling serialise on the sibling's row instead of both key-sharing it and meeting in its registry delete), in {@code collection_id} order and with no lock bound (linda:
+ * sibling queue on the sibling's row instead of both key-sharing it and meeting in its registry delete), in {@code collection_id} order (the order
+ * among deletes; against a mover or a rename it is the window described above) and with no lock bound (linda:
  * the delete's lock is unbounded, a bound would be a new wire answer); (3) {@link CollectionRefusals#requireSourceById}, which only checks (404, 409
  * retired, 409 mismatch) and consumes the id the request named, a no-wait re-lock of the row (2) holds; (4) the {@code collection_busy} check.
  * On the by-id path (2) is ONE statement over the origin and the siblings, in id order. The label path key-shares its origin (one statement cannot
  * lock some rows {@code FOR UPDATE} and others {@code FOR KEY SHARE}), so it is up to three statements that keep the id order across both modes: the
- * siblings below the origin's id, the origin, the siblings above it. A delete by id never key-shares its origin and then upgrades it: two concurrent deletes of one id would each hold a key share and wait on the other's upgrade (40P01). The collection's aspect task rows
+ * siblings below the origin's id, the origin, the siblings above it. A delete by id never key-shares its origin and then upgrades it: two concurrent
+ * deletes of one id would each hold a key share and wait on the other's upgrade (40P01). The siblings stay locked for the whole transaction, so a write
+ * into a sibling (a mover, the reaper, a restore) waits for a delete of any origin that shares it. The collection's aspect task rows
  * are taken after all of it, by the purge's own {@code AspectTaskRefs.deleteNaming}: the registry row comes before the tuple rows, as in the
  * claim-fenced aspect write ({@code AspectRepository.upsertAspect}: registry key share, then the claim row), the one-row rename and the re-home,
  * so the delete cannot cycle with them. A delete by label keeps its place: the fence takes the origin and the siblings in the id order above
@@ -187,7 +194,7 @@ final class CollectionDeleteFence {
                 // nexus-p2m1x.23 residual (b): the origin and every sibling it will remove rows from are taken FOR UPDATE in ONE statement, in
                 // collection_id order, so two deletes whose origins share a sibling serialise on the sibling's row (below both origins' ids or
                 // above) holding nothing the other wants; both key-sharing it met again in the sibling's registry delete (40P01, absorbed by
-                // the retry, now not reached). The origin's row is locked even when it is absent from the result: the statement names its id.
+                // the retry, now not reached). An origin with no row locks nothing (there is no row to take); requireSourceById answers 404 after it.
                 List<Long> all = new ArrayList<>(todo);
                 all.add(originId);
                 RegistryRowLocks.forUpdateIfPresent(ctx, tenant, all);

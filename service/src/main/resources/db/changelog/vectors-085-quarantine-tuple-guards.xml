@@ -23,7 +23,9 @@
       - The sibling refresh: the DO UPDATE takes a WHERE: a quarantine row is refreshed as before; any other row is refreshed only when no OTHER live
         row already holds the tuple being copied. When the WHERE skips the row, the INSERT affects no row, and the function raises 22023 naming the row and the
         origin, before it moves any chunk. A non-quarantine row with no live twin of the tuple is refreshed as before.
-    A race (another registration of the tuple committing between the check and the statement) still ends in the index's own 23505: never a second live holder.
+    If a route ever reaches the 22023, HttpUtil answers it as a class-22 data exception: 422 with the SQLSTATE only; the names the function puts in the
+    message stay in the log. A race (another registration of the tuple committing between the check and the statement) still ends in the index's own
+    23505, which HttpUtil answers as 409 with the constraint name: never a second live holder. Both are left as they are.
     Where the index is absent (it waits for the re-own move, collections-001-2) nothing raised, so the functions behave exactly as before: every
     check begins with to_regclass('nexus.catalog_collections_live_tuple_uq') and falls through to the old statement when it is NULL.
 
