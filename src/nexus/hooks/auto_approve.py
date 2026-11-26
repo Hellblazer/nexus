@@ -9,12 +9,13 @@ MVV port A: the first real hook module on the tool tier. Registered as
 ``tool_name`` and ``hook_event_name`` from the payload. On an allowlist match:
 ``PreToolUse`` renders
 ``{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision":
-"allow", "permissionDecisionReason": "plugin allowlist (auto-approve)"}}``; any
-other (or absent) ``hook_event_name`` -- the bash script's own default -- renders
-the ``PermissionRequest`` form
-``{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision":
-{"behavior": "allow"}}}``. No match is **silent** -- ``HookResult()``, not an
-empty envelope. Always exit 0 (``HookResult``'s own default).
+"allow", "permissionDecisionReason": "plugin allowlist (auto-approve)"}}``.
+**Any other ``hook_event_name``, absent or ``PermissionRequest`` included, is
+silent** (RDR-259 S4, nexus-sby49.6): the bash script defaulted an absent event
+to ``PermissionRequest`` and answered it, and an answer on that event overrides
+a user's own ``ask`` rule for the tool, so the verb answers ``PreToolUse`` and
+nothing else. No match is **silent** too -- ``HookResult()``, not an empty
+envelope. Always exit 0 (``HookResult``'s own default).
 
 **One deliberate addition, not a bash behaviour carried forward.** The bash
 script's case list is 62 explicit literal names, reproduced verbatim in
@@ -49,7 +50,7 @@ that bead's job.
 """
 from __future__ import annotations
 
-from nexus._hook_runtime._io import HookResult, permission_decision, permission_request
+from nexus._hook_runtime._io import HookResult, permission_decision
 
 #: Explicit full tool names, no wildcards -- carried byte-for-byte from
 #: auto-approve-nx-mcp.sh's case statement (T2 nexus_rdr/215-hook-contract-map
@@ -144,23 +145,24 @@ def _is_allowed(tool_name: str) -> bool:
 def run(payload: dict | None) -> HookResult:
     """Decide whether *payload*'s ``tool_name`` is auto-approved.
 
-    Mirrors ``auto-approve-nx-mcp.sh`` exactly: a non-match returns
-    ``HookResult()`` (silent -- no stdout at all, not an empty envelope);
-    a match renders the event-appropriate envelope via ``_io``'s shared
-    writers, which reproduce the bash layer's key order byte for byte.
+    Answers only an event that is exactly ``PreToolUse`` (RDR-259 S4,
+    nexus-sby49.6). A non-match, an absent event and a ``PermissionRequest``
+    event all return ``HookResult()`` (silent -- no stdout at all, not an
+    empty envelope); a ``PreToolUse`` match renders the envelope via
+    ``_io``'s shared writer, which reproduces the bash layer's key order byte
+    for byte.
     """
     data = payload or {}
     tool_name = data.get("tool_name", "")
     if not _is_allowed(tool_name):
         return HookResult()
 
-    event = data.get("hook_event_name", "PermissionRequest")
-    if event == "PreToolUse":
-        stdout = permission_decision(
+    if data.get("hook_event_name") != "PreToolUse":
+        return HookResult()
+    return HookResult(
+        stdout=permission_decision(
             "PreToolUse",
             "allow",
             permission_decision_reason="plugin allowlist (auto-approve)",
         )
-    else:
-        stdout = permission_request("allow")
-    return HookResult(stdout=stdout)
+    )

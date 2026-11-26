@@ -77,11 +77,10 @@ __all__ = [
 
 
 #: Hooks whose whole job is to return a VERDICT -- a PreToolUse
-#: ``permissionDecision``, a PermissionRequest ``behavior``, or a Stop /
-#: SubagentStop ``decision``. They may register here (a verdict is useful
-#: as data, and these tools are how the gate gets exercised in diagnosis),
-#: but ``hooks.json`` must WIRE them on the command tier, because an
-#: ``mcp_tool`` hook cannot decide anything.
+#: ``permissionDecision`` or a Stop / SubagentStop ``decision``. They may
+#: register here (a verdict is useful as data, and these tools are how the
+#: gate gets exercised in diagnosis), but ``hooks.json`` must WIRE them on
+#: the command tier, because an ``mcp_tool`` hook cannot decide anything.
 #:
 #: That is a property of the harness, not of this code. Claude Code's
 #: hooks guide names four hook types that carry a decision -- ``prompt``,
@@ -237,15 +236,14 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
                 "Code is about to invoke."
             ),
             "hook_event_name": (
-                "Which event fired this hook: PreToolUse or "
-                "PermissionRequest. Defaults to PermissionRequest when "
-                "absent, matching the bash script's own default."
+                "Which event fired this hook. Only PreToolUse gets an "
+                "answer; PermissionRequest or an absent value gets none."
             ),
         },
         summary=(
             "auto-approves an explicit allowlist of conexus MCP tools "
             "(the hook_ tools are in it by name, not by prefix) on PreToolUse "
-            "and PermissionRequest"
+            "only"
         ),
     ),
     HookToolSpec(

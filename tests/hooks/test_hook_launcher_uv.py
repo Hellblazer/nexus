@@ -156,20 +156,33 @@ def test_the_mailbox_drain_runs_under_the_floor_and_fails_open(tmp_path: Path) -
     assert "requires Python 3.12" not in proc.stderr
 
 
-@pytest.mark.skipif(shutil.which("nx-hook") is None, reason="needs the installed nx-hook the shim wraps")
-@pytest.mark.parametrize("event", ["PreToolUse", "PermissionRequest"])
-def test_auto_approve_allows_through_uv_and_the_shim(event: str, tmp_path: Path) -> None:
+def _run_auto_approve_entry(event: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
     (hook,) = [
         h for e, h in _launcher_entries()
         if e == event and launcher_script_args(h)[-1] == "auto-approve"
     ]
-    proc = _run(
+    return _run(
         hook,
         {"hook_event_name": event, "tool_name": "mcp__plugin_conexus_nexus__search", "session_id": "launcher-test"},
         tmp_path,
     )
+
+
+@pytest.mark.skipif(shutil.which("nx-hook") is None, reason="needs the installed nx-hook the shim wraps")
+def test_auto_approve_pretooluse_allows_through_uv_and_the_shim(tmp_path: Path) -> None:
+    proc = _run_auto_approve_entry("PreToolUse", tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert "allow" in proc.stdout, proc.stdout
+
+
+@pytest.mark.skipif(shutil.which("nx-hook") is None, reason="needs the installed nx-hook the shim wraps")
+def test_auto_approve_permissionrequest_entry_gets_no_answer_through_uv_and_the_shim(tmp_path: Path) -> None:
+    """RDR-259 S4 (nexus-sby49.6): the nx verb gives no answer on PermissionRequest, so the
+    entry hooks.json still registers exits 0 with empty stdout. nexus-sby49.14 deletes this
+    test when it removes the entry (the ``(hook,) = [...]`` unpack fails then)."""
+    proc = _run_auto_approve_entry("PermissionRequest", tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", proc.stdout
 
 
 def test_the_hook_env_is_posix_minimal_and_windows_keeps_what_uv_needs() -> None:
