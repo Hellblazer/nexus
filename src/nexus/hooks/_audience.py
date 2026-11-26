@@ -48,16 +48,6 @@ _ACCOUNT_HOME_OVERRIDE: "str | os.PathLike[str] | None" = None
 #: Relative to the checkout root.
 PROJECT_FILE_PARTS: tuple[str, ...] = (".nexus", "project.json")
 
-#: Read as ``{"subagent_git": "strict"}`` in a checkout with no ``.nexus/project.json``. The window: Stages 1 to 3 of RDR-259
-#: ship in the next normal client release after the v8.5.8 plugin-only fast lane (8.5.9, the patch cadence), and the markers
-#: stay for two client releases after that, so ``LEGACY_ACCEPTED_UNTIL`` is 8.5.11. ``tests/hooks/test_settings_legacy_window.py``
-#: fails once the plugin reaches it while these are still read; nexus-sby49.18 rechecks the value at the cut.
-LEGACY_MARKERS: tuple[str, ...] = (
-    ".nexus/dev-process.json",
-    "scripts/agent-worktree-preflight.sh",
-)
-LEGACY_ACCEPTED_UNTIL = "8.5.11"
-
 #: Files an earlier release read that nothing reads now; ``show`` lists one that still exists as having no effect.
 RETIRED_USER_FILES: tuple[str, ...] = ("maintainer-profile",)
 
@@ -340,7 +330,6 @@ class _FileRead:
         self.problems: "list[Problem]" = []
         self.raw: "bytes | None" = None
         self.forced = False  # a value here forced subagent_git strict
-        self.marker = ""  # the legacy marker that stands in for a missing project file
 
     def as_dict(self) -> dict:
         return {"role": self.role, "label": self.label, "path": self.path, "state": self.state, "exists": self.state != "absent"}
@@ -672,7 +661,7 @@ class Settings:
     """The effective settings and where each came from.
 
     ``values`` has every key but ``version``; ``sources`` names where each came from (``default``, ``user``, ``project``,
-    ``project (HEAD)``, ``project (cwd checkout)`` or ``legacy marker``); ``problems`` is the list; ``files`` the files read;
+    ``project (HEAD)`` or ``project (cwd checkout)``); ``problems`` is the list; ``files`` the files read;
     ``project`` the session root's own validated keys (no ``version``) and ``user`` the user file's with defaults filled in;
     ``project_questions`` and ``user_questions`` the brief questions each file contributes after dropping duplicates and the cap.
     """
@@ -723,14 +712,7 @@ def _read_user() -> _FileRead:
 
 def _read_project_copy(root: str, label: str, role: str, keys: "tuple[str, ...] | None") -> _FileRead:
     path = os.path.join(root, *PROJECT_FILE_PARTS)
-    fr = _read_file(label, path, role, who="project", follow=False, keys=keys)
-    if fr.state == "absent":
-        for marker in LEGACY_MARKERS:
-            if os.path.isfile(os.path.join(root, *marker.split("/"))):
-                fr.marker = marker
-                fr.values = {"subagent_git": STRICT}
-                break
-    return fr
+    return _read_file(label, path, role, who="project", follow=False, keys=keys)
 
 
 def _combine(s: Settings, copies: "list[tuple[str, _FileRead]]", session: "_FileRead | None", user: _FileRead) -> None:
@@ -812,9 +794,9 @@ def _read_settings(payload: object, head: bool, full: bool) -> Settings:
     cwdc = _read_project_copy(pcheck, CWD_LABEL, "cwd", _STRICTNESS_KEYS) if pcheck and pcheck != root else None
     copies: "list[tuple[str, _FileRead]]" = []
     if session is not None:
-        copies.append(("legacy marker" if session.marker else "project", session))
+        copies.append(("project", session))
     if cwdc is not None:
-        copies.append(("legacy marker" if cwdc.marker else "project (cwd checkout)", cwdc))
+        copies.append(("project (cwd checkout)", cwdc))
     already_strict = any(fr.values.get("subagent_git") == STRICT for _, fr in copies) or user.values.get("subagent_git") == STRICT
     headc = None
     if head and root and session is not None and (full or not already_strict):
@@ -1178,11 +1160,6 @@ def build_report(cwd: "str | None" = None, versions: "dict[str, str | None] | No
         if qs:
             texts.append({"key": "brief_questions", "source": src, "text": provenance_label("brief_questions", src), "items": list(qs)})
     retired = []
-    if root and session is not None and session.state != "absent":
-        for marker in LEGACY_MARKERS:
-            mpath = os.path.join(root, *marker.split("/"))
-            if os.path.isfile(mpath):
-                retired.append({"path": mpath, "note": "no effect while .nexus/project.json exists; without it, read as strict until " + LEGACY_ACCEPTED_UNTIL})
     if home:
         for name in RETIRED_USER_FILES:
             rpath = os.path.join(home, ".config", "nexus", name)

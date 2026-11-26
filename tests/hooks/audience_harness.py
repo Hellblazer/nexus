@@ -24,10 +24,6 @@ import os
 import runpy
 import sys
 
-#: The Phase 1 marker file, still accepted for two client releases and read as ``{"subagent_git": "strict"}``.
-LEGACY_MARKER = "scripts/agent-worktree-preflight.sh"
-
-
 def write_project_settings(repo: "os.PathLike[str] | str", **settings: object) -> None:
     """Write *repo*'s tracked ``.nexus/project.json`` with *settings* (default: ``subagent_git`` strict)."""
     body = {"version": 1, **(settings or {"subagent_git": "strict"})}
@@ -47,16 +43,6 @@ def strict_repo(path: "os.PathLike[str] | str", **settings: object) -> str:
     project-strict fixture."""
     os.makedirs(os.path.join(os.fspath(path), ".git"), exist_ok=True)
     write_project_settings(path, **{"subagent_git": "strict", **settings})
-    return os.fspath(path)
-
-
-def legacy_marked_repo(path: "os.PathLike[str] | str") -> str:
-    """A directory with a ``.git`` entry and only the Phase 1 marker file (read as strict)."""
-    os.makedirs(os.path.join(os.fspath(path), ".git"), exist_ok=True)
-    marker = os.path.join(os.fspath(path), *LEGACY_MARKER.split("/"))
-    os.makedirs(os.path.dirname(marker), exist_ok=True)
-    with open(marker, "w", encoding="utf-8") as handle:
-        handle.write("#!/bin/sh\n")
     return os.fspath(path)
 
 

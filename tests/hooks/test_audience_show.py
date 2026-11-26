@@ -110,11 +110,8 @@ def test_problems_are_listed_with_the_file_the_key_and_what_was_used(pinned, tmp
     assert "subagent-git" in text and "did you mean" in text and "subagent_git" in text
 
 
-def test_retired_files_that_still_exist_are_listed_as_having_no_effect(pinned, tmp_path):
+def test_retired_user_file_that_still_exists_is_listed_as_having_no_effect(pinned, tmp_path):
     posture = build_posture(tmp_path, "project-strict")
-    marker = posture.repo / "scripts" / "agent-worktree-preflight.sh"
-    marker.parent.mkdir(parents=True)
-    marker.write_text("#!/bin/sh\n")
     retired_name = pinned(posture).RETIRED_USER_FILES[0]
     flag = posture.home / ".config" / "nexus" / retired_name
     flag.parent.mkdir(parents=True)
@@ -122,22 +119,28 @@ def test_retired_files_that_still_exist_are_listed_as_having_no_effect(pinned, t
     audience = pinned(posture)
     report = audience.build_report(str(posture.repo), versions=VERSIONS)
     retired = {pathlib.Path(r["path"]).name: r["note"] for r in report["retired"]}
-    assert set(retired) == {"agent-worktree-preflight.sh", retired_name}
-    assert all("no effect" in note for note in retired.values())
-    assert audience.LEGACY_ACCEPTED_UNTIL in retired["agent-worktree-preflight.sh"]
+    assert set(retired) == {retired_name}
+    assert "no effect" in retired[retired_name]
     _, text = _show(audience, ["show", "--cwd", str(posture.repo)])
     assert "no effect" in text
 
 
-def test_a_legacy_marker_with_no_project_file_is_the_source_not_a_retired_file(pinned, tmp_path):
-    posture = build_posture(tmp_path, "plain")
-    marker = posture.repo / ".nexus" / "dev-process.json"
-    marker.parent.mkdir()
-    marker.write_text("{}")
+@pytest.mark.parametrize("marker", [".nexus/dev-process.json", "scripts/agent-worktree-preflight.sh"])
+@pytest.mark.parametrize("posture_name", ["plain", "project-strict"])
+def test_the_retired_markers_are_not_reported_and_decide_nothing(pinned, tmp_path, marker, posture_name):
+    """Stage 4 (RDR-259): the old marker files are neither a source nor a retired file; show says nothing about them."""
+    posture = build_posture(tmp_path, posture_name)
+    path = posture.repo.joinpath(*marker.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}")
     audience = pinned(posture)
     report = audience.build_report(str(posture.repo), versions=VERSIONS)
     row = {r["key"]: r for r in report["settings"]}["subagent_git"]
-    assert row["value"] == "strict" and row["source"] == "legacy marker" and report["retired"] == []
+    expected = ("strict", "project") if posture_name == "project-strict" else ("seatbelt", "default")
+    assert (row["value"], row["source"]) == expected
+    assert report["retired"] == []
+    _, text = _show(audience, ["show", "--cwd", str(posture.repo)])
+    assert "legacy" not in text and "dev-process" not in text
 
 
 def test_the_report_warns_when_the_plugin_and_the_cli_differ(pinned, plain_posture):

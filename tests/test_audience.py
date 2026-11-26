@@ -25,7 +25,7 @@ import sys
 import pytest
 
 from tests._module_seam import setattr_in
-from tests.hooks.audience_harness import LEGACY_MARKER, legacy_marked_repo, plain_repo, strict_repo, write_project_settings, write_user_settings
+from tests.hooks.audience_harness import plain_repo, strict_repo, write_project_settings, write_user_settings
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 SCRIPTS = PROJECT_ROOT / "conexus" / "hooks" / "scripts"
@@ -174,26 +174,38 @@ def test_a_user_file_that_cannot_be_read_reads_strict_and_leaves_the_other_defau
 
 
 # ---------------------------------------------------------------------------
-# The two old markers
+# The two retired markers (RDR-259 Stage 4): no project file reads plain, whatever else the checkout holds
 # ---------------------------------------------------------------------------
 
-
-def test_the_phase_two_file_and_the_phase_one_marker_each_read_as_strict(home, tmp_path):
-    phase_two = plain_repo(tmp_path / "two")
-    (pathlib.Path(phase_two) / ".nexus").mkdir()
-    (pathlib.Path(phase_two) / ".nexus" / "dev-process.json").write_text("{}")
-    phase_one = legacy_marked_repo(tmp_path / "one")
-    for repo in (phase_two, phase_one):
-        assert _audience.project_settings(_p(repo)) == {"subagent_git": "strict"}, repo
-        assert _audience.guard_mode(_p(repo)) == "strict"
-    assert (pathlib.Path(phase_one) / LEGACY_MARKER).is_file()
+_RETIRED_MARKERS = (".nexus/dev-process.json", "scripts/agent-worktree-preflight.sh")
 
 
-def test_the_new_file_decides_alone_when_it_exists(home, tmp_path):
-    repo = legacy_marked_repo(tmp_path / "r")
-    write_project_settings(repo, preflight="tools/pre.sh")  # a project file with no subagent_git beside the old marker
+def _with_marker(repo: str, marker: str) -> str:
+    path = pathlib.Path(repo, *marker.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}" if marker.endswith(".json") else "#!/bin/sh\n")
+    return repo
+
+
+@pytest.mark.parametrize("marker", _RETIRED_MARKERS)
+def test_a_retired_marker_with_no_project_file_reads_plain(home, tmp_path, marker):
+    repo = _with_marker(plain_repo(tmp_path / "r"), marker)
+    assert pathlib.Path(repo, *marker.split("/")).is_file()
+    assert _audience.project_settings(_p(repo)) == {}
+    assert _audience.guard_mode(_p(repo)) == "seatbelt"
+    assert _audience.read_settings(_p(repo)).sources["subagent_git"] == "default"
+
+
+@pytest.mark.parametrize("marker", _RETIRED_MARKERS)
+def test_a_retired_marker_beside_a_project_file_changes_nothing(home, tmp_path, marker):
+    repo = _with_marker(plain_repo(tmp_path / "r"), marker)
+    write_project_settings(repo, preflight="tools/pre.sh")
     assert _audience.project_settings(_p(repo)) == {"preflight": "tools/pre.sh"}
     assert _audience.guard_mode(_p(repo)) == "seatbelt"
+
+
+def test_the_retired_marker_names_are_gone_from_the_reader():
+    assert not hasattr(_audience, "LEGACY_MARKERS") and not hasattr(_audience, "LEGACY_ACCEPTED_UNTIL")
 
 
 # ---------------------------------------------------------------------------

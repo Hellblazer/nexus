@@ -23,8 +23,7 @@ the hook's stdout is compared decision by decision. Two replays prove it:
   days, as ``(command, cwd)`` from ``~/.local/state/nexus/plans/corpus/subagent-bash-30d.jsonl`` (Phase 0 extracts it; it stays
   on that machine, never in the repo). Replayed under user-strict (every cwd reads strict, and the old and new decisions are
   identical for every command), then under the plain account: every cwd that reads strict there carries its own project
-  settings and replays identically, the checkouts that fall to the seatbelt are listed (each must lack the settings file and
-  the legacy marker), and the seatbelt tightens only with its own stop text. The floor is 20 existing cwds and 500 commands; below it the test
+  settings and replays identically, the checkouts that fall to the seatbelt are listed (each must lack the settings file), and the seatbelt tightens only with its own stop text. The floor is 20 existing cwds and 500 commands; below it the test
   FAILS (unverified), and so does an absent corpus. Cwds that no longer exist cannot be judged: they are counted and listed,
   never dropped silently.
 
@@ -82,8 +81,8 @@ REQUIRE_CORPUS_ENV = "NX_REQUIRE_REAL_CORPUS"
 FLOOR_OLD_DENIES = 1000
 SYNTHETIC_FLOOR = 1500
 REMOTE_HOSTS = "chas,chas-test"
-#: The files that make a checkout read strict: the settings file, and the Phase 1 markers that still read as strict.
-STRICT_FILES = ("scripts/agent-worktree-preflight.sh", ".nexus/dev-process.json", ".nexus/project.json")
+#: The file that makes a checkout read strict (the retired Phase 1 and Phase 2 markers no longer do).
+STRICT_FILES = (".nexus/project.json",)
 
 
 def _git(*args: str, cwd: pathlib.Path = PROJECT_ROOT) -> bytes:
@@ -392,7 +391,7 @@ def test_the_real_corpus_replay_meets_the_floor_and_the_bars(old_tree, tmp_path)
           f"the old guard denied {old_denies} of them, in {denied_cwds} cwds")
 
     # Bar 2, project-strict: on an account with no settings file, every cwd under a nexus checkout that carries the settings
-    # file (or a legacy marker) reads strict; the commands replayed there are held to the same zero-difference bar.
+    # file reads strict; the commands replayed there are held to the same zero-difference bar.
     by_cwd = {c["cwd"]: r for c, r in zip(cases, plain_rows)}
     nexus_like: list[str] = []
     fell_to_seatbelt: list[str] = []
