@@ -39,6 +39,7 @@ SAFE_ANSWER: dict[str, object] = {
     "guard_mode": "strict",
     "telemetry_enabled": False,
     "telemetry_child_env": None,
+    "forced_strict_clause": None,
     "t1_nudge_enabled": True,
     "project_text": None,
     "project_brief_questions": "emptylist",
