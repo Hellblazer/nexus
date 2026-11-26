@@ -74,7 +74,8 @@ def fetch_engine_status(*, timeout: float = 5.0, mint_deadline_s: float | None =
         # unauthenticated probe reported a false UNKNOWN on every cloud box).
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
-        resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout, verify=get_shared_ssl_context())
+        from nexus.db.service_endpoint import bearer_may_use_proxy  # noqa: PLC0415 — deferred: this module loads on the CLI's startup path
+        resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout, verify=get_shared_ssl_context(), trust_env=bearer_may_use_proxy(base_url))  # nexus-ec37o: no proxy for a plain-http bearer
         resp.raise_for_status()
         body = resp.json()
     except Exception as exc:  # noqa: BLE001 — fail-closed: a transport blip or a pre-nexus-s71lr engine (404) is "unprobeable"
@@ -92,7 +93,8 @@ def fetch_engine_status_at(base_url: str, token: str | None, *, timeout: float =
     try:
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
-        resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout, verify=get_shared_ssl_context())
+        from nexus.db.service_endpoint import bearer_may_use_proxy  # noqa: PLC0415 — deferred: this module loads on the CLI's startup path
+        resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout, verify=get_shared_ssl_context(), trust_env=bearer_may_use_proxy(base_url))  # nexus-ec37o: no proxy for a plain-http bearer
         resp.raise_for_status()
         body = resp.json()
     except Exception as exc:  # noqa: BLE001 — advisory: an unreadable status is nothing to report
