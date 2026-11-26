@@ -314,7 +314,7 @@ def _plugin_copy(tmp_path: Path, mode: str) -> Path:
     shutil.copytree(PLUGIN, dst, ignore=shutil.ignore_patterns("__pycache__", "evals", "*.pyc"))
     helper = dst / "hooks" / "scripts" / "_audience.py"
     src = helper.read_text(encoding="utf-8")
-    mutated, n = re.subn(r"(def guard_mode\(payload: object\) -> str:\n)(?:.*\n)*?(?=\n\ndef telemetry_enabled)",
+    mutated, n = re.subn(r"(def guard_mode\(payload: object, head: bool = False\) -> str:\n)(?:.*\n)*?(?=\n\ndef )",
                          rf'\1    """mutated"""\n    return "{mode}"\n', src)
     assert n == 1 and f'return "{mode}"' in mutated
     helper.write_text(mutated, encoding="utf-8")

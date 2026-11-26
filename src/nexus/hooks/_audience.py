@@ -536,9 +536,10 @@ def index_names_project(gitdir: str) -> str:
     """Whether the git index names ``.nexus/project.json``: ``"yes"``, ``"no"`` or ``"unknown"``.
 
     A plain ``rm`` of the working copy leaves the index entry, so this says a project file may exist when the working one is
-    gone. A stdlib byte search of index versions 2 and 3 (full paths), reading at most ``INDEX_SEARCH_MAX_BYTES``. Version 4,
-    a split index, a sparse checkout, a miss past the bound and any read error are "unknown", which the caller treats as
-    "may name it".
+    gone. A stdlib byte search of index versions 2 and 3 (full paths), reading at most ``INDEX_SEARCH_MAX_BYTES``. Version 4
+    (prefix-compressed), a split index (``sharedindex.*``), a sparse index (a ``.nexus/`` directory entry or an ``sdir``
+    extension), a sparse checkout, a miss past the bound and any read error are "unknown", which the caller treats as "may name
+    it": git is then asked, and only a failure of git itself makes it strict.
     """
     try:
         try:
@@ -556,9 +557,14 @@ def index_names_project(gitdir: str) -> str:
         if len(data) < 12 or data[:4] != b"DIRC" or int.from_bytes(data[4:8], "big") not in (2, 3):
             return "unknown"
         truncated = len(data) > INDEX_SEARCH_MAX_BYTES
-        if b".nexus/project.json" in data[:INDEX_SEARCH_MAX_BYTES]:
+        window = data[:INDEX_SEARCH_MAX_BYTES]
+        if b".nexus/project.json" in window:
             return "yes"
-        return "unknown" if truncated else "no"
+        # A sparse index folds `.nexus/` into one directory entry (the path then ends at its NUL) and carries an `sdir`
+        # extension; neither names the file, and the file may be under them.
+        if truncated or b".nexus/\x00" in window or b"sdir" in window:
+            return "unknown"
+        return "no"
     except OSError:
         return "unknown"
 

@@ -411,3 +411,26 @@ def test_the_search_bound_constant_is_a_named_few_mib():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert 1 << 20 <= mod.INDEX_SEARCH_MAX_BYTES <= 16 << 20
+
+
+def test_a_sparse_index_entry_or_extension_says_unknown(audience, tmp_path):
+    """A sparse index folds `.nexus/` into a directory entry (the path ends at its NUL) and carries an `sdir` extension."""
+    header = b"DIRC" + (2).to_bytes(4, "big") + (1).to_bytes(4, "big")
+    for n, body in enumerate((b"\0" * 62 + b".nexus/\0\0\0\0", b"\0" * 62 + b"README\0\0" + b"sdir" + (0).to_bytes(4, "big"))):
+        gd = tmp_path / ("sparse-" + str(n))
+        gd.mkdir()
+        (gd / "index").write_bytes(header + body)
+        assert audience.index_names_project(str(gd)) == "unknown"
+    plain = tmp_path / "plain-gitdir"
+    plain.mkdir()
+    (plain / "index").write_bytes(header + b"\0" * 62 + b"README\0\0")
+    assert audience.index_names_project(str(plain)) == "no"
+
+
+def test_a_staged_deletion_is_the_tables_first_row_and_reads_no_head(audience, tmp_path, shim, monkeypatch):
+    """Staged, uncommitted removal: the working file is gone and the index no longer names it, though HEAD still has it.
+    Decision 1's table says "no working-tree file and the index does not name it: not read", so nothing is read from HEAD."""
+    repo = init_repo(tmp_path / "r", {PROJECT: _j(subagent_git="strict"), "z.txt": "z\n"})
+    run_git(repo, "rm", "-q", PROJECT)
+    shim.install(monkeypatch)
+    assert audience.guard_mode(_p(repo), head=True) == "seatbelt" and shim.calls() == []
