@@ -54,6 +54,7 @@ SAFE_ANSWER: dict[str, object] = {
     "forced_strict_clause": None,
     "settings_problems": "emptylist",
     "format_problem": "",
+    "claim_session_once": None,
 }
 WRAPPERS = {"run_hook", "never_fail"}
 

@@ -54,18 +54,6 @@ registrations:
   evidence: 'G3: the setup notice, existing data gates (analysis section 6)'
   target_state: as is
   phase: '-'
-- key: SessionStart hooks/scripts/settings_notice.py
-  event: SessionStart
-  matcher: startup|resume|clear
-  argv:
-  - hooks/scripts/settings_notice.py
-  modules:
-  - hooks/scripts/settings_notice.py
-  audience: EVERY-USER
-  gate: data
-  evidence: 'RDR-259 Decision 4: the settings problem notice, only when a settings file has a problem (a data gate on the user''s own files)'
-  target_state: as is
-  phase: '-'
 - key: SessionStart launch/nx_launch.py nx-hook upgrade-auto
   event: SessionStart
   matcher: startup|resume|clear|compact|fork
@@ -333,6 +321,18 @@ registrations:
   evidence: 'G2: the mailbox drain, existing data gates'
   target_state: as is
   phase: '-'
+- key: UserPromptSubmit hooks/scripts/settings_notice.py
+  event: UserPromptSubmit
+  matcher: ''
+  argv:
+  - hooks/scripts/settings_notice.py
+  modules:
+  - hooks/scripts/settings_notice.py
+  audience: EVERY-USER
+  gate: data
+  evidence: 'RDR-259 Decision 4: the settings problem notice, the first prompt of a session and only when a settings file has a problem (a data gate on the user''s own files)'
+  target_state: as is
+  phase: '-'
 - key: PreCompact hooks/scripts/compact_checkpoint.py pre
   event: PreCompact
   matcher: manual|auto
@@ -379,6 +379,7 @@ modules:
   hooks/scripts/settings_notice.py:
     wrapper: main_try
     predicates:
+    - claim_session_once
     - clean_text
     - format_problem
     - note_problems

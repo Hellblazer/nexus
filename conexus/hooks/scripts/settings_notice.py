@@ -3,33 +3,42 @@
 # /// script
 # requires-python = ">=3.12"
 # ///
-"""Tell the user at session start when a conexus settings file has a problem (RDR-259 Decision 4 item 1, nexus-sby49.12).
+"""Tell the user, at the first prompt of a session, when a conexus settings file has a problem (RDR-259 Decision 4 item 1, nexus-sby49.12).
 
 Two files feed the hooks: a project's tracked ``.nexus/project.json`` and the user's ``conexus.json``. A broken one is not
 an error the hooks can show on every call, and a misspelled key (``subagent-git``) changes nothing visible, so this hook is the
-one place a session says so. It runs on ``startup``, ``resume`` and ``clear`` and says nothing on ``compact`` or ``fork``, and
-nothing at all when there is no problem.
+one place a session says so. It says nothing when there is no problem.
+
+It is a UserPromptSubmit hook and speaks on the first prompt of a session only. Measured (nexus-sby49.12, 2026-11-26):
+
+* Claude Desktop runs a plugin's SessionStart hooks but does not show their ``systemMessage`` (RDR-259 record 60). It shows a
+  UserPromptSubmit ``systemMessage``, as a "Claude Code notice" above the reply (record 61). That is why this is not a
+  SessionStart hook.
+* The CLI shows both, so a hook on both would tell a CLI user twice. A headless ``claude -p`` run fires UserPromptSubmit too
+  (it always has a prompt) and reports the message as a notice. A session that never takes a prompt has nobody to tell.
+* UserPromptSubmit fires on every prompt, and the CLI shows the message each time. The first-prompt gate is
+  ``_audience.claim_session_once``: one ``O_EXCL`` file per session id, so a later prompt costs one failed ``open`` and exits
+  before the settings are read. The session id is the same across a resume (the notice does not repeat there) and new after
+  ``/clear`` (it speaks again). The mark is kept under the audience log marks; when it cannot be kept anywhere the hook stays
+  silent, because a hook that cannot remember having spoken would speak on every prompt.
 
 It prints one JSON object with two parts:
 
-* a top-level ``systemMessage``, the user's message. A plugin command hook's SessionStart output shows the user only this field
-  in the CLI (measured in nexus-sby49.15, item 1: ``additionalContext`` alone, plain stdout and stderr show nothing). Each line
-  names a file, the problem and the value used; a misspelled key carries the reader's "did you mean". Any text a file
-  controls (a key name, a rejected value) is already cleaned, quoted and cut to 60 bytes by the reader; the line is cleaned
-  and cut again here. Desktop's display of it is an open hand check, so the message ends with the command that prints the same
-  list, and the model's line below says where to send a user who did not see it.
+* a top-level ``systemMessage``, the user's message. Each line names a file, the problem and the value used; a misspelled key
+  carries the reader's "did you mean". Any text a file controls (a key name, a rejected value) is already cleaned, quoted and
+  cut to 60 bytes by the reader; the line is cleaned and cut again here. The message ends with the command that prints the
+  same list.
 * ``additionalContext``, one line for the model: the count, the file names and the pointer. It never carries file text.
 
 The pointer is ``nx settings show`` when the ``nx`` found has a ``settings`` command (it is asked, once, and only when there is
 a problem: an older CLI beside a newer plugin is normal, RDR-259 record 36), else the plugin's own copy of the reader run by its
 absolute path, which works on a machine with no CLI.
 
-Each problem is also logged once per session (``hook.log``, through ``note_problems``). The message itself is shown on every
-start, resume and clear.
+Each problem is also logged once per session (``hook.log``, through ``note_problems``).
 
 Standard library only, no ``nexus`` import: it runs under ``uv tool run python`` on a machine that may have no CLI. A repository
 with no settings file starts no process. The settings helper is imported inside a ``try``; without it the hook is silent. It
-exits 0 whatever happens: a session start must not be disturbed by this hook failing.
+exits 0 whatever happens: exit 2 from a UserPromptSubmit hook would block the user's prompt.
 """
 from __future__ import annotations
 
@@ -46,12 +55,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # The helper reads the two files and the committed copy; a helper that cannot be imported leaves the hook silent.
 try:
     from _audience import (
+        claim_session_once as _claim,
         clean_text as _clean,
         format_problem as _format,
         note_problems as _note,
         settings_problems as _problems,
     )
 except BaseException:  # noqa: BLE001 -- the fallbacks are the contract: no problems, nothing to say
+    def _claim(kind: str, payload: object) -> None:
+        return None
+
     def _clean(text: object, limit: int = 60) -> str:
         return ""
 
@@ -65,8 +78,8 @@ except BaseException:  # noqa: BLE001 -- the fallbacks are the contract: no prob
         return []
 
 
-#: The ``source`` values a session start speaks on. ``compact`` and ``fork`` are not here.
-SOURCES = ("startup", "resume", "clear")
+#: The name of the once-per-session mark.
+MARK_KIND = "settings-notice"
 
 #: Problems printed one to a line; the rest are counted.
 MAX_SHOWN = 5
@@ -75,9 +88,9 @@ MAX_SHOWN = 5
 LINE_BYTES = 200
 NAME_BYTES = 60
 
-#: The most files the model's line names, and the most seconds the question to ``nx`` may take.
+#: The most files the model's line names, and the most seconds the question to ``nx`` may take (the prompt waits for it).
 MAX_FILES = 4
-PROBE_TIMEOUT_S = 8
+PROBE_TIMEOUT_S = 5
 
 
 def _read_payload() -> dict:
@@ -147,7 +160,7 @@ def _context(problems: list, has_nx: bool) -> str:
     named = ", ".join(files[:MAX_FILES]) + (" and more" if len(files) > MAX_FILES else "")
     run = "`nx settings show` (`nx settings check` lists only the problems)" if has_nx else "`" + _stdlib_command() + "`"
     return (
-        f"conexus settings: {_plural(len(problems))} in {named}. The user was shown them at session start; "
+        f"conexus settings: {_plural(len(problems))} in {named}. The user was shown them with their first prompt; "
         f"if they did not see them, tell them to run {run}."
     )
 
@@ -155,19 +168,14 @@ def _context(problems: list, has_nx: bool) -> str:
 def _output(problems: list, has_nx: bool) -> dict:
     return {
         "systemMessage": _message(problems, has_nx),
-        "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": _context(problems, has_nx)},
+        "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": _context(problems, has_nx)},
     }
-
-
-def _speaks_on(payload: dict) -> bool:
-    source = payload.get("source")
-    return not isinstance(source, str) or source in SOURCES
 
 
 def main() -> int:
     try:
         payload = _read_payload()
-        if not _speaks_on(payload) or sys.stdout is None:
+        if sys.stdout is None or _claim(MARK_KIND, payload) is not True:  # a later prompt exits here, before any settings read
             return 0
         problems = _problems(payload)
         if not problems:

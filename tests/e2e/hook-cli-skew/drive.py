@@ -53,7 +53,7 @@ import shutil
 #: was 18 while the nexus-i93tz integrity check was registered on
 #: Pre/Post/PostToolUseFailure Bash, removed again 2026-10-25). A stated floor,
 #: not a derived one, on purpose: a derived count falls with the manifest.
-#: 23 with the SessionStart settings notice, nexus-sby49.12.
+#: 23 with the UserPromptSubmit settings notice, nexus-sby49.12 (a SessionStart entry first; the count is the same).
 DEFAULT_MIN_EXECUTED = 23
 
 #: What the launcher writes when it finds no CLI (_cli_lookup.missing_note).
