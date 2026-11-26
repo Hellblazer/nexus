@@ -153,7 +153,7 @@ def discover_lease() -> tuple[str | None, str | None]:
             token = str(ep.get("token", "")) or None
             if port > 0:
                 _has_ever_resolved_lease = True
-                return f"http://{host}:{port}", token
+                return host_port_url(host, port), token
     except Exception as exc:  # discovery is best-effort; absence fails loud above  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         _log.debug("service_endpoint_lease_discover_failed", error=str(exc))
     return None, None
@@ -409,6 +409,18 @@ def recover_endpoint_from_lease(
     return None
 
 
+def host_port_url(host: object, port: object) -> str:
+    """``http://host:port`` for a host the environment or a lease names, an IPv6 literal bracketed.
+
+    The one spelling of that URL: the CLI's and the plugin's copies are held to the same AST
+    (``tests/hooks/test_origin_binding_parity.py``), so an IPv6 lease or env host reads as the
+    same origin on both sides."""
+    shown = str(host)
+    if ":" in shown and not shown.startswith("["):
+        shown = f"[{shown}]"
+    return f"http://{shown}:{port}"
+
+
 def env_host_port_url() -> str | None:
     """``http://{host}:{port}`` from the NX_SERVICE_HOST/PORT env halves, or None.
 
@@ -430,7 +442,7 @@ def env_host_port_url() -> str | None:
             f"NX_SERVICE_PORT must be an integer, got: {port_str!r}"
         ) from exc
     host = os.environ.get("NX_SERVICE_HOST", "").strip() or "127.0.0.1"
-    return f"http://{host}:{port}"
+    return host_port_url(host, port)
 
 
 def _supervisor_registered_for_login() -> bool:
@@ -511,9 +523,8 @@ def resolve_service_config(
         # lease's own origin. An env host or port that names another origin
         # (NX_SERVICE_HOST alone keeps the lease port, but not its host) does
         # not get it.
-        shown_host = f"[{host}]" if ":" in host else host
         picked, refused = choose_bound_token(
-            f"http://{shown_host}:{port}", [(lease_token, "the supervisor lease token", lease_url)],
+            host_port_url(host, port), [(lease_token, "the supervisor lease token", lease_url)],
         )
         if picked is None:
             raise CredentialOriginMismatchError(mismatch_message(describe_url_source(), refused))
@@ -521,8 +532,7 @@ def resolve_service_config(
     if token and port is not None:
         # nexus-ec37o: this leg is always plain http, so a bearer (an env token or the lease
         # token alike) goes only to a loopback host. A LAN or docker engine needs https.
-        shown_host = f"[{host}]" if ":" in host else host
-        require_secure_transport(f"http://{shown_host}:{port}")
+        require_secure_transport(host_port_url(host, port))
 
     if port is None or not token:
         # RDR-155 P4b: the nexus-0rwwv migration-hint bridge died with the
@@ -655,6 +665,24 @@ def is_loopback_host(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def no_redirect_handler() -> Any:
+    """A urllib handler that follows no redirect: the 3xx answer surfaces as an ``HTTPError``.
+
+    urllib copies ``Authorization`` to a redirect's target, so a bound origin that answers 3xx
+    (or an attacker who can make it) would carry the credential to any host, and an https
+    origin to plain http. Every urllib opener that carries a bearer includes this handler
+    (nexus-ec37o); httpx follows nothing by default, and a lint pins that no bearer client
+    turns it on. The plugin mirror is ``conexus/hooks/scripts/_endpoint_resolve.py``.
+    """
+    import urllib.request  # noqa: PLC0415 — deferred: stdlib, only a caller that builds an opener needs it
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    return _NoRedirect()
 
 
 def bound_origin_for_saved(saved_service_url: str | None) -> str:
@@ -807,6 +835,10 @@ def bound_static_service_token(url: str) -> tuple[str, str]:
     return (picked[0] if picked else ""), ""
 
 
+#: warnings already logged by this process (see :func:`bound_mint_credential`); tests clear it
+_WARNED_ONCE: set[str] = set()
+
+
 def bound_mint_credential(url: str) -> str | None:
     """The mint credential for *url*, or ``None`` when none is configured or the one
     configured was issued for another origin (it is then not sent; the caller falls back
@@ -818,7 +850,10 @@ def bound_mint_credential(url: str) -> str | None:
         return None
     picked, _ = choose_bound_token(url, [stored])
     if picked is None:
-        _log.warning("mint_credential_origin_mismatch", source=stored[1])
+        # once per process: bearer_for runs on every request, and the same refusal each time is noise
+        if "mint_credential_origin_mismatch" not in _WARNED_ONCE:
+            _WARNED_ONCE.add("mint_credential_origin_mismatch")
+            _log.warning("mint_credential_origin_mismatch", source=stored[1])
         return None
     require_secure_transport(url)
     return picked[0]
@@ -902,7 +937,7 @@ def resolve_service_endpoint(
     host, port, token = resolve_service_config(
         wait_budget_s=wait_budget_s, poll_interval_s=poll_interval_s, clock=clock, sleep=sleep
     )
-    return f"http://{host}:{port}", token
+    return host_port_url(host, port), token
 
 
 def is_endpoint_env_pinned() -> bool:

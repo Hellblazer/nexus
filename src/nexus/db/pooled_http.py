@@ -417,11 +417,11 @@ def _shared_ssl_context() -> Any:
         return _ssl_context_slot[1]
 
 
-_handler_classes: dict[OnConnect, tuple[type, type]] = {}
+_handler_classes: dict[OnConnect, tuple[type, type, type]] = {}
 _handler_classes_lock = threading.Lock()
 
 
-def _make_handler_classes(on_connect: OnConnect) -> tuple[type, type]:
+def _make_handler_classes(on_connect: OnConnect) -> tuple[type, type, type]:
     import urllib.error  # noqa: PLC0415 — deferred import — keeps module load light
     import urllib.request  # noqa: PLC0415 — deferred import — keeps module load light
 
@@ -573,7 +573,12 @@ def _make_handler_classes(on_connect: OnConnect) -> tuple[type, type]:
                 _HTTPSConnection, req, self._debuglevel, context=self._context
             )
 
-    return _PooledHTTPHandler, _PooledHTTPSHandler
+    class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+        # nexus-ec37o: every request here may carry a bearer, which urllib would copy to a redirect's target
+        def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    return _PooledHTTPHandler, _PooledHTTPSHandler, _NoRedirectHandler
 
 
 def build_opener(on_connect: OnConnect) -> Any:
