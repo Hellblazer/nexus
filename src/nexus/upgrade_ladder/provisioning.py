@@ -305,9 +305,18 @@ def establish_verified_service(
     # (ez5.1, the engine contract).
     health_token: str | None = None
     if prov.service_url.startswith("https://"):
-        from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.db.service_endpoint import bound_static_service_token  # noqa: PLC0415 — deferred to avoid import cycle
 
-        health_token = (get_credential("service_token") or "").strip() or None
+        # nexus-ec37o: the saved token goes only to the origin it was issued for.
+        bearer, refused = bound_static_service_token(prov.service_url)
+        if refused:
+            reason = f"the bearer for the storage service health gate was refused: {refused}"
+            _log.warning("guided_upgrade_not_ready", stage="health", reason=reason)
+            return ServiceReadiness(
+                ready=False, service_url=None, reason=reason,
+                version_ok=False, provision=prov, health=None,
+            )
+        health_token = bearer or None
 
     health = _health(
         service_url=prov.service_url, timeout_s=timeout_s, interval_s=interval_s,

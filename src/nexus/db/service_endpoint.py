@@ -493,6 +493,8 @@ def resolve_service_config(
             ) from exc
 
     host, token = env_host or None, env_token or None
+    lease_url: str | None = None
+    lease_token: str | None = None
     if port is None or token is None or host is None:
         lease_url, lease_token = discover_lease_with_wait(
             budget_s=wait_budget_s, poll_interval_s=poll_interval_s, clock=clock, sleep=sleep
@@ -503,8 +505,19 @@ def resolve_service_config(
             parsed = urlsplit(lease_url)
             host = host or parsed.hostname
             port = port if port is not None else parsed.port
-        token = token or lease_token
     host = host or "127.0.0.1"
+    if token is None and lease_token and port is not None:
+        # nexus-ec37o: the lease token is the supervisor's, issued for the
+        # lease's own origin. An env host or port that names another origin
+        # (NX_SERVICE_HOST alone keeps the lease port, but not its host) does
+        # not get it.
+        shown_host = f"[{host}]" if ":" in host else host
+        picked, refused = choose_bound_token(
+            f"http://{shown_host}:{port}", [(lease_token, "the supervisor lease token", lease_url)],
+        )
+        if picked is None:
+            raise CredentialOriginMismatchError(mismatch_message(describe_url_source(), refused))
+        token = picked[0]
 
     if port is None or not token:
         # RDR-155 P4b: the nexus-0rwwv migration-hint bridge died with the
@@ -761,6 +774,20 @@ def select_service_token(
     return picked
 
 
+def bound_static_service_token(url: str) -> tuple[str, str]:
+    """``(token, refusal)`` for a caller that sends only the static ``service_token`` (no
+    lease token, no mint credential) to *url*, such as a doctor probe or a health gate.
+
+    *token* is ``""`` when none applies. *refusal* is ``""`` unless a token is set but
+    was issued for another origin, or would travel over cleartext off this machine; it
+    is then the named error's message (the source and the fix, never the URL)."""
+    try:
+        picked = select_service_token(url, lease=lambda: (None, None), allow_mint=False)
+    except ServiceTokenUnresolvableError as exc:
+        return "", str(exc)
+    return (picked[0] if picked else ""), ""
+
+
 def bound_mint_credential(url: str) -> str | None:
     """The mint credential for *url*, or ``None`` when none is configured or the one
     configured was issued for another origin (it is then not sent; the caller falls back
@@ -829,28 +856,30 @@ def resolve_service_endpoint(
     call. This is the bead's "never for the managed-cloud URL path" contract
     enforced structurally rather than by a caller-side guard.
     """
-    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import get_service_url  # noqa: PLC0415 — deferred to avoid circular import
 
     url = get_service_url() or None
     if url is not None:
-        token = (get_credential("service_token") or "").strip() or None
-        if token is None:
-            _, token = discover_lease()  # deliberately NOT discover_lease_with_wait — see docstring
-        if not token and mint_armed():
+        # nexus-ec37o: each stored credential goes only to the origin it was
+        # issued for (select_service_token), so a URL from the environment
+        # cannot pull the saved or lease token to another host. The lease read
+        # stays the unwrapped, non-waiting discover_lease (see docstring).
+        picked = select_service_token(url)
+        if picked is not None and picked[1] == "mint_token":
             # nexus-xzeml: a mint-armed box authenticates with data tokens
             # the stores mint per request; it needs no static bearer, and
             # demanding one forced such boxes to keep a revoked token in
             # config.yml as a placeholder. Token-admin verbs, which refuse
             # data tokens, then send no bearer and get a named 401.
             return url, ""
-        if not token:
+        if picked is None:
             raise ServiceTokenUnresolvableError(
                 "service_url is set but no service_token is resolvable (neither "
                 "NX_SERVICE_TOKEN env, config.yml, nor supervisor lease): set it "
                 "with `nx config set service_token <bearer>` (or export "
                 "NX_SERVICE_TOKEN) and re-run."
             )
-        return url, token
+        return url, picked[0]
     host, port, token = resolve_service_config(
         wait_budget_s=wait_budget_s, poll_interval_s=poll_interval_s, clock=clock, sleep=sleep
     )
