@@ -1494,28 +1494,22 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     if data_token:
         return base_url, data_token, is_local
 
-    import os  # noqa: PLC0415 — deferred: only this path reads the environment
-
-    token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
-    if not token:
-        token = (_ep.read_config_yml_credentials(config_dir) or {}).get(
-            "service_token", "",
-        ).strip()
-    if not token:
-        # Through the module's own accessor, never off the raw lease dict: it
-        # refuses a lease file that is not owner-only, because the token it
-        # carries authorizes real engine writes and a group- or world-readable
-        # lease means another local account could have read it too. Reading the
-        # dict directly would silently skip that audit.
-        try:
-            token = _ep.read_local_supervisor_token(config_dir).strip()
-        except _ep.EndpointUnresolvable:
-            token = ""
-    if not token:
+    # Each stored credential goes only to the origin it was issued for (nexus-ec37o): the URL
+    # above may come from a repository's env. The lease is read through the module's audited
+    # accessor, which refuses a lease file that is not owner-only, because the token it carries
+    # authorizes real engine writes and a group- or world-readable lease means another local
+    # account could have read it too. A refused credential is the unresolvable path: one SKIP
+    # line naming the source, never the URL.
+    try:
+        picked = _ep.select_service_token(config_dir, base_url)
+    except _ep.EndpointUnresolvable as exc:
+        raise _Skip(str(exc)) from exc
+    if picked is None:
         raise _Skip(
             f"resolved {_host_port(base_url)} but found no credential: no data-token lease, no "
             "NX_SERVICE_TOKEN, no persisted service_token, no local supervisor lease",
         )
+    token, _source = picked
     return base_url, token, is_local
 
 

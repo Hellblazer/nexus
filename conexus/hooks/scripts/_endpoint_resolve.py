@@ -1247,22 +1247,33 @@ def endpoint_usable(config_dir: Path, *, retry_budget_s: float | None = None, gr
         if url:
             if has_userinfo(url):
                 return False  # the CLI raises ServiceUrlUserinfoError here (nexus-ujbf8)
-            if _credential("service_token", "NX_SERVICE_TOKEN", saved):
-                return True
+            # The credential the drain would send: each stored one only to the origin it was
+            # issued for (nexus-ec37o), so "usable" agrees with what goes on the wire. The grace-read
+            # lease is read only when no stored credential answers first.
+            try:
+                if select_service_token(config_dir, url, saved=saved, lease=None, allow_mint=True) is not None:
+                    return True
+            except CredentialRefused:
+                pass
             lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s, grace=grace)
-            if lease is not None and lease["token"]:
-                return True
-            return bool(_credential("mint_token", "NX_MINT_TOKEN", saved))
+            return select_service_token(config_dir, url, saved=saved, lease=lease, allow_mint=True) is not None
         # The host never decides the answer (it defaults to 127.0.0.1), so a lease is
         # read only when the port or the token is missing.
         port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
         port = int(port_str) if port_str else None
+        host = os.environ.get("NX_SERVICE_HOST", "").strip() or None
         token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or None
+        lease = None
         if port is None or token is None:
             lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s, grace=grace)
             if lease is not None:
                 port = port if port is not None else lease["port"]
-                token = token or lease["token"] or None
-        return port is not None and bool(token)
+                host = host or lease["host"]
+        if port is None:
+            return False
+        # The lease token goes only to the lease's own endpoint, and no bearer over cleartext off
+        # this machine (nexus-ec37o). This leg never read the saved token, so ``saved`` is empty.
+        url = f"http://{host or '127.0.0.1'}:{port}"
+        return select_service_token(config_dir, url, saved={}, lease=lease) is not None
     except Exception:  # noqa: BLE001 -- any failure to resolve is "not usable", as the CLI's raise is
         return False
