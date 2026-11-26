@@ -266,6 +266,7 @@ from nexus.db.service_endpoint import (
     bearer_may_use_proxy,
     bound_mint_credential,
     is_loopback_host,
+    no_redirect_handler,
     require_secure_transport,
 )
 from nexus.rate_brake import parse_retry_after
@@ -1144,7 +1145,7 @@ def _default_poster(
     )
     before_request()  # nexus-ldf2s: a mint is a request like any other
     # nexus-ec37o: the mint credential never goes through a proxy over plain http (loopback only)
-    opener = urllib.request.build_opener(*([] if bearer_may_use_proxy(url) else [urllib.request.ProxyHandler({})]))
+    opener = urllib.request.build_opener(*([] if bearer_may_use_proxy(url) else [urllib.request.ProxyHandler({})]), no_redirect_handler())
     try:
         with opener.open(req, timeout=_mint_transport_timeout.get()) as resp:  # noqa: S310 — fixed https/http scheme from configured base_url
             raw = resp.read()

@@ -754,7 +754,7 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
 
     def _do() -> None:
         try:
-            handlers: list[urllib.request.BaseHandler] = []
+            handlers: list[urllib.request.BaseHandler] = [_ep.no_redirect_handler()]  # nexus-ec37o: a 3xx would carry the bearer to its target
             if is_local or not _ep.bearer_may_use_proxy(base_url):
                 # nexus-ec37o: a plain-http bearer (the lease token always) never goes through a proxy
                 handlers.append(urllib.request.ProxyHandler({}))
@@ -807,7 +807,7 @@ def _get(base_url: str, token: str, route: str, params: dict[str, str],
 
     def _do() -> None:
         try:
-            handlers: list[urllib.request.BaseHandler] = []
+            handlers: list[urllib.request.BaseHandler] = [_ep.no_redirect_handler()]  # nexus-ec37o: a 3xx would carry the bearer to its target
             if is_local or not _ep.bearer_may_use_proxy(base_url):
                 # nexus-ec37o: a plain-http bearer (the lease token always) never goes through a proxy
                 handlers.append(urllib.request.ProxyHandler({}))

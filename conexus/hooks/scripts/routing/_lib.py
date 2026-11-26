@@ -551,7 +551,7 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
         except ValueError:
             return None, None
         host = os.environ.get("NX_SERVICE_HOST", "").strip() or "127.0.0.1"
-        url = f"http://{host}:{port}"
+        url = _ep.host_port_url(host, port)
         data_token = _read_data_token_lease(config_dir, url)
         if data_token:
             return url, data_token
@@ -560,7 +560,7 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
         return (url, token) if token else (None, None)
 
     if lease is not None:
-        url = f"http://{lease['host']}:{lease['port']}"
+        url = _ep.host_port_url(lease['host'], lease['port'])
         data_token = _read_data_token_lease(config_dir, url)
         if data_token:
             return url, data_token
@@ -699,10 +699,13 @@ def _post_routing_event_once(
                 "Content-Type": "application/json",
             },
         )
+        # nexus-ec37o: no redirect is followed (urllib would copy the bearer to its target), and a plain-http
+        # bearer (the lease token always) never goes through a proxy.
+        # This is the detached one-shot poster, so the process-wide opener is ours to set.
+        handlers: list[urllib.request.BaseHandler] = [_ep.no_redirect_handler()]
         if not _ep.bearer_may_use_proxy(base_url):
-            # nexus-ec37o: a plain-http bearer (the lease token always) never goes through a proxy.
-            # This is the detached one-shot poster, so the process-wide opener is ours to set.
-            urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))
+            handlers.append(urllib.request.ProxyHandler({}))
+        urllib.request.install_opener(urllib.request.build_opener(*handlers))
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed internal engine URL, not user input
             if 200 <= resp.status < 300:
                 return ""
