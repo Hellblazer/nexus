@@ -1,5 +1,11 @@
 # Changelog
 
+## [8.5.8] - 2026-11-26
+
+Plugin version aligned with conexus 8.5.8. This plugin change becomes live at this pin.
+
+- `conexus/hooks/hooks.json` -- the PermissionRequest auto-approve entry is removed; auto-approve answers on PreToolUse only, so a user's own `ask` rule for a conexus tool prompts again, nexus-sby49.5.
+
 ## [8.5.7] - 2026-11-25
 
 Plugin version aligned with conexus 8.5.7. These plugin changes become live at this pin.

@@ -460,22 +460,17 @@ class TestPreToolUseApproval:
         assert "mcp__plugin_sn_.*" in _pretooluse_matchers(self.SN_HOOKS)
 
     def test_pretooluse_entry_runs_the_same_handler_as_permissionrequest(self) -> None:
-        """Each plugin's PreToolUse and PermissionRequest entries must
-        invoke the identical handler — exec-form ``uv run ... <script>`` for sn
-        (RDR-215 bead nexus-q02nx.23; launcher nexus-j4iy0), ``nx-hook auto-approve`` for nx.
-
-        The nx side has now been through three shapes: a bash ``command``
-        string, then the ``hook_auto_approve`` mcp_tool at bead
-        nexus-q02nx.21, and back to the command tier at bead nexus-17i1n
-        because an ``mcp_tool`` hook cannot return a verdict and the
-        approver's whole output is one. The comparison itself never
-        cared which shape; only the expected value did, so that is all
-        that moves here.
+        """The sn plugin's PreToolUse and PermissionRequest entries must
+        invoke the identical handler (exec-form ``uv run ... <script>``, RDR-215
+        bead nexus-q02nx.23; launcher nexus-j4iy0). The conexus plugin
+        registers the approver on PreToolUse ONLY (RDR-259 Decision 9, nexus-sby49.5):
+        a PermissionRequest answer overrides a user's own ``ask`` rule, a PreToolUse
+        answer does not, so the conexus matcher has no PermissionRequest entry.
 
         The sn side joins ``command`` with ``args``. Under exec form the
         ``command`` alone is the bare word ``uv`` for BOTH events, so
         comparing it would report agreement no matter which scripts the two
-        entries named — the equality would hold vacuously."""
+        entries named, and the equality would hold vacuously."""
 
         def handlers(hooks_json: Path, event: str) -> set[str]:
             data = json.loads(hooks_json.read_text(encoding="utf-8"))["hooks"]
@@ -495,12 +490,15 @@ class TestPreToolUseApproval:
         # register auto-approve and a direct entry exits 2 on every MCP call.
         # Launched through uv since nexus-efk2h (no python3 on stock Windows), as
         # `uv tool run` since nexus-f9bgu.36 (no .venv discovery).
-        assert nx_pre == nx_perm == {
+        assert nx_pre == {
             "uv tool run --directory ${CLAUDE_PLUGIN_ROOT} --no-config --quiet --python >=3.12 python "
             "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py auto-approve"
-        }, (
-            f"{self.NX_HOOKS}: PreToolUse {nx_pre} vs PermissionRequest {nx_perm}"
-        )
+        }, f"{self.NX_HOOKS}: PreToolUse {nx_pre}"
+        assert nx_perm == set(), f"{self.NX_HOOKS}: PermissionRequest must not answer for the conexus matcher: {nx_perm}"
+        nx_data = json.loads(self.NX_HOOKS.read_text(encoding="utf-8"))["hooks"]
+        assert not any(
+            e["matcher"].startswith("mcp__plugin_conexus_") for e in nx_data.get("PermissionRequest", [])
+        ), nx_data.get("PermissionRequest")
 
         sn_pre, sn_perm = handlers(self.SN_HOOKS, "PreToolUse"), handlers(self.SN_HOOKS, "PermissionRequest")
         assert sn_pre == sn_perm, f"{self.SN_HOOKS}: PreToolUse {sn_pre} vs PermissionRequest {sn_perm}"

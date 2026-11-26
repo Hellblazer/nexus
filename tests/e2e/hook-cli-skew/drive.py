@@ -49,11 +49,12 @@ import shutil
 #: SessionStart, nexus-3lqxv, plus the SubagentStop T1 nudge, nexus-mtheb.3, plus
 #: the Stop wake guard, nexus-4cgop, plus the destructive-action advice hook,
 #: nexus-qo7ie.36, plus the SessionEnd(clear) resume-pointer writer, RDR-253 Step 6
-#: part 2; it was 21 before that writer, 20 before the advice hook; it
-#: was 18 while the nexus-i93tz integrity check was registered on
+#: part 2, less the PermissionRequest auto-approve entry removed in 8.5.8,
+#: nexus-sby49.5; it was 22 before that removal, 21 before the resume writer,
+#: 20 before the advice hook; it was 18 while the nexus-i93tz integrity check was registered on
 #: Pre/Post/PostToolUseFailure Bash, removed again 2026-10-25). A stated floor,
 #: not a derived one, on purpose: a derived count falls with the manifest.
-DEFAULT_MIN_EXECUTED = 22
+DEFAULT_MIN_EXECUTED = 21
 
 #: What the launcher writes when it finds no CLI (_cli_lookup.missing_note).
 _MISSING_MARK = "is not installed"

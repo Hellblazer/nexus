@@ -89,7 +89,10 @@ _MIN_MCP_TOOL_ENTRIES = 1
 #: all three forms.
 #: 9 -> 10 at nexus-mtheb.3: the SubagentStop `subagent-stop-t1-nudge` entry,
 #: through the launcher.
-_MIN_NX_HOOK_ENTRIES = 10
+#: 10 -> 9 at nexus-sby49.5 (RDR-259 Decision 9): the conexus PermissionRequest
+#: auto-approve entry is removed and the PreToolUse one stays. A deliberate
+#: removal, not an extractor going blind.
+_MIN_NX_HOOK_ENTRIES = 9
 
 
 def _declared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
