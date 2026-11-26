@@ -69,7 +69,9 @@ def test_delete_of_a_collection_a_reembed_job_holds_names_the_job_and_exits_nonz
     assert "nothing was deleted" in out
     assert "Deleted:" not in out
     assert "unconfirmed" not in out, "the engine answered: the delete is refused, not unconfirmed"
-    assert [(m, p) for m, p, _b in requests] == [("POST", "/v1/catalog/collections/delete")], "one attempt, never resent"
+    # RDR-229 P3.12: a delete by label reads the registry listing first (the superseded-label and label-clash pre-check; this
+    # transport answers it 409, which is said on stderr and does not stop the delete), then sends the delete once.
+    assert [(m, p) for m, p, _b in requests if m == "POST"] == [("POST", "/v1/catalog/collections/delete")], "one attempt, never resent"
     pipeline.assert_not_called()
 
 
@@ -162,9 +164,10 @@ def test_reindex_names_a_busy_collection_and_does_not_say_the_delete_may_have_ha
 
 
 def test_delete_busy_is_read_from_the_reason_not_from_any_409(runner, env_creds, mock_db) -> None:
-    """A 409 with another body (the label-ambiguous refusal) keeps the unconfirmed-delete answer."""
-    cat = _busy_engine_catalog([], body={"error": "collection 'old' is held by 2 live rows",
-                                         "reason": "collection_label_ambiguous", "collection": "old"})
+    """A 409 with another body keeps the unconfirmed-delete answer. (The label-ambiguous refusal stood here until RDR-229 P3.12
+    typed it: ``tests/test_collection_delete_by_id.py`` has it, naming the ids.)"""
+    cat = _busy_engine_catalog([], body={"error": "the row of collection_id 5 no longer bears that label",
+                                         "reason": "collection_id_mismatch", "collection": "old"})
     with patch("nexus.catalog.factory.make_catalog_reader", return_value=cat), \
          patch("nexus.db.service_endpoint.guard_production_write"):
         result = _invoke(runner, mock_db, ["delete", "old", "--yes"])

@@ -125,8 +125,10 @@ and a typed `docs__X`, `code__X` or `rdr__X` renders as
 **A label is unique among a tenant's collections that are not superseded.**
 Two such collections cannot answer to one label, so a label in a command
 names one collection. A superseded collection keeps its label taken. Commands
-take the label: `c4812` is a label, not the id `4812`, and no `nx collection`
-verb takes the bare id.
+take the label: `c4812` is a label, not the id `4812`, and a bare number is never
+read as an id. The one verb that takes an id is `nx collection delete --id 4812`, by
+its own flag (it needs engine-service 0.1.203 or later); every other `nx collection`
+verb takes the label.
 
 A label must be non-empty UTF-8 with no control characters, at most 255
 bytes, and not the minted form `c<digits>`, which only the engine assigns. It
