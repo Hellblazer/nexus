@@ -13,6 +13,7 @@ Authorization headers each one recorded.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -180,11 +181,11 @@ def _send_event(tmp_path: Path, env: dict[str, str]):
     import subprocess  # noqa: PLC0415 -- only these cases spawn
     import sys  # noqa: PLC0415
 
-    child_env = {
-        "PATH": "/usr/bin:/bin",
-        "NEXUS_CONFIG_DIR": str(tmp_path / "config"),
-        "NX_DROPPED_WRITES_LOG_PATH": str(tmp_path / "dropped.jsonl"),
-    }
+    # The ambient environment minus the service variables (Windows needs SYSTEMROOT for sockets in
+    # the poster child); the drain cases above scrub the same way through ``_env``.
+    child_env = {k: v for k, v in os.environ.items() if not k.startswith(("NX_SERVICE_", "NX_MINT_"))}
+    child_env["NEXUS_CONFIG_DIR"] = str(tmp_path / "config")
+    child_env["NX_DROPPED_WRITES_LOG_PATH"] = str(tmp_path / "dropped.jsonl")
     child_env.update(env)
     return subprocess.run(
         [sys.executable, "-c", _SEND, str(_ROUTING_DIR)],
