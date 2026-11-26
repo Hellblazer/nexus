@@ -534,6 +534,250 @@ def resolve_service_config(
     return host, port, token
 
 
+# ── Credential-origin binding (nexus-ec37o) ─────────────────────────────────
+#
+# A repository's .claude/settings.json env reaches every hook, the MCP server
+# and every nx the model runs (RDR-259 research 27), so the URL half of an
+# endpoint is attacker-choosable. A credential kept in the account's own store
+# is therefore sent only to the origin it was issued for:
+#
+#   * a saved ``service_token`` / ``mint_token``: the origin of the ``service_url``
+#     saved in the same config.yml, else DEFAULT_MANAGED_SERVICE_URL (the wizard
+#     writes the pair together);
+#   * the supervisor lease token: the lease's own endpoint (http://127.0.0.1:port);
+#   * an env ``NX_SERVICE_TOKEN`` / ``NX_MINT_TOKEN``: unbound. The user exported
+#     it themselves, so it goes with whatever URL they named. The two residual
+#     limits (an env URL beside a user-exported token, and an env URL with no
+#     token reading a repository-chosen host's rows) are documented in
+#     docs/configuration.md and accepted (Sam 2026-11-26).
+#
+# Bindings are derived at read time from files already on disk; nothing is
+# rewritten at boot. ``conexus/hooks/scripts/_endpoint_resolve.py`` carries a
+# stdlib-only mirror of the pure functions below (normalize_origin,
+# origins_equal, is_loopback_host, choose_bound_token, the two messages);
+# tests/hooks/test_origin_binding_parity.py holds the two to one table.
+
+#: Where the managed multitenant service lives by default; the origin a saved
+#: credential with no saved ``service_url`` is bound to.
+DEFAULT_MANAGED_SERVICE_URL = "https://api.conexus-nexus.com"
+
+_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+
+
+class CredentialOriginMismatchError(ServiceTokenUnresolvableError):
+    """Every credential on hand was issued for another origin than the URL in
+    use. Subclasses :class:`ServiceTokenUnresolvableError`, so a caller that
+    treats "no token resolvable" as final (and never waits) treats this the
+    same. The message names the credential source and the fix, never the URL."""
+
+
+class InsecureServiceTransportError(ServiceTokenUnresolvableError):
+    """A bearer would travel over plain http to a host that is not this machine."""
+
+
+def normalize_origin(url: str) -> tuple[str, str, int] | None:
+    """``(scheme, host, port)`` of an http(s) URL, or ``None`` when it does not
+    name one this module can compare safely.
+
+    The scheme and host are lowercased, one trailing dot is dropped from the
+    host, an IPv6 literal loses its brackets, and the default ports 80/443 are
+    filled in. ``localhost`` stays ``localhost``: it is NOT 127.0.0.1 (macOS and
+    Windows resolve it to ::1 first, and another local account can bind
+    ``[::1]:<port>``). Hand-parsed so the plugin's stdlib mirror is the same
+    text: a backslash, ``@``, ``%``, whitespace, control or non-ASCII character
+    in the authority, an empty port, or a port outside 1-65535 yields ``None``
+    (two HTTP stacks can read such a URL as different hosts, and a credential
+    is never bound to a host the two might disagree on)."""
+    if not isinstance(url, str):
+        return None
+    scheme, sep, rest = url.strip().partition("://")
+    scheme = scheme.lower()
+    if not sep or scheme not in _DEFAULT_PORTS:
+        return None
+    authority = rest
+    for stop in "/?#":
+        authority = authority.split(stop, 1)[0]
+    if not authority or any(c in "@\\%" or not "!" <= c <= "~" for c in authority):
+        return None
+    if authority.startswith("["):
+        host, close, tail = authority[1:].partition("]")
+        if not close or ":" not in host or (tail and not tail.startswith(":")):
+            return None
+        port_text, has_port = tail[1:], bool(tail)
+    else:
+        host, colon, port_text = authority.rpartition(":") if ":" in authority else (authority, "", "")
+        has_port = bool(colon)
+        if ":" in host:
+            return None
+    if has_port and not (port_text.isascii() and port_text.isdigit() and 1 <= int(port_text) <= 65535):
+        return None
+    host = host.lower()
+    if host.endswith("."):
+        host = host[:-1]
+    if not host:
+        return None
+    return scheme, host, int(port_text) if has_port else _DEFAULT_PORTS[scheme]
+
+
+def origins_equal(a: str | None, b: str | None) -> bool:
+    """True when both URLs normalize and their origins are equal."""
+    left = normalize_origin(a) if a else None
+    right = normalize_origin(b) if b else None
+    return left is not None and left == right
+
+
+def is_loopback_host(host: str) -> bool:
+    """``localhost`` or a loopback IP literal. For the cleartext rule only:
+    origin equality never treats ``localhost`` as a loopback address."""
+    import ipaddress  # noqa: PLC0415 — deferred: stdlib, only the cleartext check needs it
+
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def bound_origin_for_saved(saved_service_url: str | None) -> str:
+    """The origin a saved credential was issued for."""
+    return (saved_service_url or "").strip().rstrip("/") or DEFAULT_MANAGED_SERVICE_URL
+
+
+def choose_bound_token(
+    url: str, candidates: list[tuple[str, str, str | None]],
+) -> tuple[tuple[str, str] | None, list[str]]:
+    """First usable candidate for *url*: ``((value, source), refused_sources)``.
+
+    A candidate is ``(value, source, bound_url)``; ``bound_url`` ``None`` means
+    unbound (an env token). A candidate whose bound origin differs from *url*'s
+    is skipped and its source recorded in the second element."""
+    refused: list[str] = []
+    for value, source, bound in candidates:
+        if not value:
+            continue
+        if bound is None or origins_equal(bound, url):
+            return (value, source), refused
+        refused.append(source)
+    return None, refused
+
+
+def mismatch_message(url_source: str, refused: list[str]) -> str:
+    return (
+        f"{url_source} names a service that the {' and the '.join(refused)} was not issued for, "
+        "so that credential is not sent there. Export NX_SERVICE_TOKEN for this service, or "
+        "point it at the service the credential belongs to (`nx config set service_url`)."
+    )
+
+
+def insecure_message(url_source: str) -> str:
+    return (
+        f"{url_source} is plain http to a host that is not this machine, and a bearer token is "
+        "not sent over that. Use an https URL (or a loopback address for a local service)."
+    )
+
+
+def describe_url_source() -> str:
+    """A fixed label for where the URL in use came from, in the resolvers' order."""
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+    if os.environ.get("NX_SERVICE_URL", "").strip():
+        return "NX_SERVICE_URL"
+    if (get_credential("service_url") or "").strip():
+        return "the saved service_url"
+    if os.environ.get("NX_SERVICE_HOST", "").strip() or os.environ.get("NX_SERVICE_PORT", "").strip():
+        return "NX_SERVICE_HOST / NX_SERVICE_PORT"
+    return "the service URL"
+
+
+def require_secure_transport(url: str, *, url_source: str | None = None) -> None:
+    """Raise :class:`InsecureServiceTransportError` unless a bearer may travel to *url*:
+    https, or http to a loopback host. A URL that does not normalize is refused too."""
+    origin = normalize_origin(url)
+    if origin is not None and (origin[0] == "https" or is_loopback_host(origin[1])):
+        return
+    raise InsecureServiceTransportError(insecure_message(url_source or describe_url_source()))
+
+
+def _stored_credential(name: str) -> tuple[str, str, str | None] | None:
+    """``(value, source, bound_url)`` for a credential in ``get_credential`` precedence
+    (env, then config.yml), or ``None``. An env value is unbound; a saved one is bound to
+    the saved ``service_url`` (else the default managed endpoint)."""
+    from nexus.config import CREDENTIALS, get_credential, nexus_config_dir, persisted_credentials  # noqa: PLC0415 — deferred to avoid circular import
+
+    value = (get_credential(name) or "").strip()
+    if not value:
+        return None
+    env_var = CREDENTIALS.get(name, name.upper())
+    if os.environ.get(env_var, ""):
+        return value, env_var, None
+    saved = persisted_credentials(nexus_config_dir())
+    return value, f"the saved {name}", bound_origin_for_saved(saved.get("service_url"))
+
+
+def select_service_token(
+    url: str,
+    *,
+    lease: Callable[[], tuple[str | None, str | None]] | None = None,
+    allow_mint: bool = True,
+    url_source: str | None = None,
+) -> tuple[str, str] | None:
+    """The bearer for *url*: ``(token, source)``, ``("", "mint_token")`` when only a
+    mint credential applies, or ``None`` when no credential of any kind is set.
+
+    Order is the resolvers' own: the env or saved ``service_token``, then the supervisor
+    lease token, then (when *allow_mint*) a mint credential. Each stored credential is
+    used only for the origin it was issued for (see the section comment). When credentials
+    exist but every one was issued elsewhere this raises
+    :class:`CredentialOriginMismatchError`; a token that would travel over cleartext
+    http off this machine raises :class:`InsecureServiceTransportError`. *lease* returns
+    ``(lease_url, lease_token)`` (default :func:`discover_lease`; the vector client passes
+    its cached read)."""
+    candidates: list[tuple[str, str, str | None]] = []
+    stored = _stored_credential("service_token")
+    if stored is not None:
+        candidates.append(stored)
+    picked, refused = choose_bound_token(url, candidates)
+    if picked is None:
+        lease_url, lease_token = (lease or discover_lease)()
+        if lease_token:
+            picked, more = choose_bound_token(
+                url, [(lease_token, "the supervisor lease token", lease_url)],
+            )
+            refused += more
+    if picked is None and allow_mint:
+        minted = _stored_credential("mint_token")
+        if minted is not None:
+            mint_pick, more = choose_bound_token(url, [minted])
+            refused += more
+            if mint_pick is not None:
+                require_secure_transport(url, url_source=url_source)
+                return "", "mint_token"
+    if picked is None:
+        if refused:
+            raise CredentialOriginMismatchError(mismatch_message(url_source or describe_url_source(), refused))
+        return None
+    require_secure_transport(url, url_source=url_source)
+    return picked
+
+
+def bound_mint_credential(url: str) -> str | None:
+    """The mint credential for *url*, or ``None`` when none is configured or the one
+    configured was issued for another origin (it is then not sent; the caller falls back
+    to its static token, which :func:`select_service_token` already checked). A credential
+    that applies but would travel over cleartext off this machine raises
+    :class:`InsecureServiceTransportError`."""
+    stored = _stored_credential("mint_token")
+    if stored is None:
+        return None
+    picked, _ = choose_bound_token(url, [stored])
+    if picked is None:
+        _log.warning("mint_credential_origin_mismatch", source=stored[1])
+        return None
+    require_secure_transport(url)
+    return picked[0]
+
+
 def mint_armed() -> bool:
     """True when a data-token mint credential (``mint_token``) is configured.
 

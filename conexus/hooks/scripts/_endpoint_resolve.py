@@ -881,6 +881,231 @@ def read_data_token_lease(
     return best_token
 
 
+# ── Credential-origin binding (nexus-ec37o) ─────────────────────────────────
+#
+# Stdlib mirror of the pure functions in ``nexus.db.service_endpoint`` under the
+# same section heading. A repository's env reaches the hooks (RDR-259 research
+# 27), so the URL half of an endpoint is attacker-choosable; a credential kept in
+# the account's own store is sent only to the origin it was issued for: a saved
+# ``service_token`` / ``mint_token`` to the saved ``service_url`` (else
+# :data:`DEFAULT_MANAGED_SERVICE_URL`), the supervisor lease token to the lease's
+# own endpoint. An env ``NX_SERVICE_TOKEN`` / ``NX_MINT_TOKEN`` is unbound. The
+# function bodies below are held to the CLI's by an AST comparison and a table of
+# cases in ``tests/hooks/test_origin_binding_parity.py``; change both together.
+
+#: Mirrors ``nexus.db.service_endpoint.DEFAULT_MANAGED_SERVICE_URL``.
+DEFAULT_MANAGED_SERVICE_URL = "https://api.conexus-nexus.com"
+
+_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+
+
+class CredentialRefused(EndpointUnresolvable):
+    """A credential would go to an origin it was not issued for, or over cleartext
+    http off this machine. The message names the credential source and the fix and
+    never the URL."""
+
+
+def normalize_origin(url: str) -> tuple[str, str, int] | None:
+    """``(scheme, host, port)`` of an http(s) URL, or ``None`` when it does not
+    name one this module can compare safely.
+
+    The scheme and host are lowercased, one trailing dot is dropped from the
+    host, an IPv6 literal loses its brackets, and the default ports 80/443 are
+    filled in. ``localhost`` stays ``localhost``: it is NOT 127.0.0.1 (macOS and
+    Windows resolve it to ::1 first, and another local account can bind
+    ``[::1]:<port>``). Hand-parsed so the plugin's stdlib mirror is the same
+    text: a backslash, ``@``, ``%``, whitespace, control or non-ASCII character
+    in the authority, an empty port, or a port outside 1-65535 yields ``None``
+    (two HTTP stacks can read such a URL as different hosts, and a credential
+    is never bound to a host the two might disagree on)."""
+    if not isinstance(url, str):
+        return None
+    scheme, sep, rest = url.strip().partition("://")
+    scheme = scheme.lower()
+    if not sep or scheme not in _DEFAULT_PORTS:
+        return None
+    authority = rest
+    for stop in "/?#":
+        authority = authority.split(stop, 1)[0]
+    if not authority or any(c in "@\\%" or not "!" <= c <= "~" for c in authority):
+        return None
+    if authority.startswith("["):
+        host, close, tail = authority[1:].partition("]")
+        if not close or ":" not in host or (tail and not tail.startswith(":")):
+            return None
+        port_text, has_port = tail[1:], bool(tail)
+    else:
+        host, colon, port_text = authority.rpartition(":") if ":" in authority else (authority, "", "")
+        has_port = bool(colon)
+        if ":" in host:
+            return None
+    if has_port and not (port_text.isascii() and port_text.isdigit() and 1 <= int(port_text) <= 65535):
+        return None
+    host = host.lower()
+    if host.endswith("."):
+        host = host[:-1]
+    if not host:
+        return None
+    return scheme, host, int(port_text) if has_port else _DEFAULT_PORTS[scheme]
+
+
+def origins_equal(a: str | None, b: str | None) -> bool:
+    """True when both URLs normalize and their origins are equal."""
+    left = normalize_origin(a) if a else None
+    right = normalize_origin(b) if b else None
+    return left is not None and left == right
+
+
+def is_loopback_host(host: str) -> bool:
+    """``localhost`` or a loopback IP literal. For the cleartext rule only:
+    origin equality never treats ``localhost`` as a loopback address."""
+    import ipaddress  # noqa: PLC0415 — deferred: stdlib, only the cleartext check needs it
+
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def bound_origin_for_saved(saved_service_url: str | None) -> str:
+    """The origin a saved credential was issued for."""
+    return (saved_service_url or "").strip().rstrip("/") or DEFAULT_MANAGED_SERVICE_URL
+
+
+def choose_bound_token(
+    url: str, candidates: list[tuple[str, str, str | None]],
+) -> tuple[tuple[str, str] | None, list[str]]:
+    """First usable candidate for *url*: ``((value, source), refused_sources)``.
+
+    A candidate is ``(value, source, bound_url)``; ``bound_url`` ``None`` means
+    unbound (an env token). A candidate whose bound origin differs from *url*'s
+    is skipped and its source recorded in the second element."""
+    refused: list[str] = []
+    for value, source, bound in candidates:
+        if not value:
+            continue
+        if bound is None or origins_equal(bound, url):
+            return (value, source), refused
+        refused.append(source)
+    return None, refused
+
+
+def mismatch_message(url_source: str, refused: list[str]) -> str:
+    return (
+        f"{url_source} names a service that the {' and the '.join(refused)} was not issued for, "
+        "so that credential is not sent there. Export NX_SERVICE_TOKEN for this service, or "
+        "point it at the service the credential belongs to (`nx config set service_url`)."
+    )
+
+
+def insecure_message(url_source: str) -> str:
+    return (
+        f"{url_source} is plain http to a host that is not this machine, and a bearer token is "
+        "not sent over that. Use an https URL (or a loopback address for a local service)."
+    )
+
+
+def describe_url_source(saved_url: str = "") -> str:
+    """A fixed label for where the URL in use came from, in the resolvers' order."""
+    if os.environ.get("NX_SERVICE_URL", "").strip():
+        return "NX_SERVICE_URL"
+    if saved_url.strip():
+        return "the saved service_url"
+    if os.environ.get("NX_SERVICE_HOST", "").strip() or os.environ.get("NX_SERVICE_PORT", "").strip():
+        return "NX_SERVICE_HOST / NX_SERVICE_PORT"
+    return "the service URL"
+
+
+def require_secure_transport(url: str, *, url_source: str | None = None) -> None:
+    """Raise :class:`CredentialRefused` unless a bearer may travel to *url*: https, or
+    http to a loopback host. A URL that does not normalize is refused too."""
+    origin = normalize_origin(url)
+    if origin is not None and (origin[0] == "https" or is_loopback_host(origin[1])):
+        return
+    raise CredentialRefused(insecure_message(url_source or describe_url_source()))
+
+
+def stored_credential(
+    name: str, env_var: str, saved: dict[str, str],
+) -> tuple[str, str, str | None] | None:
+    """``(value, source, bound_url)`` for a credential in the CLI's precedence (env, then
+    config.yml), or ``None``. An env value is unbound; a saved one is bound to the saved
+    ``service_url`` (else the default managed endpoint). Mirrors
+    ``nexus.db.service_endpoint._stored_credential``."""
+    value = _credential(name, env_var, saved)
+    if not value:
+        return None
+    if os.environ.get(env_var, ""):
+        return value, env_var, None
+    return value, f"the saved {name}", bound_origin_for_saved(saved.get("service_url"))
+
+
+def audited_lease(config_dir: Path) -> dict[str, Any] | None:
+    """The live supervisor lease with its token read through
+    :func:`read_local_supervisor_token` (the owner-only audit), or ``None``."""
+    lease = read_storage_service_lease(config_dir)
+    if lease is None:
+        return None
+    try:
+        token = read_local_supervisor_token(config_dir).strip()
+    except EndpointUnresolvable:
+        token = ""
+    return {"host": lease["host"], "port": lease["port"], "token": token}
+
+
+def lease_origin(lease: dict[str, Any]) -> str:
+    return f"http://{lease['host']}:{lease['port']}"
+
+
+def select_service_token(
+    config_dir: Path,
+    url: str,
+    *,
+    saved: dict[str, str] | None = None,
+    lease: dict[str, Any] | None | bool = False,
+    allow_mint: bool = False,
+) -> tuple[str, str] | None:
+    """The bearer for *url*: ``(token, source)``, or ``None`` when no credential is set.
+
+    Order: the env or saved ``service_token``, then the supervisor lease token (a lease
+    the caller has already read may be passed; ``False`` reads it, audited), then, with
+    *allow_mint*, a mint credential, whose presence is reported as ``("", "mint_token")``.
+    Each stored credential is used only for the origin it was issued for. Credentials
+    that exist but were all issued elsewhere raise :class:`CredentialRefused`, as does a
+    token that would travel over cleartext http off this machine."""
+    if saved is None:
+        saved = read_config_yml_credentials(config_dir, ("service_url", "service_token", "mint_token"))
+    label = describe_url_source(saved.get("service_url", ""))
+    candidates: list[tuple[str, str, str | None]] = []
+    stored = stored_credential("service_token", "NX_SERVICE_TOKEN", saved)
+    if stored is not None:
+        candidates.append(stored)
+    picked, refused = choose_bound_token(url, candidates)
+    if picked is None:
+        found = audited_lease(config_dir) if lease is False else lease
+        if found and found.get("token"):
+            picked, more = choose_bound_token(
+                url, [(str(found["token"]), "the supervisor lease token", lease_origin(found))],
+            )
+            refused += more
+    if picked is None and allow_mint:
+        minted = stored_credential("mint_token", "NX_MINT_TOKEN", saved)
+        if minted is not None:
+            mint_pick, more = choose_bound_token(url, [minted])
+            refused += more
+            if mint_pick is not None:
+                require_secure_transport(url, url_source=label)
+                return "", "mint_token"
+    if picked is None:
+        if refused:
+            raise CredentialRefused(mismatch_message(label, refused))
+        return None
+    require_secure_transport(url, url_source=label)
+    return picked
+
+
 def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
     """``(base_url, is_local_supervisor)``, or raise
     :class:`EndpointUnresolvable`.

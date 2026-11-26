@@ -32,15 +32,16 @@ import structlog
 
 from nexus._log_safe_url import log_endpoint, require_no_userinfo, scrub_transport_error
 from nexus.db.request_gate import before_request
+from nexus.db.service_endpoint import DEFAULT_MANAGED_SERVICE_URL  # noqa: F401 — single source of the default (nexus-ec37o); re-exported
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 _log = structlog.get_logger(__name__)
 
-#: Where the managed multitenant nexus service lives by default. Overridable per
-#: half via ``NX_SERVICE_URL`` (base) / ``NX_SERVICE_TOKEN`` (bearer) — the same
-#: env vars the local HTTP vector client honours, so a single override re-points
-#: every client at a staging or self-hosted managed deployment.
-DEFAULT_MANAGED_SERVICE_URL = "https://api.conexus-nexus.com"
+# DEFAULT_MANAGED_SERVICE_URL (imported above, defined in service_endpoint): where the
+# managed multitenant nexus service lives by default. Overridable per half via
+# ``NX_SERVICE_URL`` (base) / ``NX_SERVICE_TOKEN`` (bearer) — the same env vars the
+# local HTTP vector client honours. A saved token is bound to the saved service_url,
+# else to this default (nexus-ec37o).
 
 #: CROSS-REPO CONTRACT (conexus RDR-001): the managed multitenant service MUST
 #: expose ``GET /version`` UNAUTHENTICATED with ``release_version`` (and
