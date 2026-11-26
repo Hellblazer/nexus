@@ -2,12 +2,12 @@
 title: "conexus project and user settings: replacing the person-keyed audience model"
 id: RDR-259
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
-reviewed-by: pending
+reviewed-by: self
 created: 2026-11-25
-accepted_date:
+accepted_date: 2026-11-26
 related_issues: [nexus-sby49, nexus-sby49.3, nexus-sby49.4, nexus-5y47c]
 related: [RDR-184, RDR-219, RDR-143, RDR-201, RDR-215, RDR-023, RDR-035, RDR-242, RDR-245, RDR-253]
 ---
