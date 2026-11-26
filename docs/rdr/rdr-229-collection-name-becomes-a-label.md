@@ -1185,7 +1185,7 @@ The key moves table by table in strangler order:
   (`DataMoveWorker.java:529`). The status sampler logs no second page
   either: the move is still listed, so `MoveBootWork.announce` finds it
   announced and `retainAnnounced` keeps that announcement
-  (`MoveBootWork.java:344-353`). Before commit 2809da38ee that report
+  (`MoveBootWork.java:385-394`). Before commit 2809da38ee that report
   carried no page and `MoveStates` cleared it, which dropped the page from
   the needs-operator list (`data_moves_need_operator_moves`) and the
   doctor's red row, while the move stayed in `boot_work` as
@@ -1399,7 +1399,7 @@ while the engine serves:
   claims with its re-check alone. The status shows how long the validation
   has run, a stop, a pause or a supersede cancels the statement, and a boot
   ends any backend a dead engine left (`VerifyingFinisher.java:296-308`,
-  `:452-539`; `MoveBootWork.java:479-488`; `CompletionWatch.java:13-16`;
+  `:452-539`; `MoveBootWork.java:520-529`; `CompletionWatch.java:13-16`;
   `DataMoveOrphans.java:86-105`; `Main.java:284-288`). A step that blocks
   writers keeps its tight bound. The move reports in
   `boot_work` as `data-move:<label>`, with `on_stop: "resumes from the last
@@ -1765,7 +1765,7 @@ while the engine serves:
     `DataMoveRegistry` reads open moves (`:39-46`) and failed moves
     (`:66-79`). `MoveBootWork` publishes a `data-move:<label>` entry only
     for an open or failed move and finishes it when the move leaves both
-    (`MoveBootWork.java:278-300`), so a missing entry does not tell a
+    (`MoveBootWork.java:319-340`), so a missing entry does not tell a
     completed move from an unregistered or superseded one. P3.1 adds the
     read: after `SchemaMigrator.migrate` (`Main.java:290`), on its own admin
     session (`CompletionBootWork`), the engine reads the rows of its read
@@ -2093,7 +2093,7 @@ while the engine serves:
     above), says the move ends no index builder: the
     restarted engine reads `terminates_index_builds` false for it by its
     definition, and true for another chunk-family move
-    (`MoveBootWork.java:326`; `MoveBootWorkTest.java:519-545`;
+    (`MoveBootWork.java:367`; `MoveBootWorkTest.java:611-637`;
     `VerifyingFinisher.java:389-398`).
 
 Whether any step needs a maintenance window is unverified (Critical
@@ -4755,3 +4755,4 @@ large, and moved under a ratchet.
 - 2026-11-24: the Versioning sentence on routes follows linda's ruling on nexus-p2m1x.23 (T2 `229-research-340`): a route takes a label or an id in each slot, one form per slot; an id and a label in one slot is a 400; the 409 `collection_id_mismatch` is an internal guard for an id and a label from different sources.
 - 2026-11-24: the fix checks' counted citations (grant 3, nexus-p2m1x; T2 `229-research-341`, from fix checks `229-fix-check-3de92acf1e` and `229-fix-check-6eec323c91`): the re-home pre-check calls `moveUriCollisions` itself (`CollectionRehomeScope.java:159-166`), not `requireCollectionUrisFree`; "gate 3" is "the latch" where the engine refuses a rename (and "once gate 3 has latched" where readers, writers and the drop move's registration read the latched value); item 4's header and Gap 2 separate the draft's counts from the current ones; the client's id trust names `ids_stable`; the Versioning sentence cites the bead's comments of 2026-11-22 11:25 and 2026-11-23 12:53 and the filter and refusal code. No Test sentence changed.
 - 2026-11-26: P3.12 landed in full (grant 3, nexus-p2m1x.32): `nx collection delete` by label or `--id`, 3c6833a3fd, 65b245534f and 4ddee8c813 (in no engine or client tag yet). P3.12's text and the Day 2 table now say what shipped, the 0.1.203 floor and why, the retired-label refusal as ruled on the bead (only a retired label with a live direct successor is refused), and the `--keep-source` consequence. The 2026-11-24 line above describing P3.12 in part stands as the record of that date.
+- 2026-11-26: citations to landed, reviewed code (grant 3), nexus-p2m1x.48, a2f8ced290 and b0b5aa7d7e: the `MoveBootWork.java` and `MoveBootWorkTest.java` line cites (the announce and retainAnnounced block, the validation-in-flight block, the entry publisher, the restarted-engine builds line and its test) follow the sampler's new warm-up code, which shifted them; no wording changes.
