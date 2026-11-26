@@ -660,7 +660,8 @@ def test_https_connections_are_pooled_and_verified(tmp_path, monkeypatch) -> Non
     ))
 
     srv = _CountingServer(_make_handler())
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # the stdlib class: on Windows ``import nexus`` injects truststore's, which verifies a peer on the server side too
+    ctx = next(c for c in ssl.SSLContext.__mro__ if c.__module__ == "ssl")(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(cert_pem, key_pem)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
