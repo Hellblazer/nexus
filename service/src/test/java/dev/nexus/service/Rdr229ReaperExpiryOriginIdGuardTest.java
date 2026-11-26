@@ -130,10 +130,12 @@ class Rdr229ReaperExpiryOriginIdGuardTest extends AtomicWriteTestBase {
         return hex;
     }
 
-    /** A live manifest row of {@code collection} naming {@code hex}, as a document of that collection holds it. */
+    /** A live manifest row of {@code collection} naming {@code hex}, with the chunk it names, as a document of that collection holds it. */
     private void manifest(World w, String collection, String hex) throws Exception {
         long id = idOf(w, collection);
         su(ctx -> {
+            // the manifest row's foreign key wants the chunk under the manifest's own collection (a live chunk of the collection that holds it)
+            PgContainerHelper.insertChunks(ctx, w.tenant(), collection, List.of(hex), List.of("held"), List.of(new float[384]), List.of(Map.of()));
             String doc = w.tenant() + ".doc." + hex.substring(0, 12);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
                     CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
