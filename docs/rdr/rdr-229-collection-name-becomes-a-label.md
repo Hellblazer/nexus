@@ -3619,8 +3619,9 @@ its acceptance is that test green plus the census pin it lowers.
     `origin_collection_id` as well as by the id the label resolves to: a
     manifest row of that id protects the chunk whatever label the call
     carried, and from the latch a quarantine row with no origin id is never
-    expired, is not counted as protected, and is not reported (a later data
-    move will stamp such rows). `vectors-083-7` had added to
+    expired, is not counted as protected, and is not reported (stamping
+    such rows is owed to a later cut, recorded on nexus-p2m1x.28).
+    `vectors-083-7` had added to
     `reaper_expire_client_quarantine` an arm that, when the origin label
     names no live knowledge collection, narrows the expiry to rows whose
     origin id is JSON null; `vectors-086-2` keeps it. The ten
