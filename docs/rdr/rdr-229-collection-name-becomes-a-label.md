@@ -1765,7 +1765,7 @@ while the engine serves:
     `DataMoveRegistry` reads open moves (`:39-46`) and failed moves
     (`:66-79`). `MoveBootWork` publishes a `data-move:<label>` entry only
     for an open or failed move and finishes it when the move leaves both
-    (`MoveBootWork.java:319-340`), so a missing entry does not tell a
+    (`MoveBootWork.java:319-341`), so a missing entry does not tell a
     completed move from an unregistered or superseded one. P3.1 adds the
     read: after `SchemaMigrator.migrate` (`Main.java:290`), on its own admin
     session (`CompletionBootWork`), the engine reads the rows of its read
