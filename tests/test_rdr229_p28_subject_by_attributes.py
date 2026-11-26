@@ -48,9 +48,8 @@ def _client(monkeypatch: pytest.MonkeyPatch, rows: dict, *, status: int | None =
         return httpx.Response(200, json={})
 
     monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
-    # A loopback origin: a bearer is not sent over plain http to another host (nexus-ec37o).
-    client = HttpCatalogClient(base_url="http://127.0.0.1:4599")
-    client._client = httpx.Client(base_url="http://127.0.0.1:4599", transport=httpx.MockTransport(handler))
+    client = HttpCatalogClient(base_url="http://mock.test")
+    client._client = httpx.Client(base_url="http://mock.test", transport=httpx.MockTransport(handler))
     return client
 
 

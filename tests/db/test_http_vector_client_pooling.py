@@ -617,8 +617,7 @@ def test_idle_connections_are_capped_per_endpoint(make_server, monkeypatch) -> N
 
 def test_https_connections_are_pooled_and_verified(tmp_path, monkeypatch) -> None:
     """A real TLS server with a self-signed cert the client is told to trust
-    through ``network.ca_bundle`` of config.yml (SSL_CERT_FILE is not read for a bearer request,
-    nexus-ec37o): N sequential requests complete ONE handshake."""
+    through SSL_CERT_FILE: N sequential requests complete ONE handshake."""
     import datetime
     import ssl
 
@@ -641,13 +640,6 @@ def test_https_connections_are_pooled_and_verified(tmp_path, monkeypatch) -> Non
         .not_valid_before(now - datetime.timedelta(minutes=1))
         .not_valid_after(now + datetime.timedelta(hours=1))
         .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), False)
-        # a CA too: it is the trust root in config.yml (the Windows OS verifier will not anchor on a non-CA leaf)
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
-        .add_extension(x509.KeyUsage(
-            digital_signature=True, key_cert_sign=True, crl_sign=False, content_commitment=False, key_encipherment=False,
-            data_encipherment=False, key_agreement=False, encipher_only=False, decipher_only=False,
-        ), True)
-        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), False)
         .sign(key, hashes.SHA256())
     )
     cert_pem = tmp_path / "cert.pem"
@@ -660,16 +652,13 @@ def test_https_connections_are_pooled_and_verified(tmp_path, monkeypatch) -> Non
     ))
 
     srv = _CountingServer(_make_handler())
-    # the stdlib class: on Windows ``import nexus`` injects truststore's, which verifies a peer on the server side too
-    ctx = next(c for c in ssl.SSLContext.__mro__ if c.__module__ == "ssl")(ssl.PROTOCOL_TLS_SERVER)  # TLS 1.2 is its default minimum; the minimum_version setter recurses under truststore
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(cert_pem, key_pem)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        cfg = tmp_path / "cfg"
-        cfg.mkdir()
-        (cfg / "config.yml").write_text(f"network:\n  ca_bundle: '{cert_pem}'\n", encoding="utf-8")
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+        monkeypatch.setenv("SSL_CERT_FILE", str(cert_pem))
         # a non-empty proxy environment bypassing localhost: no system-proxy lookup
         monkeypatch.setenv("http_proxy", "http://unused.invalid:1")
         monkeypatch.setenv("no_proxy", "localhost")
@@ -680,11 +669,10 @@ def test_https_connections_are_pooled_and_verified(tmp_path, monkeypatch) -> Non
             assert _get(f"/v1/tls{i}")["path"] == f"/v1/tls{i}"
         assert srv.accepted == 1, f"5 HTTPS requests opened {srv.accepted} connections"
 
-        # An untrusted certificate is still refused (verification not bypassed), and the environment's
-        # SSL_CERT_FILE adds no root for a bearer request.
+        # An untrusted certificate is still refused (verification not bypassed).
         hvc.reset_connection_pool_for_tests()
-        (cfg / "config.yml").write_text("{}\n", encoding="utf-8")
-        monkeypatch.setenv("SSL_CERT_FILE", str(cert_pem))
+        monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "empty.pem"))
+        (tmp_path / "empty.pem").write_text("")
         with pytest.raises(urllib.error.URLError) as ei:
             _get("/v1/untrusted")
         assert isinstance(ei.value.reason, ssl.SSLError)

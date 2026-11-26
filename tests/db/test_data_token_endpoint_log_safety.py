@@ -51,16 +51,6 @@ def debug_logging() -> Iterator[None]:
         structlog.configure(wrapper_class=prior)
 
 
-@pytest.fixture(autouse=True)
-def _transport_rule_is_not_the_subject(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These cases hand the manager a URL carrying userinfo to prove no log event or message
-    echoes it. The resolvers never hand it one (nexus-ujbf8), and the mint POST now refuses such a
-    URL for a bearer under the one origin rule (nexus-ec37o step 5), so the request would never be
-    built. The rule is stubbed here so the redaction under test still runs; the refusal itself is
-    pinned in tests/db/test_token_transport_rules.py (TestMintPostUsesTheOneRule)."""
-    monkeypatch.setattr(data_token, "require_secure_transport", lambda url, **kw: None)
-
-
 class _Clock:
     def __init__(self) -> None:
         self.t = 1000.0

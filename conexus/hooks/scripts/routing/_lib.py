@@ -460,14 +460,7 @@ def _read_data_token_lease(config_dir: pathlib.Path, base_url: str) -> str | Non
     sibling module. ``tests/test_routing_hooks.py``'s
     ``test_parity_read_data_token_lease_*`` suite still runs both
     wrappers against the same on-disk lease fixture and asserts
-    identical return values.
-
-    nexus-ec37o: a lease is bound to its host, not to a transport, so a data token is
-    served only over https or to a loopback host, as a stored credential is."""
-    try:
-        _ep.require_secure_transport(base_url)
-    except _ep.EndpointUnresolvable:
-        return None
+    identical return values."""
     return _ep.read_data_token_lease(config_dir, base_url)
 
 
@@ -482,21 +475,6 @@ def _read_config_yml_credentials(config_dir: pathlib.Path) -> dict:
     identical return values.
     """
     return _ep.read_config_yml_credentials(config_dir)
-
-
-def _bound_token(config_dir: pathlib.Path, url: str, saved: dict, lease: dict | None) -> str:
-    """The bearer for *url*, or ``""`` when no credential applies or the only ones were issued for
-    another origin (nexus-ec37o): a saved ``service_token`` goes only to the saved ``service_url`` (else
-    the default managed endpoint), the lease token only to the lease's own endpoint. An env
-    ``NX_SERVICE_TOKEN`` is unbound. Never raises: a refusal is "unresolvable", which the caller meters.
-
-    RDR-259's nexus-sby49.10 (``pinned_endpoint`` / ``telemetry_child_env``, on another branch) pins this
-    path's destination further; the binding here is the credential-side check that holds either way."""
-    try:
-        picked = _ep.select_service_token(config_dir, url, saved=saved, lease=lease)
-    except _ep.EndpointUnresolvable:
-        return ""
-    return picked[0] if picked else ""
 
 
 def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
@@ -541,8 +519,14 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
         data_token = _read_data_token_lease(config_dir, url)
         if data_token:
             return url, data_token
-        token = _bound_token(config_dir, url, yaml_creds, lease)
-        return (url, token) if token else (None, None)
+        token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
+        if not token:
+            token = yaml_creds.get("service_token", "").strip()
+        if not token:
+            token = lease["token"] if lease else ""
+        if not token:
+            return None, None
+        return url, token
 
     port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
     if port_str:
@@ -551,16 +535,19 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
         except ValueError:
             return None, None
         host = os.environ.get("NX_SERVICE_HOST", "").strip() or "127.0.0.1"
-        url = _ep.host_port_url(host, port)
+        url = f"http://{host}:{port}"
         data_token = _read_data_token_lease(config_dir, url)
         if data_token:
             return url, data_token
-        # This leg never read the saved service_token; an empty ``saved`` keeps it so.
-        token = _bound_token(config_dir, url, {}, lease)
-        return (url, token) if token else (None, None)
+        token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or (
+            lease["token"] if lease else ""
+        )
+        if not token:
+            return None, None
+        return url, token
 
     if lease is not None:
-        url = _ep.host_port_url(lease['host'], lease['port'])
+        url = f"http://{lease['host']}:{lease['port']}"
         data_token = _read_data_token_lease(config_dir, url)
         if data_token:
             return url, data_token
@@ -699,10 +686,6 @@ def _post_routing_event_once(
                 "Content-Type": "application/json",
             },
         )
-        # nexus-ec37o: the proxy and CA of config.yml, never the environment's; no proxy over plain http; no
-        # redirect followed (urllib would copy the bearer to its target).
-        # This is the detached one-shot poster, so the process-wide opener is ours to set.
-        urllib.request.install_opener(_ep.bearer_opener(base_url, _default_config_dir()))
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed internal engine URL, not user input
             if 200 <= resp.status < 300:
                 return ""

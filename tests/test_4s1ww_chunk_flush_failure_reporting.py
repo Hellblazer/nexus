@@ -42,7 +42,6 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from tests._fake_credentials import SAVED_FAKE_CREDENTIALS, fake_credential
 
 # ── indexer._run_index wiring ────────────────────────────────────────────────
 # Mirrors tests/test_indexer_seam_b_cutover.py's service-mode fixture shape
@@ -90,8 +89,7 @@ def _service_mode_patches(db, *, extra=None):
     patches = {
         "nexus.frecency.batch_frecency": {"return_value": {}},
         "nexus.config.load_config": {"return_value": _DEFAULT_CONFIG},
-        "nexus.config.get_credential": {"side_effect": fake_credential},
-        "nexus.config.persisted_credentials": {"return_value": SAVED_FAKE_CREDENTIALS},
+        "nexus.config.get_credential": {"return_value": "fake-key"},
         "nexus.mcp_infra.get_t3": {"return_value": db},
         "nexus.db.make_t3": {"return_value": db},
         "nexus.indexer._index_code_file": {"return_value": 0},

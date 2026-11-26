@@ -203,52 +203,16 @@ class TestResolveBaseUrlParityWithRealClient:
         assert hook_url == self._real_base_url()
 
     def test_host_only_env_fills_port_from_lease(self, monkeypatch) -> None:
-        # The env host is the lease's own origin, so the lease token goes with it (nexus-ec37o).
-        _publish_lease(host="127.0.0.1", port=4242, token="lease-tok")
-        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        _publish_lease(host="10.0.0.9", port=4242, token="lease-tok")
+        monkeypatch.setenv("NX_SERVICE_HOST", "192.168.1.1")
         hook_url, _ = _resolve_base_url()
-        assert hook_url == self._real_base_url() == "http://127.0.0.1:4242"
+        assert hook_url == self._real_base_url()
 
     def test_port_only_env_fills_host_from_lease(self, monkeypatch) -> None:
-        # An env token is unbound, so the half-filled URL resolves on both sides.
-        _publish_lease(host="127.0.0.1", port=4242, token="lease-tok")
+        _publish_lease(host="10.0.0.9", port=4242, token="lease-tok")
         monkeypatch.setenv("NX_SERVICE_PORT", "9999")
-        monkeypatch.setenv("NX_SERVICE_TOKEN", "env-tok")
         hook_url, _ = _resolve_base_url()
-        assert hook_url == self._real_base_url() == "http://127.0.0.1:9999"
-
-    @pytest.mark.expects_unresolvable_endpoint
-    @pytest.mark.parametrize(
-        ("env", "why"),
-        [
-            ({"NX_SERVICE_HOST": "localhost"}, "localhost is not 127.0.0.1: another origin by design"),
-            ({"NX_SERVICE_PORT": "9999"}, "another port is another origin"),
-        ],
-    )
-    def test_a_half_filled_url_that_is_not_the_lease_origin_gets_no_lease_token(
-        self, monkeypatch, env, why,
-    ) -> None:
-        """ONE rule on both sides (nexus-ec37o): the URL is still filled from the lease, and the
-        lease token goes with it only when the URL's normalized origin equals the lease's. The
-        CLI refuses at resolution (it needs the token there); the drain resolves the URL and then
-        refuses the token, through the plugin's mirror of the same primitive."""
-        from nexus.db.service_endpoint import CredentialOriginMismatchError
-
-        _publish_lease(host="127.0.0.1", port=4242, token="lease-tok")
-        for k, v in env.items():
-            monkeypatch.setenv(k, v)
-        hook_url, _ = _resolve_base_url()
-        with pytest.raises(CredentialOriginMismatchError) as cli_err:
-            self._real_base_url()
-        scripts = str(Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts")
-        monkeypatch.syspath_prepend(scripts)
-        import _endpoint_resolve as plugin
-
-        lease = {"host": "127.0.0.1", "port": 4242, "token": "lease-tok"}
-        with pytest.raises(plugin.CredentialRefused) as plugin_err:
-            plugin.select_service_token(_config_dir(), hook_url, saved={}, lease=lease)
-        assert str(cli_err.value) == str(plugin_err.value), why
-        assert "the the" not in str(cli_err.value)
+        assert hook_url == self._real_base_url()
 
     def test_bare_lease(self) -> None:
         _publish_lease(port=5555, token="lease-tok")

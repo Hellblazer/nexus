@@ -54,47 +54,6 @@ Hold one kind of credential. The CLI prefers a static `service_token` when both 
 
 Export both in your shell profile or process manager. You do not supply a Voyage key in managed-cloud mode (the service owns it).
 
-### A saved credential goes only to the service it was issued for
-
-A credential you saved (`service_token`, `mint_token`), the local supervisor's lease token and a data-token lease are each tied to one service origin (scheme, host and port), and `nx` and the plugin hooks send one only to that origin. A project's `.claude/settings.json` can set `NX_SERVICE_URL`, `NX_SERVICE_HOST` or `NX_SERVICE_PORT`, and the hooks, the MCP server and every `nx` the model runs would otherwise attach your saved token to whatever host that names.
-
-- A saved `service_token` or `mint_token` is tied to the `service_url` saved beside it. With no saved `service_url` it is tied to `https://api.conexus-nexus.com`.
-- The supervisor lease token is tied to the local engine's own address, so an env URL or an `NX_SERVICE_PORT` that names another address does not get it.
-- When the URL in use is another origin, nothing is sent and the command stops with a message like: `NX_SERVICE_URL names a service that the saved service_token was not issued for, so that credential is not sent there. Export NX_SERVICE_TOKEN for this service, or point it at the service the credential belongs to (nx config set service_url).` The message names where the URL came from and never prints the URL itself.
-- To use another service (a staging or self-hosted one), either `nx config set service_url <its URL>` together with its token, or export `NX_SERVICE_TOKEN` for it. A second local engine on another port needs its own `NX_SERVICE_TOKEN`.
-- Plain `http` to a host that is not this machine is refused whenever a token would be sent, and there is no switch to allow it. A LAN or docker-network engine needs `https`, or a loopback address (`localhost`, `127.0.0.1`, `[::1]`, for example through a port forward). Origins are compared exactly: `localhost` and `127.0.0.1` are different origins.
-- A request that carries a token over plain `http` (the local engine's lease token above all) goes straight to the engine, whatever proxy is configured, so the supervisor lease token never meets a proxy. A request that carries a token to an `https` origin reads no proxy or CA setting from the environment either; see [A proxy or CA for the managed service](#a-proxy-or-ca-for-the-managed-service).
-- A URL the client cannot read as an origin (one carrying `user:password@`, a backslash or a `%`) is refused for any token, and the password is never echoed to the terminal or a log.
-- A request that carries a token follows no redirect: a `3xx` from the service (or from anything that answers in its place) comes back as an error and the `Location` is never dialled, so the token cannot be carried to another host or from `https` to plain `http`.
-- A host name with non-ASCII characters is not supported: the client cannot tell which host two stacks would read it as, so a saved `service_url` naming one is refused like any other URL it cannot read. Save the `xn--` (punycode) form of the host instead.
-
-Known limits, accepted and not detected:
-
-1. A token you export yourself (`NX_SERVICE_TOKEN`, `NX_MINT_TOKEN`) is yours to point anywhere, so a project that also sets `NX_SERVICE_URL` sends it to that URL. Export a token only in a shell you trust with the URL it should reach. The per-session tokens that ride beside a bearer travel with it: the identity token (`X-Nexus-Identity-Token`, on mailbox requests) and the T1 session token (`X-Nexus-T1-Session`) are not tied to an origin, so wherever an exported token goes, they go too.
-2. An env URL with no credential still lets a project name a host. No mailbox drain, T2 scan, MCP call or `nx` data command sends an authenticated or row-reading request to it without a credential, but several unauthenticated requests do go out to the env URL: the T3 client's `/version` compatibility probe, the managed-endpoint probe, the serving-engine version check, `nx doctor`'s `/version` and `/health` checks. A project that points `NX_SERVICE_URL` at a host it controls therefore chooses what those probes report (the T3 client reads `embedding_mode` and the engine's capability flags from `/version`, so a project can steer them), and where an unauthenticated read goes. It cannot make any of them send a stored credential.
-
-Neither limit is closed by a check in the client; both are the user's own statement of where a token or a read should go.
-
-### A proxy or CA for the managed service
-
-A project's `.claude/settings.json` can also set `HTTPS_PROXY` and `SSL_CERT_FILE`. A proxy that terminates TLS with a certificate authority the project names would read the `Authorization` header of a request to the right host, so a request that carries a token ignores every proxy and CA variable in the environment: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lowercase forms, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, a `.netrc` and `SSLKEYLOGFILE`. This covers the T2 and T1 stores, the T3 client, the mint request, both mailbox drains, the telemetry poster, the cloud backup commands and the `nx doctor` probes that send a token. A request that carries no token (a version probe, a model download) is unchanged.
-
-A proxy or CA you need goes in nexus's own `config.yml` (`~/.config/nexus/config.yml`). A project can plant its own config directory (`NEXUS_CONFIG_DIR`, `HOME`) with its own `network.*` settings, but your saved credentials are never read from a planted directory, so a planted proxy can only see a token the project itself supplies (or one you exported yourself: known limit 1 above). Set them there:
-
-| `nx config set` key | Meaning |
-|---|---|
-| `network.https_proxy` | The proxy for `https` requests that carry a token, as a URL: `http://proxy.corp:3128`, or with proxy credentials `http://user:pass@proxy.corp:3128`. It serves `https` only: a plain-`http` request (the lease token) always goes direct. |
-| `network.ca_bundle` | A PEM file, or a directory of hashed certificates, whose roots are trusted in addition to the default ones. The default roots are certifi's bundle for `nx` (the T2, T1 and T3 clients alike) and, on Windows, also the operating system's store (`nx` verifies through `truststore` there); for the plugin hooks they are the interpreter's own bundle or a well-known system one, plus the Windows ROOT and CA stores. For a TLS-inspecting corporate proxy, the CA that signs its certificates; for a private service, its CA. |
-
-```
-nx config set network.https_proxy=http://proxy.corp:3128
-nx config set network.ca_bundle=/etc/corp/root-ca.pem
-nx config get network.https_proxy
-nx config unset network.https_proxy
-```
-
-Both are read from the same config directory the saved credential came from, and never from a per-repo `.nexus.yml`. `nx config set` checks the proxy is an `http` or `https` URL and the bundle exists, and refuses a `network.` key it does not know. A long-lived process (the MCP server, a Claude Code session) reads them when it starts a connection, so restart it after changing them. On Linux and macOS a private CA installed only in the system store (not through `SSL_CERT_FILE`) is not seen by `nx`'s bearer requests, the T3 vector client's included, which used to follow the interpreter's system store: set it with `nx config set network.ca_bundle`. Windows keeps the operating system's store for `nx`, so a CA in the Windows store needs nothing. The plugin hooks still read the system store on every platform. If you had a corporate CA in `SSL_CERT_FILE` or a proxy in `HTTPS_PROXY`, `nx` still uses those for requests that carry no token; for the managed service, move them into these two keys. A CA that adds a root through the `SSL_CERT_FILE` variable no longer reaches a request that carries a token: with the managed service behind a TLS-inspecting proxy and no `network.ca_bundle`, the request fails with `CERTIFICATE_VERIFY_FAILED`, and the fix is the key.
-
 ### Migration-source credentials — RETIRED as of 7.0.0
 
 `CHROMA_API_KEY`, `CHROMA_DATABASE` and `CHROMA_TENANT` are **inert**. Setting them does nothing.
@@ -153,7 +112,6 @@ printf %s "$KEY" | nx config set openai_compat_api_key --stdin              # op
 
 | YAML path | Env var | Default | Description |
 |---|---|---|---|
-| `network.https_proxy`, `network.ca_bundle` | — | unset | The proxy and the extra CA roots for a request that carries a token. Global `config.yml` only; no environment variable and no per-repo `.nexus.yml` sets them. See [A proxy or CA for the managed service](#a-proxy-or-ca-for-the-managed-service). |
 | `embeddings.rerankerModel` | `NX_EMBEDDINGS_RERANKER_MODEL` | `rerank-2.5` | RETIRED (RDR-188): reranking runs server-side; the engine picks the model via `NX_RERANK_MODEL` in its environment. A set value emits a deprecation notice and is otherwise ignored |
 | `llm.backend` | `NX_LLM_BACKEND` | `auto` | Which backend runs operator, extraction and labelling LLM calls (nexus-2k66t.3): `auto`, `cli`, `anthropic`, `openai_compat`. `auto` uses the `claude` CLI when it is on PATH, else the Anthropic API when an `anthropic_api_key` resolves, else no backend. `anthropic` and `openai_compat` force that backend for every tool-free call. A call that grants tools (`nx_plan_audit`, `nx_enrich_beads`) always uses `cli`. The env var wins over config. **Read from the env and the GLOBAL `~/.config/nexus/config.yml` only, never from a per-repo `.nexus.yml`**: a cloned repository cannot choose the backend, redirect prompts or change the billed account. A missing or unreadable global config means `auto`. See [LLM backend](#llm-backend). |
 | `llm.openai_compat.base_url` | `NX_LLM_OPENAI_BASE_URL` | unset | Server root for the `openai_compat` backend (`http://localhost:11434`, or an OpenAI-style root ending in `/v1` such as `https://openrouter.ai/api/v1`). `http`/`https` only, no `user:password@`. Global config and env only. |

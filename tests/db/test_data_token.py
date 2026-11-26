@@ -490,14 +490,8 @@ def test_a_mint_hold_wait_is_bounded_by_its_budget() -> None:
     assert len(sleep.calls) == 1 and 0.0 < sleep.calls[0] <= _MINT_HOLD_WAIT_BUDGET_S  # inside the budget, not past it
 
 
-def test_a_mint_503_records_the_shared_hold_with_its_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_mint_503_records_the_shared_hold_with_its_endpoint() -> None:
     import json
-
-    from nexus.db import data_token as dt
-
-    # the URL carries userinfo on purpose (the hold records host:port only); the transport rule
-    # that refuses such a URL for a bearer is pinned in tests/db/test_token_transport_rules.py
-    monkeypatch.setattr(dt, "require_secure_transport", lambda url, **kw: None)
 
     poster = _FakePoster()
     poster.queue(503, {"error": "unavailable"})

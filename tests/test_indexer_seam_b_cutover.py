@@ -16,7 +16,6 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
-from tests._fake_credentials import SAVED_FAKE_CREDENTIALS, fake_credential
 from tests._module_seam import module_time
 
 
@@ -60,8 +59,7 @@ def _service_mode_patches(db, *, extra=None):
     patches = {
         "nexus.frecency.batch_frecency": {"return_value": {}},
         "nexus.config.load_config": {"return_value": _DEFAULT_CONFIG},
-        "nexus.config.get_credential": {"side_effect": fake_credential},
-        "nexus.config.persisted_credentials": {"return_value": SAVED_FAKE_CREDENTIALS},
+        "nexus.config.get_credential": {"return_value": "fake-key"},
         # Service-mode routing: get_t3() returns the mock db
         "nexus.mcp_infra.get_t3": {"return_value": db},
         # make_t3 should NOT be called in service mode — mock it so

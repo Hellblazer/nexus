@@ -23,8 +23,6 @@ from nexus.daemon.service_registry import service_identity
 
 from nexus.daemon.service_registry import ServiceRegistry
 from nexus.db.service_endpoint import (
-    CredentialOriginMismatchError,
-    InsecureServiceTransportError,
     discover_lease,
     resolve_service_config,
     resolve_service_endpoint,
@@ -56,40 +54,23 @@ def _clean_env(monkeypatch):
 
 class TestResolveServiceConfig:
     def test_env_only_resolves_without_lease(self, monkeypatch):
-        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
-        monkeypatch.setenv("NX_SERVICE_PORT", "9999")
-        monkeypatch.setenv("NX_SERVICE_TOKEN", "env-token")
-        assert resolve_service_config() == ("127.0.0.1", 9999, "env-token")
-
-    @pytest.mark.expects_unresolvable_endpoint
-    def test_env_only_refuses_a_bearer_for_plain_http_off_the_machine(self, monkeypatch):
-        # nexus-ec37o: this leg is always plain http, so a token (env or lease) goes only to a
-        # loopback host. Was: 10.0.0.5 resolved with the env token. No opt-in for a LAN engine.
         monkeypatch.setenv("NX_SERVICE_HOST", "10.0.0.5")
         monkeypatch.setenv("NX_SERVICE_PORT", "9999")
         monkeypatch.setenv("NX_SERVICE_TOKEN", "env-token")
-        with pytest.raises(InsecureServiceTransportError):
-            resolve_service_config()
+        assert resolve_service_config() == ("10.0.0.5", 9999, "env-token")
 
     def test_lease_fills_when_env_absent(self):
         _publish_lease(port=4242, token="lease-token")
         host, port, token = resolve_service_config()
         assert (host, port, token) == ("127.0.0.1", 4242, "lease-token")
 
-    def test_env_port_equal_to_the_lease_port_gets_the_lease_token(self, monkeypatch):
-        # nexus-ec37o: the lease token goes only to the lease's own origin.
-        _publish_lease(port=4242, token="lease-token")
-        monkeypatch.setenv("NX_SERVICE_PORT", "4242")
-        assert resolve_service_config() == ("127.0.0.1", 4242, "lease-token")
-
-    @pytest.mark.expects_unresolvable_endpoint
-    def test_env_port_naming_another_port_is_refused_the_lease_token(self, monkeypatch):
-        # Was: port from env, token from the lease. A stale or second local engine
-        # on another port must bring its own NX_SERVICE_TOKEN.
+    def test_env_port_with_lease_token(self, monkeypatch):
+        # Each half independent: port from env, token from the lease.
         _publish_lease(port=4242, token="lease-token")
         monkeypatch.setenv("NX_SERVICE_PORT", "7000")
-        with pytest.raises(CredentialOriginMismatchError):
-            resolve_service_config()
+        host, port, token = resolve_service_config()
+        assert port == 7000
+        assert token == "lease-token"
 
     @pytest.mark.t2_tenant
     def test_fail_loud_when_neither(self):
@@ -144,20 +125,13 @@ class TestSchemeAwareEndpoint:
         base_url, _ = resolve_service_endpoint()
         assert base_url == "https://api.conexus-nexus.com:443"
 
-    def test_service_url_at_the_lease_origin_takes_the_lease_token(self, monkeypatch):
-        # nexus-ec37o: an env URL gets the lease token only when it IS the lease's origin.
-        _publish_lease(port=4242, token="lease-token")
-        monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:4242")
-        assert resolve_service_endpoint() == ("http://127.0.0.1:4242", "lease-token")
-
-    @pytest.mark.expects_unresolvable_endpoint
-    def test_service_url_naming_another_origin_is_refused_the_lease_token(self, monkeypatch):
-        # Was: URL from env, token from the lease, each half independent. That pairing is
-        # how a repository's env URL pulled the supervisor token to its own host.
+    def test_service_url_token_falls_back_to_lease(self, monkeypatch):
+        # URL from env, token from the lease — each half independent.
         _publish_lease(port=4242, token="lease-token")
         monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com:443")
-        with pytest.raises(CredentialOriginMismatchError):
-            resolve_service_endpoint()
+        base_url, token = resolve_service_endpoint()
+        assert base_url == "https://api.conexus-nexus.com:443"
+        assert token == "lease-token"
 
     def test_no_service_url_preserves_http_from_env(self, monkeypatch):
         # Regression: the local supervisor path is unchanged (http).

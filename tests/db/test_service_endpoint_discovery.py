@@ -139,27 +139,15 @@ class TestResolutionOrder:
         assert url == "http://127.0.0.1:4242"
         assert token == "lease-token"
 
-    def test_env_url_at_the_lease_origin_takes_the_lease_token(self, monkeypatch):
-        """nexus-ec37o: the lease token goes only to the lease's own origin."""
-        monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:4242")
+    def test_env_url_with_lease_token(self, monkeypatch):
+        """Each half overrides independently: URL from env, token from lease."""
+        monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:7777")
         _publish_lease(port=4242, token="lease-token")
         from nexus.db.http_vector_client import _resolve_endpoint
 
         url, token = _resolve_endpoint()
-        assert url == "http://127.0.0.1:4242"
+        assert url == "http://127.0.0.1:7777"
         assert token == "lease-token"
-
-    @pytest.mark.expects_unresolvable_endpoint
-    def test_env_url_naming_another_origin_is_refused_the_lease_token(self, monkeypatch):
-        """Was: URL from env, token from the lease (the "mixed source" pairing). Gone:
-        an env URL elsewhere would have received the supervisor's token."""
-        monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:7777")
-        _publish_lease(port=4242, token="lease-token")
-        from nexus.db.http_vector_client import _resolve_endpoint
-        from nexus.db.service_endpoint import CredentialOriginMismatchError
-
-        with pytest.raises(CredentialOriginMismatchError):
-            _resolve_endpoint()
 
     def test_env_token_with_lease_url(self, monkeypatch):
         monkeypatch.setenv("NX_SERVICE_TOKEN", "env-token")
@@ -485,23 +473,13 @@ class TestCatalogClientResolution:
         assert (host, port, token) == ("127.0.0.1", 4243, "lease-token")
 
     def test_catalog_env_halves_override_individually(self, monkeypatch):
-        monkeypatch.setenv("NX_SERVICE_PORT", "4243")
+        monkeypatch.setenv("NX_SERVICE_PORT", "9999")
         _publish_lease(port=4243, token="lease-token")
         from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 
         host, port, token = _resolve_config()
-        assert port == 4243          # env wins
-        assert token == "lease-token"  # lease fills the missing half (nexus-ec37o: only at its own origin)
-
-    @pytest.mark.expects_unresolvable_endpoint
-    def test_catalog_env_port_elsewhere_is_refused_the_lease_token(self, monkeypatch):
-        monkeypatch.setenv("NX_SERVICE_PORT", "9999")
-        _publish_lease(port=4243, token="lease-token")
-        from nexus.db.service_endpoint import CredentialOriginMismatchError
-        from nexus.db.service_endpoint import resolve_service_config as _resolve_config
-
-        with pytest.raises(CredentialOriginMismatchError):
-            _resolve_config()
+        assert port == 9999          # env wins
+        assert token == "lease-token"  # lease fills the missing half
 
     @pytest.mark.t2_tenant
     def test_catalog_fail_loud_when_neither(self):

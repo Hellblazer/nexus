@@ -185,12 +185,7 @@ class ImportClient:
         self._base = base_url.rstrip("/")
         self._shown = log_endpoint(self._base)
         self._creds = credentials
-        if http is None:
-            from nexus.db.t2.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 - deferred, heavy
-
-            # nexus-ec37o: the proxy and CA come from config.yml, never the environment
-            http = httpx.Client(timeout=_PAGE_TIMEOUT, **bearer_httpx_kwargs())
-        self._http = http
+        self._http = http if http is not None else httpx.Client(timeout=_PAGE_TIMEOUT)
         self._sleep = sleep
         self._monotonic = monotonic
         self._open_budget = open_wait_budget_s
