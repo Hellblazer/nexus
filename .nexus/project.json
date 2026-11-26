@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "version": 1,
   "subagent_git": "strict",
   "preflight": "scripts/agent-worktree-preflight.sh",
   "ci_wait": "nx ci wait <sha> --branch develop",
