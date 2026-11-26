@@ -242,9 +242,9 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "git reflog delete HEAD@{1}",  # nexus-sby49.3: plan 2.1 says the full guard denies it; the verb set missed it
         "git gc",
     ],
-    # nexus-3c92m round 4 retired the read-only-spelling refinement: a
-    # `git stash list` is denied like any other stash.
-    "stash_read_forms_since_round4": ["git stash list", "git stash show -p"],
+    # nexus-3c92m round 4 retired the read-only-spelling refinement; nexus-5y47c admits `git stash list|show`
+    # again, by segment (tests/test_routing_subagent_git_admit.py). A bare `git stash` and every other stash form deny.
+    "stash_read_forms_since_round4": ["git stash", "git stash pop", "git stash -u", "git stash drop", "git stash clear"],
     # Options between `git` and the verb.
     "global_flags": [
         "git -C {repo} commit -m msg",
@@ -559,7 +559,6 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "git $(basename merge-base | cut -c1-5) topic",
         "git status; echo merge-base | cut -c1-5 | xargs -I{} git {} topic",
         "git merge-base A B | sh",
-        "git diff " + D + "(git merge-base A B)",
         "git diff " + BT + "git merge-base A B" + BT,
         "git merge-base A B > /tmp/out.sh; sh /tmp/out.sh",
         "git merge-base A B | tee out.sh",
@@ -582,41 +581,20 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         # the two flags
         "git log --abbrev-commit | sh",
         "git diff-tree --no-commit-id HEAD | xargs -I{} git {}",
-        "git log --no-commit-id " + D + "(basename /x/commit)",
         # a glued or longer token is not the exempt token
-        "git status; ls x.git/hooks/post-commit",
-        "git status; ls .git/hooks/post-commit-x",
         "git status; ls .git/hooks/{post-commit,x}",
         "git status; ls .git/hooks/post-{commit,x}",
-        "git log --abbrev-commit-x",
-        "git log --no-commit-id=1",
-        "git log x--abbrev-commit",
     ],
     # nexus-7mgnd accepted false positives: a verb glued to a path or word
     # character after a git command denies. Over-blocking is the price of not
     # judging text adjacency (see manufactured_verbs). Pinned so a loosening
     # is a visible decision.
     "glued_verbs_accepted_price": [
-        "git log feature/x-add-thing",
-        "git log origin/feature/add-thing",
-        "git log docs/add.md",
-        "git diff docs/add.md",
-        "git show HEAD:src/commit.py",
         "git branch nexus-96-restore",
-        "git log -- scripts/nexus-96-restore",
-        "git status && ls /Users/x/git/nexus-96-restore",
-        "git status && echo ---clean above---",
-        "git show a461db0b7 --stat; ls scratchpad/commit-a461db0b7",
-        "git status && ls hooks/post-merge",
-        "git log ./checkout",
-        "git log ~/commit",
         "git merge-file a b c",
         "git merge-base-foo",
         "git merge-tree.sh a b",
         # an exempt literal inside a command that can rebuild text
-        "git diff " + D + "(git merge-base HEAD origin/develop)..HEAD",
-        "for d in a b; do git status; ls " + D + "d/.git/hooks/post-commit; done",
-        "for s in 1; do git diff-tree --no-commit-id -r " + D + "s; done",
     ],
     # nexus-dsr6a: repo-config writes. `core.hooksPath` redirects which hook
     # code runs on the orchestrator's later commits and checkouts; `user.*`
@@ -1145,28 +1123,24 @@ _DENY_FAMILIES: dict[str, list[str]] = {
     # Text that happens to contain `git` plus a verb. Over-blocking is the
     # design's stated price (a false positive costs a rephrase, a false
     # negative destroys uncommitted work); pin it so a loosening is a
-    # visible decision.
+    # visible decision. nexus-5y47c loosened the read-only and plain-text
+    # members, and they moved to CATALOGUE_NOW_ADMITTED in
+    # tests/test_routing_subagent_git_admit.py; what is left here still denies.
     "accepted_false_positives": [
-        "git log --grep=commit",
         'echo "later run git commit -m x',
         "\n".join(["python3 - <<'EOF'", "print('as text only: git checkout -- t3.py')", "EOF"]),
         "git status && echo add${item} to list",
         "git log file${i}.txt",
         "make i${n}t",
-        "ls ~/git/ && echo add",
-        "cd ~/git && echo add",
         # nexus-dsr6a: `config` after git reads as the verb when it is the
         # subcommand slot's word, wherever the command sits, and a read that
         # pipes into a non-filter is unprovable.
-        "echo git config user.name x",
         "git config --get user.name | sort",
         # nexus-dsr6a: a standalone `config` word reads as the verb in text that
         # can rebuild a word, whatever it follows.
         "git show HEAD:config | sort",
         # nexus-0l6zh: the same no-position-analysis price for gh and hub.
         "echo 'gh pr checkout' > notes.txt",
-        "gh pr view 5 && echo pr checkout",
-        "cd ~/bin/gh && echo repo sync",
     ],
 }
 
@@ -1690,7 +1664,7 @@ def test_the_deny_message_gives_the_hand_back_protocol(shared_repo):
     assert out["permissionDecision"] == "deny"
     reason = out["permissionDecisionReason"]
     low = reason.lower()
-    for needle in ("orchestrator commits", "uncommitted", "falsify by comparison", "git show head:", "diff"):
+    for needle in ("hand back diffs", "it commits", "git show head:", "diff <scratch>"):
         assert needle in low, f"deny message lost {needle!r}: {reason}"
     # The escape is named for an operator, never handed to the gated agent
     # (nexus-cnzei.2 S8), and the completion wording scopes SendMessage to
@@ -1700,9 +1674,10 @@ def test_the_deny_message_gives_the_hand_back_protocol(shared_repo):
     # nexus-7mgnd/0l6zh review: the tool call's cwd decides the worktree
     # exemption, so a cd inside the command must not be read as one; the one
     # literal `git -C <worktree>` shape is the named carve-out (2026-11-18).
-    assert "cwd of the tool call decides" in low, reason
-    assert "`cd <wt>`" in reason and "`git -C <absolute worktree path>" in reason, reason
-    assert "isolation: worktree" in reason, reason
+    assert "`cd <wt>` counts only before `&&`" in reason, reason
+    assert "`git -C <absolute worktree root>" in reason and "`cd <worktree root> && git" in reason, reason
+    # nexus-5y47c: what was denied, the one allowed shape, who to ask. The base text was 2.9 KB.
+    assert len(reason.encode()) < 1500, len(reason.encode())
 
 
 def test_the_spliced_expansion_deny_names_the_reconstructed_fragment(shared_repo):

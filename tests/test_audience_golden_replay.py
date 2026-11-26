@@ -12,9 +12,11 @@ as it did before. Two replays prove it, each running the guard from
 the working tree over the same inputs, and comparing the hook's stdout:
 
 * **Synthetic** (``test_the_synthetic_replay_...``): every command in
-  ``test_routing_subagent_git_write``'s deny, allow, exemption and ssh tables, in a
-  marked primary checkout, a marked linked worktree, a non-repo cwd and with no
-  cwd. Zero differences, and a floor so a replay that examined nothing fails.
+  ``test_routing_subagent_git_write``'s deny, allow, exemption and ssh tables, plus the
+  admission tables of ``test_routing_subagent_git_admit``, in a marked primary checkout,
+  a marked linked worktree, a non-repo cwd and with no cwd. No tightening, every
+  loosening named in a table and carrying the ``allow_admit_`` outcome of nexus-5y47c,
+  and a floor so a replay that examined nothing fails.
 * **Real corpus** (``test_the_real_corpus_replay_...``): every subagent Bash call
   recorded on the maintainer's machine over 30 days, as ``(command, cwd)`` from
   ``~/.local/state/nexus/plans/corpus/subagent-bash-30d.jsonl`` (Phase 0 extracts
@@ -51,6 +53,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from tests import test_routing_subagent_git_admit as admit_tests
 from tests import test_routing_subagent_git_write as guard_tests
 from tests.hooks.audience_harness import strict_home, mark_strict
 
@@ -120,17 +123,6 @@ def _worker(tree: pathlib.Path, mode: str, home: pathlib.Path | None, cases: lis
     return rows
 
 
-def _decision(verdict: str) -> str:
-    """The permission decision a hook output carries (``deny``, ``allow``, ``ask``), ``""`` for none. The deny TEXT changed on
-    purpose in nexus-sby49.4 (internal ids removed), so the replay holds the decisions identical, not the words."""
-    if not verdict.strip():
-        return ""
-    try:
-        return str(json.loads(verdict).get("hookSpecificOutput", {}).get("permissionDecision", "text"))
-    except ValueError:
-        return "text"
-
-
 def _both(old_tree, home, cases, *, mode_home_has_hosts: bool = True):
     """Old and new verdicts for *cases*, the two workers running at once."""
     new_tree = PROJECT_ROOT / SCRIPTS_REL
@@ -166,7 +158,35 @@ def _synthetic_commands() -> list[str]:
         take(getattr(T, name, []))
     commands.append(T._REMOTE_CMD.format(host="chas"))
     commands.append(T._REMOTE_CMD.format(host="devbox"))
+    commands.extend(_admission_commands())
     return sorted(set(commands))
+
+
+def _admission_commands() -> list[str]:
+    """The read-shaped tables of the admission tests: no placeholder but the scratch directory."""
+    A = admit_tests
+    out = [c.replace("{S}", "/tmp/scratch-replay") for c in A._READ_ADMITTED]
+    out += list(A.CATALOGUE_NOW_ADMITTED)
+    out += list(A._READ_PLANTS)
+    return out
+
+
+def _decision(row: dict) -> str:
+    return "deny" if '"deny"' in row["verdict"] else ("pass" if row["verdict"] == "" else "other")
+
+
+def _changes(cases: list[dict], old_rows: list[dict], new_rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """``(loosenings, tightenings)``: the commands whose DECISION moved. The deny text changed on purpose
+    (nexus-5y47c fix 6), so a command denied by both is the same verdict whatever its text says."""
+    loosened: list[dict] = []
+    tightened: list[dict] = []
+    for case, o, n in zip(cases, old_rows, new_rows):
+        before, after = _decision(o), _decision(n)
+        if before == after:
+            continue
+        rec = {"command": case["command"], "cwd": case["cwd"], "outcome": n.get("outcome", ""), "was": before, "now": after}
+        (loosened if before == "deny" and after == "pass" else tightened).append(rec)
+    return loosened, tightened
 
 
 #: The one deliberate change to the maintainer path since Phase 1 (nexus-sby49.3): plan section 2.1 says the full guard denies
@@ -195,7 +215,7 @@ def test_the_replay_shows_exactly_the_intended_tightening(old_tree, tmp_path):
             assert '"deny"' in n["verdict"], f"[{label}] the working tree still passes {c!r}"
 
 
-def test_the_synthetic_replay_shows_zero_maintainer_path_differences(old_tree, tmp_path):
+def test_the_synthetic_replay_shows_only_the_named_loosenings(old_tree, tmp_path):
     commands = _synthetic_commands()
     primary = tmp_path / "primary"
     primary.mkdir()
@@ -223,22 +243,36 @@ def test_the_synthetic_replay_shows_zero_maintainer_path_differences(old_tree, t
         ("no cwd (flagged)", "", flagged),
     ]
     examined = denies = passes = 0
-    differences: list[str] = []
+    loosened_all: list[str] = []
+    tightened_all: list[str] = []
+    unnamed: list[str] = []
+    by_outcome: collections.Counter[str] = collections.Counter()
+    named = set(admit_tests.CATALOGUE_NOW_ADMITTED) | {c.replace("{S}", "/tmp/scratch-replay") for c in admit_tests._READ_ADMITTED}
     for label, cwd, home in places:
         cases = [{"command": c, "cwd": cwd} for c in commands]
         old, new = _both(old_tree, home, cases)
-        for c, o, n in zip(commands, old, new):
+        for o, n in zip(old, new):
             examined += 1
             denies += '"deny"' in o["verdict"]
             passes += o["verdict"] == ""
-            if _decision(o["verdict"]) != _decision(n["verdict"]):
-                differences.append(f"[{label}] {c[:120]!r}")
-            assert n["maintainer"] is True, f"[{label}] new guard saw a non-maintainer for {c[:80]!r}"
+            assert n["maintainer"] is True, f"[{label}] new guard saw a non-maintainer"
+        loosened, tightened = _changes(cases, old, new)
+        for rec in loosened:
+            by_outcome[rec["outcome"]] += 1
+            loosened_all.append(f"[{label}] {rec['command'][:100]!r}")
+            if rec["command"] not in named or not rec["outcome"].startswith("allow_admit_"):
+                unnamed.append(f"[{label}] {rec['command'][:100]!r} ({rec['outcome']})")
+        tightened_all += [f"[{label}] {rec['command'][:100]!r}" for rec in tightened]
     print(f"\nsynthetic replay: {len(commands)} commands x {len(places)} places = {examined} verdicts, "
-          f"{denies} deny, {passes} pass, {len(differences)} differences")
+          f"{denies} deny, {passes} pass; {len(loosened_all)} loosened {dict(by_outcome)}, {len(tightened_all)} tightened")
     assert examined >= SYNTHETIC_FLOOR, f"only {examined} verdicts replayed (floor {SYNTHETIC_FLOOR})"
     assert denies >= 500 and passes >= 100, f"a vacuous replay: {denies} denies, {passes} passes"
-    assert differences == [], differences[:20]
+    assert tightened_all == [], tightened_all[:20]
+    assert unnamed == [], unnamed[:20]
+    # The named catalogue loosenings are all exercised, in every place: a loosening that is not seen is not proven.
+    seen = {line for line in loosened_all}
+    missing = [c for c in admit_tests.CATALOGUE_NOW_ADMITTED if f"[primary] {c[:100]!r}" not in seen]
+    assert missing == [], missing
 
 
 # ---------------------------------------------------------------------------
@@ -297,13 +331,16 @@ def test_the_real_corpus_replay_meets_the_floor_and_the_bars(old_tree, tmp_path)
         noflag = pool.submit(_worker, new_tree, "new", empty, cases)
         old_rows, new_rows, noflag_rows = old.result(), new.result(), noflag.result()
 
-    # Bar 1: with the flag, maintainer() is true everywhere, and the verdicts are identical.
+    # Bar 1: with the flag, maintainer() is true everywhere. Every command whose decision moved is a
+    # loosening that the admission module made (outcome allow_admit_*), counted per class; none tightened.
     not_maintainer = sorted({c["cwd"] for c, r in zip(cases, new_rows) if r["maintainer"] is not True})
-    verdict_diffs = [c for c, o, n in zip(cases, old_rows, new_rows) if _decision(o["verdict"]) != _decision(n["verdict"])]
+    loosened, tightened = _changes(cases, old_rows, new_rows)
+    verdict_diffs = tightened + [rec for rec in loosened if not rec["outcome"].startswith("allow_admit_")]
+    by_class = collections.Counter(rec["outcome"] for rec in loosened)
     old_denies = sum('"deny"' in r["verdict"] for r in old_rows)
     denied_cwds = len({c["cwd"] for c, r in zip(cases, old_rows) if '"deny"' in r["verdict"]})
     print(f"flag present: maintainer() true for {len(existing) - len(not_maintainer)}/{len(existing)} cwds; "
-          f"verdicts identical for {len(cases) - len(verdict_diffs)}/{len(cases)} commands; "
+          f"{len(loosened)} of {len(cases)} commands loosened {dict(by_class)}, {len(tightened)} tightened; "
           f"the old guard denied {old_denies} of them, in {denied_cwds} cwds")
     assert old_denies >= FLOOR_OLD_DENIES, (
         f"a vacuous corpus replay: the old guard denied {old_denies} commands (floor {FLOOR_OLD_DENIES})"

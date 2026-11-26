@@ -78,6 +78,8 @@ An agent's hand-back on this relay is not accepted on prose alone (a 2026-09-13 
 - [Related bead ID and brief description]
 ```
 
+A relay that touches git also says where the worktree is, which git shape to use and who pushes: see the orchestration skill's `reference.md` § Git in an implementer brief.
+
 ## Validation Checklist
 
 A valid relay MUST have:

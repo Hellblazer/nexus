@@ -593,6 +593,27 @@ expansion denies, so ``git fetch origin "$BRANCH"`` and ``git fetch origin $(git
 rev-parse --abbrev-ref HEAD)`` are false denials in the shared tree, taken on
 purpose because the text cannot show whether the expansion is a refspec.
 
+nexus-5y47c (2026-11-25, Sam's ruling): the rule above lifted its freeze for six fixes, after 2,199 denials in
+three weeks of which 97% were not the harm it exists for. Everything above still
+decides; ``_git_admit`` (its own module, read its docstring first) only ADDS a pass,
+after the rule above has denied, through ``_admission``. It lexes the command strictly
+(a heredoc, a backtick, a comment, a brace, a backslash outside double quotes, a
+redirect to a file from ``echo``/``printf`` and any word it cannot read leave the
+command to the rule above), then judges each segment: a read-only git shape or a text
+command (``grep``, ``cat``, ``echo``, ``ls``...) may spell a verb word in its
+arguments; ``git fetch`` without a refspec destination passes; a write aimed at a
+linked worktree git proves (``git -C <root> ...``, or ``cd <root> &&`` before a bare
+git command) passes through the flag allowlist ``DASH_C_FLAGS``; ``push [-u] origin
+HEAD`` passes for the branch that worktree has checked out; ``worktree add --detach``
+outside every repository and a scratch repository the same command creates pass; any
+other segment must be clean by THIS rule on its own text (``_legacy_denies``). The
+config and side-effect rules still run on every admitted git segment. An interpreter
+anywhere in the command, text that reaches a command through a pipe or a file, a
+``git config`` segment and a variable that carries verb text keep the command with
+this rule. The adjacency rule stays authoritative. The 30 entries of the old deny
+catalogue this loosens are named in ``tests/test_routing_subagent_git_admit.py``
+(``CATALOGUE_NOW_ADMITTED``); every other family still denies in full.
+
 ``run_hook(fail_closed=False)`` is unchanged: a crash in the hook ITSELF
 still allows, since a broken guard must not brick every agent's Bash.
 """
@@ -643,6 +664,12 @@ try:
     import _user_git_seatbelt
 except BaseException:  # noqa: BLE001
     _user_git_seatbelt = None
+# nexus-5y47c: the admission half (segment-level passes). A missing or broken module
+# admits nothing, which leaves every verdict as the guard below gave it.
+try:
+    import _git_admit
+except BaseException:  # noqa: BLE001
+    _git_admit = None
 
 RULE_NAME = "subagent_git_write_requires_orchestrator"
 
@@ -4080,29 +4107,22 @@ def _current_branch(cwd: str) -> str | None:
 def _deny_message(agent_type: str, verb_names: str, *,
                   undeterminable: bool = False, in_worktree: bool = False,
                   sidefx: bool = False) -> str:
-    who = f"you are subagent `{agent_type or 'unknown'}`"
     head = (
-        f"Working in your session's linked worktree from the primary cwd? One "
-        f"literal command per call passes: `git -C <absolute worktree root> "
-        f"<verb> ...` with verb add, commit, rm, mv, switch -c, "
-        f"reset (--soft/--mixed), rebase, cherry-pick, revert, merge or branch "
-        f"<new>; every flag spelled out in full and separately (no `-am`, no "
-        f"abbreviations); nothing chained or redirected; any word holding "
-        f"`~ ^ {{ }} ( ) % $ #` or spaces inside single quotes (`'HEAD~1'`); and "
-        f"a commit message that names a git verb goes through `-F <file>`. "
-        f"Discarding changes (reset --hard, restore, checkout), --abort/--skip, "
-        f"stash, tag and branch deletion are never admitted that way: hand those back.\n"
-        f"Subagents never run git write verbs ({verb_names}) in the shared "
-        f"tree ({who}); that includes `gh`/`hub` commands that move HEAD or "
-        f"rewrite the working tree (gh pr checkout, gh repo sync). This guard is intentionally STRUCTURE-AGNOSTIC "
-        f"(a structural parser grew a new bypass every round): it denies whenever `git` "
-        f"appears near a write verb ANYWHERE in the raw command text, "
-        f"regardless of shell structure — heredocs, pipes, substitutions, "
-        f"line-continuations, quoting, and comments create no exemption. "
-        f"A false positive here just costs a rephrase or a hand-back; a "
-        f"false negative destroys uncommitted work outright (a reviewer's "
-        f"`git checkout -- <file>` once silently wiped three uncommitted "
-        f"production fixes)."
+        f"Denied: subagent `{agent_type or 'unknown'}` may not run git write verbs ({verb_names}) "
+        f"in the shared tree. The guard is STRUCTURE-AGNOSTIC (it reads the raw command text): a "
+        f"verb word that an interpreter, a pipe, a file or a variable could run denies; rephrase.\n"
+        f"Allowed shape, in a linked worktree you were given: `git -C <absolute worktree root> "
+        f"<verb> ...`, or `cd <worktree root> && git <verb> ...` (a `cd <wt>` counts only before "
+        f"`&&`), calls chained with `&&`; verb add, commit, rm, mv, switch -c, reset "
+        f"(--soft/--mixed), rebase, cherry-pick, revert, merge or branch <new>; flags spelled "
+        f"out (no `-am`), `'HEAD~1'` quoted; a commit message that names a git verb goes "
+        f"through `-F <file>`. Also open: read-only git, `git fetch`, `git push [-u] origin "
+        f"HEAD` of that worktree's own branch. Or dispatch with isolation: worktree.\n"
+        f"Not from a subagent: checkout, stash, restore, reset --hard, clean, or any write in "
+        f"the primary checkout (`gh pr checkout` and `gh repo sync` too). Ask the orchestrator: "
+        f"hand back diffs and paths (a background agent does that via SubagentHandback or "
+        f"SendMessage before idling; a foreground agent's final message is the hand-back) and "
+        f"it commits."
     )
     if "config" in verb_names.split(", "):
         head += (
@@ -4140,8 +4160,8 @@ def _deny_message(agent_type: str, verb_names: str, *,
             )
     if sidefx:
         head += (
-            "\nVerbs that write `.git/config` by side effect are denied "
-            ": `git remote add|remove|rm|rename|set-url|set-head|"
+            "\nVerbs that write `.git/config` by side effect are denied: "
+            "`git remote add|remove|rm|rename|set-url|set-head|"
             "set-branches|prune`, `git branch -u|--set-upstream-to|"
             "--unset-upstream|-t|--track`, `git push|fetch|pull -u|"
             "--set-upstream` (shared tree only), `git checkout|switch -t|--track`, `git submodule "
@@ -4195,34 +4215,13 @@ def _deny_message(agent_type: str, verb_names: str, *,
             "licence to proceed."
         )
     head += (
-        "\nNeed to compare working-tree content against a committed ref "
-        "instead of resetting to it? Falsify by comparison, never by "
-        "mutation: `git show HEAD:<path> > /private/tmp/<scratch>/<name>` "
-        "then `diff /private/tmp/<scratch>/<name> <path>`."
+        "\nTo compare a file with a committed ref, `git show HEAD:<path> > <scratch>/<name>` "
+        "then `diff <scratch>/<name> <path>`."
     )
     return (
         f"{head}\n"
-        f"Hand back your changes as diffs + file paths -- a background "
-        f"dispatch does that via SubagentHandback or SendMessage before idling; a foreground "
-        f"one's final message IS the hand-back, no separate report call "
-        f"needed -- so the orchestrator commits, pathspec-limited.\n"
-        f"Rephrase without the literal git verb, or hand the edit back to "
-        f"the orchestrator to run.\n"
-        f"Read-only git (status/diff/log/show/blame/rev-parse/ls-files) "
-        f"stays allowed as long as the command text doesn't ALSO contain a "
-        f"write-verb word near `git` (e.g. in a `--grep` pattern or a "
-        f"comment) — that is an accepted false-positive cost of this design, "
-        f"not a bug.\n"
-        f"Worktree-isolated agents are exempt automatically when this guard "
-        f"can POSITIVELY PROVE a linked worktree (a linked worktree is "
-        f"yours to destroy); an undeterminable worktree state does not "
-        f"qualify. The cwd of the tool call decides that, and a `cd <wt>` "
-        f"inside the command does not count; the one exception is the literal "
-        f"`git -C <absolute worktree path>` shape described at the top. Or "
-        f"dispatch with isolation: worktree.\n"
-        f"An escape (`# routing-allow: <reason>`) exists for this "
-        f"guard, but only on the user's explicit instruction to use "
-        f"it -- it is not yours to reach for."
+        f"A `# routing-allow: <reason>` escape exists only on the user's explicit "
+        f"instruction; it is not yours to reach for."
     )
 
 
@@ -4587,6 +4586,67 @@ def _scan_command(
     return spliced_fragment, primary_match, relaxed, view
 
 
+def _legacy_denies(text: str) -> bool:
+    """True when the guard above, run on *text* alone, would deny it (the adjacency
+    rule or the primary rule). The admission module (``_git_admit``) asks this of
+    every segment it does not recognise, so such a segment passes only when it is
+    clean by the unchanged rule."""
+    spliced, primary, _relaxed, _view = _scan_command(text, _normalize_for_primary_scan(text))
+    return bool(spliced) or primary is not None
+
+
+def _has_verb_word(text: str) -> bool:
+    return _VERB_RE.search(_normalize_for_primary_scan(text)) is not None
+
+
+def _has_git_word(text: str) -> bool:
+    return _first_git_command(_normalize_for_primary_scan(text)) is not None
+
+
+def _admission(command: str, cwd: str = "") -> Any:
+    """The admission module's verdict for *command* (nexus-5y47c), after the config
+    and side-effect rules have run on every git segment it admitted; None when
+    nothing is admitted. Each segment is judged as a worktree command exactly when
+    the module proved its target a linked worktree root."""
+    if _git_admit is None:
+        return None
+    try:
+        return _admission_unguarded(command, cwd)
+    except Exception:  # noqa: BLE001 -- run_hook(fail_closed=False) would ALLOW on a crash; an admission bug must deny
+        return None
+
+
+def _admission_unguarded(command: str, cwd: str) -> Any:
+    proven: dict[str, bool] = {}
+
+    def is_wt_root(path: str) -> bool:
+        if path not in proven:
+            proven[path] = _is_linked_worktree_root(path)
+        return proven[path]
+
+    adm = _git_admit.analyze(
+        command,
+        _git_admit.Hooks(
+            legacy_denies=_legacy_denies, is_wt_root=is_wt_root, branch_of=_current_branch,
+            safe_config_key=_config_worktree_key, has_verb_word=_has_verb_word,
+            has_git_word=_has_git_word, cwd=cwd,
+        ),
+    )
+    if adm is None:
+        return None
+    for chk in adm.checks:
+        normalized = _normalize_for_primary_scan(chk.text)
+        _spliced, _primary, _relaxed, view = _scan_command(chk.text, normalized)
+        root = chk.root
+        hit = _config_hit(normalized, view, worktree=chk.worktree) or _sidefx_hit(
+            normalized, view, worktree=chk.worktree,
+            branch_of=functools.cache(lambda root=root: _current_branch(root)) if root else _no_branch,
+        )
+        if hit is not None:
+            return None
+    return adm
+
+
 def _user_mode(payload: dict[str, Any], command: str) -> None:
     """The seatbelt, the guard's default mode; always exits.
 
@@ -4656,6 +4716,18 @@ def body(payload: dict[str, Any]) -> None:
         if dash_c_hit is None:
             _lib.log_routing_event(
                 rule=RULE_NAME, outcome="allow_dash_c_worktree", tool_name="Bash",
+                command_fragment=command,
+            )
+            _lib.pass_through()
+
+    # Segment-level admission (nexus-5y47c): a command whose every segment is a
+    # read-only shape, a text command, a plain fetch, or an allowlisted write aimed
+    # at a worktree git proves. It never overrides the adjacency rule.
+    if not spliced_fragment:
+        admitted = _admission(command, str(payload.get("cwd") or "") or os.environ.get("CLAUDE_PROJECT_DIR", ""))
+        if admitted is not None:
+            _lib.log_routing_event(
+                rule=RULE_NAME, outcome=f"allow_admit_{admitted.kind}", tool_name="Bash",
                 command_fragment=command,
             )
             _lib.pass_through()

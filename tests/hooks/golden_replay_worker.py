@@ -16,9 +16,10 @@ an older commit). *mode*:
 
 Each input line is ``{"command": ..., "cwd": ..., "agent_type": ...}``. Each output
 line is ``{"verdict": "<stdout of the hook>", "maintainer": bool|null,
-"nexus_repo": bool|null}``. The guard's git probes are cached per cwd and its
-telemetry is stubbed, so a 200,000-line corpus runs in minutes: neither changes a
-verdict, they only stop a spawn per line.
+"nexus_repo": bool|null, "outcome": "<the last routing event's outcome>"}``. The
+guard's git probes are cached per cwd and its telemetry is captured, not sent, so a
+200,000-line corpus runs in minutes: neither changes a verdict, they only stop a
+spawn per line.
 """
 from __future__ import annotations
 
@@ -48,7 +49,8 @@ def main(argv: list[str]) -> None:
     assert spec and spec.loader
     guard = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard)
-    guard._lib.log_routing_event = lambda **kwargs: None
+    events: list[str] = []
+    guard._lib.log_routing_event = lambda **kwargs: events.append(str(kwargs.get("outcome", "")))
     for name in ("_in_linked_worktree", "_current_branch", "_is_linked_worktree_root"):
         setattr(guard, name, functools.cache(getattr(guard, name)))
     maint_cache: dict[str, tuple[bool, bool]] = {}
@@ -72,12 +74,16 @@ def main(argv: list[str]) -> None:
                 )
             maint, nexus = maint_cache[cwd]
         out = io.StringIO()
+        events.clear()
         with contextlib.redirect_stdout(out):
             try:
                 guard.body(payload)
             except SystemExit:
                 pass
-        sys.stdout.write(json.dumps({"verdict": out.getvalue(), "maintainer": maint, "nexus_repo": nexus}) + "\n")
+        sys.stdout.write(json.dumps({
+            "verdict": out.getvalue(), "maintainer": maint, "nexus_repo": nexus,
+            "outcome": events[-1] if events else "",
+        }) + "\n")
     sys.stdout.flush()
 
 

@@ -58,16 +58,20 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/agents/strategic-planner.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` (retrieval plans only); without `.beads/` the planner skips the `bd` steps, puts the task breakdown in its hand-back and, where the conexus nexus tools are available, in the T2 plan record `plan-{name}.md`; the internal ids are removed from the body, nexus-sby49.4.
 - `conexus/agents/substantive-critic.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan; the internal RDR and bead ids are removed from the body; where a bead is required it is gated on `.beads/`, nexus-sby49.4.
 - `conexus/agents/test-validator.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3. The plan-library tool is `answer_plan_search` and a saved plan is a retrieval plan, never an implementation plan; the internal RDR and bead ids are removed from the body; where a bead is required it is gated on `.beads/`, nexus-sby49.4.
-- `conexus/resources/agent-shared/RELAY_TEMPLATE.md`: the Bead field also takes a tracking id (D10), nexus-sby49.3.
+- `conexus/resources/agent-shared/RELAY_TEMPLATE.md`: the Bead field also takes a tracking id (D10), nexus-sby49.3; a one-line pointer to the orchestration skill's reference.md for what a brief gives a subagent about git, nexus-5y47c.
 - `conexus/hooks/scripts/routing/_lib.py`: `log_routing_event` records only under `maintainer()`, so a user's command fragments no longer reach their engine as routing_events rows, nexus-sby49.3.
 - `conexus/hooks/scripts/_audience.py`: three lazy imports carry a `noqa: PLC0415` reason so the byte copy under `src/` passes the repo's ruff job (comment only), nexus-sby49.3.
 - `conexus/README.md`: the relay example's Bead field takes a tracking id, nexus-sby49.3.
 - `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md`: the relay validation and the relay example take a tracking id in the Bead field, nexus-sby49.3.
 - `conexus/commands/debug.md`: the relay's Bead field takes a tracking id, nexus-sby49.3.
 - `conexus/commands/review-code.md`: the relay's Bead field takes a tracking id, nexus-sby49.3.
-- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`: the maintainer's full guard also denies `git reflog delete` (plan 2.1), nexus-sby49.3.
-- `conexus/hooks/audience.yaml`: the audience manifest, one entry per hook registration, module and injected constant; read by the lint and the behaviour leg, nexus-sby49.3.
-- `conexus/hooks/scripts/routing/registry.yaml`: each rule carries its `audience`, nexus-sby49.3.
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`: the maintainer's full guard also denies `git reflog delete` (plan 2.1), nexus-sby49.3; it admits read-only git and verb words in text, chained writes in a worktree git proves, a plain fetch, a detached worktree outside every repo, a scratch repository the command creates, and a push of the worktree's own branch, and its deny text is 1.3 KB where it was 2.9 KB, nexus-5y47c.
+- `conexus/hooks/scripts/routing/_git_admit.py`: new module, the admission half of nexus-5y47c: a strict lexer, per-segment shapes and the unchanged guard as the fallback for every segment it does not recognise.
+- `conexus/skills/orchestration/SKILL.md`: the implementer dispatch section points to reference.md for what a brief gives a subagent about git, nexus-5y47c; internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/skills/orchestration/reference.md`: a section, Git in an implementer brief (worktree root, the one shape, who pushes), nexus-5y47c; internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/hooks/scripts/routing/README.md`: the git guard's freeze note records the one lift for the six nexus-5y47c fixes (Sam, 2026-11-25).
+- `conexus/hooks/audience.yaml`: the audience manifest, one entry per hook registration, module and injected constant; read by the lint and the behaviour leg, nexus-sby49.3; a module entry for `_git_admit.py`, nexus-5y47c.
+- `conexus/hooks/scripts/routing/registry.yaml`: each rule carries its `audience`, nexus-sby49.3; the git guard's rationale names the segment admission and its limits, nexus-5y47c.
 - `conexus/skills/writing-nx-skills/promotion.md`: the target table gains an Audience column, a hook target is live only with its audience.yaml entry and a behaviour-leg case, and the loss check lists over-reach, nexus-sby49.3.
 - `conexus/hooks/scripts/routing/destructive_action_advice.py`: the advice `Row` gains an `audience` field (every row EVERY-USER), nexus-sby49.3.
 - `conexus/skills/asks/SKILL.md`: the description no longer cites an RDR id, nexus-sby49.4.
@@ -81,8 +85,6 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/decision-drift-review/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 - `conexus/skills/mailbox/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 - `conexus/skills/nexus/reference.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
-- `conexus/skills/orchestration/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
-- `conexus/skills/orchestration/reference.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 - `conexus/skills/peer-messaging/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 - `conexus/skills/phase-review-gate/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 - `conexus/skills/plan-first/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
@@ -97,6 +99,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/tumbler-footnotes/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 - `conexus/skills/upgrade/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 - `conexus/skills/why-was-this-written/SKILL.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/hooks/scripts/_session_facts.py`: the unlanded-work check compares against the repository's default branch (`origin/HEAD`, else main, master or develop) and reports -1 when none resolves, nexus-sby49.4.
+- `conexus/hooks/scripts/routing/_user_git_seatbelt.py`: the module text names the seatbelt as the guard's default mode and the `subagent_git` setting that turns the strict form on, nexus-sby49.4.
 - `conexus/hooks/scripts/compact_checkpoint.py`: the compaction text names the threads board and `bd` only where the project has them, nexus-sby49.4.
 - `conexus/hooks/scripts/routing/credential_print_guard.py`: a user's deny and redirect text names no maintainer tool or host, nexus-sby49.4.
 - `conexus/hooks/scripts/stop_wake_guard.py`: the stop guard's CI wording is read only in a nexus checkout; a user gets neutral text, nexus-sby49.4.
