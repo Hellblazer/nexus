@@ -108,10 +108,12 @@ pc = os.path.join(repo, ".nexus", "project.json")
 uc = os.path.join(home, ".config", "nexus", "conexus.json")
 out = {}
 t = time.perf_counter_ns(); mod.account_home(); out["account_home"] = time.perf_counter_ns() - t
-mod._ACCOUNT_HOME_OVERRIDE = home
+if not real_home:
+    mod._ACCOUNT_HOME_OVERRIDE = home
 t = time.perf_counter_ns(); mod._load_json(pc, follow=False); out["project_file"] = time.perf_counter_ns() - t
 t = time.perf_counter_ns(); mod._load_json(uc, follow=True); out["user_file"] = time.perf_counter_ns() - t
 t = time.perf_counter_ns(); mod.read_settings({"cwd": repo}); out["read_settings"] = time.perf_counter_ns() - t
+out["account_home_plus_read_settings"] = out["account_home"] + out["read_settings"]
 print(json.dumps(out))
 """
 
@@ -166,6 +168,14 @@ def test_the_reader_stays_within_the_file_read_and_head_read_budgets(tmp_path: P
     for _ in range(50):
         real_home_ns.append(_time_call(mod.account_home))
     warm_stats["account_home (real lookup, no override)"] = _stats(real_home_ns)
+    git_spawn_ns = [_time_call(subprocess.run, [real_git(), "--version"], capture_output=True, check=False) for _ in range(30)]
+    one_proc_ns = [
+        _time_call(subprocess.run, [real_git(), "--git-dir", str(repo / ".git"), "cat-file", "blob", "HEAD:.nexus/project.json"],
+                   cwd=str(repo), capture_output=True, check=False)
+        for _ in range(30)
+    ]
+    warm_stats["git --version (one spawn, for scale)"] = _stats(git_spawn_ns)
+    warm_stats["git cat-file blob HEAD:path (a one-process read, informational)"] = _stats(one_proc_ns)
     cold_stats = _cold(repo, home, real_home=False)
     cold_real = _cold(repo, home, real_home=True)
 
@@ -197,7 +207,7 @@ def test_the_reader_stays_within_the_file_read_and_head_read_budgets(tmp_path: P
     for k, v in cold_stats.items():
         print(f"  cold  {k + ' (home override)':44s} {_fmt(v)}  n={v['n']}")
     for k, v in cold_real.items():
-        print(f"  cold  {k + ' (real account home)':44s} {_fmt(v)}  n={v['n']}")
+        print(f"  cold  {k + ' (real account home, no override)':44s} {_fmt(v)}  n={v['n']}")
     print("COSTBENCH item 4: head=True minus head=False, ms; budget %.1f ms at the median; git processes per head=True call" % HEAD_ADDED_BUDGET_MS)
     print(f"  {'posture':18s} {'path':15s} {'off med':>8s} {'on med':>8s} {'added med':>10s} {'added p90':>10s}  git")
     for name, fns in head_rows.items():
