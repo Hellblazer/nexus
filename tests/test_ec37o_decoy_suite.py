@@ -68,6 +68,9 @@ class _Server:
 
     def __init__(self, bind: str = "127.0.0.1") -> None:
         self.requests: list[tuple[str, str | None]] = []
+        #: set to a base URL and every request is answered ``redirect_code`` to that URL plus the request path
+        self.redirect_to: str | None = None
+        self.redirect_code = 302
         outer = self
 
         class _Handler(http.server.BaseHTTPRequestHandler):
@@ -76,6 +79,12 @@ class _Server:
                 if length:
                     self.rfile.read(length)
                 outer.requests.append((self.path, self.headers.get("Authorization")))
+                if outer.redirect_to is not None:
+                    self.send_response(outer.redirect_code)
+                    self.send_header("Location", outer.redirect_to + self.path)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 if "/data-tokens/mint" in self.path:
                     body: object = {"data_token": "minted-data-token", "expires_in_seconds": 600}
                 elif self.path == "/version":
@@ -227,7 +236,9 @@ def _env_names_the_bound_origin(kind: str, leg: str) -> bool:
 
 # ── the callers, each run as a real process ──────────────────────────────────
 
-_ENV_SCRUBBED = ("NX_SERVICE_", "NX_MINT_")
+#: NX_LOCAL is the provisioned suite's own mode switch (it makes the T3 client skip its /version compatibility
+#: probe); a decoy case about what a caller sends must not depend on it, so no child inherits it
+_ENV_SCRUBBED = ("NX_SERVICE_", "NX_MINT_", "NX_LOCAL")
 _PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy")
 
 
@@ -351,6 +362,46 @@ CALLERS: tuple[_Caller, ...] = (
 )
 
 
+# ── which cases refuse (the storage-touch guard) ────────────────────────────
+#
+# A case in which a caller is refused a credential, or finds no endpoint, constructs the resolver's error
+# in the child, and the storage-touch guard (``tests/_storage_touch_guard.py``) charges that to the test
+# unless it carries ``expects_unresolvable_endpoint``. A case that sends nothing for another reason
+# (a plugin script that never constructs a nexus error class, the routing poster) does not construct one,
+# and the guard calls the mark on it STALE. So the mark is per case, and the guard holds both directions:
+# a refusing case without it fails, a marked case that does not refuse fails.
+
+_UNRESOLVABLE = pytest.mark.expects_unresolvable_endpoint
+#: callers that build the nexus storage clients themselves, so every refusal raises in the child
+STORAGE_CLIENTS = frozenset({"nx_subprocess", "nx_t3_vector_client", "t2_prefix_scan_hook", "mcp_t2_construction"})
+#: the wheel drain and the doctor probe resolve through the same primitive but stop earlier for some kinds
+#: and legs; these are the (kind, leg) cases where each one raises it
+_REFUSED_BY_DRAIN = frozenset({
+    ("saved_service_token_with_url", "url_decoy"), ("saved_service_token_no_url", "url_real"),
+    ("saved_service_token_no_url", "url_decoy"), ("supervisor_lease", "url_decoy"), ("supervisor_lease", "hostport_decoy"),
+})
+_REFUSED_BY_DOCTOR = _REFUSED_BY_DRAIN - {("supervisor_lease", "url_decoy"), ("supervisor_lease", "hostport_decoy")}
+
+
+def _refuses(caller: str, kind: str, leg: str) -> bool:
+    if caller in STORAGE_CLIENTS:
+        # an env host and port that names no lease leaves a saved token alone: nothing is resolved, nothing refused
+        return not _env_names_the_bound_origin(kind, leg) and not (kind == "saved_service_token_with_url" and leg in HOSTPORT_LEGS)
+    if caller == "drain_wheel_verb":
+        return (kind, leg) in _REFUSED_BY_DRAIN
+    if caller == "doctor_whoami_probe":
+        return (kind, leg) in _REFUSED_BY_DOCTOR
+    return False  # the plugin drain and the routing poster are stdlib: they construct no nexus error
+
+
+#: the T3 client reads /version from whatever answers; a 3xx, or a recording proxy standing in for the engine,
+#: is not a conformant engine, and the client raises ManagedServiceIncompatible (a guarded error) in the child
+
+
+def _marks(refuses: bool) -> tuple[pytest.MarkDecorator, ...]:
+    return (_UNRESOLVABLE,) if refuses else ()
+
+
 def _matrix() -> list[pytest.param]:
     params = []
     for caller in CALLERS:
@@ -358,7 +409,7 @@ def _matrix() -> list[pytest.param]:
             for leg in caller.legs:
                 if leg in HOSTPORT_LEGS and kind not in ("supervisor_lease", "saved_service_token_with_url"):
                     continue  # an env host and port never reaches a credential that is not a lease or a saved token
-                params.append(pytest.param(caller, kind, leg, id=f"{caller.name}-{kind}-{leg}"))
+                params.append(pytest.param(caller, kind, leg, id=f"{caller.name}-{kind}-{leg}", marks=_marks(_refuses(caller.name, kind, leg))))
     return params
 
 
@@ -390,6 +441,104 @@ def test_a_decoy_gets_no_credential_and_the_bound_origin_does(tmp_path, real, de
 
 
 
+def _redirect_matrix() -> list[pytest.param]:
+    params = []
+    for caller in CALLERS:
+        for kind in caller.kinds:
+            if kind == "saved_service_token_no_url":
+                continue  # bound to the managed default: it goes nowhere on this box
+            for code in (302, 307):
+                params.append(pytest.param(caller, kind, code, id=f"{caller.name}-{kind}-{code}", marks=_marks(caller.name == "nx_t3_vector_client")))
+    return params
+
+
+@pytest.mark.parametrize(("caller", "kind", "code"), _redirect_matrix())
+def test_a_redirect_from_the_bound_origin_carries_no_credential_to_the_decoy(tmp_path, real, decoy, caller, kind, code):
+    """The bound origin answers 302 / 307 to the decoy (a compromised or misconfigured origin, or one an
+    attacker can make redirect): urllib would copy ``Authorization`` to the target, so every opener that
+    carries a bearer follows none, and httpx follows none by default. The decoy sees nothing from any caller."""
+    KINDS[kind].store(tmp_path, real)
+    real.redirect_to, real.redirect_code = decoy.url, code
+    env = _leg_env("url_real", real, decoy)
+    if caller.name == "mint_armed_bearer_for":
+        env = {**env, "_NX_TEST_REAL_URL": real.url}
+    proc = caller.run(tmp_path, env)
+    expected = KINDS[kind].header if kind not in caller.sends_nothing_for else None
+    if caller.after is not None:
+        caller.after(tmp_path, real, decoy, expected is not None)
+    context = (proc.returncode, proc.stdout[-400:], proc.stderr[-400:], real.requests, decoy.requests)
+    assert decoy.requests == [] and decoy.auth == [], context  # not the credential, and not the request at all
+    if expected is not None and not (caller.name == "mint_armed_bearer_for" and kind == "data_token_lease"):
+        assert expected in real.auth or "Bearer minted-data-token" in real.auth or caller.name == "mint_armed_bearer_for", context  # non-vacuity: it was sent to the bound origin
+
+
+# ── a planted config directory: the design's claim that one directory serves each caller ──
+#
+# A repository's env can point a caller's config directory elsewhere (``NEXUS_CONFIG_DIR``, or a
+# ``HOME`` that holds ``.config/nexus``) at a directory the repository planted, with its own
+# ``config.yml`` naming the decoy and carrying its own token. The claim: a caller reads ONE directory,
+# so the user's real credential (in the directory the planted one replaced) is never read and so never
+# sent anywhere, and the planted token goes only where the planted config binds it (the decoy it names).
+# ``XDG_CONFIG_HOME`` is not read at all, so a config planted there is inert.
+
+PLANTED = "Bearer PLANTED-TOKEN"
+_PLANT_VARIANTS = ("NEXUS_CONFIG_DIR", "HOME", "XDG_CONFIG_HOME")
+_PLANT_CALLERS = tuple(
+    c for c in CALLERS
+    if c.name in ("nx_subprocess", "nx_t3_vector_client", "drain_wheel_verb", "drain_plugin_script", "t2_prefix_scan_hook", "mcp_t2_construction", "routing_telemetry_poster")
+)
+
+
+def _write_config(directory: Path, credentials: dict[str, str]) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "config.yml"
+    path.write_text(yaml.safe_dump({"credentials": credentials}), encoding="utf-8")
+    restrict_to_owner(path)
+
+
+def _wait_for_either(tmp_path: Path, real: _Server, decoy: _Server) -> None:
+    """The routing poster is a detached child: wait for a request to either server, or for its drop record."""
+    dropped = tmp_path / "dropped.jsonl"
+    settle(
+        lambda: not (real.auth or decoy.auth or (dropped.exists() and dropped.read_text(encoding="utf-8"))),
+        what="the poster child's POST or drop record",
+    )
+
+
+@pytest.mark.parametrize("variant", _PLANT_VARIANTS)
+@pytest.mark.parametrize("caller", _PLANT_CALLERS, ids=lambda c: c.name)
+def test_a_planted_config_dir_never_gets_the_users_credential(tmp_path, real, decoy, caller, variant):
+    home = tmp_path / "home"
+    _write_config(home / ".config" / "nexus", {"service_url": real.url, "service_token": "SAVED-SERVICE-TOKEN"})  # the user's own
+    planted = tmp_path / "planted"
+    planted_config = {"service_url": decoy.url, "service_token": "PLANTED-TOKEN"}
+    env: dict[str, str] = {"HOME": str(home), "USERPROFILE": str(home), "NEXUS_CONFIG_DIR": ""}
+    if variant == "NEXUS_CONFIG_DIR":
+        _write_config(planted, planted_config)
+        env["NEXUS_CONFIG_DIR"] = str(planted)
+    elif variant == "HOME":
+        _write_config(planted / ".config" / "nexus", planted_config)
+        env["HOME"] = env["USERPROFILE"] = str(planted)
+    else:
+        _write_config(planted / "nexus", planted_config)
+        env["XDG_CONFIG_HOME"] = str(planted)
+    proc = caller.run(tmp_path, env)
+    if caller.after is not None:
+        _wait_for_either(tmp_path, real, decoy)
+    context = (proc.returncode, proc.stdout[-300:], proc.stderr[-300:], real.requests, decoy.requests)
+
+    assert SAVED not in decoy.auth + real.auth or variant == "XDG_CONFIG_HOME", context  # the user's own is never read from a planted dir
+    assert SAVED not in decoy.auth, context  # and never reaches the decoy, whichever way the repository points the caller
+    assert set(decoy.auth) <= {PLANTED}, context  # the decoy gets at most the token the planted config itself carries
+    assert PLANTED not in real.auth, context  # which is never spent at the user's real service
+    if variant == "XDG_CONFIG_HOME":
+        assert decoy.requests in ([], [("/version", None)]), context  # an XDG dir is not read: nothing names the decoy
+    else:
+        assert real.auth == [], context  # the real service sees nothing from a caller pointed at the planted dir
+        if caller.name == "nx_subprocess":
+            assert PLANTED in decoy.auth, context  # non-vacuity: the planted config was read, so the absences above are about the user's token
+
+
 # ── the two accepted residuals (Sam's ruling 4, 2026-11-26; T2 nexus/sam-ruling-ec37o-token-host-binding-2026-11-26) ──
 #
 # These are KNOWN LIMITS, pinned so a change to either is a decision and not an accident.
@@ -416,23 +565,56 @@ def test_residual_one_an_exported_mint_token_travels_with_the_env_url(tmp_path, 
     assert "Bearer exported-mint" in decoy.auth, (proc.stdout, proc.stderr[-400:], decoy.requests)
 
 
-@pytest.mark.parametrize("caller", CALLERS, ids=lambda c: c.name)
+@pytest.mark.parametrize("caller", [pytest.param(c, id=c.name, marks=_marks(c.name in STORAGE_CLIENTS)) for c in CALLERS])
 def test_residual_two_an_env_url_with_no_credential_is_sent_no_credential(tmp_path, real, decoy, caller):
     """Residual two as Sam accepted it: an env URL with no token still lets a repository-chosen
     host be named. On this tree no caller builds an authenticated or row-reading request to it
     without a credential (the mailbox drain, the T2 prefix scan, the MCP server and ``nx`` stop at
-    "not resolvable"). The one request that does go out is the T3 client's unauthenticated
-    ``GET /version`` compatibility probe, whose answer only decides an error message. The ruling kept
-    this as a documented limit rather than a detector; this pins the boundary as it stands, so a
-    caller that starts sending a read to the env URL turns the residual real and fails here first."""
+    "not resolvable"). Of the callers in this matrix the one request that goes out is the T3 client's
+    unauthenticated ``GET /version`` compatibility probe; the other unauthenticated probes that read the
+    env URL (the managed-endpoint probe, ``serving_engine_version``, ``nx doctor``'s ``/version`` and
+    ``/health``) are held by the probe test below. What a probe reads can steer what it reports (the
+    T3 client takes ``embedding_mode`` and capability flags from ``/version``), which the docs name. The
+    ruling kept this as a documented limit rather than a detector; this pins the boundary as it stands,
+    so a caller that starts sending a read to the env URL turns the residual real and fails here first."""
     env = {"NX_SERVICE_URL": decoy.url}
     if caller.name == "mint_armed_bearer_for":
         env["_NX_TEST_REAL_URL"] = real.url
-    caller.run(tmp_path, env)
+    proc = caller.run(tmp_path, env)
     if caller.after is not None:
         caller.after(tmp_path, real, decoy, False)
     allowed = [("/version", None)] if caller.name == "nx_t3_vector_client" else []
-    assert decoy.requests == allowed and real.requests == []
+    assert decoy.requests == allowed and real.requests == [], (proc.returncode, proc.stdout[-300:], proc.stderr[-600:])
+
+
+def _probe_managed_service(url: str) -> None:
+    from nexus.db.managed_endpoint import probe_managed_service  # noqa: PLC0415 -- this probe only
+
+    try:
+        probe_managed_service(base_url=url, timeout=5.0)
+    except Exception:  # noqa: BLE001 -- an incompatible or unreachable answer is fine; what was SENT is asserted
+        pass
+
+
+def _probe_serving_engine_version(url: str) -> None:
+    from nexus.db.serving_engine_version import probe_serving_engine_version  # noqa: PLC0415 -- this probe only
+
+    probe_serving_engine_version()
+
+
+@pytest.mark.real_engine_probe  # conftest stubs the serving-engine probe unless asked not to
+@pytest.mark.parametrize("probe", [_probe_managed_service, _probe_serving_engine_version], ids=lambda f: f.__name__.removeprefix("_probe_"))
+def test_residual_two_the_other_unauthenticated_probes_reach_the_env_url_with_no_credential(tmp_path, decoy, monkeypatch, probe):
+    """The probes besides the T3 client's read ``/version`` from the env URL, so a repository that names a
+    host steers what they report; none of them builds an Authorization header, even with a stored credential
+    beside them."""
+    _save(tmp_path, {"service_url": decoy.url, "service_token": "SAVED-SERVICE-TOKEN", "mint_token": "SAVED-MINT-TOKEN"})
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(_config_dir(tmp_path)))
+    monkeypatch.setenv("NX_SERVICE_URL", decoy.url)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    probe(decoy.url)
+    assert any(path.startswith("/version") for path in decoy.paths), decoy.requests  # it did reach the env URL: the residual is real
+    assert decoy.auth == [], decoy.requests  # and carried no credential
 
 
 # ── transport rules (step 5): no bearer in the clear off this machine, no proxy for a lease token ──
@@ -515,8 +697,16 @@ def _cleartext_case(tmp_path: Path, server: _Server, source: str) -> dict[str, s
 _CLEARTEXT_SOURCES = ("exported_token", "saved_token_and_url", "saved_mint_and_url", "exported_mint")
 
 
-@pytest.mark.parametrize("source", _CLEARTEXT_SOURCES)
-@pytest.mark.parametrize("caller", [c for c in CALLERS if c.name != "mint_armed_bearer_for"], ids=lambda c: c.name)
+def _cleartext_refuses(caller: str, source: str) -> bool:
+    if caller in STORAGE_CLIENTS:
+        return True
+    return caller in ("drain_wheel_verb", "doctor_whoami_probe") and source in ("exported_token", "saved_token_and_url")
+
+
+@pytest.mark.parametrize(
+    ("caller", "source"),
+    [pytest.param(c, src, id=f"{c.name}-{src}", marks=_marks(_cleartext_refuses(c.name, src))) for c in CALLERS if c.name != "mint_armed_bearer_for" for src in _CLEARTEXT_SOURCES],
+)
 def test_no_bearer_over_plain_http_to_a_host_that_is_not_this_machine(tmp_path, off_machine, caller, source):
     env = _cleartext_case(tmp_path, off_machine, source)
     proc = caller.run(tmp_path, env)
@@ -530,7 +720,7 @@ def test_no_bearer_over_plain_http_to_a_host_that_is_not_this_machine(tmp_path, 
         assert off_machine.off_machine_url.split("//")[1] not in output, output[-400:]  # names the source, never the URL
 
 
-@pytest.mark.parametrize("source", _CLEARTEXT_SOURCES)
+@pytest.mark.parametrize("source", [pytest.param(src, marks=_marks(src in ("saved_mint_and_url", "exported_mint"))) for src in _CLEARTEXT_SOURCES])
 def test_no_mint_credential_over_plain_http_to_a_host_that_is_not_this_machine(tmp_path, off_machine, source):
     env = _cleartext_case(tmp_path, off_machine, source)
     caller = next(c for c in CALLERS if c.name == "mint_armed_bearer_for")
@@ -551,7 +741,7 @@ def _proxy_matrix() -> list[pytest.param]:
         if caller.name in ("doctor_whoami_probe", "mint_armed_bearer_for"):
             continue  # neither carries a lease token
         for leg in ("bare", "url_real", "hostport_real"):
-            params.append(pytest.param(caller, leg, id=f"{caller.name}-{leg}"))
+            params.append(pytest.param(caller, leg, id=f"{caller.name}-{leg}", marks=_marks(caller.name == "nx_t3_vector_client" and leg == "url_real")))
     return params
 
 
@@ -574,7 +764,7 @@ def test_a_lease_token_never_goes_through_a_proxy(tmp_path, real, decoy, caller,
     assert LEASE in real.auth, context
 
 
-@pytest.mark.parametrize("caller", _TOKEN_CALLERS, ids=lambda c: c.name)
+@pytest.mark.parametrize("caller", [pytest.param(c, id=c.name, marks=_marks(c.name == "nx_t3_vector_client")) for c in _TOKEN_CALLERS])
 def test_an_exported_token_at_a_plain_http_url_never_goes_through_a_proxy(tmp_path, real, decoy, caller):
     """The env-token leg of the same rule: the bearer goes straight to the engine whatever proxy is named."""
     proc = caller.run(tmp_path, {"NX_SERVICE_URL": real.url, "NX_SERVICE_TOKEN": "exported-by-the-user", **_proxy_env(decoy)})
@@ -586,7 +776,7 @@ def test_an_exported_token_at_a_plain_http_url_never_goes_through_a_proxy(tmp_pa
     assert EXPORTED in real.auth, context
 
 
-@pytest.mark.parametrize("caller", _TOKEN_CALLERS, ids=lambda c: c.name)
+@pytest.mark.parametrize("caller", [pytest.param(c, id=c.name, marks=_marks(c.name == "nx_t3_vector_client")) for c in _TOKEN_CALLERS])
 def test_an_https_engine_behind_a_proxy_is_tunnelled_without_the_bearer(tmp_path, decoy, caller):
     """https keeps using a configured proxy, and the proxy sees a CONNECT with no credential in it."""
     proc = caller.run(tmp_path, {"NX_SERVICE_URL": "https://engine.example:8443", "NX_SERVICE_TOKEN": "exported-by-the-user", **_proxy_env(decoy)})
@@ -608,7 +798,7 @@ def _no_secret_anywhere(tmp_path: Path, proc: subprocess.CompletedProcess[str], 
 _PASSWORD = "S3CR3T-PASSWORD"
 
 
-@pytest.mark.parametrize("caller", [c for c in CALLERS if c.name != "doctor_whoami_probe"], ids=lambda c: c.name)
+@pytest.mark.parametrize("caller", [pytest.param(c, id=c.name, marks=_marks(c.name == "mint_armed_bearer_for")) for c in CALLERS if c.name != "doctor_whoami_probe"])
 def test_a_url_with_userinfo_is_refused_for_a_bearer_and_its_password_is_never_written(tmp_path, real, caller):
     """A URL ``normalize_origin`` cannot read (user:password@) gets no bearer, and nothing echoes the password."""
     url = f"http://user:{_PASSWORD}@127.0.0.1:{real.port}"
@@ -622,7 +812,7 @@ def test_a_url_with_userinfo_is_refused_for_a_bearer_and_its_password_is_never_w
     _no_secret_anywhere(tmp_path, proc, _PASSWORD)
 
 
-@pytest.mark.parametrize("caller", [c for c in CALLERS if c.name in ("nx_subprocess", "drain_wheel_verb", "drain_plugin_script")], ids=lambda c: c.name)
+@pytest.mark.parametrize("caller", [pytest.param(c, id=c.name, marks=_marks(c.name != "drain_plugin_script")) for c in CALLERS if c.name in ("nx_subprocess", "drain_wheel_verb", "drain_plugin_script")])
 def test_an_env_host_that_is_not_this_machine_gets_no_bearer_and_the_refusal_names_the_source(tmp_path, off_machine, caller):
     """NX_SERVICE_HOST / NX_SERVICE_PORT naming a plain-http host off the machine, with an exported token."""
     host = off_machine.off_machine_url.split("//")[1].rsplit(":", 1)[0]
@@ -633,7 +823,7 @@ def test_an_env_host_that_is_not_this_machine_gets_no_bearer_and_the_refusal_nam
     assert f"{host}:{off_machine.port}" not in output and host not in output, output[-400:]
 
 
-@pytest.mark.parametrize("caller", [c for c in CALLERS if c.name in ("nx_subprocess", "drain_wheel_verb", "drain_plugin_script")], ids=lambda c: c.name)
+@pytest.mark.parametrize("caller", [pytest.param(c, id=c.name, marks=_marks(c.name != "drain_plugin_script")) for c in CALLERS if c.name in ("nx_subprocess", "drain_wheel_verb", "drain_plugin_script")])
 def test_a_data_token_lease_for_a_plain_http_host_off_the_machine_is_not_sent(tmp_path, off_machine, caller):
     url = off_machine.off_machine_url
     _save(tmp_path, {"service_url": url, "mint_token": "SAVED-MINT-TOKEN"})
