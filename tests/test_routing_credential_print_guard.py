@@ -224,6 +224,24 @@ def test_the_projects_text_is_only_added_to_the_refusal(tmp_path: pathlib.Path) 
     assert HELPER_TEXT in reason.split("\n\nMatched:")[0]
 
 
+def test_the_projects_text_is_introduced_by_its_label_on_a_line_of_its_own(tmp_path: pathlib.Path) -> None:
+    """RDR-259 Decision 2: the helper is the project's text, labelled as such and never in the guard's own voice."""
+    project = _checkout(tmp_path / "project", helper=HELPER_TEXT)
+    lines = _reason(_run(DENIED_SHAPES[0][1], cwd=project)).split("\n\nMatched:")[0].split("\n")
+    assert len(lines) == 2, lines
+    assert lines[1] == f"This project's `.nexus/project.json` adds (project text, not this guard's): {HELPER_TEXT}"
+
+
+def test_the_projects_text_is_cleaned_before_it_is_printed(tmp_path: pathlib.Path) -> None:
+    root = tmp_path / "project"
+    (root / ".git").mkdir(parents=True)
+    (root / ".nexus").mkdir()
+    (root / ".nexus" / "project.json").write_text(
+        json.dumps({"version": 1, "credential_helper": "use tools/cred.sh\u202e now"}), encoding="utf-8")
+    lines = _reason(_run(DENIED_SHAPES[0][1], cwd=str(root))).split("\n\nMatched:")[0].split("\n")
+    assert lines[1].endswith("(project text, not this guard's): use tools/cred.sh now"), lines
+
+
 def test_a_forced_error_in_a_plain_checkout_still_denies_with_the_neutral_wording(tmp_path: pathlib.Path) -> None:
     proc = _drive_forced_error('security find-generic-password -s "Claude Code-credentials" -w', cwd=_checkout(tmp_path / "u"))
     reason = json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]

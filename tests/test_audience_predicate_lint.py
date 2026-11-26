@@ -15,8 +15,8 @@ For every hook script under ``conexus/hooks/scripts/`` that imports ``_audience`
 2. the handler binds each imported name to a fallback that answers in the safe
    direction: ``"strict"`` for ``guard_mode`` and ``True`` for ``t1_nudge_enabled`` (tightening or adding),
    ``False`` for ``telemetry_enabled``, an empty set for ``advice_blocked`` and ``remote_test_hosts``, ``None`` for
-   ``project_text`` and an empty list for ``project_brief_questions`` (all loosening or adding nothing), ``None`` for the
-   note writer;
+   ``project_text``, ``provenance_label`` and ``integration_branch`` and an empty list for the brief-question readers (all
+   loosening or adding nothing), an empty string for ``clean_text``, ``None`` for the note writers;
 3. every call to a predicate sits in a covered function: one handed to
    ``_lib.run_hook`` or ``never_fail``, one whose own ``try`` holds the call
    (a standalone ``main()``), or one only ever called from covered functions.
@@ -41,6 +41,11 @@ SAFE_ANSWER: dict[str, object] = {
     "t1_nudge_enabled": True,
     "project_text": None,
     "project_brief_questions": "emptylist",
+    "user_brief_questions": "emptylist",
+    "provenance_label": None,
+    "clean_text": "",
+    "integration_branch": None,
+    "note_problems": None,
     "advice_blocked": "empty",
     "remote_test_hosts": "empty",
     "note_hook_error": None,

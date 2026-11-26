@@ -208,7 +208,7 @@ _SUBAGENT_START_BUDGET_BYTES = 11850
 _SUBAGENT_START_WORKTREE_BUDGET_BYTES = 13950
 
 
-def _seeded_env(home: Path, cwd: str | None) -> dict[str, str]:
+def _seeded_env(home: Path, cwd: str | None, user_settings: dict | None = None) -> dict[str, str]:
     """The subprocess env with both live-state sections seeded (nexus-wxe50).
 
     The Knowledge Map cache is keyed exactly as
@@ -236,7 +236,7 @@ def _seeded_env(home: Path, cwd: str | None) -> dict[str, str]:
     # An account with strict user settings, under a home of its own (the seam prelude names it).
     settings = home / "acct" / ".config" / "nexus" / "conexus.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text(json.dumps({"subagent_git": "strict"}), encoding="utf-8")
+    settings.write_text(json.dumps(user_settings or {"subagent_git": "strict"}), encoding="utf-8")
     # USERPROFILE: Windows' home for expanduser; NEXUS_CONFIG_DIR: the
     # directory the hook reads the cache from (nexus-3fme8).
     return {
@@ -267,9 +267,10 @@ def _assert_seeds_reached(conexus_ctx: str) -> None:
 
 
 def _run_conexus(
-    *, home: Path, cwd: str | None = None, payload: str = _REAL_SHAPE_PAYLOAD, timeout: float = 15
+    *, home: Path, cwd: str | None = None, payload: str = _REAL_SHAPE_PAYLOAD, timeout: float = 15,
+    user_settings: dict | None = None,
 ) -> str:
-    env = _seeded_env(home, cwd)
+    env = _seeded_env(home, cwd, user_settings)
     result = subprocess.run(
         [sys.executable, "-c", _CONEXUS_PY_DRIVER],
         input=payload,

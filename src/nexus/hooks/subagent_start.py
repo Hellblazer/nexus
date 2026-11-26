@@ -79,14 +79,18 @@ from nexus.hooks import subagent_work
 
 __all__ = ["run"]
 
-# Settings the injected text reads (stdlib only): the guard's mode, the project's preflight command and extra brief
-# questions. ``guard_mode`` tightens (it adds the Git row), so an import failure binds it to "strict"; the project text
-# only adds, so a failure gives none.
+# Settings the injected text reads (stdlib only): the guard's mode, the project's preflight command and the extra brief
+# questions of the project and the user. ``guard_mode`` tightens (it adds the Git row), so an import failure binds it to
+# "strict"; the settings texts only add, so a failure gives none. Each text is printed after its Provenance label
+# (RDR-259 Decision 2), which ``provenance_label`` builds, and cleaned by ``clean_text``.
 try:
     from nexus.hooks._audience import (
+        clean_text as _clean_text,
         guard_mode as _guard_mode,
         project_brief_questions as _project_brief_questions,
         project_text as _project_text,
+        provenance_label as _provenance_label,
+        user_brief_questions as _user_brief_questions,
     )
 except BaseException:  # noqa: BLE001
     def _guard_mode(payload: object) -> str:
@@ -97,6 +101,15 @@ except BaseException:  # noqa: BLE001
 
     def _project_brief_questions(payload: object) -> "list[str]":
         return []
+
+    def _user_brief_questions(payload: object = None) -> "list[str]":
+        return []
+
+    def _provenance_label(key: str, source: str, value: "str | None" = None) -> "str | None":
+        return None
+
+    def _clean_text(text: object, limit: int = 60) -> str:
+        return ""
 
 # -- Classification regexes (verbatim; see module docstring) -----------------
 
@@ -206,13 +219,10 @@ def _orchestration(payload: dict) -> str:
 def _worktree_preflight_row(payload: dict) -> str:
     """The Preflight row: only when the project's settings name a ``preflight`` command, which a worktree agent runs first."""
     command = _project_text(payload, "preflight")
-    if not command:
+    label = _provenance_label("preflight", "project", command) if command else None
+    if not label:
         return ""
-    return (
-        "| Preflight | If dispatched with isolation:worktree: run "
-        f"`{command}` as your FIRST action; stop and report if it prints "
-        "PREFLIGHT_FAIL or exits non-zero |\n"
-    )
+    return f"| Preflight | For an isolation:worktree dispatch: {label} |\n"
 
 
 #: nexus-mtheb: the T1 contract, first in every injection, review and code-nav
@@ -309,6 +319,8 @@ _BRIEF_CHECK_HEAD = (
     "ask the dispatcher) and put the answers at the top of your hand-back. If "
     "you cannot resolve one, stop and report it; do not guess.\n"
 )
+#: The longest an added question may be (RDR-259 Decision 2); a longer one is already rejected when the file is read.
+_BRIEF_QUESTION_BYTES = 160
 _BRIEF_Q_CONSUMERS = (
     "Consumers: every caller and consumer of what you change, by name, and "
     "which of them filter, re-rank or page AFTER it.\n"
@@ -331,8 +343,18 @@ _BRIEF_Q_STATE = (
 def _brief_check(payload: dict) -> str:
     """The brief check for an implementer dispatch: the four generic questions, then the project's own, numbered."""
     questions = [_BRIEF_Q_CONSUMERS, _BRIEF_Q_FINAL_POINT, _BRIEF_Q_BOUNDS, _BRIEF_Q_STATE]
-    questions += [q if q.endswith("\n") else q + "\n" for q in _project_brief_questions(payload)]
-    return _BRIEF_CHECK_HEAD + "".join(f"{n}. {q}" for n, q in enumerate(questions, 1))
+    out = _BRIEF_CHECK_HEAD + "".join(f"{n}. {q}" for n, q in enumerate(questions, 1))
+    n = len(questions)
+    # The project's questions, then the user's, each list after the label that names its file (Decision 2), numbered on.
+    for source, extra in (("project", _project_brief_questions(payload)), ("user", _user_brief_questions(payload))):
+        label = _provenance_label("brief_questions", source) if extra else None
+        if not label:
+            continue
+        out += label + "\n"
+        for q in extra:
+            n += 1
+            out += f"{n}. {_clean_text(q, _BRIEF_QUESTION_BYTES)}\n"
+    return out
 
 #: GitHub #1656 (2026-11-13): the "Sequential Thinking" section is no longer injected. With it in the hook's
 #: output, subagents were stopped by the API's safety classifier ([reasoning_extraction]); on the reporter's machine
