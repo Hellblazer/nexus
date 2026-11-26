@@ -507,10 +507,18 @@ def test_a_saved_service_url_and_token_are_usable(endpoint: Path) -> None:
 
 @pytest.mark.t2_tenant
 def test_a_service_url_with_a_lease_token_is_usable(endpoint: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NX_SERVICE_URL", "https://example.invalid")
+    monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:4599")
     _lease(monkeypatch)
     assert setup_tools.usable_service() is True
     _lease(monkeypatch, token=None)
+    assert setup_tools.usable_service() is False
+
+
+@pytest.mark.t2_tenant
+def test_a_lease_token_is_not_usable_for_a_service_url_of_another_origin(endpoint: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The supervisor lease token goes only to its own lease origin (nexus-ec37o)."""
+    monkeypatch.setenv("NX_SERVICE_URL", "https://example.invalid")
+    _lease(monkeypatch)
     assert setup_tools.usable_service() is False
 
 
