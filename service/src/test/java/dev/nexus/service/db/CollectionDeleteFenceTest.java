@@ -519,6 +519,16 @@ class CollectionDeleteFenceTest {
         return new String[] {origin, sibling};
     }
 
+    /**
+     * PostgreSQL looks for a cycle in the backend that has waited a {@code deadlock_timeout} (1 s), and ends THAT backend: the first to wait, once the
+     * cycle exists. The delete is parked first, so a mover released at once would find itself the second waiter and the delete the victim (its own
+     * belt then retries it, and the mover is never ended). Held past the timeout, the delete's check finds no cycle yet, and the mover, waiting second and
+     * checking last, is the victim: the case the mover's retry is for.
+     */
+    private static void waitPastTheDeadlockTimeout() throws InterruptedException {
+        TimeUnit.MILLISECONDS.sleep(2_500);
+    }
+
     private static void await(java.util.concurrent.CountDownLatch latch) {
         try {
             if (!latch.await(60, TimeUnit.SECONDS)) throw new IllegalStateException("the latch was never released");
@@ -565,6 +575,7 @@ class CollectionDeleteFenceTest {
             Future<Map<String, Integer>> delete = pool.submit(() -> catalog.deleteCollectionById(T, origin, originId, false));
             assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%catalog_collections%"))
                 .as("the delete holds the sibling and waits for the origin the mover key-shares").isTrue();
+            waitPastTheDeadlockTimeout();
             proceed.countDown();
 
             delete.get(90, TimeUnit.SECONDS);
@@ -615,6 +626,7 @@ class CollectionDeleteFenceTest {
             Future<Map<String, Integer>> delete = pool.submit(() -> catalog.deleteCollectionById(T, origin, originId, false));
             assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%catalog_collections%"))
                 .as("the delete holds the sibling and waits for the origin the rename holds").isTrue();
+            waitPastTheDeadlockTimeout();
             proceed.countDown();
 
             delete.get(90, TimeUnit.SECONDS);

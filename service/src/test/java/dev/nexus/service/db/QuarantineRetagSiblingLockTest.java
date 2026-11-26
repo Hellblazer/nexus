@@ -10,6 +10,7 @@ import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -37,7 +38,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class QuarantineRetagSiblingLockTest extends AtomicWriteTestBase {
 
-    private final ExecutorService pool = Executors.newCachedThreadPool();
+    private ExecutorService pool;
+
+    @BeforeEach
+    void startPool() {
+        pool = Executors.newCachedThreadPool();
+    }
 
     @AfterEach
     void stopPool() {
