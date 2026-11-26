@@ -569,11 +569,16 @@ def test_first_creation_logs_one_attributing_event_and_writes_it_to_the_file(
     assert json.loads(lines[0]) == {k: v for k, v in ev.items() if k not in ("event", "log_level")}
 
 
-def test_no_token_or_credential_reaches_the_event_or_the_lock_file(tmp_path: Path) -> None:
+def test_no_token_or_credential_reaches_the_event_or_the_lock_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The mint path carries a credential, a minted token and a base URL with
     a token in its userinfo and query. None of them may reach the creation
     event or the lock file (the endpoint is host:port, not the netloc)."""
     url = "http://user:tok-URLSECRET@127.0.0.1:9999/p?token=tok-QUERYSECRET"
+    # the transport rule refuses a URL with userinfo for a bearer (tests/db/test_token_transport_rules.py);
+    # here the URL is the input whose secrets must stay out of the event and the lock file
+    monkeypatch.setattr(data_token, "require_secure_transport", lambda url, **kw: None)
     with structlog.testing.capture_logs() as captured:
         assert _manager(tmp_path).bearer_for(url, TENANT) == "tok-SECRET"
     ev = next(e for e in captured if e["event"] == "data_token_mint_lock_created")

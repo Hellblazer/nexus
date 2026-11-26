@@ -153,7 +153,7 @@ def discover_lease() -> tuple[str | None, str | None]:
             token = str(ep.get("token", "")) or None
             if port > 0:
                 _has_ever_resolved_lease = True
-                return f"http://{host}:{port}", token
+                return host_port_url(host, port), token
     except Exception as exc:  # discovery is best-effort; absence fails loud above  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         _log.debug("service_endpoint_lease_discover_failed", error=str(exc))
     return None, None
@@ -409,6 +409,18 @@ def recover_endpoint_from_lease(
     return None
 
 
+def host_port_url(host: object, port: object) -> str:
+    """``http://host:port`` for a host the environment or a lease names, an IPv6 literal bracketed.
+
+    The one spelling of that URL: the CLI's and the plugin's copies are held to the same AST
+    (``tests/hooks/test_origin_binding_parity.py``), so an IPv6 lease or env host reads as the
+    same origin on both sides."""
+    shown = str(host)
+    if ":" in shown and not shown.startswith("["):
+        shown = f"[{shown}]"
+    return f"http://{shown}:{port}"
+
+
 def env_host_port_url() -> str | None:
     """``http://{host}:{port}`` from the NX_SERVICE_HOST/PORT env halves, or None.
 
@@ -430,7 +442,7 @@ def env_host_port_url() -> str | None:
             f"NX_SERVICE_PORT must be an integer, got: {port_str!r}"
         ) from exc
     host = os.environ.get("NX_SERVICE_HOST", "").strip() or "127.0.0.1"
-    return f"http://{host}:{port}"
+    return host_port_url(host, port)
 
 
 def _supervisor_registered_for_login() -> bool:
@@ -493,6 +505,8 @@ def resolve_service_config(
             ) from exc
 
     host, token = env_host or None, env_token or None
+    lease_url: str | None = None
+    lease_token: str | None = None
     if port is None or token is None or host is None:
         lease_url, lease_token = discover_lease_with_wait(
             budget_s=wait_budget_s, poll_interval_s=poll_interval_s, clock=clock, sleep=sleep
@@ -503,8 +517,22 @@ def resolve_service_config(
             parsed = urlsplit(lease_url)
             host = host or parsed.hostname
             port = port if port is not None else parsed.port
-        token = token or lease_token
     host = host or "127.0.0.1"
+    if token is None and lease_token and port is not None:
+        # nexus-ec37o: the lease token is the supervisor's, issued for the
+        # lease's own origin. An env host or port that names another origin
+        # (NX_SERVICE_HOST alone keeps the lease port, but not its host) does
+        # not get it.
+        picked, refused = choose_bound_token(
+            host_port_url(host, port), [(lease_token, "the supervisor lease token", lease_url)],
+        )
+        if picked is None:
+            raise CredentialOriginMismatchError(mismatch_message(describe_url_source(), refused))
+        token = picked[0]
+    if token and port is not None:
+        # nexus-ec37o: this leg is always plain http, so a bearer (an env token or the lease
+        # token alike) goes only to a loopback host. A LAN or docker engine needs https.
+        require_secure_transport(host_port_url(host, port))
 
     if port is None or not token:
         # RDR-155 P4b: the nexus-0rwwv migration-hint bridge died with the
@@ -532,6 +560,302 @@ def resolve_service_config(
             "NX_SERVICE_HOST) explicitly."
         )
     return host, port, token
+
+
+# ── Credential-origin binding (nexus-ec37o) ─────────────────────────────────
+#
+# A repository's .claude/settings.json env reaches every hook, the MCP server
+# and every nx the model runs (RDR-259 research 27), so the URL half of an
+# endpoint is attacker-choosable. A credential kept in the account's own store
+# is therefore sent only to the origin it was issued for:
+#
+#   * a saved ``service_token`` / ``mint_token``: the origin of the ``service_url``
+#     saved in the same config.yml, else DEFAULT_MANAGED_SERVICE_URL (the wizard
+#     writes the pair together);
+#   * the supervisor lease token: the lease's own endpoint (http://127.0.0.1:port);
+#   * an env ``NX_SERVICE_TOKEN`` / ``NX_MINT_TOKEN``: unbound. The user exported
+#     it themselves, so it goes with whatever URL they named. The two residual
+#     limits (an env URL beside a user-exported token, and an env URL with no
+#     token reading a repository-chosen host's rows) are documented in
+#     docs/configuration.md and accepted (Sam 2026-11-26).
+#
+# Bindings are derived at read time from files already on disk; nothing is
+# rewritten at boot. ``conexus/hooks/scripts/_endpoint_resolve.py`` carries a
+# stdlib-only mirror of the pure functions below (normalize_origin,
+# origins_equal, is_loopback_host, choose_bound_token, the two messages);
+# tests/hooks/test_origin_binding_parity.py holds the two to one table.
+
+#: Where the managed multitenant service lives by default; the origin a saved
+#: credential with no saved ``service_url`` is bound to.
+DEFAULT_MANAGED_SERVICE_URL = "https://api.conexus-nexus.com"
+
+_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+
+
+class CredentialOriginMismatchError(ServiceTokenUnresolvableError):
+    """Every credential on hand was issued for another origin than the URL in
+    use. Subclasses :class:`ServiceTokenUnresolvableError`, so a caller that
+    treats "no token resolvable" as final (and never waits) treats this the
+    same. The message names the credential source and the fix, never the URL."""
+
+
+class InsecureServiceTransportError(ServiceTokenUnresolvableError):
+    """A bearer would travel over plain http to a host that is not this machine."""
+
+
+def normalize_origin(url: str) -> tuple[str, str, int] | None:
+    """``(scheme, host, port)`` of an http(s) URL, or ``None`` when it does not
+    name one this module can compare safely.
+
+    The scheme and host are lowercased, one trailing dot is dropped from the
+    host, an IPv6 literal loses its brackets, and the default ports 80/443 are
+    filled in. ``localhost`` stays ``localhost``: it is NOT 127.0.0.1 (macOS and
+    Windows resolve it to ::1 first, and another local account can bind
+    ``[::1]:<port>``). Hand-parsed so the plugin's stdlib mirror is the same
+    text: a backslash, ``@``, ``%``, whitespace, control or non-ASCII character
+    in the authority, an empty port, or a port outside 1-65535 yields ``None``
+    (two HTTP stacks can read such a URL as different hosts, and a credential
+    is never bound to a host the two might disagree on)."""
+    if not isinstance(url, str):
+        return None
+    scheme, sep, rest = url.strip().partition("://")
+    scheme = scheme.lower()
+    if not sep or scheme not in _DEFAULT_PORTS:
+        return None
+    authority = rest
+    for stop in "/?#":
+        authority = authority.split(stop, 1)[0]
+    if not authority or any(c in "@\\%" or not "!" <= c <= "~" for c in authority):
+        return None
+    if authority.startswith("["):
+        host, close, tail = authority[1:].partition("]")
+        if not close or ":" not in host or (tail and not tail.startswith(":")):
+            return None
+        port_text, has_port = tail[1:], bool(tail)
+    else:
+        host, colon, port_text = authority.rpartition(":") if ":" in authority else (authority, "", "")
+        has_port = bool(colon)
+        if ":" in host:
+            return None
+    if has_port and not (port_text.isascii() and port_text.isdigit() and 1 <= int(port_text) <= 65535):
+        return None
+    host = host.lower()
+    if host.endswith("."):
+        host = host[:-1]
+    if not host:
+        return None
+    return scheme, host, int(port_text) if has_port else _DEFAULT_PORTS[scheme]
+
+
+def origins_equal(a: str | None, b: str | None) -> bool:
+    """True when both URLs normalize and their origins are equal."""
+    left = normalize_origin(a) if a else None
+    right = normalize_origin(b) if b else None
+    return left is not None and left == right
+
+
+def is_loopback_host(host: str) -> bool:
+    """``localhost`` or a loopback IP literal. For the cleartext rule only:
+    origin equality never treats ``localhost`` as a loopback address."""
+    import ipaddress  # noqa: PLC0415 — deferred: stdlib, only the cleartext check needs it
+
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def no_redirect_handler() -> Any:
+    """A urllib handler that follows no redirect: the 3xx answer surfaces as an ``HTTPError``.
+
+    urllib copies ``Authorization`` to a redirect's target, so a bound origin that answers 3xx
+    (or an attacker who can make it) would carry the credential to any host, and an https
+    origin to plain http. Every urllib opener that carries a bearer includes this handler
+    (nexus-ec37o); httpx follows nothing by default, and a lint pins that no bearer client
+    turns it on. The plugin mirror is ``conexus/hooks/scripts/_endpoint_resolve.py``.
+    """
+    import urllib.request  # noqa: PLC0415 — deferred: stdlib, only a caller that builds an opener needs it
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    return _NoRedirect()
+
+
+def bound_origin_for_saved(saved_service_url: str | None) -> str:
+    """The origin a saved credential was issued for."""
+    return (saved_service_url or "").strip().rstrip("/") or DEFAULT_MANAGED_SERVICE_URL
+
+
+def choose_bound_token(
+    url: str, candidates: list[tuple[str, str, str | None]],
+) -> tuple[tuple[str, str] | None, list[str]]:
+    """First usable candidate for *url*: ``((value, source), refused_sources)``.
+
+    A candidate is ``(value, source, bound_url)``; ``bound_url`` ``None`` means
+    unbound (an env token). A candidate whose bound origin differs from *url*'s
+    is skipped and its source recorded in the second element."""
+    refused: list[str] = []
+    for value, source, bound in candidates:
+        if not value:
+            continue
+        if bound is None or origins_equal(bound, url):
+            return (value, source), refused
+        refused.append(source)
+    return None, refused
+
+
+def mismatch_message(url_source: str, refused: list[str]) -> str:
+    return (
+        f"{url_source} names a service that {' and '.join(refused)} was not issued for, "
+        "so that credential is not sent there. Export NX_SERVICE_TOKEN for this service, or "
+        "point it at the service the credential belongs to (`nx config set service_url`)."
+    )
+
+
+def insecure_message(url_source: str) -> str:
+    return (
+        f"{url_source} is plain http to a host that is not this machine, and a bearer token is "
+        "not sent over that. Use an https URL (or a loopback address for a local service)."
+    )
+
+
+def describe_url_source() -> str:
+    """A fixed label for where the URL in use came from, in the resolvers' order."""
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+    if os.environ.get("NX_SERVICE_URL", "").strip():
+        return "NX_SERVICE_URL"
+    if (get_credential("service_url") or "").strip():
+        return "the saved service_url"
+    if os.environ.get("NX_SERVICE_HOST", "").strip() or os.environ.get("NX_SERVICE_PORT", "").strip():
+        return "NX_SERVICE_HOST / NX_SERVICE_PORT"
+    return "the service URL"
+
+
+def require_secure_transport(url: str, *, url_source: str | None = None) -> None:
+    """Raise :class:`InsecureServiceTransportError` unless a bearer may travel to *url*:
+    https, or http to a loopback host. A URL that does not normalize is refused too."""
+    origin = normalize_origin(url)
+    if origin is not None and (origin[0] == "https" or is_loopback_host(origin[1])):
+        return
+    raise InsecureServiceTransportError(insecure_message(url_source or describe_url_source()))
+
+
+def bearer_proxy_for(url: str, proxy: str) -> str | None:
+    """*proxy* (the ``network.https_proxy`` of ``config.yml``) for a bearer request to *url*, else ``None``.
+
+    Only an https endpoint may use a proxy. A plain-http request is sent direct whatever the
+    configuration names: a proxy would read its ``Authorization`` header, and the supervisor
+    lease token (loopback http only, by its binding) travels that way. A URL that does not
+    normalize gets no proxy either. The proxy comes from ``config.yml`` and never from the
+    environment (see :mod:`nexus.db.t2.bearer_transport`); the plugin's mirror of this function is
+    ``_endpoint_resolve.bearer_proxy_for`` (nexus-ec37o)."""
+    origin = normalize_origin(url)
+    return proxy if proxy and origin is not None and origin[0] == "https" else None
+
+
+def _stored_credential(name: str) -> tuple[str, str, str | None] | None:
+    """``(value, source, bound_url)`` for a credential in ``get_credential`` precedence
+    (env, then config.yml), or ``None``. An env value is unbound; a saved one is bound to
+    the saved ``service_url`` (else the default managed endpoint)."""
+    from nexus.config import CREDENTIALS, get_credential, nexus_config_dir, persisted_credentials  # noqa: PLC0415 — deferred to avoid circular import
+
+    value = (get_credential(name) or "").strip()
+    if not value:
+        return None
+    env_var = CREDENTIALS.get(name, name.upper())
+    if os.environ.get(env_var, ""):
+        return value, env_var, None
+    saved = persisted_credentials(nexus_config_dir())
+    return value, f"the saved {name}", bound_origin_for_saved(saved.get("service_url"))
+
+
+def select_service_token(
+    url: str,
+    *,
+    lease: Callable[[], tuple[str | None, str | None]] | None = None,
+    allow_mint: bool = True,
+    url_source: str | None = None,
+) -> tuple[str, str] | None:
+    """The bearer for *url*: ``(token, source)``, ``("", "mint_token")`` when only a
+    mint credential applies, or ``None`` when no credential of any kind is set.
+
+    Order is the resolvers' own: the env or saved ``service_token``, then the supervisor
+    lease token, then (when *allow_mint*) a mint credential. Each stored credential is
+    used only for the origin it was issued for (see the section comment). When credentials
+    exist but every one was issued elsewhere this raises
+    :class:`CredentialOriginMismatchError`; a token that would travel over cleartext
+    http off this machine raises :class:`InsecureServiceTransportError`. *lease* returns
+    ``(lease_url, lease_token)`` (default :func:`discover_lease`; the vector client passes
+    its cached read)."""
+    candidates: list[tuple[str, str, str | None]] = []
+    stored = _stored_credential("service_token")
+    if stored is not None:
+        candidates.append(stored)
+    picked, refused = choose_bound_token(url, candidates)
+    if picked is None:
+        lease_url, lease_token = (lease or discover_lease)()
+        if lease_token:
+            picked, more = choose_bound_token(
+                url, [(lease_token, "the supervisor lease token", lease_url)],
+            )
+            refused += more
+    if picked is None and allow_mint:
+        minted = _stored_credential("mint_token")
+        if minted is not None:
+            mint_pick, more = choose_bound_token(url, [minted])
+            refused += more
+            if mint_pick is not None:
+                require_secure_transport(url, url_source=url_source)
+                return "", "mint_token"
+    if picked is None:
+        if refused:
+            raise CredentialOriginMismatchError(mismatch_message(url_source or describe_url_source(), refused))
+        return None
+    require_secure_transport(url, url_source=url_source)
+    return picked
+
+
+def bound_static_service_token(url: str) -> tuple[str, str]:
+    """``(token, refusal)`` for a caller that sends only the static ``service_token`` (no
+    lease token, no mint credential) to *url*, such as a doctor probe or a health gate.
+
+    *token* is ``""`` when none applies. *refusal* is ``""`` unless a token is set but
+    was issued for another origin, or would travel over cleartext off this machine; it
+    is then the named error's message (the source and the fix, never the URL)."""
+    try:
+        picked = select_service_token(url, lease=lambda: (None, None), allow_mint=False)
+    except ServiceTokenUnresolvableError as exc:
+        return "", str(exc)
+    return (picked[0] if picked else ""), ""
+
+
+#: warnings already logged by this process (see :func:`bound_mint_credential`); tests clear it
+_WARNED_ONCE: set[str] = set()
+
+
+def bound_mint_credential(url: str) -> str | None:
+    """The mint credential for *url*, or ``None`` when none is configured or the one
+    configured was issued for another origin (it is then not sent; the caller falls back
+    to its static token, which :func:`select_service_token` already checked). A credential
+    that applies but would travel over cleartext off this machine raises
+    :class:`InsecureServiceTransportError`."""
+    stored = _stored_credential("mint_token")
+    if stored is None:
+        return None
+    picked, _ = choose_bound_token(url, [stored])
+    if picked is None:
+        # once per process: bearer_for runs on every request, and the same refusal each time is noise
+        if "mint_credential_origin_mismatch" not in _WARNED_ONCE:
+            _WARNED_ONCE.add("mint_credential_origin_mismatch")
+            _log.warning("mint_credential_origin_mismatch", source=stored[1])
+        return None
+    require_secure_transport(url)
+    return picked[0]
 
 
 def mint_armed() -> bool:
@@ -585,32 +909,34 @@ def resolve_service_endpoint(
     call. This is the bead's "never for the managed-cloud URL path" contract
     enforced structurally rather than by a caller-side guard.
     """
-    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import get_service_url  # noqa: PLC0415 — deferred to avoid circular import
 
     url = get_service_url() or None
     if url is not None:
-        token = (get_credential("service_token") or "").strip() or None
-        if token is None:
-            _, token = discover_lease()  # deliberately NOT discover_lease_with_wait — see docstring
-        if not token and mint_armed():
+        # nexus-ec37o: each stored credential goes only to the origin it was
+        # issued for (select_service_token), so a URL from the environment
+        # cannot pull the saved or lease token to another host. The lease read
+        # stays the unwrapped, non-waiting discover_lease (see docstring).
+        picked = select_service_token(url)
+        if picked is not None and picked[1] == "mint_token":
             # nexus-xzeml: a mint-armed box authenticates with data tokens
             # the stores mint per request; it needs no static bearer, and
             # demanding one forced such boxes to keep a revoked token in
             # config.yml as a placeholder. Token-admin verbs, which refuse
             # data tokens, then send no bearer and get a named 401.
             return url, ""
-        if not token:
+        if picked is None:
             raise ServiceTokenUnresolvableError(
                 "service_url is set but no service_token is resolvable (neither "
                 "NX_SERVICE_TOKEN env, config.yml, nor supervisor lease): set it "
                 "with `nx config set service_token <bearer>` (or export "
                 "NX_SERVICE_TOKEN) and re-run."
             )
-        return url, token
+        return url, picked[0]
     host, port, token = resolve_service_config(
         wait_budget_s=wait_budget_s, poll_interval_s=poll_interval_s, clock=clock, sleep=sleep
     )
-    return f"http://{host}:{port}", token
+    return host_port_url(host, port), token
 
 
 def is_endpoint_env_pinned() -> bool:

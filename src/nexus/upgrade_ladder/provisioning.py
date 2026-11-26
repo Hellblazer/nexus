@@ -305,9 +305,18 @@ def establish_verified_service(
     # (ez5.1, the engine contract).
     health_token: str | None = None
     if prov.service_url.startswith("https://"):
-        from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.db.service_endpoint import bound_static_service_token  # noqa: PLC0415 — deferred to avoid import cycle
 
-        health_token = (get_credential("service_token") or "").strip() or None
+        # nexus-ec37o: the saved token goes only to the origin it was issued for.
+        bearer, refused = bound_static_service_token(prov.service_url)
+        if refused:
+            reason = f"the bearer for the storage service health gate was refused: {refused}"
+            _log.warning("guided_upgrade_not_ready", stage="health", reason=reason)
+            return ServiceReadiness(
+                ready=False, service_url=None, reason=reason,
+                version_ok=False, provision=prov, health=None,
+            )
+        health_token = bearer or None
 
     health = _health(
         service_url=prov.service_url, timeout_s=timeout_s, interval_s=interval_s,
@@ -525,8 +534,8 @@ def wait_for_service_health(
             import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
             headers = {"Authorization": f"Bearer {token}"} if token else {}
-            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
-            return httpx.get(url, timeout=timeout, headers=headers, verify=get_shared_ssl_context())
+            from nexus.db.t2.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+            return httpx.get(url, timeout=timeout, headers=headers, **bearer_httpx_kwargs(url))  # nexus-ec37o: a health probe may carry the bearer
 
     url = service_url.rstrip("/") + "/health"
     req_timeout = max(0.1, min(interval_s, 5.0)) if interval_s > 0 else 1.0

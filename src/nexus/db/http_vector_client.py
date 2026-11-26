@@ -307,6 +307,12 @@ def _warn_skip_existing_deprecated() -> None:
 #      refused so clients ride through supervisor auto-restarts).
 #   4. FAIL LOUD. The legacy hardcoded localhost default is retired — a
 #      silent wrong-port fallback is a correctness hazard.
+#
+# The token half is bound to the URL half (nexus-ec37o): a saved
+# ``service_token`` or the lease token goes only to the origin it was issued
+# for (``service_endpoint.select_service_token``), so an env URL no longer
+# pairs with a lease or saved token (the old "mixed source"); only an exported
+# ``NX_SERVICE_TOKEN`` travels with whatever URL was named.
 
 _endpoint_lock = threading.Lock()
 #: Cached (base_url, token) from the LEASE only — env halves are read fresh.
@@ -331,18 +337,35 @@ def _discover_lease() -> tuple[str | None, str | None]:
     return discover_lease()
 
 
+def _cached_lease() -> tuple[str | None, str | None]:
+    """The lease ``(url, token)``, discovered once and cached (``(None, None)``
+    on a miss, which is never cached)."""
+    global _lease_cache
+    with _endpoint_lock:
+        if _lease_cache is None:
+            discovered = _discover_lease()
+            if discovered[0] is not None:
+                # Cache ONLY on success: a (None, None) miss must not
+                # stick, or a client started before the supervisor would
+                # never discover it (dual-review S1).
+                _lease_cache = discovered  # type: ignore[assignment]
+        return _lease_cache or (None, None)
+
+
 def _resolve_endpoint() -> tuple[str, str]:
     """Return ``(base_url, token)`` per the resolution order above."""
-    global _lease_cache
     # env FIRST, then the persisted config.yml credential (RDR-166 nexus-v3p0x:
     # a greenfield managed user who ran `nx config set service_url/service_token`
     # must reach a resolvable endpoint with no env exported). get_credential
     # encodes env>config.yml precedence, so an exported env var still wins.
-    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.config import get_service_url  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.db.service_endpoint import (  # noqa: PLC0415 — deferred to avoid circular import
+        ServiceEndpointUnresolvableError,
+        env_host_port_url,
+        select_service_token,
+    )
 
-    env_url = get_service_url() or None
-    env_token = (get_credential("service_token") or "").strip() or None
-    url, token = env_url, env_token
+    url = get_service_url() or None
     if url is None:
         # nexus-edwlp: honor the NX_SERVICE_HOST/PORT env halves (T2 parity —
         # resolve_service_config has always read them; the vector path
@@ -350,39 +373,21 @@ def _resolve_endpoint() -> tuple[str, str]:
         # with only host/port/token exported). Env wins over the lease, the
         # documented T2 trade-off; the 401/refused single retry corrects a
         # stale env against a restarted supervisor.
-        from nexus.db.service_endpoint import env_host_port_url  # noqa: PLC0415 — deferred to avoid circular import
-
         url = env_host_port_url()
-    if url is None or token is None:
-        with _endpoint_lock:
-            if _lease_cache is None:
-                discovered = _discover_lease()
-                if discovered[0] is not None:
-                    # Cache ONLY on success: a (None, None) miss must not
-                    # stick, or a client started before the supervisor would
-                    # never discover it (dual-review S1).
-                    _lease_cache = discovered  # type: ignore[assignment]
-            lease_url, lease_token = _lease_cache or (None, None)
-        url = url or lease_url
-        token = token or lease_token
-        # "credential" = env-or-config.yml (get_credential precedence); the
-        # source here is "configured" vs "lease", not specifically env.
-        if env_url is not None and token is lease_token and token is not None:
-            _log.debug(
-                "vector_endpoint_mixed_source", url_source="credential", token_source="lease"
-            )
-        elif env_token is not None and url is lease_url and url is not None:
-            _log.debug(
-                "vector_endpoint_mixed_source", url_source="lease", token_source="credential"
-            )
-    if env_url is not None and token is None:
-        # nexus-xzeml: a mint-armed box needs no static bearer; the
-        # data token minted per request (see the bearer_for override
-        # below) authenticates every T3 call.
-        from nexus.db.service_endpoint import mint_armed  # noqa: PLC0415 — deferred to avoid circular import
-
-        if mint_armed():
-            token = ""
+    if url is None:
+        url = _cached_lease()[0]
+    token: str | None = None
+    if url is not None:
+        # nexus-ec37o: each stored credential goes only to the origin it was
+        # issued for, so an env URL beside a lease or saved token no longer
+        # pairs them (the old "mixed source" shape). ``lease`` is this module's
+        # cached read, so a restarted supervisor is still picked up.
+        picked = select_service_token(url, lease=_cached_lease)
+        if picked is not None:
+            # A mint-armed box needs no static bearer (nexus-xzeml): the data
+            # token minted per request (see the bearer_for override below)
+            # authenticates every T3 call.
+            token = picked[0]
     if url is None or token is None:
         # RDR-155 P4b: the nexus-0rwwv migration-hint bridge died with the
         # migration module; stranded pre-PG installs are redirected by the
@@ -390,8 +395,6 @@ def _resolve_endpoint() -> tuple[str, str]:
         # nexus-sis0m.1: the named not-resolvable type (a RuntimeError
         # subclass, so existing catchers still match) lets the CLI render
         # it as one line instead of a traceback.
-        from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred to avoid circular import
-
         raise ServiceEndpointUnresolvableError(
             "nexus-service endpoint is not resolvable: T3 vector serving "
             "routes through the nexus-service HTTP API (RDR-155 Phase 4a — "
