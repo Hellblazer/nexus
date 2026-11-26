@@ -1303,8 +1303,8 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     token wherever one exists, mirroring the real client's
     ``DataTokenManager.bearer_for``.
     """
-    from nexus.config import persisted_credentials  # noqa: PLC0415 — deferred: a drain with no address never resolves
-    from nexus.db.data_token import DataTokenManager  # noqa: PLC0415 — deferred, same reason
+    from nexus.db.data_token import DataTokenManager  # noqa: PLC0415 — deferred: a drain with no address never resolves
+    from nexus.db.service_endpoint import ServiceTokenUnresolvableError, discover_lease, select_service_token  # noqa: PLC0415 — deferred, same reason
 
     base_url, is_local = _resolve_base_url()
 
@@ -1321,24 +1321,31 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     if data_token:
         return base_url, data_token, is_local
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
-    if not token:
-        token = persisted_credentials(config_dir).get("service_token", "").strip()
-    if not token:
-        # Through the accessor, never off the raw lease record: it
-        # refuses a lease file that is not owner-only, because the token it
-        # carries authorizes real engine writes and a group- or world-readable
-        # lease means another local account could have read it too. The lease
-        # filename carries the service identity (uid on POSIX, SID on Windows).
+    # Each stored credential goes only to the origin it was issued for (nexus-ec37o): the URL
+    # above may come from a repository's env. The lease token is read through the accessor,
+    # never off the raw lease record: it refuses a lease file that is not owner-only, because
+    # the token it carries authorizes real engine writes and a group- or world-readable lease
+    # means another local account could have read it too. A refused credential is a _Skip
+    # naming the source, never the URL.
+    def _lease() -> tuple[str | None, str | None]:
+        lease_url, _ = discover_lease()
+        if lease_url is None:
+            return None, None
         try:
-            token = _read_local_supervisor_token(config_dir).strip()
+            return lease_url, _read_local_supervisor_token(config_dir).strip() or None
         except _Skip:
-            token = ""
-    if not token:
+            return lease_url, None
+
+    try:
+        picked = select_service_token(base_url, lease=_lease, allow_mint=False)
+    except ServiceTokenUnresolvableError as exc:
+        raise _Skip(str(exc)) from exc
+    if picked is None:
         raise _Skip(
             f"resolved {log_endpoint(base_url)} but found no credential: no data-token lease, no "
             "NX_SERVICE_TOKEN, no persisted service_token, no local supervisor lease",
         )
+    token, _source = picked
     return base_url, token, is_local
 
 

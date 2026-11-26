@@ -477,6 +477,21 @@ def _read_config_yml_credentials(config_dir: pathlib.Path) -> dict:
     return _ep.read_config_yml_credentials(config_dir)
 
 
+def _bound_token(config_dir: pathlib.Path, url: str, saved: dict, lease: dict | None) -> str:
+    """The bearer for *url*, or ``""`` when no credential applies or the only ones were issued for
+    another origin (nexus-ec37o): a saved ``service_token`` goes only to the saved ``service_url`` (else
+    the default managed endpoint), the lease token only to the lease's own endpoint. An env
+    ``NX_SERVICE_TOKEN`` is unbound. Never raises: a refusal is "unresolvable", which the caller meters.
+
+    RDR-259's nexus-sby49.10 (``pinned_endpoint`` / ``telemetry_child_env``, on another branch) pins this
+    path's destination further; the binding here is the credential-side check that holds either way."""
+    try:
+        picked = _ep.select_service_token(config_dir, url, saved=saved, lease=lease)
+    except _ep.EndpointUnresolvable:
+        return ""
+    return picked[0] if picked else ""
+
+
 def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
     """``(base_url, token)`` for the nexus-service engine, or
     ``(None, None)`` when nothing is resolvable. Never raises.
@@ -519,14 +534,8 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
         data_token = _read_data_token_lease(config_dir, url)
         if data_token:
             return url, data_token
-        token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
-        if not token:
-            token = yaml_creds.get("service_token", "").strip()
-        if not token:
-            token = lease["token"] if lease else ""
-        if not token:
-            return None, None
-        return url, token
+        token = _bound_token(config_dir, url, yaml_creds, lease)
+        return (url, token) if token else (None, None)
 
     port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
     if port_str:
@@ -539,12 +548,9 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
         data_token = _read_data_token_lease(config_dir, url)
         if data_token:
             return url, data_token
-        token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or (
-            lease["token"] if lease else ""
-        )
-        if not token:
-            return None, None
-        return url, token
+        # This leg never read the saved service_token; an empty ``saved`` keeps it so.
+        token = _bound_token(config_dir, url, {}, lease)
+        return (url, token) if token else (None, None)
 
     if lease is not None:
         url = f"http://{lease['host']}:{lease['port']}"
