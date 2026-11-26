@@ -20,7 +20,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.hooks.audience_harness import plain_repo, strict_repo, write_user_settings
+
 REPO_ROOT = Path(__file__).parent.parent
+HARNESS = REPO_ROOT / "tests" / "hooks" / "audience_harness.py"
 SCRIPT = REPO_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "destructive_action_advice.py"
 
 _spec = importlib.util.spec_from_file_location("destructive_action_advice", SCRIPT)
@@ -458,20 +461,18 @@ def test_the_branch_delete_advice_is_neutral() -> None:
     assert "one `git branch -D <name>` at a time" in advice
 
 
-def test_a_deny_mode_is_the_maintainers_only() -> None:
-    """U8b (D6): never for users. Whatever mode is set, a call that is not the maintainer's is advised."""
+def test_a_row_blocks_only_when_its_id_is_listed() -> None:
+    """D6 (re-ruled in nexus-sby49.4): every row warns; a row blocks only if the project's or the user's ``advice_block`` lists it."""
     row = daa.ROWS[0]
-    assert daa.row_mode(row, "deny", maintainer=False) == "advise"
-    assert daa.row_mode(row, "deny", maintainer=True) == "deny"
-    assert daa.row_mode(daa.Row("x", "s", row.tools, row.predicate, "a", mode="deny"), None, maintainer=False) == "advise"
+    assert daa.row_mode(row) == "advise"
+    assert daa.row_mode(row, frozenset({"another_row"})) == "advise"
+    assert daa.row_mode(row, frozenset({row.id})) == "deny"
 
 
-def test_advise_is_the_mode_and_no_row_denies_today() -> None:
-    assert daa.MODE == "advise"
-    assert all(r.mode in (None, "advise") for r in daa.ROWS)
+def test_no_row_denies_by_default_and_the_mode_switches_are_gone() -> None:
     assert all(daa.row_mode(r) == "advise" for r in daa.ROWS)
-    assert daa.row_mode(daa.ROWS[0], "deny") == "deny", "the switch exists"
-    assert daa.row_mode(daa.ROWS[0], "bogus") == "advise", "an unknown mode is advise"
+    assert not hasattr(daa, "MODE") and not hasattr(daa.Row, "mode")
+    assert all(r.audience == "EVERY-USER" for r in daa.ROWS)
 
 
 def test_a_crashing_predicate_is_no_match(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -503,39 +504,36 @@ def _env(tmp_path: Path) -> dict[str, str]:
     return env
 
 
-def _run(payload_text: str, tmp_path: Path, *, mode: str | None = None, home: Path | None = None) -> subprocess.CompletedProcess:
-    """*home*: the account home the audience helper reads, through its in-process seam (this machine's own account may
-    carry the maintainer flag, and no environment variable moves it)."""
-    if mode is None:
-        argv = [sys.executable, str(SCRIPT)]
-    else:
-        driver = (
-            "import importlib.util, sys\n"
-            "s = importlib.util.spec_from_file_location('daa', sys.argv[1])\n"
-            "m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
-            "m.MODE = sys.argv[2]\n"
-            "if len(sys.argv) > 3:\n"
-            "    sys.path.insert(0, m._SCRIPTS)\n"
-            "    import _audience\n"
-            "    _audience._ACCOUNT_HOME_OVERRIDE = sys.argv[3]\n"
-            "m.main()\n"
-        )
-        argv = [sys.executable, "-c", driver, str(SCRIPT), mode, *([str(home)] if home else [])]
+def _run(payload_text: str, tmp_path: Path, *, settings: dict | None = None, home: Path | None = None) -> subprocess.CompletedProcess:
+    """Run the hook through ``tests/hooks/audience_harness.py`` with an account home of its own: *settings* are the user's
+    ``conexus.json`` (this machine's own account may carry one, and no environment variable moves it)."""
+    home = home or tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    if settings is not None:
+        write_user_settings(home, **settings)
     return subprocess.run(
-        argv, input=payload_text, capture_output=True, text=True, timeout=30, env=_env(tmp_path),
+        [sys.executable, str(HARNESS), str(home), str(SCRIPT)],
+        input=payload_text, capture_output=True, text=True, timeout=30, env=_env(tmp_path),
     )
 
 
 def test_a_match_advises_with_context_and_no_decision(tmp_path: Path) -> None:
-    proc = _run(json.dumps(_payload("pkill -f pytest")), tmp_path)
+    proc = _run(json.dumps(_payload("pkill -f pytest")), tmp_path, settings={"telemetry": True})
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)["hookSpecificOutput"]
     assert out["hookEventName"] == "PreToolUse"
-    assert "permissionDecision" not in out, "advise mode never decides"
+    assert "permissionDecision" not in out, "a row that is not listed never decides"
     assert "[pattern_kill]" in out["additionalContext"]
     assert "kill <pid>" in out["additionalContext"], "the safe alternative rides along"
     log = (tmp_path / "cfg" / "dropped_writes.jsonl").read_text()
     assert '"rule":"destructive_action_advice"' in log and '"outcome":"advise_pattern_kill"' in log
+
+
+def test_a_match_records_nothing_unless_the_user_turned_telemetry_on(tmp_path: Path) -> None:
+    proc = _run(json.dumps(_payload("pkill -f pytest")), tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "[pattern_kill]" in json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert not (tmp_path / "cfg" / "dropped_writes.jsonl").exists()
 
 
 def test_two_matching_rows_share_one_envelope(tmp_path: Path) -> None:
@@ -583,39 +581,44 @@ def test_the_fast_path_imports_neither_the_framework_nor_shlex(tmp_path: Path) -
     assert _imports_after(_payload("pkill -f x"), tmp_path) >= {"_lib", "shlex"}, "a match does import them"
 
 
-def test_deny_mode_is_implemented_but_not_active(tmp_path: Path) -> None:
+def test_a_listed_row_blocks_with_the_escape_clause(tmp_path: Path) -> None:
     payload = json.dumps(_payload("pkill -f pytest"))
     advise = json.loads(_run(payload, tmp_path).stdout)["hookSpecificOutput"]
     assert "permissionDecision" not in advise
 
-    out = json.loads(_run(payload, tmp_path, mode="deny").stdout)["hookSpecificOutput"]
+    listed = {"advice_block": ["pattern_kill"], "telemetry": True}
+    out = json.loads(_run(payload, tmp_path, settings=listed).stdout)["hookSpecificOutput"]
     assert out["permissionDecision"] == "deny"
     assert "[pattern_kill]" in out["permissionDecisionReason"]
-    assert "routing-allow" in out["permissionDecisionReason"], "deny mode carries the escape clause"
+    assert "routing-allow" in out["permissionDecisionReason"], "a block carries the escape clause"
 
     escaped = json.dumps(_payload("pkill -f pytest  # routing-allow: user said to stop my own run"))
-    proc = _run(escaped, tmp_path, mode="deny")
-    assert proc.returncode == 0 and proc.stdout == "", "a valid escape lets the call through in deny mode"
+    proc = _run(escaped, tmp_path, settings=listed)
+    assert proc.returncode == 0 and proc.stdout == "", "a valid escape lets the call through"
     log = (tmp_path / "cfg" / "dropped_writes.jsonl").read_text()
     assert '"outcome":"escape"' in log and '"outcome":"deny"' in log
 
 
-def test_deny_mode_never_denies_a_users_checkout(tmp_path: Path) -> None:
-    """U8b end to end: the same deny-mode run that denies in the nexus checkout only advises in a user's repository."""
-    user = tmp_path / "user-repo"
-    (user / ".git").mkdir(parents=True)
-    payload = json.dumps(_payload("pkill -f pytest", cwd=str(user)))
-    home = tmp_path / "home"
-    home.mkdir()
-    proc = _run(payload, tmp_path, mode="deny", home=home)
-    assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)["hookSpecificOutput"]
-    assert "permissionDecision" not in out and "[pattern_kill]" in out["additionalContext"]
-    flag = home / ".config" / "nexus" / "maintainer-profile"
-    flag.parent.mkdir(parents=True)
-    flag.write_text("")
-    flagged = json.loads(_run(payload, tmp_path, mode="deny", home=home).stdout)["hookSpecificOutput"]
-    assert flagged["permissionDecision"] == "deny", "the maintainer's account still gets the flip"
+def test_only_the_listed_row_blocks(tmp_path: Path) -> None:
+    cmd = "git branch --list 'x-*' | xargs git branch -D | wc -l ; pkill -f y"
+    out = json.loads(_run(json.dumps(_payload(cmd)), tmp_path, settings={"advice_block": ["pattern_kill"]}).stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    reason = out["permissionDecisionReason"]
+    assert "[pattern_kill]" in reason and "[branch_bulk_delete]" in reason, "the blocked call still carries every matched row's advice"
+
+
+def test_a_project_lists_rows_and_the_user_lists_add_to_it(tmp_path: Path) -> None:
+    """The project's tracked ``advice_block`` and the user's own list are added together; a plain account and project block nothing."""
+    project = tmp_path / "project"
+    strict_repo(project, advice_block=["pattern_kill"])
+    payload = json.dumps(_payload("pkill -f pytest", cwd=str(project)))
+    assert json.loads(_run(payload, tmp_path).stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    plain = tmp_path / "plain"
+    plain_repo(plain)
+    other = json.dumps(_payload("pkill -f pytest", cwd=str(plain)))
+    assert "permissionDecision" not in json.loads(_run(other, tmp_path).stdout)["hookSpecificOutput"]
+    user = _run(other, tmp_path, settings={"advice_block": ["pattern_kill"]})
+    assert json.loads(user.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 # ---- wiring ---------------------------------------------------------------------------------
@@ -639,20 +642,20 @@ def test_the_registry_names_the_rule_and_it_is_fail_open() -> None:
     assert "fail_closed: false" in block
 
 
-def test_a_broken_audience_helper_keeps_a_deny_a_deny(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``maintainer`` tightens (a deny stays a deny), so a helper that fails to import binds it to True (nexus-sby49.4)."""
+def test_a_broken_audience_helper_leaves_every_row_advising(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The block list loosens (a listed row blocks), so a helper that fails to import binds it to the empty set (nexus-sby49.4)."""
     monkeypatch.setitem(sys.modules, "_audience", None)  # an import of it now raises ImportError
-    assert daa._is_maintainer(_payload("ls")) is True
+    assert daa._blocked_rows(_payload("ls")) == frozenset()
 
 
-def test_a_helper_that_raises_also_gives_the_maintainer_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_helper_that_raises_also_leaves_every_row_advising(monkeypatch: pytest.MonkeyPatch) -> None:
     import types
 
     broken = types.ModuleType("_audience")
 
-    def boom(payload: object) -> bool:
+    def boom(payload: object) -> frozenset:
         raise RuntimeError("no account database")
 
-    broken.maintainer = boom  # type: ignore[attr-defined]
+    broken.advice_blocked = boom  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "_audience", broken)
-    assert daa._is_maintainer(_payload("ls")) is True
+    assert daa._blocked_rows(_payload("ls")) == frozenset()

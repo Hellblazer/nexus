@@ -18,14 +18,10 @@ spawns under ONE shared deadline of :data:`DEADLINE_S` seconds, and once that
 is spent the answer is "no match". The ``_lib`` framework (and its telemetry)
 is imported only after a row has matched.
 
-MODE. :data:`MODE` is ``"advise"``: a matched call gets the advice as
-``additionalContext`` and NO permission decision (the ordinary permission flow
-decides, exactly like ``_lib.warn``). The hook never denies in this mode. The
-flip to ``"deny"`` is the one line below (or a per-row ``mode=``); the deny
-path is implemented and pinned by tests but is not active. In deny mode the
-usual ``# routing-allow: <reason>`` escape applies to Bash calls. A deny applies only
-when ``_audience.maintainer`` is true for the call (nexus-sby49.4, U8b, D6): for anyone
-else every row stays advice, whatever mode is set.
+BLOCKING. Every row advises: a matched call gets the advice as ``additionalContext`` and NO permission decision (the
+ordinary permission flow decides, exactly like ``_lib.warn``). A row blocks (denies) only when its id is listed in the
+``advice_block`` setting of the project's ``.nexus/project.json`` or of the user's ``conexus.json``; a project can only add
+rows to that list. In deny the usual ``# routing-allow: <reason>`` escape applies to Bash calls.
 
 FALSE POSITIVES only advise, but the predicates are written to keep them rare:
 the command is split on unquoted ``; & | newline``, each segment is tokenised
@@ -58,9 +54,6 @@ RULE_NAME = "destructive_action_advice"
 
 #: Seconds, from the start of the call, that ALL spawns together may take.
 DEADLINE_S = 2.0
-
-#: "advise" (never denies) or "deny". The one-line flip.
-MODE = "advise"
 
 _EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit"})
 _BASH = frozenset({"Bash"})
@@ -821,9 +814,7 @@ class Row(NamedTuple):
     predicate: Callable[[Ctx], bool]
     advice: str
     hints: tuple[str, ...] | None = None  # cheap gate for Bash: one must occur in the command
-    mode: str | None = None  # None = :data:`MODE`
-    #: Who the row fires for (nexus-sby49.3): EVERY-USER, NEXUS-REPO or SAM-WIDE, in ``conexus/hooks/audience.yaml``'s
-    #: vocabulary. Every row advises for everyone today (U8a); the planned per-row deny flip (U8b, D6) is the maintainer's.
+    #: Who the row fires for, in ``conexus/hooks/audience.yaml``'s vocabulary: every row, for every user.
     audience: str = "EVERY-USER"
 
 
@@ -946,41 +937,35 @@ def decide(payload: dict) -> list[Hit]:
     return hits
 
 
-def row_mode(row: Row, mode: str | None = None, *, maintainer: bool = True) -> str:
-    """The mode *row* runs in: its own, else *mode*, else :data:`MODE`; anything unknown is advise.
-
-    ``deny`` is the maintainer's only (nexus-sby49.4, U8b, D6): a call that is not the maintainer's is advised
-    whatever mode is set, so the flip, when it is made row by row, can never reach a user."""
-    m = row.mode or mode or MODE
-    if m == "deny" and not maintainer:
-        return "advise"
-    return m if m in ("advise", "deny") else "advise"
+def row_mode(row: Row, blocked: "frozenset[str] | set[str]" = frozenset()) -> str:
+    """``"deny"`` when *row*'s id is in *blocked* (the project's and the user's ``advice_block``), else ``"advise"``."""
+    return "deny" if row.id in blocked else "advise"
 
 
-def _is_maintainer(payload: dict) -> bool:
-    """``_audience.maintainer`` for *payload*; True when the helper is missing or fails (it tightens: a deny stays a deny)."""
+def _blocked_rows(payload: dict) -> "frozenset[str]":
+    """The advice row ids the project or the user listed to block; empty when the helper is missing or fails (a row advises)."""
     try:
         sys.path.insert(0, _SCRIPTS)
         try:
-            from _audience import maintainer as _maintainer  # noqa: PLC0415 -- only a deny-mode hit pays for it
+            from _audience import advice_blocked as _advice_blocked  # noqa: PLC0415 -- only a matched call pays for it
         except BaseException:  # noqa: BLE001
-            def _maintainer(payload: object) -> bool:
-                return True
-        return bool(_maintainer(payload))
+            def _advice_blocked(payload: object) -> frozenset[str]:
+                return frozenset()
+        return _advice_blocked(payload)
     except BaseException:  # noqa: BLE001
-        return True
+        return frozenset()
 
 
 def render(hits: list[Hit]) -> str:
     return "\n\n".join(f"destructive-action advice [{h.row.id}]: {h.note}{h.row.advice}" for h in hits)
 
 
-def emit(_lib, payload: dict, hits: list[Hit], mode: str | None = None) -> None:
-    """Log each hit, then advise (never deny in advise mode) or deny."""
+def emit(_lib, payload: dict, hits: list[Hit], blocked: "frozenset[str] | None" = None) -> None:
+    """Log each hit, then advise or, for a row listed in *blocked* (default: the project's and the user's setting), deny."""
     ctx = Ctx(payload)
     escaped = bool(ctx.command) and _lib.should_skip_for_reason(ctx.command)
-    maint = _is_maintainer(payload) if any(row_mode(h.row, mode) == "deny" for h in hits) else True
-    denying = [h for h in hits if row_mode(h.row, mode, maintainer=maint) == "deny"]
+    rows = _blocked_rows(payload) if blocked is None else blocked
+    denying = [h for h in hits if row_mode(h.row, rows) == "deny"]
     for h in hits:
         if h in denying:
             outcome = "escape" if escaped else "deny"
@@ -1002,7 +987,7 @@ def emit(_lib, payload: dict, hits: list[Hit], mode: str | None = None) -> None:
     _lib.warn(text)
 
 
-def main(mode: str | None = None) -> None:
+def main(blocked: "frozenset[str] | None" = None) -> None:
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw else {}
@@ -1018,7 +1003,7 @@ def main(mode: str | None = None) -> None:
 
     sys.stdin = io.StringIO(raw)
     def body(p: dict) -> None:
-        emit(_lib, p, hits, mode)
+        emit(_lib, p, hits, blocked)
 
     _lib.run_hook(body, fail_closed=False, rule_name=RULE_NAME)
 

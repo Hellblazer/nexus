@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests.hooks.audience_harness import path_without, src_seam_env
-from tests.hooks.test_subagent_start_hook import STDIN_PAYLOAD, _flagged_home, _run_hook
+from tests.hooks.test_subagent_start_hook import STDIN_PAYLOAD, _strict_home, _run_hook
 
 # The hook lists T1 by running ``nx scratch list`` whenever ``nx`` is on PATH, and that child reaches storage: under CI's
 # storage-touch guard (a thin venv puts ``nx`` on PATH) every case here ended in a teardown error, "reached storage without
@@ -38,26 +38,25 @@ def _context(*, payload: dict | None = None, account_home: str | None = None) ->
     return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
 
 
-class TestOrchestrationRowsByAudience:
-    def test_a_user_gets_no_git_row_and_no_search_scope_row(self) -> None:
-        """U4 and the Search-scope row: outside nexus and with no flag, only Completion and Inbox. The Git row is the
-        prompt half of the maintainer's git guard, which a user does not have."""
+class TestOrchestrationRowsBySetting:
+    def test_a_plain_session_gets_the_search_scope_row_and_no_guard_row(self) -> None:
+        """The Search scope row is process, for every dispatch. The Git row is the prompt half of the strict guard, which
+        is a setting: a plain session has the seatbelt and no such row."""
         ctx = _context()
         assert "| Directive | Rule |" in ctx
         assert "| Git |" not in ctx
         assert "NEVER git add/commit" not in ctx
-        assert "| Search scope |" not in ctx
+        assert "| Search scope |" in ctx
 
-    def test_a_marked_nexus_checkout_gets_the_git_and_search_scope_rows(self, nexus_marked_repo: Path) -> None:
-        ctx = _context(payload={**json.loads(STDIN_PAYLOAD), "cwd": str(nexus_marked_repo)})
+    def test_a_project_with_the_strict_setting_gets_the_guard_row(self, project_strict_repo: Path) -> None:
+        ctx = _context(payload={**json.loads(STDIN_PAYLOAD), "cwd": str(project_strict_repo)})
         assert "| Git |" in ctx
         assert "NEVER git add/commit" in ctx
         assert "orchestrator commits pathspec-limited" in ctx
         assert "| Search scope |" in ctx
 
-    def test_the_account_flag_alone_gets_the_git_and_search_scope_rows(self, tmp_path: Path) -> None:
-        """SAM-WIDE: Sam's other repos carry the rows because his account does, with no marker in the repo."""
-        ctx = _context(account_home=_flagged_home(tmp_path))
+    def test_a_user_with_the_strict_setting_gets_the_guard_row_in_any_project(self, tmp_path: Path) -> None:
+        ctx = _context(account_home=_strict_home(tmp_path))
         assert "NEVER git add/commit" in ctx
         assert "| Search scope |" in ctx
 
@@ -70,17 +69,18 @@ _REAL_SHAPE = {"session_id": "test-session", "hook_event_name": "SubagentStart",
 _IMPLEMENTERS = ["developer", "conexus:developer", "worktree-developer", "general-purpose", "claude", "conexus:debugger"]
 
 
-class TestBriefCheckByAudience:
+class TestBriefCheckForEveryone:
     @pytest.mark.parametrize("agent_type", _IMPLEMENTERS)
-    def test_a_user_gets_no_brief_check(self, agent_type: str) -> None:
-        """D10 / T5: the brief check is the maintainer's (nexus_ffa, nexus-yjg4v); a user's implementer gets none."""
-        assert "## Brief check" not in _context(payload={**_REAL_SHAPE, "agent_type": agent_type})
-
-    def test_a_maintainer_outside_nexus_gets_four_renumbered_questions_without_modes(self, tmp_path: Path) -> None:
-        """Question 3 is nexus's own local/cloud axis (NEXUS-REPO): Sam's other repos get 1, 2, 4 and 5, numbered 1 to 4."""
-        ctx = _context(payload={**_REAL_SHAPE, "agent_type": "general-purpose"}, account_home=_flagged_home(tmp_path))
+    def test_every_implementer_gets_the_four_generic_questions(self, agent_type: str) -> None:
+        """The brief check is process: a plain session's implementer gets the four questions, numbered 1 to 4."""
+        ctx = _context(payload={**_REAL_SHAPE, "agent_type": agent_type})
         assert "## Brief check" in ctx
-        assert "local AND cloud" not in ctx and "Modes:" not in ctx
         assert "1. Consumers:" in ctx and "2. Final point:" in ctx
         assert "3. Bounds:" in ctx and "4. State:" in ctx
+        assert "local AND cloud" not in ctx and "Modes:" not in ctx
         assert "5. " not in ctx.split("## Brief check", 1)[1].split("\n## ", 1)[0]
+
+    def test_a_project_adds_its_own_question(self, project_settings_repo) -> None:
+        repo = project_settings_repo(brief_questions=["Does it hold on every platform we ship?"])
+        ctx = _context(payload={**_REAL_SHAPE, "agent_type": "general-purpose", "cwd": str(repo)})
+        assert "5. Does it hold on every platform we ship?" in ctx

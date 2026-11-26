@@ -1,84 +1,995 @@
 {
-  "comment": "Parity corpus for the audience helper (nexus-sby49.3). Each row builds a layout under a tmp dir, picks a payload and a flag state, and names the answer of each predicate. The plugin copy (conexus/hooks/scripts/_audience.py), the src copy (src/nexus/hooks/_audience.py) and the previous release's plugin copy (git show <pinned ref>:...) must all give it. A row the previous copy cannot know sets prev_release to false. Paths are relative to the tmp dir and use '/'. A file entry is a file, a dir entry a directory, a link entry a symlink (posix only: a row with a link sets posix_only).",
-  "markers": ["scripts/agent-worktree-preflight.sh", ".nexus/dev-process.json"],
-  "rows": [
-    {"id": "plain-repo-no-flag", "layout": [{"p": "r/.git", "k": "dir"}], "payload": {"cwd": "r"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "plain-repo-flag", "layout": [{"p": "r/.git", "k": "dir"}], "payload": {"cwd": "r"}, "flag": true,
-     "expect": {"account_flag": true, "nexus_repo": false, "maintainer": true}},
-    {"id": "phase1-marker-no-flag", "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/scripts/agent-worktree-preflight.sh", "k": "file"}],
-     "payload": {"cwd": "r"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": true, "maintainer": true}},
-    {"id": "phase2-marker-no-flag", "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "file", "c": "{}"}],
-     "payload": {"cwd": "r"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": true, "maintainer": true}},
-    {"id": "both-markers", "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "file"}, {"p": "r/scripts/agent-worktree-preflight.sh", "k": "file"}],
-     "payload": {"cwd": "r"}, "flag": true,
-     "expect": {"account_flag": true, "nexus_repo": true, "maintainer": true}},
-    {"id": "marked-repo-subdir", "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "file"}, {"p": "r/src/pkg", "k": "dir"}],
-     "payload": {"cwd": "r/src/pkg"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": true, "maintainer": true}},
-    {"id": "marked-repo-cwd-in-dot-git", "layout": [{"p": "r/.git/hooks", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "file"}],
-     "payload": {"cwd": "r/.git/hooks"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": true, "maintainer": true}},
-    {"id": "marked-repo-cwd-gone", "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "file"}],
-     "payload": {"cwd": "r/deleted/worktree"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": true, "maintainer": true}},
-    {"id": "nested-repo-inside-marked-no-flag", "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "file"}, {"p": "r/vendor/lib/.git", "k": "dir"}],
-     "payload": {"cwd": "r/vendor/lib"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "nested-repo-inside-marked-flag", "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "file"}, {"p": "r/vendor/lib/.git", "k": "dir"}],
-     "payload": {"cwd": "r/vendor/lib"}, "flag": true,
-     "expect": {"account_flag": true, "nexus_repo": false, "maintainer": true}},
-    {"id": "submodule-git-file", "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "file"}, {"p": "r/sub/.git", "k": "file", "c": "gitdir: ../.git/modules/sub\n"}],
-     "payload": {"cwd": "r/sub"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "linked-worktree-marked", "layout": [{"p": "wt/.git", "k": "file", "c": "gitdir: /nonexistent\n"}, {"p": "wt/.nexus/dev-process.json", "k": "file"}],
-     "payload": {"cwd": "wt"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": true, "maintainer": true}},
-    {"id": "linked-worktree-older-branch-no-flag", "layout": [{"p": "wt/.git", "k": "file", "c": "gitdir: /nonexistent\n"}],
-     "payload": {"cwd": "wt"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "linked-worktree-older-branch-flag", "layout": [{"p": "wt/.git", "k": "file", "c": "gitdir: /nonexistent\n"}],
-     "payload": {"cwd": "wt"}, "flag": true,
-     "expect": {"account_flag": true, "nexus_repo": false, "maintainer": true}},
-    {"id": "no-git-anywhere", "layout": [{"p": "plain/dir", "k": "dir"}], "payload": {"cwd": "plain/dir"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "marker-above-the-first-git", "layout": [{"p": "o/.nexus/dev-process.json", "k": "file"}, {"p": "o/inner/.git", "k": "dir"}],
-     "payload": {"cwd": "o/inner"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "marker-is-a-directory", "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "dir"}],
-     "payload": {"cwd": "r"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "flag-is-a-directory", "layout": [{"p": "r/.git", "k": "dir"}], "payload": {"cwd": "r"}, "flag": "dir",
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "symlinked-cwd-to-marked-repo", "posix_only": true,
-     "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "file"}, {"p": "elsewhere/here", "k": "link", "t": "r"}],
-     "payload": {"cwd": "elsewhere/here"}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": true, "maintainer": true}},
-    {"id": "project-dir-env-names-a-marked-repo", "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "file"}],
-     "payload": {}, "env_project_dir": "r", "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": true, "maintainer": true}},
-    {"id": "payload-cwd-wins-over-project-dir", "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "file"}, {"p": "u/.git", "k": "dir"}],
-     "payload": {"cwd": "u"}, "env_project_dir": "r", "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "unsubstituted-cwd", "layout": [], "payload": {"cwd": "${cwd}"}, "raw_cwd": true, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "relative-cwd", "layout": [{"p": "r/.git", "k": "dir"}, {"p": "r/.nexus/dev-process.json", "k": "file"}],
-     "payload": {"cwd": "relative/path"}, "raw_cwd": true, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "nul-byte-cwd", "layout": [], "payload": {"cwd": "bad\u0000path"}, "raw_cwd": true, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "empty-payload-no-flag", "layout": [], "payload": {}, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "empty-payload-flag", "layout": [], "payload": {}, "flag": true,
-     "expect": {"account_flag": true, "nexus_repo": false, "maintainer": true}},
-    {"id": "payload-is-not-a-dict", "layout": [], "payload": null, "flag": false,
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false}},
-    {"id": "hosts-file-lines-commas-comments", "layout": [], "payload": {}, "flag": false,
-     "home_files": [{"p": ".config/nexus/remote-test-hosts", "c": "chas, qwent # lab hosts\n# whole-line comment\nhellmini\n\n"}],
-     "expect": {"account_flag": false, "nexus_repo": false, "maintainer": false, "remote_test_hosts": ["chas", "hellmini", "qwent"]}},
-    {"id": "hosts-file-absent", "layout": [], "payload": {}, "flag": true,
-     "expect": {"account_flag": true, "nexus_repo": false, "maintainer": true, "remote_test_hosts": []}}
-  ]
+ "comment": "Parity corpus for the audience helper (nexus-sby49.3; reworked in nexus-sby49.4). Each row builds a layout under a tmp dir, picks a payload and the user's settings file (user: null, an object for conexus.json, \"dir\" for a directory in its place, or a raw string), and names the answer of each reader: guard_mode, project_settings, telemetry_enabled, t1_nudge_enabled and advice_blocked. The plugin copy (conexus/hooks/scripts/_audience.py) and the src copy (src/nexus/hooks/_audience.py) must give it. The previous release's plugin copy (git show <tag>:...) knows only the two legacy markers, so on every row that does not set prev_release to false its nexus_repo answer must equal 'the project is strict'. Paths are relative to the tmp dir and use '/'. A file entry is a file, a dir entry a directory, a link entry a symlink (posix only: a row with a link sets posix_only).",
+ "markers": [
+  ".nexus/dev-process.json",
+  "scripts/agent-worktree-preflight.sh"
+ ],
+ "rows": [
+  {
+   "id": "plain-repo-no-user-file",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "plain-repo-user-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "expect": {
+    "guard_mode": "strict",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": {
+    "subagent_git": "strict"
+   }
+  },
+  {
+   "id": "phase1-marker-no-user-file",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/scripts/agent-worktree-preflight.sh",
+     "k": "file"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "phase2-marker-no-user-file",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "file",
+     "c": "{}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "both-markers",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "file"
+    },
+    {
+     "p": "r/scripts/agent-worktree-preflight.sh",
+     "k": "file"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": {
+    "subagent_git": "strict"
+   }
+  },
+  {
+   "id": "strict-project-repo-subdir",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "file"
+    },
+    {
+     "p": "r/src/pkg",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r/src/pkg"
+   },
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "strict-project-repo-cwd-in-dot-git",
+   "layout": [
+    {
+     "p": "r/.git/hooks",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "file"
+    }
+   ],
+   "payload": {
+    "cwd": "r/.git/hooks"
+   },
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "strict-project-repo-cwd-gone",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "file"
+    }
+   ],
+   "payload": {
+    "cwd": "r/deleted/worktree"
+   },
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "nested-repo-inside-strict-project-no-user-file",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "file"
+    },
+    {
+     "p": "r/vendor/lib/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r/vendor/lib"
+   },
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "nested-repo-inside-strict-project-user-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "file"
+    },
+    {
+     "p": "r/vendor/lib/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r/vendor/lib"
+   },
+   "expect": {
+    "guard_mode": "strict",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": {
+    "subagent_git": "strict"
+   }
+  },
+  {
+   "id": "submodule-git-file",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "file"
+    },
+    {
+     "p": "r/sub/.git",
+     "k": "file",
+     "c": "gitdir: ../.git/modules/sub\n"
+    }
+   ],
+   "payload": {
+    "cwd": "r/sub"
+   },
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "linked-worktree-strict-project",
+   "layout": [
+    {
+     "p": "wt/.git",
+     "k": "file",
+     "c": "gitdir: /nonexistent\n"
+    },
+    {
+     "p": "wt/.nexus/dev-process.json",
+     "k": "file"
+    }
+   ],
+   "payload": {
+    "cwd": "wt"
+   },
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "linked-worktree-older-branch-no-user-file",
+   "layout": [
+    {
+     "p": "wt/.git",
+     "k": "file",
+     "c": "gitdir: /nonexistent\n"
+    }
+   ],
+   "payload": {
+    "cwd": "wt"
+   },
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "linked-worktree-older-branch-user-strict",
+   "layout": [
+    {
+     "p": "wt/.git",
+     "k": "file",
+     "c": "gitdir: /nonexistent\n"
+    }
+   ],
+   "payload": {
+    "cwd": "wt"
+   },
+   "expect": {
+    "guard_mode": "strict",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": {
+    "subagent_git": "strict"
+   }
+  },
+  {
+   "id": "no-git-anywhere",
+   "layout": [
+    {
+     "p": "plain/dir",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "plain/dir"
+   },
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "marker-above-the-first-git",
+   "layout": [
+    {
+     "p": "o/.nexus/dev-process.json",
+     "k": "file"
+    },
+    {
+     "p": "o/inner/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "o/inner"
+   },
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "marker-is-a-directory",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "user-file-is-a-directory",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": "dir"
+  },
+  {
+   "id": "symlinked-cwd-to-strict-project-repo",
+   "posix_only": true,
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "file"
+    },
+    {
+     "p": "elsewhere/here",
+     "k": "link",
+     "t": "r"
+    }
+   ],
+   "payload": {
+    "cwd": "elsewhere/here"
+   },
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "project-dir-env-names-a-strict-project-repo",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "file"
+    }
+   ],
+   "payload": {},
+   "env_project_dir": "r",
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "payload-cwd-wins-over-project-dir",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "file"
+    },
+    {
+     "p": "u/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "u"
+   },
+   "env_project_dir": "r",
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "unsubstituted-cwd",
+   "layout": [],
+   "payload": {
+    "cwd": "${cwd}"
+   },
+   "raw_cwd": true,
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "relative-cwd",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/dev-process.json",
+     "k": "file"
+    }
+   ],
+   "payload": {
+    "cwd": "relative/path"
+   },
+   "raw_cwd": true,
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "nul-byte-cwd",
+   "layout": [],
+   "payload": {
+    "cwd": "bad\u0000path"
+   },
+   "raw_cwd": true,
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "empty-payload-no-user-file",
+   "layout": [],
+   "payload": {},
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "empty-payload-user-strict",
+   "layout": [],
+   "payload": {},
+   "expect": {
+    "guard_mode": "strict",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": {
+    "subagent_git": "strict"
+   }
+  },
+  {
+   "id": "payload-is-not-a-dict",
+   "layout": [],
+   "payload": null,
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "user": null
+  },
+  {
+   "id": "hosts-file-lines-commas-comments",
+   "layout": [],
+   "payload": {},
+   "home_files": [
+    {
+     "p": ".config/nexus/remote-test-hosts",
+     "c": "chas, qwent # lab hosts\n# whole-line comment\nhellmini\n\n"
+    }
+   ],
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": [],
+    "remote_test_hosts": [
+     "chas",
+     "hellmini",
+     "qwent"
+    ]
+   },
+   "user": null
+  },
+  {
+   "id": "hosts-file-absent",
+   "layout": [],
+   "payload": {},
+   "expect": {
+    "guard_mode": "strict",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": [],
+    "remote_test_hosts": []
+   },
+   "user": {
+    "subagent_git": "strict"
+   }
+  },
+  {
+   "id": "project-file-every-key",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"schema\": 1, \"subagent_git\": \"strict\", \"preflight\": \"tools/pre.sh\", \"ci_wait\": \"ci <sha>\", \"credential_helper\": \"Use tools/c.sh.\", \"brief_questions\": [\"Q1?\"], \"advice_block\": [\"pattern_kill\"]}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict",
+     "preflight": "tools/pre.sh",
+     "ci_wait": "ci <sha>",
+     "credential_helper": "Use tools/c.sh.",
+     "brief_questions": [
+      "Q1?"
+     ],
+     "advice_block": [
+      "pattern_kill"
+     ]
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": [
+     "pattern_kill"
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-file-cannot-loosen-or-turn-telemetry-on",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"seatbelt\", \"telemetry\": true, \"t1_nudge\": false}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-file-malformed-gives-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{not json"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-file-not-an-object-gives-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "[1]"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-file-wins-over-the-phase-one-marker",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"tools/pre.sh\"}"
+    },
+    {
+     "p": "r/scripts/agent-worktree-preflight.sh",
+     "k": "file"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {
+     "preflight": "tools/pre.sh"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-file-wrong-types-are-ignored",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": 1, \"preflight\": 3, \"advice_block\": [1, \"a\", \"\"]}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {
+     "advice_block": [
+      "a"
+     ]
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": [
+     "a"
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-telemetry-on-and-t1-nudge-off-and-advice",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "telemetry": true,
+    "t1_nudge": false,
+    "advice_block": [
+     "whole_disk_scan"
+    ]
+   },
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": true,
+    "t1_nudge": false,
+    "advice_blocked": [
+     "whole_disk_scan"
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-and-user-advice-lists-add",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"advice_block\": [\"pattern_kill\"]}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "advice_block": [
+     "whole_disk_scan"
+    ]
+   },
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {
+     "advice_block": [
+      "pattern_kill"
+     ]
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": [
+     "pattern_kill",
+     "whole_disk_scan"
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-seatbelt-does-not-loosen-a-strict-project",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "subagent_git": "seatbelt"
+   },
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-file-malformed-leaves-defaults",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": "{bad",
+   "prev_release": false,
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {},
+    "telemetry": false,
+    "t1_nudge": true,
+    "advice_blocked": []
+   }
+  }
+ ]
 }

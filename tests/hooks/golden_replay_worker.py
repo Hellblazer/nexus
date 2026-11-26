@@ -66,7 +66,10 @@ def main(argv: list[str]) -> None:
         nexus: bool | None = None
         if audience is not None:
             if cwd not in maint_cache:
-                maint_cache[cwd] = (audience.maintainer(payload), audience.nexus_repo(payload))
+                maint_cache[cwd] = (
+                    audience.guard_mode(payload) == "strict",
+                    audience.project_settings(payload).get("subagent_git") == "strict",
+                )
             maint, nexus = maint_cache[cwd]
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

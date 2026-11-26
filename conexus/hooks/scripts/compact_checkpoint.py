@@ -113,15 +113,6 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# nexus-sby49.4 audience gate (S2-2): the compaction text names the threads board and ``bd`` only where the project has
-# them, and with no checkpoint to read the board is named for the maintainer. ``maintainer`` tightens (it adds the board
-# words), so an import that fails binds it to True: a broken helper gives the full text.
-try:
-    from _audience import maintainer as _maintainer
-except BaseException:  # noqa: BLE001
-    def _maintainer(payload: object) -> bool:
-        return True
-
 #: The plugin's sibling modules, bound by ``_load_siblings`` inside ``main``'s guard.
 _cli_lookup = None
 _endpoint_resolve = None
@@ -285,17 +276,13 @@ def _without_beads_section(shaped: str, payload: dict) -> str:
 
 
 def _board_known(checkpoint: str | None, payload: dict) -> bool:
-    """Whether the compaction text may name the threads board. A checkpoint that pre wrote shows whether pre found an
-    entry. With none to read, inject cannot ask the service (it makes no ``nx`` call: nexus-75w5d), so the board is
-    named for the maintainer, whose sessions keep one (``_maintainer`` answers True when the helper cannot load)."""
+    """Whether the compaction text may name the threads board: only when the checkpoint pre wrote shows pre found an entry.
+    With no checkpoint to read, inject cannot ask the service (it makes no ``nx`` call), so the board is not named."""
     if checkpoint is not None:
         heading = re.search(rf"(?m)^## Threads board entry \({_BOARD_PROJECT}/[^)\n]*\)\n+(.*)$", checkpoint)
         if heading is not None and not heading.group(1).startswith("[no board entry"):
             return True
-    try:
-        return bool(_maintainer(payload))
-    except Exception:  # noqa: BLE001 -- a failing predicate gives the full text, like a failed import
-        return True
+    return False
 
 
 _ARCHIVE_STAMP = "%Y%m%dT%H%M%SZ"

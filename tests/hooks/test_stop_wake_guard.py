@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import re
 import os
 import subprocess
 import sys
@@ -191,21 +192,21 @@ _SAM_ACTOR_TEXTS = [
         "I'll rebase when you say go.",
         "Name a bead and I'll take it.",
         "! run nx upgrade, then I'll check it.",
-        "The tag needs Sam. Once Sam merges, I'll rebase.",
+        "The tag needs the user. Once the user merges, I'll rebase.",
         # Gates phrased without "you" (nexus-4cgop review r1, B1 and F1): an approval word is the gate.
         "I'll push the tag once the release go arrives.",
         "I'll merge the PR once approved.",
         "I'll cut the tag after approval.",
         "Pushing to develop is next, pending the ack.",
-        "It is Sam's decision. I'll proceed once that comes through.",
+        "It is the user's decision. I'll proceed once that comes through.",
         "This needs the operator's go, then I'll run the migration.",
-        "Once Sam's go lands, I'll push the tag.",
-        "It needs the go from Sam. I'll check the publish after.",
-        "Sam will decide; I'll proceed after.",
+        "Once the user's go lands, I'll push the tag.",
+        "It needs the go from the user. I'll check the publish after.",
+        "The user will decide; I'll proceed after.",
         "Once it's approved I'll merge.",
         "The approval is pending. I'll push when it is granted.",
         "Tag push is gated on authorization; I'll push when it's recorded.",
-        "Cutting the tag is Sam's call. I'll check CI after it publishes.",
+        "Cutting the tag is the user's call. I'll check CI after it publishes.",
         "Standing by for the green light; then I'll push.",
         "I'll pick this up when a decision comes.",
 ]
@@ -219,7 +220,7 @@ def test_sam_actor_is_never_blocked(text: str) -> None:
 
 
 def test_default_proceed_idiom_is_not_a_sam_actor_clause() -> None:
-    """'unless you'd rather ...' names Sam only to offer an override; the session carries on."""
+    """'unless you'd rather ...' names the user only to offer an override; the session carries on."""
     assert swg.evaluate_text("The flap is next unless you'd rather I take something else.").block is True
 
 
@@ -254,9 +255,9 @@ def test_a_message_that_ends_on_sam_is_allowed_whole() -> None:
     "text",
     [
         "CI is still running on the branch. Say go and I'll tag.",
-        "Shard 3 is still in progress. Sam, which option do you want?",
-        "The suite is still running. I'll read it when it finishes. Waiting on Sam for the tag.",
-        "Once the shards finish I'll read the result. The tag is Sam's call.",
+        "Shard 3 is still in progress. The user, which option do you want?",
+        "The suite is still running. I'll read it when it finishes. Waiting on the user for the tag.",
+        "Once the shards finish I'll read the result. The tag is the user's call.",
     ],
 )
 def test_a_status_line_before_a_hand_off_to_sam_does_not_block(text: str) -> None:
@@ -264,7 +265,7 @@ def test_a_status_line_before_a_hand_off_to_sam_does_not_block(text: str) -> Non
 
 
 def test_only_the_tail_of_a_long_message_is_read() -> None:
-    """An early status line cannot block when the message ends on a question to Sam (review r1, S1)."""
+    """An early status line cannot block when the message ends on a question to the user (review r1, S1)."""
     head = "The planner is still running. " + "Background detail that is neither a wait nor a promise. " * 40
     assert swg.evaluate_text(head + "Which option do you want?").block is False
     # And the reverse: a promise inside the tail still blocks, whatever precedes it.
@@ -289,9 +290,9 @@ def test_a_fifty_kilobyte_single_line_returns_quickly() -> None:
     "text",
     [
         "I'll send the merged picture once the replies are in.",
-        "I'll start on the code once kimi answers.",
+        "I'll start on the code once the reviewer answers.",
         "If it asks for READY after this restart, I'll answer then.",
-        "I'll rebase the fold once bob lands it.",
+        "I'll rebase the fold once the peer lands it.",
         "It will send me the develop sha when the push lands.",
         "Once nexus_981 sends the all-clear, I'll push.",
         "I'll be notified when the run finishes.",
@@ -309,8 +310,8 @@ def test_peer_or_event_wake_is_dropped(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "I told linda I'll check the shard tomorrow.",
-        "I asked bob; he'll read the check runs.",
+        "I told the peer I'll check the shard tomorrow.",
+        "I asked the peer; he'll read the check runs.",
         "Next time I'll run the whole set once before any reviewer.",
         "I haven't checked CI, so nothing is running.",
         "I'll stay off engine and edge work until 20:27.",
@@ -369,7 +370,7 @@ _N1_GATED = [
     "Release cut awaits the OK. I'll run it then.",
     "The tag goes out when the human okays it, and I'll verify the publish after.",
     "I'll merge once it is signed-off.",
-    "I'll push when Sam okays it.",
+    "I'll push when the user okays it.",
     "I'll cut the release when the user gives the go-ahead.",
 ]
 #: N2: an approval word that is only the subject of a test, a log or a workflow is not a gate.
@@ -388,7 +389,7 @@ _N2_TEST_SUBJECTS = [
 _N3_COURTESY = [
     "I'll check the CI result once the shards finish. I'll keep you posted.",
     "I'll check the CI result once the shards finish, and update you.",
-    "I'll check the CI result once the shards finish. Will report back to Sam.",
+    "I'll check the CI result once the shards finish. Will report back to the user.",
     "I'll check the CI result once the shards finish. Thanks for your patience.",
     "I'll check the CI result once the shards finish. See you then.",
     "I'll check the CI result once the shards finish. If anything fails, you will hear from me.",
@@ -396,7 +397,7 @@ _N3_COURTESY = [
 #: N4: a clause that merely names an approval, or Sam, does not chain to an unrelated CI wait.
 _N4_UNCHAINED = [
     "Fixed the decision table bug. Once the shards finish, I'll check CI.",
-    "Pushed the fix; Sam can review. After the shards finish, I'll check CI.",
+    "Pushed the fix; The user can review. After the shards finish, I'll check CI.",
     "I changed the ack handling. Then I'll check the CI result once the shards finish.",
     "Approved by the reviewer. Then I'll check the CI result once the shards finish.",
     "The permission tests pass. Next, I'll check CI once the shards finish.",
@@ -408,8 +409,8 @@ _LIVE_BLOCKS = ["The nine lane beads close once CI on develop shows my parts gre
 _ENDS_ON_SAM = [
     "I'll check the CI result once the shards finish. Which option do you want?",
     "I'll check the CI result once the shards finish. Say go and I'll tag.",
-    "I'll check the CI result once the shards finish. Waiting on Sam for the tag.",
-    "I'll check the CI result once the shards finish. The tag is Sam's call.",
+    "I'll check the CI result once the shards finish. Waiting on the user for the tag.",
+    "I'll check the CI result once the shards finish. The tag is the user's call.",
     "I'll check the CI result once the shards finish. Let me know if you want the tag.",
     "I'll check the CI result once the shards finish. If you want, I'll start on the next bead.",
 ]
@@ -438,25 +439,25 @@ _GATED_ON_THE_USER = [
     "I'll merge when the maintainer gives the word.",
     "I'll push the tag once you approve.",
     "I'll push once it is cleared.",
-    "I'll push once Sam is happy with it.",
     "I'll push once the user is happy with it.",
-    "I'll push the tag once Sam confirms.",
+    "I'll push once the user is happy with it.",
+    "I'll push the tag once the user confirms.",
     "I'll push the tag once the user confirms.",
     "I'll push the tag once he confirms.",
     "I'll proceed once the owner replies.",
     "I'll proceed after the user answers.",
     "I'll proceed once the user weighs in.",
-    "I'll proceed once Sam weighs in.",
-    "I'll proceed once Sam answers.",
-    "I'll proceed when Sam is back.",
+    "I'll proceed once the user weighs in.",
+    "I'll proceed once the user answers.",
+    "I'll proceed when the user is back.",
     "I'll proceed when the user is back.",
     "I'll proceed when the user returns.",
     "Waiting on the user.",
-    "Waiting on Sam.",
+    "Waiting on the user.",
     "I'll push the tag after the user okays it.",
-    "I'll push the tag after Sam lets me know.",
+    "I'll push the tag after the user lets me know.",
     "I'll push the tag when told.",
-    "I'll push once Sam's back.",
+    "I'll push once the user's back.",
     "I'll push when I hear back.",
     "I'll push once confirmed.",
     "I'll push on confirmation.",
@@ -474,8 +475,8 @@ _PEER_OR_APPROVAL_WAKE = [
     "I'll merge once Bob approves.",
     "I'll merge once the reviewer reports.",
     "I'll push after the reviewer approves.",
-    "I'll merge after the reviewer approves and Sam signs off.",
-    "I'll merge after Sam approves.",
+    "I'll merge after the reviewer approves and the user signs off.",
+    "I'll merge after the user approves.",
     "I'll merge after the PR is approved.",
     "I'll merge after the review is approved.",
     "I'll merge after the approval comes.",
@@ -510,7 +511,7 @@ _PRINCIPAL_GATES = [
 
 #: A gate on 'you' or the user, ending on or chaining to him.
 _GATES_ON_YOU = [
-    "Sam's ack is pending. The build is green. Then I'll check CI once the shards finish.",
+    "The user's ack is pending. The build is green. Then I'll check CI once the shards finish.",
     "Waiting on your ack. After that I'll push the tag.",
     "I'll hand you the tag command. Everything is green. After it publishes, I'll check the release.",
     "I'll hand you the tag command. Everything is green. After it publishes, I'll check the release once the shards finish.",
@@ -528,44 +529,44 @@ _GATES_ON_YOU = [
 
 #: The turn is handed to Sam: his reply is the wake.
 _HANDOVERS = [
-    "The next step is Sam's. I'll push once he does it.",
-    "Sam will cut the tag. I'll check the publish after.",
-    "Sam has the tag to cut. After it publishes I'll verify.",
-    "Tag cut is Sam's. I'll verify the publish afterwards.",
-    "That one is for Sam. Afterwards I'll check CI.",
-    "Sam is cutting the tag now. Then I'll check the publish.",
-    "The release cut belongs to Sam. I'll verify the publish when it lands.",
-    "Sam needs to cut the tag. Then I'll check the publish.",
-    "Sam needs to look at the diff; I'll push after.",
-    "Sam is reviewing. I'll merge when he is done.",
-    "Sam is out until Monday. I'll pick this up then.",
-    "Sam is away. I'll continue when he returns.",
-    "Sam should look at this first. I'll push after that.",
-    "The diff is with Sam. I'll push after he reads it.",
-    "The decision is Sam's. I'll implement it once it lands.",
-    "I've handed the tag command to Sam. I'll check the publish once it runs.",
-    "Handed to Sam. I'll verify the publish after he runs it.",
-    "Sam runs the tag. Once it publishes, I'll check the battery.",
-    "Sam has the ball. I'll resume when it comes back.",
-    "The ruling is with Sam. I'll continue after.",
+    "The next step is the user's. I'll push once he does it.",
+    "The user will cut the tag. I'll check the publish after.",
+    "The user has the tag to cut. After it publishes I'll verify.",
+    "Tag cut is the user's. I'll verify the publish afterwards.",
+    "That one is for the user. Afterwards I'll check CI.",
+    "The user is cutting the tag now. Then I'll check the publish.",
+    "The release cut belongs to the user. I'll verify the publish when it lands.",
+    "The user needs to cut the tag. Then I'll check the publish.",
+    "The user needs to look at the diff; I'll push after.",
+    "The user is reviewing. I'll merge when he is done.",
+    "The user is out until Monday. I'll pick this up then.",
+    "The user is away. I'll continue when he returns.",
+    "The user should look at this first. I'll push after that.",
+    "The diff is with the user. I'll push after he reads it.",
+    "The decision is the user's. I'll implement it once it lands.",
+    "I've handed the tag command to the user. I'll check the publish once it runs.",
+    "Handed to the user. I'll verify the publish after he runs it.",
+    "The user runs the tag. Once it publishes, I'll check the battery.",
+    "The user has the ball. I'll resume when it comes back.",
+    "The ruling is with the user. I'll continue after.",
     "The hold is on the maintainer. I'll push once it lifts.",
     "It's the operator's decision. I'll proceed after.",
-    "It's up to Sam. I'll continue after.",
+    "It's up to the user. I'll continue after.",
     "It is with the operator now. I'll push when they reply.",
-    "Parked pending Sam. I'll push after.",
-    "Parked on Sam; I'll continue after.",
-    "Over to Sam. I'll verify afterwards.",
+    "Parked pending the user. I'll push after.",
+    "Parked on the user; I'll continue after.",
+    "Over to the user. I'll verify afterwards.",
     "Over to you. I'll verify afterwards.",
     "Blocked on the maintainer's review. I'll merge after.",
 ]
 
 #: Short handovers and chained then/accordingly.
 _HANDOVER_SHORT = [
-    "Over to Sam.",
-    "It's up to Sam.",
-    "Handed to Sam.",
-    "The next step is Sam's.",
-    "Tag cut is Sam's.",
+    "Over to the user.",
+    "It's up to the user.",
+    "Handed to the user.",
+    "The next step is the user's.",
+    "Tag cut is the user's.",
     "Ready when you are. I'll push then.",
     "Your call. I'll proceed accordingly.",
     "I'll proceed once it is settled.",
@@ -583,8 +584,8 @@ _OFFERS_AND_NOISE = [
     "I'll check CI after the push. You can ignore this.",
     "Done. I'll check CI once the shards finish. See you then.",
     "Approved by the reviewer. Then I'll check CI once the shards finish.",
-    "Sam approved it. I'll push the tag now.",
-    "I'll push once Sam's call comes in; meanwhile I'll check CI in 5 minutes.",
+    "The user approved it. I'll push the tag now.",
+    "I'll push once the user's call comes in; meanwhile I'll check CI in 5 minutes.",
     "Does that work? I'll check back in 10 minutes.",
     "I'll push after review.",
     "I'll proceed after the reviewer's verdict arrives.",
@@ -638,16 +639,16 @@ _NAMING_SAM = [
     "I'll check CI once the permission tests finish.",
     "I'll check once the decision log tests finish.",
     "I'll rerun after the ack handling tests pass.",
-    "I'll ping Sam once the build finishes.",
-    "I'll message Sam when CI finishes.",
-    "I'll tell Sam the result once the shards finish.",
-    "I'll read the shards once they finish, then ping Sam.",
-    "I'll check Sam's PR when the shards finish.",
-    "Sam's ack is pending. Meanwhile I'll check the shards once they finish.",
+    "I'll ping the user once the build finishes.",
+    "I'll message the user when CI finishes.",
+    "I'll tell the user the result once the shards finish.",
+    "I'll read the shards once they finish, then ping the user.",
+    "I'll check the user's PR when the shards finish.",
+    "The user's ack is pending. Meanwhile I'll check the shards once they finish.",
     "The user asked me to wait. I'll check CI once the shards finish.",
     "The user needs to approve. I'll check CI once the shards finish.",
-    "Pushed the fix; Sam can review. After the shards finish, I'll check CI.",
-    "Sam reads the board each morning; I'll check the thread tomorrow.",
+    "Pushed the fix; The user can review. After the shards finish, I'll check CI.",
+    "The user reads the board each morning; I'll check the thread tomorrow.",
 ]
 
 #: Known false allow, kept visible: any clause with a bare "you" is dropped, so an offer to the user inside a clause
@@ -682,28 +683,28 @@ _PRINCIPAL_WITH_A_NOUN = [
 
 #: Habitual, ownership and notification statements about Sam pass no turn (review r2, finding 2): the promise stands.
 _NOT_A_HANDOVER = [
-    "Sam will get an email when it is done. After the shards finish, I'll verify the deploy.",
-    "Sam will get an email. After the shards finish I'll verify.",
-    "Sam will see the PR comment. Once CI finishes I'll check the result.",
-    "Sam is reading the board. After the build I'll check the results.",
-    "Sam has the board open. After CI finishes, I'll check the result.",
-    "Sam should get a notification. Then I'll check the shards once they finish.",
-    "Sam must have pushed already. After the CI run completes I'll read the log.",
-    "Sam runs the nightly at 2am. Then I'll check the output once it finishes.",
-    "Sam handles the releases. After the release job completes, I'll verify.",
-    "Sam owns the pipeline config. After the next run finishes, I'll check.",
-    "Sam holds the credentials. Once the deploy completes I'll verify.",
+    "The user will get an email when it is done. After the shards finish, I'll verify the deploy.",
+    "The user will get an email. After the shards finish I'll verify.",
+    "The user will see the PR comment. Once CI finishes I'll check the result.",
+    "The user is reading the board. After the build I'll check the results.",
+    "The user has the board open. After CI finishes, I'll check the result.",
+    "The user should get a notification. Then I'll check the shards once they finish.",
+    "The user must have pushed already. After the CI run completes I'll read the log.",
+    "The user runs the nightly at 2am. Then I'll check the output once it finishes.",
+    "The user handles the releases. After the release job completes, I'll verify.",
+    "The user owns the pipeline config. After the next run finishes, I'll check.",
+    "The user holds the credentials. Once the deploy completes I'll verify.",
 ]
 
 #: Turn-passing statements about Sam: allowed.
 _TURN_PASSING = [
-    "Sam runs the install. After that I'll verify.",
-    "Sam to review. I'll rebase afterwards.",
-    "Sam, your move. I'll continue after.",
-    "Sam's turn. I'll rebase once he merges.",
+    "The user runs the install. After that I'll verify.",
+    "The user to review. I'll rebase afterwards.",
+    "The user, your move. I'll continue after.",
+    "The user's turn. I'll rebase once he merges.",
     "It's his move. I'll continue after.",
-    "Sam will review the PR. I'll address comments then.",
-    "Sam must approve before I merge. I'll merge after.",
+    "The user will review the PR. I'll address comments then.",
+    "The user must approve before I merge. I'll merge after.",
 ]
 
 #: Neutral clauses (no gate, no class) that sit between a Sam gate and its follow-up.
@@ -712,7 +713,7 @@ _CHAIN_GAP_ROWS = [
     ("Once you give it, I'll push the tag. " + " ".join(_NEUTRAL[:1]) + " After the shards finish, I'll check CI.", False),
     ("Once you give it, I'll push the tag. " + " ".join(_NEUTRAL[:2]) + " After the shards finish, I'll check CI.", False),
     ("Once you give it, I'll push the tag. " + " ".join(_NEUTRAL[:3]) + " After the shards finish, I'll check CI.", True),
-    ("Over to Sam. " + " ".join(_NEUTRAL[:3]) + " Then I'll check CI once the shards finish.", True),
+    ("Over to the user. " + " ".join(_NEUTRAL[:3]) + " Then I'll check CI once the shards finish.", True),
 ]
 
 _CORPUS: list[tuple[str, str, bool]] = (
@@ -766,7 +767,7 @@ def test_reminder_keeps_do_it_for_a_plain_ci_wait_and_a_plain_promise() -> None:
 
 
 def test_a_denied_run_state_resets_the_chain_but_a_status_sentence_does_not() -> None:
-    """Review r2 N4. 'No suite is still running' matches the CI class and is denied: it ends what hung from the Sam
+    """Review r2 N4. 'No suite is still running' matches the CI class and is denied: it ends what hung from the the user
     clause. A sentence that matches no class stays transparent (fixture sel3-25 pins that: a status line sits
     between 'hand you the tag command' and 'After it publishes')."""
     gate = "Once you give it, I'll push the tag. "
@@ -777,7 +778,7 @@ def test_a_denied_run_state_resets_the_chain_but_a_status_sentence_does_not() ->
 def test_final_sam_is_set_only_for_a_question_an_imperative_or_an_approval_gate() -> None:
     for text in ("Thanks for your patience.", "See you then.", "I'll keep you posted.", "Your fix is in."):
         assert swg.evaluate_text("I'll check the build later. " + text).final_sam is False, text
-    for text in ("Which one?", "Say go.", "Waiting on Sam for the tag.", "Once you approve, I'll push."):
+    for text in ("Which one?", "Say go.", "Waiting on the user for the tag.", "Once you approve, I'll push."):
         assert swg.evaluate_text("I'll check the build later. " + text).block is False, text
 
 
@@ -794,7 +795,7 @@ def test_reason_quotes_the_clause_and_offers_the_ways_out() -> None:
 def test_reason_never_says_do_it_now_for_a_clause_that_names_an_approval() -> None:
     plain = swg.block_reason(swg.CLASS_PROMISE, "I'll check the build later.")
     assert "do it" in plain
-    for clause in ("I'll push once the ruling arrives.", "I'll push after Sam's note."):
+    for clause in ("I'll push once the ruling arrives.", "I'll push after the user's note."):
         gated = swg.block_reason(swg.CLASS_PROMISE, clause)
         assert "do it" not in gated, clause
         assert "who it is" in gated and "ScheduleWakeup" in gated
@@ -870,11 +871,15 @@ def test_internal_error_fails_open(tmp_path: Path) -> None:
 _CI_TEXT_WORDS = ("nx ci wait", "CI board", "develop and main")
 
 
-def _repo(path: Path, *, marked: bool) -> Path:
+_CI_COMMAND = "leg-ci-wait <sha> --branch main"
+
+
+def _repo(path: Path, *, ci_wait: str | None = None) -> Path:
+    """A repository; with *ci_wait* its tracked ``.nexus/project.json`` names that CI-wait command."""
     (path / ".git").mkdir(parents=True)
-    if marked:
-        (path / "scripts").mkdir()
-        (path / "scripts" / "agent-worktree-preflight.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    if ci_wait is not None:
+        (path / ".nexus").mkdir()
+        (path / ".nexus" / "project.json").write_text(json.dumps({"schema": 1, "ci_wait": ci_wait}), encoding="utf-8")
     return path
 
 
@@ -886,42 +891,52 @@ def _run_in_repo(repo: Path, config: Path, text: str) -> subprocess.CompletedPro
 
 
 @pytest.mark.parametrize("cls", [swg.CLASS_CI_WAIT, swg.CLASS_CI_WAIT_NO_CHANNEL])
-def test_the_ci_text_is_the_nexus_checkouts_and_a_user_gets_neutral_wording(cls: str) -> None:
-    full = swg.block_reason(cls, "The runs are still going.")
-    assert "`nx ci wait <sha>" in full and "CI board" in full
-    user = swg.block_reason(cls, "The runs are still going.", nexus=False)
+def test_the_ci_command_is_the_projects_and_everyone_else_gets_neutral_wording(cls: str) -> None:
+    named = swg.block_reason(cls, "The runs are still going.", ci_wait=_CI_COMMAND)
+    assert f"`{_CI_COMMAND}`" in named and "The runs are still going." in named
+    assert "CI board" not in named and "develop and main" not in named, "the project's command only; no nexus wording"
+    neutral = swg.block_reason(cls, "The runs are still going.")
     for word in _CI_TEXT_WORDS:
-        assert word not in user, word
+        assert word not in neutral, word
     for word in ("Monitor", "until-loop", "ScheduleWakeup", "CronCreate", "who it is", "The runs are still going."):
-        assert word in user, word
+        assert word in neutral, word
 
 
-def test_a_user_session_gets_the_neutral_block_and_a_nexus_checkout_gets_the_ci_text(tmp_path: Path) -> None:
+def test_a_session_gets_the_neutral_block_and_a_project_with_ci_wait_gets_its_command(tmp_path: Path) -> None:
     text = "The suite is still running. When it finishes, I'll read the result."
     got: dict[str, str] = {}
-    for name, marked in (("user", False), ("nexus", True)):
-        proc = _run_in_repo(_repo(tmp_path / name, marked=marked), tmp_path / f"cfg-{name}", text)
+    for name, ci_wait in (("plain", None), ("project", _CI_COMMAND)):
+        proc = _run_in_repo(_repo(tmp_path / name, ci_wait=ci_wait), tmp_path / f"cfg-{name}", text)
         assert proc.returncode == 0, proc.stderr
         got[name] = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert "The suite is still running." in got["user"] and "ScheduleWakeup" in got["user"]
-    assert not any(w in got["user"] for w in _CI_TEXT_WORDS), got["user"]
-    assert "`nx ci wait <sha> --branch <branch>`" in got["nexus"]
+    assert "The suite is still running." in got["plain"] and "ScheduleWakeup" in got["plain"]
+    assert not any(w in got["plain"] for w in _CI_TEXT_WORDS), got["plain"]
+    assert f"`{_CI_COMMAND}`" not in got["plain"]
+    assert "ScheduleWakeup" in got["project"]
 
 
-def test_a_broken_audience_helper_gives_the_full_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``nexus_repo`` tightens, so an import that fails binds it to True (the plan's failure-in-the-safe-direction rule)."""
+def test_a_project_ci_command_reaches_a_ci_wait_block_only(tmp_path: Path) -> None:
+    ci = "Pushed. I'll read the CI result once the runs finish."
+    proc = _run_in_repo(_repo(tmp_path / "project", ci_wait=_CI_COMMAND), tmp_path / "cfg", ci)
+    assert f"`{_CI_COMMAND}`" in json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    plain = _run_in_repo(_repo(tmp_path / "plain"), tmp_path / "cfg2", ci)
+    assert _CI_COMMAND not in json.loads(plain.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_a_broken_audience_helper_gives_the_neutral_wording(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The project's CI command only adds text, so an import that fails binds ``_project_text`` to None."""
     monkeypatch.setitem(sys.modules, "_audience", None)  # an import of it now raises ImportError
     spec = importlib.util.spec_from_file_location("stop_wake_guard_no_helper", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert module._nexus_repo({"cwd": "/nowhere"}) is True
+    assert module._project_text({"cwd": "/nowhere"}, "ci_wait") is None
 
 
 def test_the_log_is_not_created_where_its_directory_is_absent(tmp_path: Path) -> None:
     """U6c: a user's home must not gain ``~/.config/nexus/logs/hook.log`` from a Stop hook."""
     config = tmp_path / "cfg"
     config.mkdir()
-    proc = _run_in_repo(_repo(tmp_path / "r", marked=False), config, BLOCKING)
+    proc = _run_in_repo(_repo(tmp_path / "r"), config, BLOCKING)
     assert proc.returncode == 0 and "additionalContext" in proc.stdout
     assert list(config.iterdir()) == [], "the hook made a directory under the config dir"
 
@@ -929,7 +944,7 @@ def test_the_log_is_not_created_where_its_directory_is_absent(tmp_path: Path) ->
 def test_the_log_is_written_where_its_directory_exists(tmp_path: Path) -> None:
     config = tmp_path / "cfg"
     (config / "logs").mkdir(parents=True)
-    _run_in_repo(_repo(tmp_path / "r", marked=False), config, BLOCKING)
+    _run_in_repo(_repo(tmp_path / "r"), config, BLOCKING)
     assert " INFO stop-wake-guard: block class=" in (config / "logs" / "hook.log").read_text(encoding="utf-8")
 
 
@@ -996,8 +1011,17 @@ def test_hooks_json_wires_stop_as_a_command_hook() -> None:
 # --- the labelled sample --------------------------------------------------------------------------
 
 
+_PERSON_NAMES = re.compile(r"\b(?:bob|linda|wren|halcyon|kimi|marlowe|tamsin|steve|steven|kestrel|elsinore|labrun)\b", re.IGNORECASE)
+
+
 def _rows() -> list[dict]:
-    return json.loads(SAMPLE.read_text(encoding="utf-8"))["rows"]
+    """The sample's rows, with the person names the corpus recorded replaced by the role words the classifier keeps."""
+    rows = json.loads(SAMPLE.read_text(encoding="utf-8"))["rows"]
+    for r in rows:
+        text = re.sub(r"\bSam's\b", "the user's", r["text"])
+        text = re.sub(r"\bSam\b", "the user", text)
+        r["text"] = _PERSON_NAMES.sub("the peer", text)
+    return rows
 
 
 def _blocked(row: dict) -> bool:
@@ -1096,10 +1120,10 @@ class TestCiWakeArmed:
     def test_the_text_blocks_as_a_ci_wait_with_nothing_armed(self, tmp_path: Path) -> None:
         decision = self._decide(tmp_path)
         assert decision.block and decision.reason == swg.CLASS_CI_WAIT, decision
-        reason = swg.block_reason(decision.reason, decision.clause)
-        assert "`nx ci wait <sha> --branch <branch>` as a background command" in reason
-        assert "release or PR" in reason and "any other branch reads GitHub" in reason
+        reason = swg.block_reason(decision.reason, decision.clause, ci_wait=_CI_COMMAND)
+        assert f"`{_CI_COMMAND}` as a background command" in reason and "release or PR" in reason
         assert "Monitor" in reason  # still offered for a run that is not CI
+        assert "CI board" not in swg.block_reason(decision.reason, decision.clause)
 
     def test_channel_and_a_done_subscription_cover_a_ci_wait(self, tmp_path: Path) -> None:
         _status(tmp_path)
@@ -1110,8 +1134,9 @@ class TestCiWakeArmed:
         _status(tmp_path, channel_flag=False)
         decision = self._decide(tmp_path)
         assert decision.block and decision.reason == swg.CLASS_CI_WAIT_NO_CHANNEL, decision
-        reason = swg.block_reason(decision.reason, decision.clause)
-        assert "not launched with the conexus channel" in reason and "`nx ci wait <sha>`" in reason
+        reason = swg.block_reason(decision.reason, decision.clause, ci_wait=_CI_COMMAND)
+        assert "not launched with the conexus channel" in reason and f"`{_CI_COMMAND}`" in reason
+        assert "channel" not in swg.block_reason(decision.reason, decision.clause), "no project command: the plain wording"
 
     @pytest.mark.parametrize("fields", [
         {"alive": False}, {"gate_stalled": True}, {"gate_open": False}, {"board_topics": ["board/ci/nexus-develop"]},

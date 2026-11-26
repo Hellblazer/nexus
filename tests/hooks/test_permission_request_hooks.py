@@ -41,28 +41,9 @@ NX_SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts
 SN_SCRIPT = Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "auto_approve_sn_mcp.py"
 
 
-def _account(monkeypatch: pytest.MonkeyPatch, home: Path, *, flagged: bool) -> None:
-    """Point the audience helper's account home (its in-process seam) at *home*, with or without the maintainer flag."""
-    from nexus.hooks import _audience
-
-    flag = home.joinpath(*_audience.FLAG_PARTS)
-    if flagged:
-        flag.parent.mkdir(parents=True, exist_ok=True)
-        flag.write_text("", encoding="utf-8")
-    else:
-        home.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(_audience, "_ACCOUNT_HOME_OVERRIDE", str(home))
-
-
-@pytest.fixture(autouse=True)
-def _maintainer_account(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The ported hook's wider allowlist keys on the account flag (nexus-sby49.4, U2b), and this machine's real account may or
-    may not carry it. Every test below that is not about the user prompt runs as the maintainer's account."""
-    _account(monkeypatch, tmp_path / "maintainer-home", flagged=True)
-
-
-#: U2b (D2): the destructive or other-party tools a user is prompted for; the account flag keeps the full list.
-_PROMPTED_FOR_USERS = (
+#: U2b (D2, re-ruled in nexus-sby49.4): the destructive or other-party tools, auto-approved for every user. A user who wants a
+#: prompt for one adds an ask rule in their own Claude Code settings, which beats a hook's allow.
+_DESTRUCTIVE_AND_OTHER_PARTY = (
     "memory_delete", "answer_plan_delete", "plan_delete", "memory_consolidate", "nx_tidy", "tuple_in", "mailbox_send",
 )
 
@@ -209,65 +190,35 @@ class TestNxPermissionHook:
         assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
 
 
-class TestUsersArePromptedForDestructiveAndOtherPartyTools:
-    """nexus-sby49.4, U2b (D2): the allowlist for destructive and other-party tools is a loosening, so it keys on the
-    account flag alone. A user (no flag) falls through to Claude Code's own permission prompt: the hook is silent."""
+class TestEveryUserHasTheSevenDestructiveAndOtherPartyToolsAutoApproved:
+    """nexus-sby49.4, U2b (D2 re-ruled): the plugin asks nothing about who the user is, so the seven tools are allowed for the
+    plain user, on every event the hook is registered for, exactly as every other allowed tool is."""
 
     @pytest.mark.parametrize("event", [None, "PreToolUse", "PermissionRequest"])
-    @pytest.mark.parametrize("tool", _PROMPTED_FOR_USERS)
-    def test_a_user_gets_no_allow_for_the_seven_tools(self, monkeypatch, tmp_path: Path, tool: str, event: str | None) -> None:
-        _account(monkeypatch, tmp_path / "user-home", flagged=False)
-        assert _run_nx_hook(f"mcp__plugin_conexus_nexus__{tool}", hook_event_name=event) == ""
+    @pytest.mark.parametrize("tool", _DESTRUCTIVE_AND_OTHER_PARTY)
+    def test_a_plain_user_gets_an_allow(self, tool: str, event: str | None) -> None:
+        out = _run_nx_hook(f"mcp__plugin_conexus_nexus__{tool}", hook_event_name=event)
+        assert out, f"{tool}: the hook was silent, so Claude Code would prompt"
+        data = json.loads(out)["hookSpecificOutput"]
+        assert (data.get("permissionDecision") or data["decision"]["behavior"]) == "allow"
 
-    @pytest.mark.parametrize("tool", _PROMPTED_FOR_USERS)
-    def test_the_maintainer_account_keeps_them(self, tool: str) -> None:
-        assert _parse_decision(_run_nx_hook(f"mcp__plugin_conexus_nexus__{tool}")) == "allow"
-        pre = json.loads(_run_nx_hook(f"mcp__plugin_conexus_nexus__{tool}", hook_event_name="PreToolUse"))
-        assert pre["hookSpecificOutput"]["permissionDecision"] == "allow"
-
-    def test_a_user_keeps_every_other_allowed_tool(self, monkeypatch, tmp_path: Path) -> None:
+    def test_there_is_no_prompt_list_left(self) -> None:
         from nexus.hooks import auto_approve
 
-        _account(monkeypatch, tmp_path / "user-home", flagged=False)
-        prompted = {f"mcp__plugin_conexus_nexus__{t}" for t in _PROMPTED_FOR_USERS}
-        assert prompted <= auto_approve._ALLOWED_TOOLS, "non-vacuity: the seven names are in the full list"
-        kept = sorted((auto_approve._ALLOWED_TOOLS | auto_approve._ALLOWED_HOOK_TOOLS) - prompted)
-        assert len(kept) > 40
-        denied = [t for t in kept if _parse_decision(_run_nx_hook(t)) != "allow"]
-        assert not denied, f"a user lost an allow it keeps: {denied}"
+        assert not hasattr(auto_approve, "_PROMPT_UNLESS_FLAGGED"), "the flag-keyed prompt list is gone"
+        names = {f"mcp__plugin_conexus_nexus__{t}" for t in _DESTRUCTIVE_AND_OTHER_PARTY}
+        assert names <= auto_approve._ALLOWED_TOOLS, "non-vacuity: the seven names are in the allowlist"
+        assert all(auto_approve._is_allowed(n) for n in names)
 
-    def test_the_prompted_set_is_the_manifests_list(self) -> None:
-        from nexus.hooks import auto_approve
-
-        assert auto_approve._PROMPT_UNLESS_FLAGGED == {f"mcp__plugin_conexus_nexus__{t}" for t in _PROMPTED_FOR_USERS}
-
-    def test_a_broken_audience_helper_never_widens_the_list(self, monkeypatch, tmp_path: Path) -> None:
-        """``account_flag`` loosens, so a failure answers False: the user's prompt, never an allow."""
-        from nexus.hooks import _audience
-
-        def boom() -> str:
-            raise RuntimeError("no account database")
-
-        _account(monkeypatch, tmp_path / "user-home", flagged=False)
-        monkeypatch.setattr(_audience, "account_home", boom)
-        assert _run_nx_hook("mcp__plugin_conexus_nexus__memory_delete") == ""
+    def test_the_hook_reads_nothing_about_the_account(self) -> None:
+        text = (Path(auto_approve_path()).read_text(encoding="utf-8"))
+        assert "_audience" not in text.split('"""', 2)[2], "the approver imports no audience helper"
 
 
-class TestAFailedAudienceImportNeverWidensTheList:
-    """``account_flag`` loosens, so an import of ``nexus.hooks._audience`` that fails binds it to False (nexus-sby49.4)."""
+def auto_approve_path() -> str:
+    from nexus.hooks import auto_approve
 
-    def test_the_fallback_answers_false_and_the_six_stay_prompted(self, monkeypatch) -> None:
-        import importlib.util
-
-        monkeypatch.setitem(sys.modules, "nexus.hooks._audience", None)  # an import of it now raises ImportError
-        spec = importlib.util.spec_from_file_location(
-            "auto_approve_no_helper", Path(__import__("nexus.hooks.auto_approve", fromlist=["x"]).__file__))
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        assert module._account_flag() is False
-        for tool in module._PROMPT_UNLESS_FLAGGED:
-            assert module._is_allowed(tool) is False, tool
-        assert module._is_allowed("mcp__plugin_conexus_nexus__search") is True
+    return auto_approve.__file__
 
 
 class TestDemotedOperatorsAreNotAutoApproved:

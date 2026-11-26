@@ -40,10 +40,10 @@ under that prefix that should have prompted. A one-way door with no one at it.
 The line-per-port cost is the point, not the price: it is what makes each grant
 visible in a diff, and it is what the bash script already paid 62 times.
 
-**Audience (nexus-sby49.4, U2b).** Seven of the listed names (the plan delete under both its names) delete or rewrite records, tidy the store, take a tuple or
-message another session (:data:`_PROMPT_UNLESS_FLAGGED`). They are auto-approved only on an account that carries the
-maintainer flag (``_audience.account_flag``); for anyone else the hook is silent and Claude Code's own prompt decides.
-The flag alone keys the loosening, never the repository's marker.
+**Every user.** The seven destructive or other-party tools in the list (``memory_delete``, ``answer_plan_delete`` and its old name
+``plan_delete``, ``memory_consolidate``, ``nx_tidy``, ``tuple_in``, ``mailbox_send``) are auto-approved for everyone: the plugin
+asks nothing about who the user is. A user who wants a prompt for one adds an ``ask`` or ``deny`` rule in their own Claude Code
+settings, which beats a hook's allow.
 
 **AUDIT RESIDUAL (bead nexus-q02nx.4, round 1, Moderate): hook-chain re-entry
 is measured by bead nexus-q02nx.6, not resolved here.** Auto-approving
@@ -146,33 +146,7 @@ _ALLOWED_HOOK_TOOLS: frozenset[str] = frozenset(
 )
 
 
-#: The destructive or other-party tools in :data:`_ALLOWED_TOOLS` that a user is prompted for (nexus-sby49.4, U2b, D2): they
-#: delete or rewrite stored records, tidy the store, take a tuple off the space, or send a message to another session.
-#: The decisions that listed them (240731431b, ff9d61f5ee) never weighed users, so the full list stays the maintainer's.
-_PROMPT_UNLESS_FLAGGED: frozenset[str] = frozenset(
-    {
-        "mcp__plugin_conexus_nexus__memory_delete",
-        "mcp__plugin_conexus_nexus__answer_plan_delete",
-        "mcp__plugin_conexus_nexus__plan_delete",  # the old name, until the alias is removed
-        "mcp__plugin_conexus_nexus__memory_consolidate",
-        "mcp__plugin_conexus_nexus__nx_tidy",
-        "mcp__plugin_conexus_nexus__tuple_in",
-        "mcp__plugin_conexus_nexus__mailbox_send",
-    }
-)
-
-# nexus-sby49.4: ``account_flag`` loosens (it keeps the wider allowlist), so an import that fails binds it to False: a
-# broken helper gives the user's prompt, never a wider allow.
-try:
-    from nexus.hooks._audience import account_flag as _account_flag
-except BaseException:  # noqa: BLE001
-    def _account_flag() -> bool:
-        return False
-
-
 def _is_allowed(tool_name: str) -> bool:
-    if tool_name in _PROMPT_UNLESS_FLAGGED and not _account_flag():
-        return False
     return tool_name in _ALLOWED_TOOLS or tool_name in _ALLOWED_HOOK_TOOLS
 
 

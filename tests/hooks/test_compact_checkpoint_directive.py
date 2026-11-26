@@ -37,7 +37,6 @@ def mod():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module._load_siblings()
-    module._maintainer = lambda payload: True  # these tests read the full text; TestAudienceGate varies it
     return module
 
 
@@ -106,7 +105,7 @@ class TestOpenWorkDirective:
         census found the unblocked work, so the directive applies most here."""
         ctx = _inject(mod, monkeypatch)
         assert "no working-state checkpoint" in ctx
-        assert ctx.count(DIRECTIVE) == 1
+        assert ctx.count(mod._resume_directive(False, True)) == 1
 
     def test_a_stub_checkpoint_carries_it_once(self, mod, checkpoints, monkeypatch) -> None:
         (checkpoints / f"{SID}.md").write_text(
@@ -114,7 +113,7 @@ class TestOpenWorkDirective:
         )
         ctx = _inject(mod, monkeypatch)
         assert "no working-state checkpoint" in ctx
-        assert ctx.count(DIRECTIVE) == 1
+        assert ctx.count(mod._resume_directive(False, True)) == 1
 
     def test_a_checkpoint_with_no_usable_stamp_carries_it_once(self, mod, checkpoints, monkeypatch) -> None:
         (checkpoints / f"{SID}.md").write_text(
@@ -122,7 +121,7 @@ class TestOpenWorkDirective:
         )
         ctx = _inject(mod, monkeypatch)
         assert "no working-state checkpoint" in ctx
-        assert ctx.count(DIRECTIVE) == 1
+        assert ctx.count(mod._resume_directive(False, True)) == 1
 
     def test_a_checkpoint_an_earlier_compaction_already_injected_carries_it_once(self, mod, checkpoints, monkeypatch) -> None:
         _write(checkpoints, "x")
@@ -134,7 +133,7 @@ class TestOpenWorkDirective:
         os.utime(sidecar, (old, old))                    # an EARLIER compaction's inject, not this one's
         ctx = _inject(mod, monkeypatch)
         assert "no working-state checkpoint" in ctx
-        assert ctx.count(DIRECTIVE) == 1
+        assert ctx.count(mod._resume_directive(False, True)) == 1
 
     def test_a_resume_start_that_restores_a_checkpoint_carries_no_directive(self, mod, checkpoints, monkeypatch) -> None:
         """"After this compaction" is false on a resume, a fork or a startup: the directive is compact-only."""
@@ -146,7 +145,7 @@ class TestOpenWorkDirective:
         self, mod, checkpoints, monkeypatch
     ) -> None:
         ctx = _inject(mod, monkeypatch)
-        assert ctx.index("Recover your state") < ctx.index(DIRECTIVE)
+        assert ctx.index("Recover your state") < ctx.index(mod._resume_directive(False, True))
 
     def test_the_notice_stays_a_notice(self, mod, checkpoints, monkeypatch) -> None:
         """tests/hooks/test_compact_checkpoint.py bounds it under 1 KiB; the directive must fit there."""
@@ -193,7 +192,6 @@ class TestAudienceGate:
         assert DIRECTIVE in text
 
     def test_a_user_with_neither_gets_a_notice_with_no_board_and_no_bd(self, mod, checkpoints, monkeypatch, tmp_path) -> None:
-        mod._maintainer = lambda payload: False
         (tmp_path / "bare" / ".git").mkdir(parents=True)
         ctx = _inject(mod, monkeypatch, cwd=str(tmp_path / "bare"))
         assert "no working-state checkpoint" in ctx
@@ -203,7 +201,6 @@ class TestAudienceGate:
         assert ctx.count(mod._resume_directive(False, False)) == 1
 
     def test_beads_are_named_where_the_project_has_a_beads_directory(self, mod, checkpoints, monkeypatch, tmp_path) -> None:
-        mod._maintainer = lambda payload: False
         ctx = _inject(mod, monkeypatch, cwd=str(tmp_path / "project"))
         assert "check git status, the branch and `bd list --status=in_progress`." in ctx
         assert "board" not in ctx.lower()
@@ -221,14 +218,12 @@ class TestAudienceGate:
         (tmp_path / "p" / "sub" / ".git").mkdir(parents=True)
         assert mod._has_beads({"cwd": str(tmp_path / "p" / "sub")}) is False
 
-    def test_a_restored_checkpoint_with_a_board_entry_names_the_board_for_a_user(self, mod, checkpoints, monkeypatch) -> None:
-        mod._maintainer = lambda payload: False
+    def test_a_restored_checkpoint_with_a_board_entry_names_the_board(self, mod, checkpoints, monkeypatch) -> None:
         _write(checkpoints, "BODY-SENTINEL")
         ctx = _inject(mod, monkeypatch)
         assert "the threads board" in ctx and mod._resume_directive(True, True) in ctx
 
-    def test_a_restored_checkpoint_with_no_board_entry_names_none_for_a_user(self, mod, checkpoints, monkeypatch, tmp_path) -> None:
-        mod._maintainer = lambda payload: False
+    def test_a_restored_checkpoint_with_no_board_entry_names_none(self, mod, checkpoints, monkeypatch, tmp_path) -> None:
         (tmp_path / "bare" / ".git").mkdir(parents=True)
         (checkpoints / f"{SID}.md").write_text(
             f"# Compaction checkpoint\n\n- session: {SID}\n- trigger: auto\n- written: "
@@ -242,17 +237,15 @@ class TestAudienceGate:
         assert "board" not in intro and "beads" not in intro
         assert mod._resume_directive(False, False) in ctx
 
-    def test_the_maintainer_gets_the_board_with_no_checkpoint_to_read(self, mod, checkpoints, monkeypatch, tmp_path) -> None:
+    def test_no_one_gets_the_board_with_no_checkpoint_to_read(self, mod, checkpoints, monkeypatch, tmp_path) -> None:
+        """Inject cannot ask the service, so with no checkpoint the board is not named: it is named only when one was found."""
         (tmp_path / "bare" / ".git").mkdir(parents=True)
         ctx = _inject(mod, monkeypatch, cwd=str(tmp_path / "bare"))
-        assert "read your threads board entry" in ctx and "bd list" not in ctx
+        assert "no working-state checkpoint" in ctx
+        assert "board" not in ctx.lower() and "bd list" not in ctx
 
-    def test_a_broken_audience_helper_binds_maintainer_to_true(self, monkeypatch) -> None:
-        monkeypatch.setitem(sys.modules, "_audience", None)
-        spec = importlib.util.spec_from_file_location("cc_no_helper", SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        assert module._maintainer({"cwd": "/nowhere"}) is True
+    def test_the_module_reads_no_audience_setting(self, mod) -> None:
+        assert not hasattr(mod, "_maintainer") and not hasattr(mod, "_audience")
 
     def test_a_project_without_beads_loses_the_in_progress_beads_placeholder(self, mod, tmp_path) -> None:
         """``nx command-context continuation`` fills the subsection with ``(bd unavailable or no results)`` for a project that

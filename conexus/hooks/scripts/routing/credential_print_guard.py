@@ -141,14 +141,13 @@ _interpreter.reexec_if_needed()
 sys.path.insert(0, os.path.dirname(__file__))
 import _lib  # noqa: E402
 
-# nexus-sby49.4 audience gate (U7b). The redirect that names the Hellblazer/nexus wrapper is for a checkout that carries the
-# nexus marker; every other user is told to ask their operator for an equivalent. ``nexus_repo`` tightens (it adds text),
-# so an import that fails binds it to True: a broken helper gives the full redirect, never a thinner deny.
+# The deny's redirect is neutral unless the project's tracked settings carry a ``credential_helper`` text naming its own safe
+# way to use the credential. The setting only adds text, so a helper that cannot be imported gives the neutral redirect.
 try:
-    from _audience import nexus_repo as _nexus_repo  # noqa: E402 -- the sys.path insert above reaches it
+    from _audience import project_text as _project_text  # noqa: E402 -- the sys.path insert above reaches it
 except BaseException:  # noqa: BLE001
-    def _nexus_repo(payload: object) -> bool:
-        return True
+    def _project_text(payload: object, key: str) -> "str | None":
+        return None
 
 RULE_NAME = "credential_print_guard"
 
@@ -186,28 +185,22 @@ _FAILSAFE_MARKERS: tuple[str, ...] = (
     *CREDENTIAL_ENV_VARS,
 )
 
-_REDIRECT = (
+_REFUSAL = (
     "This command would print a Claude Code credential. Harnesses never read "
     "the keychain or a credential file directly, and never print the "
-    "automation token. The nexus repo's wrapper "
-    "(https://github.com/Hellblazer/nexus/blob/main/tests/e2e/lib/claude_credentials.py) "
-    "does both safely: `claude_credentials.py status` checks the token, and "
-    "`claude_credentials.py run -- <command>` runs a child process with it "
-    "set in the environment. A project without that wrapper asks its operator "
-    "for an equivalent (RDR-219)."
+    "automation token."
 )
 
-#: What every other user reads (U7b): the same refusal, with no wrapper to point at.
+#: What the deny says when the project names no helper.
 _REDIRECT_USER = (
-    "This command would print a Claude Code credential. Harnesses never read "
-    "the keychain or a credential file directly, and never print the "
-    "automation token. Ask your operator for a helper that checks the token "
+    _REFUSAL + " Ask your operator for a helper that checks the token "
     "and runs a command with it set in the environment without printing it."
 )
 
 
 def _redirect(payload: dict) -> str:
-    return _REDIRECT if _nexus_repo(payload) else _REDIRECT_USER
+    helper = _project_text(payload, "credential_helper")
+    return f"{_REFUSAL} {helper}" if helper else _REDIRECT_USER
 
 
 # ---------------------------------------------------------------------------

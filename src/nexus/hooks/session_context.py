@@ -114,21 +114,6 @@ from nexus._hook_runtime._io import HookResult
 
 __all__ = ["run"]
 
-# nexus-sby49 audience gates (stdlib only). ``maintainer`` and ``nexus_repo`` tighten (they add text), so
-# an import failure binds them to True, the contract's direction: a broken helper gives the maintainer's
-# full output, never a thinner one. ``account_flag`` loosens and binds to False.
-try:
-    from nexus.hooks._audience import account_flag as _account_flag, maintainer as _maintainer, nexus_repo as _nexus_repo
-except BaseException:  # noqa: BLE001
-    def _maintainer(payload: object) -> bool:
-        return True
-
-    def _nexus_repo(payload: object) -> bool:
-        return True
-
-    def _account_flag() -> bool:
-        return False
-
 # Configuration via environment variables
 DEBUG = os.environ.get('NX_HOOK_DEBUG', '0') == '1'
 NX_TIMEOUT = int(os.environ.get('NX_TIMEOUT', '10'))
@@ -264,9 +249,8 @@ def _render_ready_beads(
 #: 2026-11-01 found 0 T1 writes in ~45 dispatches across 9 sessions, with the
 #: only top-level mention one capability line deep in this block.
 #:
-#: nexus-sby49.3: one constant per line, each with its own audience in ``conexus/hooks/audience.yaml``. The heading and
-#: the lifetime line are the product's (I1a; the retired-``share_t1`` parenthetical is gone for everyone, I1c). The
-#: dispatch protocol sentence is Sam's own working rule (I1b, D10, nexus-mtheb) and goes only to ``maintainer()``.
+#: One constant per line, each declared in ``conexus/hooks/audience.yaml``. Every session gets all three: the heading, the
+#: dispatch protocol sentence and the lifetime line.
 _T1_HEADING: str = "## T1: the working layer this session shares with its subagents"
 _T1_DISPATCH_PROTOCOL: str = (
     "Before a dispatch, `scratch put` the design-of-record and the shared brief context "
@@ -282,34 +266,13 @@ _T1_LIFETIME: str = (
     "`scope=identity` and tag `working`; session scope stays the layer your subagents share."
 )
 
-#: The maintainer's block: what every session had before nexus-sby49.3, less the retired-``share_t1`` parenthetical.
+#: The T1 block every session gets.
 _T1_TOP_LINES: list[str] = [_T1_HEADING, _T1_DISPATCH_PROTOCOL, _T1_LIFETIME, ""]
 
 
 def _t1_top_lines(payload: object) -> list[str]:
-    """The T1 block for this session: the dispatch protocol sentence only for ``maintainer()``."""
-    if _maintainer(payload):
-        return list(_T1_TOP_LINES)
-    return [_T1_HEADING, _T1_LIFETIME, ""]
-
-
-#: The one NEXUS-REPO line that replaces the hook-log tripwire (plan section 7 Phase 2, change 3): a checkout that
-#: carries the nexus marker is held to nexus's rules whoever opens it, and this account has no maintainer flag, so
-#: nothing outside this checkout is. Printed on every start in such a checkout; silent everywhere else.
-_TRIPWIRE_LINE: str = (
-    "This checkout carries the nexus marker, so nexus's own development rules apply in it, but this account has no "
-    "maintainer flag (`~/.config/nexus/maintainer-profile`), so they apply nowhere else."
-)
-
-
-def _tripwire_lines(payload: object) -> list[str]:
-    """The tripwire line when the repo marker is the only reason this session is a maintainer's; ``[]`` otherwise."""
-    try:
-        if _nexus_repo(payload) and not _account_flag():
-            return [_TRIPWIRE_LINE]
-    except BaseException:  # noqa: BLE001 — a line of text never costs the session its context
-        pass
-    return []
+    """The T1 block for this session (the same for every session)."""
+    return list(_T1_TOP_LINES)
 
 
 def _build_capabilities_block() -> list[str]:
@@ -500,9 +463,6 @@ def run(payload: dict | None) -> HookResult:
             output_lines.extend(identity_notes.notes_lines(session_id))
         except Exception:  # noqa: BLE001 — a hook must never fail; keep the rest of the context
             debug("identity notes line skipped")
-
-    # --- NEXUS-REPO: the marker is the only reason this session is held to nexus's rules (nexus-sby49.3, the tripwire) ---
-    output_lines.extend(_tripwire_lines(audience_payload))
 
     # --- Fire-only: a T2 that cannot be reached, or whose newest entry is stale, is never silent (nexus-8fvp2) ---
     output_lines.extend(_t2_reachability_lines(repo))

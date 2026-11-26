@@ -178,7 +178,7 @@ class TestCheckpointShowsEachSlip:
         world["board"] = f"## Main\nref: nexus-ct74m\nstate: in nexus-wt/{NAME}\n"
         text = world["write"](cwd=str(primary))
         assert re.search(rf"- no board thread names \S*{NAME}-forgotten \[feature/x-{NAME}-forgotten\]: "
-                         r"1 commit\(s\) not on origin/develop \(as of its last fetch\)", text)
+                         r"1 commit\(s\) not on the default branch \(as of its last fetch\)", text)
 
     def test_the_worktree_is_the_one_with_the_newest_commit_not_the_cwd(self, world, mod, env, monkeypatch, tmp_path) -> None:
         _repo(tmp_path, {NAME: True, f"{NAME}-live": False})
@@ -266,7 +266,7 @@ class TestNoFalseClaim:
         monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
         world["board"] = "## Main\nref: nexus-ct74m\n"
         assert "landed" not in _section(world["write"](cwd=str(primary)), "Board checked against the facts").replace(
-            "not on origin/develop", "")
+            "not on the default branch", "")
         assert f"{NAME}-landed" not in _section(world["write"](cwd=str(primary)), "Board checked against the facts")
 
     def test_one_closed_bead_on_a_mixed_line_does_not_make_the_line_stale(self, world) -> None:

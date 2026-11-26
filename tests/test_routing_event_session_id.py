@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from tests.hooks.audience_harness import mark_nexus, marked_repo
+from tests.hooks.audience_harness import mark_strict, plain_repo, write_user_settings
 
 ROUTING = pathlib.Path(__file__).parent.parent / "conexus" / "hooks" / "scripts" / "routing"
 SESSION = "m4lej-session-0001"
@@ -75,9 +75,17 @@ def _wait_for(predicate, timeout: float = 15.0) -> bool:
     return predicate()
 
 
+HARNESS = pathlib.Path(__file__).parent / "hooks" / "audience_harness.py"
+
+
+def _telemetry_home(env: dict) -> str:
+    """An account home whose ``conexus.json`` turns the opt-in telemetry on: the rows these tests read are sent only then."""
+    return str(write_user_settings(pathlib.Path(env["NEXUS_CONFIG_DIR"]).parent / "acct-telemetry", telemetry=True))
+
+
 def _run(script: str, payload: dict, env: dict) -> dict:
     proc = subprocess.run(
-        [sys.executable, str(ROUTING / script)],
+        [sys.executable, str(HARNESS), _telemetry_home(env), str(ROUTING / script)],
         input=json.dumps(payload), capture_output=True, text=True, timeout=20, env=env,
     )
     assert proc.returncode == 0, proc.stderr
@@ -89,7 +97,7 @@ def test_credential_print_guard_deny_row_carries_session(engine, tmp_path):
     out = _run(
         "credential_print_guard.py",
         {"tool_name": "Bash", "tool_input": {"command": "cat /proc/1234/environ"},
-         "session_id": SESSION, "cwd": marked_repo(tmp_path / "nexus")},  # the event is the maintainer's (nexus-sby49.3)
+         "session_id": SESSION, "cwd": plain_repo(tmp_path / "checkout")},
         env,
     )
     assert out["permissionDecision"] == "deny"
@@ -103,7 +111,7 @@ def test_subagent_git_write_deny_row_carries_session(engine, tmp_path):
     repo = tmp_path / "shared"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    mark_nexus(repo)  # the guard's full rule is the maintainer's (nexus-sby49)
+    mark_strict(repo)  # the guard's full rule runs where the project's settings say strict
     out = _run(
         "subagent_git_write_requires_orchestrator.py",
         {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"},
@@ -122,6 +130,7 @@ def test_explicit_session_id_wins_over_payload(engine, tmp_path):
     bodies, env = engine
     stub = (
         f"import sys; sys.path.insert(0, {str(ROUTING)!r}); import _lib\n"
+        f"import _audience; _audience._ACCOUNT_HOME_OVERRIDE = {_telemetry_home(env)!r}\n"
         "def body(p):\n"
         "    _lib.log_routing_event(rule='r', outcome='deny', session_id='explicit')\n"
         "    _lib.log_routing_event(rule='r', outcome='allow')\n"
@@ -130,7 +139,7 @@ def test_explicit_session_id_wins_over_payload(engine, tmp_path):
     )
     proc = subprocess.run(
         [sys.executable, "-c", stub],
-        input=json.dumps({"session_id": SESSION, "cwd": marked_repo(tmp_path / "nexus")}),
+        input=json.dumps({"session_id": SESSION, "cwd": plain_repo(tmp_path / "checkout")}),
         capture_output=True, text=True, timeout=20, env=env,
     )
     assert proc.returncode == 0, proc.stderr
@@ -145,9 +154,9 @@ def test_subagent_git_write_escape_row_carries_session(engine, tmp_path):
     repo = tmp_path / "shared"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    mark_nexus(repo)  # the guard's full rule is the maintainer's (nexus-sby49)
+    mark_strict(repo)  # the guard's full rule runs where the project's settings say strict
     proc = subprocess.run(
-        [sys.executable, str(ROUTING / "subagent_git_write_requires_orchestrator.py")],
+        [sys.executable, str(HARNESS), _telemetry_home(env), str(ROUTING / "subagent_git_write_requires_orchestrator.py")],
         input=json.dumps({
             "tool_name": "Bash",
             "tool_input": {"command": "git commit -m x  # routing-allow: m4lej escape case"},
@@ -181,7 +190,7 @@ def test_dropped_event_keeps_session(tmp_path):
     out = _run(
         "credential_print_guard.py",
         {"tool_name": "Bash", "tool_input": {"command": "cat /proc/1234/environ"},
-         "session_id": SESSION, "cwd": marked_repo(tmp_path / "nexus")},
+         "session_id": SESSION, "cwd": plain_repo(tmp_path / "checkout")},
         env,
     )
     assert out["permissionDecision"] == "deny"

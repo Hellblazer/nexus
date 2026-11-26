@@ -96,14 +96,14 @@ from typing import Any, Callable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _endpoint_resolve as _ep  # noqa: E402 -- must follow the sys.path insert
 
-# nexus-sby49.3: routing telemetry (a routing_events row carries the user's command fragment to their engine, for
-# nexus's own census work) is SAM-WIDE. ``maintainer`` tightens (it keeps today's logging), so a helper that cannot be
-# imported binds it to True: a broken helper restores the logging, never removes a guard.
+# Routing telemetry (a routing_events row carries the user's command fragment to their engine) is an opt-in user setting,
+# ``telemetry`` in ``conexus.json``, off by default. It sends data, so a helper that cannot be imported binds it to False:
+# a broken helper records nothing.
 try:
-    from _audience import maintainer as _maintainer  # noqa: E402 -- same sys.path insert
+    from _audience import telemetry_enabled as _telemetry_enabled  # noqa: E402 -- same sys.path insert
 except BaseException:  # noqa: BLE001
-    def _maintainer(payload: object) -> bool:
-        return True
+    def _telemetry_enabled() -> bool:
+        return False
 
 ESCAPE_TOKEN = "# routing-allow:"
 ESCAPE_REASON_MIN_LENGTH = 8
@@ -814,12 +814,12 @@ def log_routing_event(
     :func:`run_hook` read (nexus-m4lej: two guards' seven call sites never
     passed it, so every routing_events row carried an empty session).
 
-    Audience (nexus-sby49.3): the event carries the user's command fragment to their engine, for nexus's own
-    census work, so it is recorded only under ``maintainer()``; for anyone else this returns before it resolves
-    an endpoint, starts a child or meters a drop. A predicate error records, as before.
+    Telemetry is opt-in: the event carries the user's command fragment to their engine, so it is recorded only when the
+    user's ``telemetry`` setting is true; otherwise this returns before it resolves an endpoint, starts a child or meters
+    a drop.
     """
     try:
-        if not _maintainer(_payload):
+        if not _telemetry_enabled():
             return
         record: dict = {
             "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),

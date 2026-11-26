@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tests.hooks.audience_harness import flagged_home, plain_repo
+from tests.hooks.audience_harness import strict_home, plain_repo
 
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS = ROOT / "tests" / "hooks" / "audience_harness.py"
@@ -40,7 +40,7 @@ def _another_python(tmp_path: Path) -> tuple[Path, Path]:
 def test_the_harness_does_not_let_a_script_re_exec_away_from_its_seam(tmp_path: Path) -> None:
     other, ran = _another_python(tmp_path)
     repo = plain_repo(tmp_path / "users-repo")
-    home = flagged_home(tmp_path / "acct")
+    home = strict_home(tmp_path / "acct")
     payload = {
         "tool_name": "Bash", "tool_input": {"command": "git commit -am x"}, "cwd": repo,
         "agent_id": "aworker-x-0000000000", "agent_type": "general-purpose", "session_id": "s",

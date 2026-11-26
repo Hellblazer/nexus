@@ -31,9 +31,9 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SN_SCRIPT = _REPO_ROOT / "sn" / "hooks" / "scripts" / "subagent_start.py"
 
-#: nexus-sby49.3: the budget bounds the LARGEST injection, the maintainer's in a nexus checkout (the Git row, the
-#: Search scope row and all five brief-check questions). A user's is smaller, so these cases run as a maintainer on an
-#: account that carries the flag, named through the seam prelude (the child process cannot reach the in-process one).
+#: The budget bounds the LARGEST injection: a project whose tracked settings turn every key on (the Git row, the Search scope
+#: row, the Preflight row, the four generic brief-check questions and the project's own) on an account whose user settings are
+#: strict too, named through the seam prelude (the child process cannot reach the in-process one). A plain session's is smaller.
 _CONEXUS_PY_DRIVER = SRC_SEAM_PRELUDE + """
 import json, sys
 import os
@@ -233,10 +233,10 @@ def _seeded_env(home: Path, cwd: str | None) -> dict[str, str]:
     # nexus-mtheb: the T1 index at its worst case, read by the driver's stub.
     t1_seed = home / "t1-seed.txt"
     t1_seed.write_text(_T1_SEED, encoding="utf-8")
-    # The maintainer's account: the flag file under a home of its own (the seam prelude names it).
-    flag = home / "acct" / ".config" / "nexus" / "maintainer-profile"
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("", encoding="utf-8")
+    # An account with strict user settings, under a home of its own (the seam prelude names it).
+    settings = home / "acct" / ".config" / "nexus" / "conexus.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"subagent_git": "strict"}), encoding="utf-8")
     # USERPROFILE: Windows' home for expanduser; NEXUS_CONFIG_DIR: the
     # directory the hook reads the cache from (nexus-3fme8).
     return {
@@ -308,13 +308,14 @@ def test_sn_subagent_start_script_exists() -> None:
 
 @pytest.mark.t2_tenant
 def test_combined_subagent_start_total_under_budget(tmp_path) -> None:
-    # cwd names this checkout, which carries the tracked marker: the measured case is a maintainer in nexus.
+    # cwd names this checkout, whose tracked .nexus/project.json sets every project key: the measured case is the largest.
     conexus_payload = json.dumps({**json.loads(_REAL_SHAPE_PAYLOAD), "cwd": str(_REPO_ROOT)})
     conexus_ctx = _run_conexus(home=tmp_path / "home", payload=conexus_payload)
     _assert_seeds_reached(conexus_ctx)
-    assert "| Git |" in conexus_ctx and "| Search scope |" in conexus_ctx and "3. Modes:" in conexus_ctx, (
-        "the measured injection is not the maintainer's full one, so the budget bounds a smaller case"
+    assert "| Git |" in conexus_ctx and "| Search scope |" in conexus_ctx and "5. Does it hold in both modes" in conexus_ctx, (
+        "the measured injection is not the full one (every project key on), so the budget bounds a smaller case"
     )
+    assert "| Preflight |" in conexus_ctx
     sn_ctx = _run_sn()
     conexus_bytes = len(conexus_ctx.encode("utf-8"))
     sn_bytes = len(sn_ctx.encode("utf-8"))
@@ -346,14 +347,15 @@ def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> N
     main_repo = tmp_path / "the-real-project"
     main_repo.mkdir()
     subprocess.run(["git", "init", "-q", str(main_repo)], check=True)
-    # nexus-z7ddd: the worktree Preflight row goes only to a project that has the
-    # script, as the nexus repo does; seed it so this measures the largest case.
-    preflight = main_repo / "scripts" / "agent-worktree-preflight.sh"
-    preflight.parent.mkdir()
-    preflight.write_text("#!/bin/sh\n", encoding="utf-8")
-    # The script is also the Phase 1 audience marker; committed, the worktree carries it, so the payload's
-    # cwd (the worktree) is a nexus checkout and the measured case includes the NEXUS-REPO brief-check question.
-    subprocess.run(["git", "-C", str(main_repo), "add", "scripts/agent-worktree-preflight.sh"], check=True)
+    # The worktree Preflight row, the strict Git row and the project's brief question come from the project's tracked
+    # settings; committed, the worktree carries them, so this measures the largest case.
+    settings = main_repo / ".nexus" / "project.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({
+        "subagent_git": "strict", "preflight": "scripts/agent-worktree-preflight.sh",
+        "brief_questions": ["Does it hold in both modes, local AND cloud?"],
+    }), encoding="utf-8")
+    subprocess.run(["git", "-C", str(main_repo), "add", ".nexus/project.json"], check=True)
     subprocess.run(
         ["git", "-C", str(main_repo), "-c", "user.name=t", "-c", "user.email=t@t",
          "commit", "-q", "--allow-empty", "-m", "init"],
@@ -376,7 +378,7 @@ def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> N
     conexus_ctx = _run_conexus(home=tmp_path / "home", cwd=str(worktree_dir), payload=worktree_payload)
     _assert_seeds_reached(conexus_ctx)
     assert "| Preflight |" in conexus_ctx, "the worktree Preflight row is not in the measured injection"
-    assert "| Git |" in conexus_ctx and "3. Modes:" in conexus_ctx, "the measured injection is not the maintainer's full one"
+    assert "| Git |" in conexus_ctx and "5. Does it hold in both modes" in conexus_ctx, "the measured injection is not the full one"
     sn_ctx = _run_sn(payload=worktree_payload)
     assert "worktree" in sn_ctx.lower(), (
         "sn subagent_start.py did not emit worktree-section.md for a real linked "

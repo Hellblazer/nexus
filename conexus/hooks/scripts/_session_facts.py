@@ -345,27 +345,44 @@ MAX_WORKTREES = 12
 class WorktreeWork:
     path: str
     branch: str
-    unlanded: int  # commits whose change is not on origin/develop; -1 unknown
+    unlanded: int  # commits whose change is not on the repository's default branch; -1 unknown
     dirty: int  # tracked files changed; -1 unknown
 
 
+def default_branch_ref(path: str, git: str, timeout: float = 3.0) -> str:
+    """The remote ref of the repository's default branch: what ``origin/HEAD`` points at, else ``origin/main``,
+    ``origin/master`` or ``origin/develop`` when one exists. Empty when none resolves."""
+    code, out = run([git, "-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], timeout)
+    if code == 0 and out.strip().startswith("origin/"):
+        return out.strip()
+    for ref in ("origin/main", "origin/master", "origin/develop"):
+        code, _ = run([git, "-C", path, "rev-parse", "--verify", "--quiet", ref], timeout)
+        if code == 0:
+            return ref
+    return ""
+
+
 def worktree_work(path: str, branch: str, git: str, timeout: float = 3.0) -> WorktreeWork:
-    """Commits not landed on ``origin/develop`` and changed tracked files. "Landed" is against develop,
-    never the branch's own upstream: a pushed feature branch whose tracking ref is behind would count work
-    that is already on develop (marlowe-runner, review of 448ad2e1c). HEAD inside develop is 0; otherwise
-    ``git cherry`` counts commits whose patch develop does not hold (a cherry-picked fix counts as landed).
+    """Commits not landed on the repository's default branch and changed tracked files. "Landed" is against that branch
+    (``origin/HEAD``), never the branch's own upstream: a pushed feature branch whose tracking ref is behind would count work
+    that is already on the default branch. HEAD inside it is 0; otherwise ``git cherry`` counts commits whose patch it does
+    not hold (a cherry-picked fix counts as landed). The count is -1 (unknown) when no default branch resolves.
     An empty *branch* is looked up (``HEAD`` stays empty: detached)."""
     if not branch:
         code, head = run([git, "-C", path, "rev-parse", "--abbrev-ref", "HEAD"], timeout)
         branch = head.strip() if code == 0 and head.strip() != "HEAD" else ""
-    code, _ = run([git, "-C", path, "merge-base", "--is-ancestor", "HEAD", "origin/develop"], timeout)
-    if code == 0:
-        unlanded = 0
-    elif code == 1:
-        code, cherry = run([git, "-C", path, "cherry", "origin/develop", "HEAD"], timeout)
-        unlanded = sum(1 for ln in cherry.splitlines() if ln.startswith("+")) if code == 0 else -1
-    else:
+    base = default_branch_ref(path, git, timeout)
+    if not base:
         unlanded = -1
+    else:
+        code, _ = run([git, "-C", path, "merge-base", "--is-ancestor", "HEAD", base], timeout)
+        if code == 0:
+            unlanded = 0
+        elif code == 1:
+            code, cherry = run([git, "-C", path, "cherry", base, "HEAD"], timeout)
+            unlanded = sum(1 for ln in cherry.splitlines() if ln.startswith("+")) if code == 0 else -1
+        else:
+            unlanded = -1
     code, status = run([git, "--no-optional-locks", "-C", path, "status", "--porcelain", "--untracked-files=no"], timeout)
     dirty = len([ln for ln in status.splitlines() if ln.strip()]) if code == 0 else -1
     return WorktreeWork(path, branch, unlanded, dirty)
@@ -401,7 +418,7 @@ def unboarded(work: Iterable[WorktreeWork], board: str) -> tuple[list[str], list
             continue
         what = []
         if w.unlanded > 0:
-            what.append(f"{w.unlanded} commit(s) not on origin/develop (as of its last fetch)")
+            what.append(f"{w.unlanded} commit(s) not on the default branch (as of its last fetch)")
         if w.dirty > 0:
             what.append(f"{w.dirty} changed file(s)")
         if what:

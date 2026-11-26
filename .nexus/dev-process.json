@@ -1,5 +1,0 @@
-{
-  "schema": 1,
-  "project": "nexus",
-  "purpose": "Marks a checkout as nexus's own development tree. The conexus plugin's hooks read this file's presence (conexus/hooks/scripts/_audience.py, src/nexus/hooks/_audience.py) to switch on the rules that exist for nexus's multi-agent development. Adding it to another project turns those rules on there. Plan: nexus-sby49."
-}

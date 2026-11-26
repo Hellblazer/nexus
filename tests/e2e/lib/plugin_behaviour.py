@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""The behaviour leg of the plugin out-of-repo gate (nexus-sby49.3, plan section 5 item 2).
+"""The behaviour leg of the plugin out-of-repo gate (nexus-sby49.3, plan section 5 item 2; reworked in nexus-sby49.4).
 
 The static pass reads the plugin's markdown. This leg RUNS its hooks, the way a user's machine does, and asks the
-question the audience manifest answers: does a user who is not nexus's maintainer get a quiet, neutral plugin, and does
-nexus's own checkout still get the full one? Deterministic: it needs ``uv`` and the project's Python, never ``claude``.
+question the audience manifest answers: does every user get the same quiet, neutral plugin, and does a project or a user
+that turns a setting on get exactly that setting's behaviour and nothing else? Nothing depends on who the user is.
+Deterministic: it needs ``uv`` and the project's Python, never ``claude``.
 
 It runs each ``hooks.json`` registration's real argv, with ``${CLAUDE_PLUGIN_ROOT}`` substituted, under payloads of the
-shape Claude Code sends, in three fixtures:
+shape Claude Code sends, in these fixtures:
 
-* ``plain``: a scratch git repository (clean tree) on an account with no flag: a user's repository. ``plain-dirty`` is
-  the same with an uncommitted change, for the git guard's dirty-tree rows.
-* ``marked``: a scratch repository whose tracked files carry the nexus markers, on an account with no flag.
-* ``flagged``: a plain repository on an account that carries the maintainer flag.
+* ``plain``: a scratch git repository (clean tree) on an account with no settings file. ``plain-dirty`` is the same with
+  an uncommitted change, for the git guard's dirty-tree rows; ``plain-beads`` has a ``.beads/`` directory.
+* ``project-strict``: a scratch repository whose tracked ``.nexus/project.json`` sets every project key (``PROJECT_SETTINGS``),
+  on an account with no settings file.
+* ``user-strict``: a plain repository on an account whose ``.config/nexus/conexus.json`` sets the user keys
+  (``USER_SETTINGS``).
 
 and two postures:
 
@@ -22,21 +25,21 @@ and two postures:
 
 What it asserts, and where each assertion lives:
 
-* in a plain fixture the only denies are the ones the fixture's probe expects (D1's list, the credential read, a Stop
-  promise), and no output carries the lexicon (a bead id, an RDR id, ``bd``, Sam, Hal, peer names, ``orchestrator``,
-  ``develop/main``, the lab hosts, ``Hellblazer/nexus``, ``hook-ENFORCED``, ``local AND cloud``);
-* in the marked and flagged fixtures every live SAM-WIDE constant appears in some output, every live NEXUS-REPO constant
-  appears in the marked fixture and not in the flagged one, and none of them appears in a plain one;
-* a probe that names the decision it expects (the git guard's rows of plan section 2.1 per audience) gets it.
+* in every fixture no output carries the lexicon (a bead id, an RDR id, ``bd`` outside a beads project, Sam, Hal, peer names,
+  ``develop/main``, the lab hosts, ``Hellblazer/nexus``, ``hook-ENFORCED``, ``local AND cloud``), and the only denies are
+  the ones the fixture expects (the seatbelt's list, the credential read, a blocked advice row, a Stop promise);
+* every live ``SETTING:<key>`` constant appears in the output of each fixture that sets the key and in none that does not;
+* a probe that names the decision or the words it expects gets them: the git guard's rows of plan section 2.1 per mode, the
+  Stop guard's CI command, the credential helper, the Git, Search scope, Preflight and brief-check rows, the blocked advice row,
+  the seven auto-approved tools, the T1 nudge.
 
 A finding that is not a failure is allowlisted in ``plugin-behaviour-allowlist.txt``, and only for a manifest row that is
-not live yet (a Phase 3 row). An entry whose condition has passed fails, and so does an entry that matched nothing.
+not live yet. The allowlist is empty: an entry whose condition has passed fails, and so does an entry that matched nothing.
 
 Account control. The helper reads the account home from the OS account database, so no environment variable moves it.
-With ``--account auto`` the leg runs the real argv when the real account has no flag (a CI runner, a lab host), and when
-it has one (a maintainer's laptop) it inserts ``tests/hooks/audience_harness.py`` after ``python``, which sets the
-in-process seam and runs the same script; the output says which. The src hooks reach the seam through a prelude in the
-P2 shim, in every mode.
+With ``--account auto`` the leg runs the real argv when the real account has no ``conexus.json`` (a CI runner, a lab host), and
+when it has one it inserts ``tests/hooks/audience_harness.py`` after ``python``, which sets the in-process seam and runs the
+same script; the output says which. The src hooks reach the seam through a prelude in the P2 shim, in every mode.
 
 Usage (from the repository, under the project's interpreter; the gate script does this)::
 
@@ -72,12 +75,12 @@ DEFAULT_ALLOWLIST = REPO / "tests" / "e2e" / "plugin-behaviour-allowlist.txt"
 SEAM_ENV = "NX_TEST_ACCOUNT_HOME"
 NX_PROGRAMS = ("nx", "nx-hook", "nx-mcp", "nx-mcp-catalog", "nx-session-end-launcher")
 
-#: A user's output must carry none of this (plan section 5 item 2). ``Sam`` and ``Hal`` are case-sensitive; the rest are not.
-#: The peer names are the person names in the stop guard's ``_PEER_NAMES``; the rest of that tuple is ordinary English.
+#: No fixture's output may carry any of this (plan section 5 item 2). ``Sam`` and ``Hal`` are case-sensitive; the rest are not.
+#: The peer names are the person names the stop guard's classifier used to carry. ``orchestrator`` is process vocabulary.
 PEER_NAMES = ("bob", "linda", "wren", "halcyon", "kimi", "marlowe", "tamsin", "steve", "steven", "kestrel", "elsinore", "labrun")
 LEXICON_CS = re.compile(r"\b(?:Sam|Hal)\b")
 LEXICON_CI = re.compile(
-    r"\bnexus-[a-z0-9]{4,}\b|\bRDR-\d+\b|\bbd\b|\borchestrator\b|develop/main|\blab-remote\b|\blab-run\b|\bchas\b|\bqwent\b"
+    r"\bnexus-[a-z0-9]{4,}\b|\bRDR-\d+\b|\bbd\b|develop/main|\blab-remote\b|\blab-run\b|\bchas\b|\bqwent\b"
     r"|\bhellmini\b|Hellblazer/nexus|hook-ENFORCED|local AND cloud|\b(?:" + "|".join(PEER_NAMES) + r")\b",
     re.IGNORECASE,
 )
@@ -90,8 +93,8 @@ def lexicon_hits(text: str, *, beads: bool = False) -> list[str]:
     return [t for _, t in sorted(found) if not (beads and t.lower() == "bd")]
 
 
-# --- section 2.1: the git guard per verb, for a user and for the maintainer ---------------------------
-#: (command, user, maintainer): "deny" or "pass". A user's dirty-tree rows are in ``DIRTY_ROWS``.
+# --- section 2.1: the git guard per verb, in the default mode and in strict mode ---------------------------
+#: (command, seatbelt, strict): "deny" or "pass". The seatbelt's dirty-tree rows are in ``DIRTY_ROWS``.
 GUARD_ROWS: list[tuple[str, str, str]] = [
     ("git commit -am x", "pass", "deny"),
     ("git add f", "pass", "deny"),
@@ -152,25 +155,42 @@ GUARD_ROWS: list[tuple[str, str, str]] = [
     ("gh pr merge 5", "pass", "pass"),
     ("gh pr checkout 5", "pass", "deny"),
 ]
-#: Rows that deny for a user only when the tree has something to lose; the plain fixture is clean, plain-dirty is not.
+#: Rows the seatbelt denies only when the tree has something to lose; the plain fixture is clean, plain-dirty is not.
 DIRTY_ROWS: list[str] = [
     "git checkout -- f", "git checkout -f main", "git restore f", "git reset --hard", "git reset --hard HEAD~1",
     "git stash", "git stash -u", "git rm -f f", "git clean -fd",
 ]
 CREDENTIAL_ROWS = [("cat /proc/1234/environ", "deny"), ("ls -la", "pass")]
-#: (command, what the output is): advice is additionalContext with no decision, none is silence. A user's advice is as neutral
-#: as the maintainer's (U8a), and no fixture's output is a deny (U8b: the flip is not made, and never reaches a user).
+#: (command, what the output is in a fixture with no ``advice_block``): advice is additionalContext with no decision, none is
+#: silence. A row blocks only where the project's or the user's ``advice_block`` lists its id.
 ADVICE_ROWS = [("pkill -f pytest", "advice"), ("find / -name x.py", "advice"), ("ls -la", "none")]
-#: U2b: the tools a user is prompted for (the hook is silent, so Claude Code's own prompt decides); the maintainer's account allows.
-PROMPTED_FOR_USERS = (
+#: The row ``PROJECT_SETTINGS`` and ``USER_SETTINGS`` switch to block, and the command that matches it.
+BLOCKED_ROW_COMMAND = "find / -name x.py"
+#: U2b: the destructive or other-party tools, auto-approved for every user (the hook says allow in every fixture).
+AUTO_APPROVED_FOR_EVERYONE = (
     "memory_delete", "answer_plan_delete", "plan_delete", "memory_consolidate", "nx_tidy", "tuple_in", "mailbox_send",
 )
-#: U6b: the stop guard's CI wording, which only a nexus checkout reads.
+#: U6b: the stop guard's CI wording, which only a project's ``ci_wait`` brings.
 CI_TEXT = ("nx ci wait", "CI board", "develop and main")
 
-FIXTURES = ("plain", "plain-dirty", "plain-beads", "marked", "flagged")
-USER_FIXTURES = ("plain", "plain-dirty", "plain-beads")
-#: A user's repository with a ``.beads/`` directory: only the compaction events run in it (S2-2's data gate, switched on).
+#: What the project-strict fixture's tracked ``.nexus/project.json`` carries: every project key.
+PROJECT_SETTINGS: dict[str, Any] = {
+    "schema": 1,
+    "subagent_git": "strict",
+    "preflight": "tools/leg-preflight.sh",
+    "ci_wait": "leg-ci-wait <sha>",
+    "credential_helper": "The project's tools/leg-credentials.sh checks the token and runs a command with it set in the environment.",
+    "brief_questions": ["Does it hold on every platform the project supports?"],
+    "advice_block": ["whole_disk_scan"],
+}
+#: What the user-strict fixture's account ``conexus.json`` carries: every user key but telemetry (it needs an engine).
+USER_SETTINGS: dict[str, Any] = {"subagent_git": "strict", "t1_nudge": True, "advice_block": ["whole_disk_scan"]}
+
+FIXTURES = ("plain", "plain-dirty", "plain-beads", "project-strict", "user-strict")
+#: The fixtures with no setting on: the seatbelt, neutral text, no blocked row.
+PLAIN_FIXTURES = ("plain", "plain-dirty", "plain-beads")
+STRICT_FIXTURES = ("project-strict", "user-strict")
+#: A repository with a ``.beads/`` directory: only the compaction events run in it (S2-2's data gate, switched on).
 BEADS_FIXTURES = ("plain-beads",)
 #: The interpreter that runs the module-driven probes (SubagentStart): the project's, or the installed tool's with ``--nx installed``.
 MODULE_PYTHON = sys.executable
@@ -184,7 +204,7 @@ class Fixture:
     name: str
     repo: Path
     home: Path
-    flagged_home: bool
+    user_settings: bool
 
 
 @dataclasses.dataclass
@@ -360,13 +380,16 @@ def _norm(text: str) -> str:
 
 
 def presence_problems(manifest: dict, repo: Path, texts: dict[str, str]) -> tuple[list[str], int]:
-    """Where each live SAM-WIDE and NEXUS-REPO constant must and must not appear. Returns (problems, constants examined)."""
+    """Where each live ``SETTING:<key>`` constant must and must not appear: in the output of each fixture that sets the key,
+    in no plain fixture's. Returns (problems, constants examined)."""
     out: list[str] = []
     examined = 0
     norm = {k: _norm(v) for k, v in texts.items()}
-    users = "\n".join(norm.get(f, "") for f in USER_FIXTURES)
+    plain = "\n".join(norm.get(f, "") for f in PLAIN_FIXTURES)
+    sets_key = {"project-strict": set(PROJECT_SETTINGS), "user-strict": set(USER_SETTINGS)}
     for c in manifest.get("constants") or []:
-        if not c.get("live", True) or c["audience"] not in ("SAM-WIDE", "NEXUS-REPO"):
+        key = am.audience_setting(str(c["audience"]))
+        if not c.get("live", True) or key is None:
             continue
         value = constant_text(repo, c["id"])
         if not value or not value.strip():
@@ -374,19 +397,14 @@ def presence_problems(manifest: dict, repo: Path, texts: dict[str, str]) -> tupl
             continue
         needle = _norm(value)
         examined += 1
-        in_marked, in_flagged = needle in norm.get("marked", ""), needle in norm.get("flagged", "")
-        if c["audience"] == "SAM-WIDE":
-            if not in_marked:
-                out.append(f"{c['id']} (SAM-WIDE) never appeared in the marked fixture's output")
-            if not in_flagged:
-                out.append(f"{c['id']} (SAM-WIDE) never appeared in the flagged fixture's output")
-        else:
-            if not in_marked:
-                out.append(f"{c['id']} (NEXUS-REPO) never appeared in the marked fixture's output")
-            if in_flagged:
-                out.append(f"{c['id']} (NEXUS-REPO) appeared in the flagged fixture, whose repo is not nexus")
-        if needle in users:
-            out.append(f"{c['id']} ({c['audience']}) appeared in a user's output")
+        for fixture, keys in sets_key.items():
+            present = needle in norm.get(fixture, "")
+            if key in keys and not present:
+                out.append(f"{c['id']} ({c['audience']}) never appeared in the {fixture} fixture's output, which sets {key}")
+            if key not in keys and present:
+                out.append(f"{c['id']} ({c['audience']}) appeared in the {fixture} fixture, which does not set {key}")
+        if needle in plain:
+            out.append(f"{c['id']} ({c['audience']}) appeared in a plain fixture's output")
     return out, examined
 
 
@@ -419,14 +437,18 @@ def _uv() -> str | None:
     return shutil.which("uv")
 
 
-def _account_flagged(plugin: Path) -> bool:
-    """Is the REAL account flagged? Asked of the plugin's own helper, which reads the OS account database."""
+def _account_has_settings(plugin: Path) -> bool:
+    """Does the REAL account carry a ``conexus.json``? Asked of the plugin's own helper, which reads the OS account database."""
     spec = importlib.util.spec_from_file_location("_audience_probe", plugin / "hooks" / "scripts" / "_audience.py")
     if spec is None or spec.loader is None:
         return False
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return bool(mod.account_flag())
+    try:
+        home = mod.account_home()
+        return bool(home) and os.path.isfile(os.path.join(home, *mod.USER_FILE_PARTS))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -437,23 +459,21 @@ def _git(repo: Path, *args: str) -> None:
 
 
 def make_fixtures(work: Path) -> dict[str, Fixture]:
-    homes = {"plain": work / "home-plain", "flagged": work / "home-flagged"}
+    homes = {"plain": work / "home-plain", "user-strict": work / "home-user-strict"}
     for h in homes.values():
         h.mkdir(parents=True)
-    flag = homes["flagged"].joinpath(*am_flag_parts())
-    flag.parent.mkdir(parents=True)
-    flag.write_text("")
+    settings = homes["user-strict"].joinpath(".config", "nexus", "conexus.json")
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps(USER_SETTINGS))
     out: dict[str, Fixture] = {}
     for name in FIXTURES:
         repo = work / f"repo-{name}"
         repo.mkdir()
         subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
         (repo / "f").write_text("one\n")
-        if name == "marked":
+        if name == "project-strict":
             (repo / ".nexus").mkdir()
-            (repo / ".nexus" / "dev-process.json").write_text("{}")
-            (repo / "scripts").mkdir()
-            (repo / "scripts" / "agent-worktree-preflight.sh").write_text("#!/bin/sh\n")
+            (repo / ".nexus" / "project.json").write_text(json.dumps(PROJECT_SETTINGS))
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", "init")
         if name in BEADS_FIXTURES:
@@ -461,12 +481,8 @@ def make_fixtures(work: Path) -> dict[str, Fixture]:
         if name == "plain-dirty":
             (repo / "f").write_text("two\n")
             (repo / "untracked.txt").write_text("x\n")
-        out[name] = Fixture(name, repo, homes["flagged"] if name == "flagged" else homes["plain"], name == "flagged")
+        out[name] = Fixture(name, repo, homes["user-strict"] if name == "user-strict" else homes["plain"], name == "user-strict")
     return out
-
-
-def am_flag_parts() -> tuple[str, ...]:
-    return (".config", "nexus", "maintainer-profile")
 
 
 #: Programs the leg hides from every fixture's PATH: the nx family (P0 has no nx, and P2 brings its own through the shim
@@ -636,7 +652,7 @@ def _no_put_transcript(path: Path) -> None:
 
 
 def build_probes(plugin: Path, manifest: dict, hooks_json: dict, fixtures: dict[str, Fixture], postures: list[str],
-                 only: str, account_mode: str, real_flagged: bool) -> list[Probe]:
+                 only: str, account_mode: str, real_has_settings: bool) -> list[Probe]:
     probes: list[Probe] = []
     regs = {r["key"]: r for r in am.registrations(hooks_json)}
     for r in manifest["registrations"]:
@@ -652,9 +668,9 @@ def build_probes(plugin: Path, manifest: dict, hooks_json: dict, fixtures: dict[
             if account_mode == "harness":
                 use_harness = True
             elif account_mode == "real":
-                use_harness = fx.flagged_home
+                use_harness = fx.user_settings
             else:
-                use_harness = real_flagged or fx.flagged_home
+                use_harness = real_has_settings or fx.user_settings
             for posture in postures:
                 if posture == "P0" and (not nx_entry or fx.name != "plain"):
                     continue
@@ -683,11 +699,11 @@ def _scenarios(reg: dict, fx: Fixture) -> list[dict]:
     """The payloads for one registration under one fixture. The shapes are the ones Claude Code sends."""
     event, tail = reg["event"], reg["argv"]
     key = reg["key"]
-    user = fx.name in USER_FIXTURES
+    strict = fx.name in STRICT_FIXTURES
     out: list[dict] = []
     if event == "PreToolUse" and tail[-1].endswith("subagent_git_write_requires_orchestrator.py"):
-        for cmd, u, m in GUARD_ROWS:
-            out.append({"name": cmd, "payload": _bash(fx, cmd), "expect": u if user else m})
+        for cmd, seatbelt, full in GUARD_ROWS:
+            out.append({"name": cmd, "payload": _bash(fx, cmd), "expect": full if strict else seatbelt})
         if fx.name == "plain-dirty":
             for cmd in DIRTY_ROWS:
                 out.append({"name": cmd, "payload": _bash(fx, cmd), "expect": "deny"})
@@ -699,36 +715,39 @@ def _scenarios(reg: dict, fx: Fixture) -> list[dict]:
                 out.append({"name": cmd, "payload": _bash(fx, cmd), "expect": "deny"})
         return out
     if event == "PreToolUse" and tail[-1].endswith("credential_print_guard.py"):
-        # U7b: the wrapper the redirect names is the nexus checkout's; every other repository is told to ask its operator.
+        # U7b: the helper the redirect names is the project's own ``credential_helper``; without one the deny says ask your operator.
         out = []
+        project = fx.name == "project-strict"
         for cmd, exp in CREDENTIAL_ROWS:
             sc: dict = {"name": cmd, "payload": _bash(fx, cmd), "expect": exp}
             if exp == "deny":
-                sc["must"] = ("claude_credentials.py status",) if fx.name == "marked" else ("Ask your operator",)
-                sc["forbid"] = () if fx.name == "marked" else ("claude_credentials", "Hellblazer/nexus")
+                sc["must"] = ("tools/leg-credentials.sh",) if project else ("Ask your operator",)
+                sc["forbid"] = ("Ask your operator",) if project else ("leg-credentials", "claude_credentials", "Hellblazer/nexus")
             out.append(sc)
         return out
     if event == "PreToolUse" and tail[-1].endswith("destructive_action_advice.py"):
-        return [{"name": cmd, "payload": _bash(fx, cmd), "expect": what} for cmd, what in ADVICE_ROWS]
+        # A row blocks only where the project's or the user's advice_block lists it (both strict fixtures do).
+        return [{"name": cmd, "payload": _bash(fx, cmd),
+                 "expect": "deny" if strict and cmd == BLOCKED_ROW_COMMAND else what} for cmd, what in ADVICE_ROWS]
     if event in ("PreToolUse", "PermissionRequest") and tail[-1] == "auto-approve":
-        # U2b: the seven tools are the account flag's alone (the marker does not loosen); every other allowed tool is everyone's
+        # U2b: the seven destructive or other-party tools are auto-approved for every user, like every other allowed tool
         out = [{"name": "search", "expect": "allow", "payload": _common(
             fx, event, tool_name="mcp__plugin_conexus_nexus__search", tool_input={"query": "x", "project": "p", "title": "t"})}]
-        for tool in PROMPTED_FOR_USERS:
-            out.append({"name": tool, "expect": "allow" if fx.flagged_home else "none", "payload": _common(
+        for tool in AUTO_APPROVED_FOR_EVERYONE:
+            out.append({"name": tool, "expect": "allow", "payload": _common(
                 fx, event, tool_name=f"mcp__plugin_conexus_nexus__{tool}", tool_input={"query": "x", "project": "p", "title": "t"})})
         return out
     if event == "Stop":
-        nexus = fx.name == "marked"
+        project = fx.name == "project-strict"
         promise = "The suite is still running. When it finishes, I'll read the result and close the bead."
         ci_wait = "Pushed. I'll read the CI result once the runs finish."
         out = []
         for name, text in (("closing promise", promise), ("ci wait", ci_wait)):
             sc = {"name": name, "expect": "advice", "private_cfg": True, "payload": _common(
                 fx, "Stop", stop_hook_active=False, background_tasks=[], session_crons=[], last_assistant_message=text)}
-            if name == "ci wait":  # U6b: the CI wording is a nexus checkout's alone
-                sc["must" if nexus else "forbid"] = ("nx ci wait",) if nexus else CI_TEXT
-            elif not nexus:
+            if name == "ci wait":  # U6b: the CI command is the project's ``ci_wait`` alone
+                sc["must" if project else "forbid"] = ("leg-ci-wait",) if project else CI_TEXT
+            elif not project:
                 sc["forbid"] = CI_TEXT
             out.append(sc)
         return out
@@ -744,20 +763,32 @@ def _scenarios(reg: dict, fx: Fixture) -> list[dict]:
     if event == "SubagentStop":
         outs = []
         for agent_type in ("conexus:developer", "general-purpose"):
-            # U5a: a conexus agent with no T1 put is nudged for everyone. U5b: any other type only for the maintainer.
-            nudged = agent_type.startswith("conexus:") or fx.name not in USER_FIXTURES
+            # U5: an agent with no T1 put is nudged, whatever its type and whoever the user is (the t1_nudge setting is on by default).
             outs.append({"name": agent_type, "payload": _common(
                 fx, "SubagentStop", agent_id=f"aleg-{fx.name}-stop", agent_type=agent_type, stop_hook_active=False,
                 agent_transcript_path=str(fx.repo.parent / f"agent-{fx.name}-{agent_type.replace(':', '_')}.jsonl")),
-                "expect": "advice" if nudged else "none"})
+                "expect": "advice"})
         return outs
     if event == "SubagentStart":
-        starts = [{"name": at, "payload": _common(fx, "SubagentStart", agent_id=f"aleg-{fx.name}-start", agent_type=at, prompt_id="p1"), "expect": None}
-                  for at in ("conexus:developer", "general-purpose", "Explore")]
-        # The Phase Boundary Gate block is task-keyed; its maintainer-only incident clause must be reachable by the presence check.
+        starts = []
+        for at in ("conexus:developer", "general-purpose", "Explore"):
+            sc = {"name": at, "payload": _common(fx, "SubagentStart", agent_id=f"aleg-{fx.name}-start", agent_type=at, prompt_id="p1"), "expect": None}
+            # The Search scope row is process, for everyone. The Git row goes where the strict guard runs; the Preflight row and the
+            # project's brief question come from the project's settings alone; the four generic questions go to an implementer.
+            must = ["| Search scope |"]
+            forbid = []
+            (must if strict else forbid).append("| Git |")
+            (must if fx.name == "project-strict" else forbid).append("tools/leg-preflight.sh")
+            if at == "conexus:developer":
+                must += ["## Brief check", "Consumers:", "Bounds:", "State:"]
+                (must if fx.name == "project-strict" else forbid).append("Does it hold on every platform the project supports?")
+                forbid.append("local AND cloud")
+            sc["must"], sc["forbid"] = tuple(must), tuple(forbid)
+            starts.append(sc)
+        # The Phase Boundary Gate block is task-keyed; its closing sentence is the same for everyone.
         starts.append({"name": "phase close", "expect": None, "payload": _common(
             fx, "SubagentStart", agent_id=f"aleg-{fx.name}-phase", agent_type="conexus:developer", prompt_id="p2",
-            task="close the phase review gate for this phase")})
+            task="close the phase review gate for this phase"), "must": ("a dropped item surfaces phases later",)})
         return starts
     if event == "SessionStart":
         source = "compact" if tail[-1] == "inject" else "startup"
@@ -767,14 +798,13 @@ def _scenarios(reg: dict, fx: Fixture) -> list[dict]:
             return [first]
         # S2-2: a restored checkpoint and a compact start with none; the board and beads are named only where the project has them
         beads = fx.name in BEADS_FIXTURES
-        maint = fx.name in ("marked", "flagged")
         # the restored text carries the checkpoint's own body (it says "board" in an error line): assert the intro's wording
         first["must"] = ("git or beads",) if beads else ()
-        first["forbid"] = (() if maint else ("threads board", "a board thread")) + (() if beads else ("or beads", "and beads"))
+        first["forbid"] = ("threads board", "a board thread") + (() if beads else ("or beads", "and beads"))
         none = {"name": "compact, no checkpoint", "expect": None, "payload": _common(
             fx, "SessionStart", source="compact", model="m", session_id=f"leg-{fx.name}-nockpt")}
-        none["must"] = (("bd list --status=in_progress",) if beads else ()) + (("threads board entry",) if maint else ())
-        none["forbid"] = (() if maint else ("board", "threads")) + (() if beads else ("bd list", "beads"))
+        none["must"] = ("bd list --status=in_progress",) if beads else ()
+        none["forbid"] = ("board", "threads") + (() if beads else ("bd list", "beads"))
         return [first, none]
     return [{"name": "default", "payload": _common(fx, event), "expect": None}]
 
@@ -861,7 +891,7 @@ def evaluate(outcomes: list[Outcome], manifest: dict, repo: Path) -> tuple[list[
                 hard.append(f"{p.id}: expected the call to pass, got {o.decision}")
             elif p.expect in ("deny", "block", "advice", "none", "allow") and o.decision != p.expect:
                 hard.append(f"{p.id}: expected {p.expect}, got {o.decision}")
-        elif p.fixture in USER_FIXTURES and o.decision in ("deny", "block"):
+        elif p.fixture in PLAIN_FIXTURES and o.decision in ("deny", "block"):
             findings.append({"reg_key": p.reg_key, "hit": f"<{o.decision}>", "probe": p.id})
         low = o.text.lower()
         for word in p.must:
@@ -872,8 +902,7 @@ def evaluate(outcomes: list[Outcome], manifest: dict, repo: Path) -> tuple[list[
                 hard.append(f"{p.id}: the output carries {word!r}")
         if o.leaked:
             hard.append(f"{p.id}: the hook left {list(o.leaked)} in a config directory that did not exist (a Stop hook must not create one)")
-        if p.fixture in USER_FIXTURES:
-            for hit in sorted(set(lexicon_hits(o.text, beads=p.fixture in BEADS_FIXTURES))):
+        for hit in sorted(set(lexicon_hits(o.text, beads=p.fixture in BEADS_FIXTURES))):
                 findings.append({"reg_key": p.reg_key, "hit": hit, "probe": p.id})
     return findings, hard, texts, counts
 
@@ -910,7 +939,7 @@ def run_leg(args: argparse.Namespace) -> int:
         print("PLUGIN BEHAVIOUR LEG FAILED -- the allowlist:\n  " + "\n  ".join(problems))
         return 1
 
-    real_flagged = _account_flagged(plugin)
+    real_has_settings = _account_has_settings(plugin)
     root = scratch_root()
     if root is None:
         print("PLUGIN BEHAVIOUR LEG UNVERIFIED -- every candidate scratch root sits inside a git repository; set TMPDIR elsewhere", file=sys.stderr)
@@ -929,11 +958,11 @@ def run_leg(args: argparse.Namespace) -> int:
             MODULE_PYTHON = nx_python
         uv_env = real_uv_env()
         envs = {(po, name): base_env(work, plugin, fx, po, shim_dir, uv_env) for po in postures for name, fx in fixtures.items()}
-        mode = {"auto": "real argv" if not real_flagged else "audience harness (the real account carries the flag)",
+        mode = {"auto": "real argv" if not real_has_settings else "audience harness (the real account carries a conexus.json)",
                 "real": "real argv", "harness": "audience harness"}[args.account]
         print(f"== plugin behaviour leg: {plugin} ==")
         print(f"   account: {mode}; postures: {','.join(postures)}; nx: {args.nx if 'P2' in postures else 'none'}; manifest registrations: {len(declared)}")
-        probes = build_probes(plugin, manifest, hooks_json, fixtures, postures, args.only or "", args.account, real_flagged)
+        probes = build_probes(plugin, manifest, hooks_json, fixtures, postures, args.only or "", args.account, real_has_settings)
         if not probes:
             print("PLUGIN BEHAVIOUR LEG FAILED -- no probe was built; a pass over nothing is not a pass")
             return 1

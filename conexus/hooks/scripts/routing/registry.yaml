@@ -20,11 +20,11 @@
 #   fail_closed:      bool; default false. true means hook crashes deny
 #                     the call rather than allow it. Reserve for safety-
 #                     critical invariants (no rule uses it today).
-#   audience:         who the hook fires for (nexus-sby49.3): EVERY-USER |
-#                     NEXUS-REPO | SAM-WIDE. The registration's audience as
-#                     audience.yaml (in the plugin's hooks directory) declares it; a rule inside
-#                     the hook that only the maintainer has (the git guard's
-#                     full form) is its own entry there.
+#   audience:         who the hook fires for: EVERY-USER (every hook here
+#                     fires for everyone). The registration's audience as
+#                     audience.yaml (in the plugin's hooks directory) declares it; a
+#                     rule inside the hook that a setting turns on (the git
+#                     guard's strict form) is its own entry there.
 #
 # Example shape (commented; not yet active):
 #

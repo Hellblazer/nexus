@@ -97,14 +97,13 @@ from typing import NamedTuple
 
 KILL_SWITCH_ENV = "NX_STOP_WAKE_GUARD"
 
-# nexus-sby49.4 audience gate (U6b). The CI text (``nx ci wait``, develop and main, the CI board) is fed by nexus's own CI,
-# so only a checkout that carries the nexus marker gets it; every other user gets the same block in neutral words. The
-# predicate tightens (it adds text), so an import that fails binds it to True: a broken helper gives today's full text.
+# The block's CI wording is neutral unless the project's tracked settings name a CI-wait command (``ci_wait`` in
+# ``.nexus/project.json``). A helper that cannot be imported gives the neutral wording: the setting only adds text.
 try:
-    from _audience import nexus_repo as _nexus_repo
+    from _audience import project_text as _project_text
 except BaseException:  # noqa: BLE001
-    def _nexus_repo(payload: object) -> bool:
-        return True
+    def _project_text(payload: object, key: str) -> "str | None":
+        return None
 _REASON_CLAUSE_CAP = 240
 _LOG_CLAUSE_CAP = 140
 #: Only the end of the message is read. 600 characters is two or three sentences: the closing
@@ -192,8 +191,8 @@ _ROLE_FOLLOWED_BY_A_VERB = (
     r"(?=$|[^\w\s-]|\s*$|'(?:ll|re|ve|d)\b|\s+(?:" + _FUNCTION_WORDS + r")\b|\s+\w+(?:ed|ly)\b"
     r"|\s+(?!\w*(?:ss|us|is)\b)\w+s\b)(?!\s+(?:" + _NOUN_BACKSTOP + r")\b)"
 )
-_PRINCIPAL = r"(?:sam|hal|you|" + _ROLE + _ROLE_FOLLOWED_BY_A_VERB + r")"
-_PRINCIPAL_NAME = r"(?:sam|hal|the (?:user|human|maintainer|owner|operator)|operator|owner)"
+_PRINCIPAL = r"(?:you|" + _ROLE + _ROLE_FOLLOWED_BY_A_VERB + r")"
+_PRINCIPAL_NAME = r"(?:the (?:user|human|maintainer|owner|operator)|operator|owner)"
 _P = r"\b" + _PRINCIPAL + r"\b(?!'s\b)"
 _P_RE = re.compile(_P, re.I)
 
@@ -221,7 +220,7 @@ _STRONG_SRC = (
     r"say-?so|says? so|rulings?|ruled|acks?|acked|acknowledg\w*+|consent\w*+|blessing|nods?|nodded|"
     r"okay(?:s|ed)|oks|ok'd|(?:the|an?|your|his|her|their) (?:ok|okay)|(?:ok|okay) from|thumbs?[- ]up|hear(?:s|d)? back|"
     r"(?:gives?|gave|giving|get|got|has|have) the (?:word|nod|go|ok|okay)|"
-    r"(?:the|a|his|her|their|your|sam's|operator's|owner's|release|ship|final) go\b"
+    r"(?:the|a|his|her|their|your|operator's|owner's|release|ship|final) go\b"
     r"(?!\s+(?:build\w*+|binary|toolchain|vet|mod|install|run|version|test\w*+|\d))"
 )
 #: WEAK terms: ordinary state-change words ("cleared", "settled", "granted", "ok", "decision", "permission"). They
@@ -243,8 +242,7 @@ _NOT_AN_APPROVER = re.compile(
     re.I,
 )
 _NON_SAM_ACTOR = re.compile(
-    r"\b(?:reviewers?|critics?|peers?|agents?|bots?|planner|review(?!\s+(?:is|was|has been))|bob|linda|wren|halcyon|kimi|marlowe|tamsin|steve|steven|"
-    r"kestrel|elsinore|labrun|mailbox)\b",
+    r"\b(?:reviewers?|critics?|peers?|agents?|bots?|planner|review(?!\s+(?:is|was|has been))|mailbox)\b",
     re.I,
 )
 _SUBJECT_SPLIT = re.compile(r"\b(?:and|or|but|then|while)\b", re.I)
@@ -408,8 +406,7 @@ _CHAIN_CONT = re.compile(
 
 #: A peer, mailbox, notification or restart is named as the wake.
 _PEER_NAMES = (
-    "bob", "linda", "wren", "halcyon", "kimi", "marlowe", "tamsin", "steve", "steven", "kestrel",
-    "elsinore", "conexus", "labrun", "peer", "peers", "mailbox", "notification", "notifications",
+    "conexus", "peer", "peers", "mailbox", "notification", "notifications",
     "notified", "notify", "another session", "other session", "other sessions", "sibling", "restart",
     "restarts", "restarted", "restarting", "ready ask", "all-clear", "roll call", "go comes", "their",
     "reconnect", "reconnects", "reconnected", "resumes", "resumed", "compaction", "compacts", "compacted",
@@ -419,8 +416,7 @@ _PEER_NAMES = (
 #: theirs); a clause with a wait cue is never stripped (:func:`_recipients_stripped`). Turn-end census, 986abbe7 11-19.
 _RECIPIENT_PEER = re.compile(
     r"\b(?:to|for)\s+(?:the\s+)?(?:"
-    + "|".join(re.escape(n) for n in ("bob", "linda", "wren", "halcyon", "kimi", "marlowe", "tamsin", "steve",
-                                      "steven", "kestrel", "elsinore", "labrun", "peer", "peers"))
+    + "|".join(re.escape(n) for n in ("peer", "peers"))
     + r")\b(?!'s)",
     re.I,
 )
@@ -532,8 +528,8 @@ class Verdict(NamedTuple):
 #: A courtesy to Sam, not a request to him: "keep you posted", "update you", "report back to Sam", "see you
 #: then", "thanks for your patience", "you will hear from me". It names him without handing him the turn.
 _COURTESY = re.compile(
-    r"\b(?:keep|keeping) (?:you|sam) (?:posted|informed|in the loop)\b|\bupdat(?:e|es|ing) (?:you|sam)\b|"
-    r"\b(?:report(?:ing)?|get|circle|come|check|write) back to (?:you|sam)\b|\bsee you\b|\bthank(?:s| you)\b|"
+    r"\b(?:keep|keeping) you (?:posted|informed|in the loop)\b|\bupdat(?:e|es|ing) you\b|"
+    r"\b(?:report(?:ing)?|get|circle|come|check|write) back to you\b|\bsee you\b|\bthank(?:s| you)\b|"
     r"\byour patience\b|\byou(?:'ll| will) (?:hear|get|see) (?:from|back from) me\b|\bhear from me\b",
     re.I,
 )
@@ -763,20 +759,20 @@ def decide(payload: object, env: dict[str, str], *, now: float | None = None) ->
     return Decision(False, "no-match", "", detail)
 
 
-def block_reason(cls: str, clause: str, nexus: bool = True) -> str:
-    """The text the block carries. *nexus* is :func:`_nexus_repo` for the payload: the CI wording (``nx ci wait``, develop
-    and main, the CI board) is only for a checkout that carries the nexus marker (U6b); the default is the full text."""
+def block_reason(cls: str, clause: str, ci_wait: "str | None" = None) -> str:
+    """The text the block carries. *ci_wait* is the project's ``ci_wait`` setting for the payload: the command the block names
+    for waiting on a push's CI. Without it the wording is neutral."""
     quoted = " ".join(clause.split())
     if len(quoted) > _REASON_CLAUSE_CAP:
         quoted = quoted[: _REASON_CLAUSE_CAP - 3] + "..."
-    if cls == CLASS_CI_WAIT_NO_CHANNEL and not nexus:
-        cls = CLASS_CI_WAIT  # a user has no CI board to be subscribed to: the plain wording
+    if cls == CLASS_CI_WAIT_NO_CHANNEL and not ci_wait:
+        cls = CLASS_CI_WAIT  # no project CI command to name: the plain wording
     if cls == CLASS_CI_WAIT_NO_CHANNEL:
         return (
             f'Stop-hook wake guard: your last message closes on a CI wait ("{quoted}"). This session is subscribed to '
-            "a CI board's --done topic, but it was not launched with the conexus channel, so that post will not wake "
-            "it. Run `nx ci wait <sha>` as a background command now (add `--branch <branch>` for a release or PR "
-            "branch; its exit is the wake and its line is the result), then end the turn."
+            "a CI completion topic, but it was not launched with the conexus channel, so that post will not wake "
+            f"it. Run `{ci_wait}` as a background command now (its exit is the wake and its line is the result), then "
+            "end the turn."
         )
     what = {
         CLASS_CI_WAIT: "a CI or run wait",
@@ -790,9 +786,8 @@ def block_reason(cls: str, clause: str, nexus: bool = True) -> str:
     return (
         f'Stop-hook wake guard: your last message closes on {what} ("{quoted}"), and nothing is armed to wake this '
         "session: no background task, Monitor or scheduled wakeup is running. Arm the wake now, then end the turn: "
-        + ("`nx ci wait <sha> --branch <branch>` as a background command for a push, release or PR's CI (develop "
-           "and main read the CI board, any other branch reads GitHub), a Monitor or a background Bash "
-           "until-loop for another run, " if cls == CLASS_CI_WAIT and nexus else
+        + (f"`{ci_wait}` as a background command for a push, release or PR's CI, a Monitor or a background Bash "
+           "until-loop for another run, " if cls == CLASS_CI_WAIT and ci_wait else
            "a Monitor or a background Bash until-loop for a run or CI, ")
         + "ScheduleWakeup or CronCreate for a timed step. "
         f"{do_now}Never start work the user held back or asked you to wait on, work that needs the user's approval, "
@@ -849,7 +844,7 @@ def main() -> int:
         if decision.block:
             clause = " ".join(decision.clause.split())[:_LOG_CLAUSE_CAP]
             _log("INFO", f'block class={decision.reason} {fields} clause="{clause}"')
-            reason = block_reason(decision.reason, decision.clause, nexus=_nexus_repo(payload))
+            reason = block_reason(decision.reason, decision.clause, ci_wait=_project_text(payload, "ci_wait"))
             sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": reason}}))
             sys.stdout.flush()
         else:

@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The behaviour leg's own tests (nexus-sby49.3, plan section 5 item 2).
+"""The behaviour leg's own tests (nexus-sby49.3, plan section 5 item 2; reworked in nexus-sby49.4).
 
-``tests/e2e/lib/plugin_behaviour.py`` runs the plugin's hooks and judges what a user and the maintainer see. This file pins
-its judgement (the lexicon, the output classifier, the allowlist rules, the presence rules) with synthetic input, and proves
-it fails in both directions on a real run: a plugin copy whose helper calls everyone the maintainer fails (a user got the
-maintainer's deny), and one whose helper calls nobody the maintainer fails (nexus's own checkout lost its guard). The full
-leg, both postures, is the release battery's ``plugins`` leg and ``plugin-out-of-repo-gate.sh``.
+``tests/e2e/lib/plugin_behaviour.py`` runs the plugin's hooks and judges what each fixture sees: a plain repository, a project whose
+tracked ``.nexus/project.json`` turns settings on, and a user whose ``conexus.json`` does. This file pins its judgement (the
+lexicon, the output classifier, the allowlist rules, the presence rules, each fixture's expectations) with synthetic input, and
+proves it fails in both directions on a real run: a plugin copy whose helper calls every session strict fails (a plain session
+got the strict guard's deny), and one whose helper calls none strict fails (a project that turned the strict guard on lost it).
+The full leg, both postures, is the release battery's ``plugins`` leg and ``plugin-out-of-repo-gate.sh``.
 """
 from __future__ import annotations
 
@@ -51,7 +52,6 @@ def manifest() -> dict:
     ("run bd ready first", "bd"),
     ("ask Sam", "Sam"),
     ("ask Hal", "Hal"),
-    ("the Orchestrator commits", "Orchestrator"),
     ("develop/main", "develop/main"),
     ("a lab-remote run", "lab-remote"),
     ("on lab-run hosts", "lab-run"),
@@ -84,8 +84,9 @@ def test_the_legs_own_scratch_names_never_look_like_an_id() -> None:
     assert leg.lexicon_hits("/tmp/x/nexus-config/checkpoints") == ["nexus-config"]
 
 
-def test_the_peer_names_are_the_stop_guards() -> None:
-    """The lexicon's person names are the stop guard's own ``_PEER_NAMES`` (the rest of that tuple is ordinary English)."""
+def test_the_stop_guards_classifier_carries_none_of_the_lexicons_person_names() -> None:
+    """The lexicon's person names are the ones the stop guard's classifier used to carry in ``_PEER_NAMES``; it now keeps role
+    words only (nexus-sby49.4), so no output can name one."""
     import ast
 
     tree = ast.parse((PLUGIN / "hooks" / "scripts" / "stop_wake_guard.py").read_text(encoding="utf-8"))
@@ -93,8 +94,10 @@ def test_the_peer_names_are_the_stop_guards() -> None:
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "_PEER_NAMES" for t in node.targets):
             names = ast.literal_eval(node.value)
-    assert names, "the stop guard no longer has _PEER_NAMES: update the lexicon"
-    assert set(leg.PEER_NAMES) <= set(names), set(leg.PEER_NAMES) - set(names)
+    assert names, "the stop guard no longer has _PEER_NAMES: update this test"
+    assert set(leg.PEER_NAMES).isdisjoint(names), set(leg.PEER_NAMES) & set(names)
+    text = (PLUGIN / "hooks" / "scripts" / "stop_wake_guard.py").read_text(encoding="utf-8")
+    assert not any(f'"{name}"' in text or f"|{name}|" in text for name in leg.PEER_NAMES)
 
 
 # --- what an output is -----------------------------------------------------------------------------
@@ -117,12 +120,12 @@ def test_classify_reads_the_hook_envelopes() -> None:
 # --- the allowlist -------------------------------------------------------------------------------
 
 
-ROW = "hooks/scripts/routing/credential_print_guard.py:_REDIRECT"
+ROW = "hooks/scripts/routing/credential_print_guard.py:_REDIRECT_USER"
 
 
 @pytest.fixture()
 def unwired(manifest) -> dict:
-    """The manifest with one row (the credential redirect) switched to ``live: false``: Phase 3 wired every real one, so the
+    """The manifest with one row (the neutral credential redirect) switched to ``live: false``: Phase 3 wired every real one, so the
     allowlist's rules are exercised on a synthetic row."""
     import copy
 
@@ -217,18 +220,17 @@ def test_every_advisory_rows_text_is_clean_or_allowlisted(manifest) -> None:
         assert not extra, f"advice row {row.id} names {sorted(extra)} to a user, and no allowlist entry covers it"
 
 
-def test_the_leg_expects_the_subagent_stop_nudge_by_audience() -> None:
-    """U5a and U5b: general-purpose is nudged only for the maintainer; a conexus agent for everyone."""
+def test_the_leg_expects_the_subagent_stop_nudge_for_every_agent_type_in_every_fixture() -> None:
+    """The ``t1_nudge`` setting is on by default: a built-in agent is nudged like a conexus agent, in every fixture."""
     hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     reg = next(r for r in am.registrations(hooks) if r["event"] == "SubagentStop")
     seen: dict[tuple[str, str], str] = {}
-    for name in ("plain", "marked", "flagged"):
-        fx = leg.Fixture(name, Path("/x") / name, Path("/h"), name == "flagged")
+    for name in leg.FIXTURES:
+        fx = leg.Fixture(name, Path("/x") / name, Path("/h"), name == "user-strict")
         for sc in leg._scenarios(reg, fx):
             seen[(name, sc["name"])] = sc["expect"]
-    assert seen[("plain", "general-purpose")] == "none"
-    assert seen[("marked", "general-purpose")] == seen[("flagged", "general-purpose")] == "advice"
-    assert all(seen[(n, "conexus:developer")] == "advice" for n in ("plain", "marked", "flagged"))
+    assert len(seen) == 2 * len(leg.FIXTURES)
+    assert set(seen.values()) == {"advice"}
 
 
 # --- presence ------------------------------------------------------------------------------------
@@ -237,35 +239,39 @@ def test_the_leg_expects_the_subagent_stop_nudge_by_audience() -> None:
 def _synthetic(tmp_path: Path):
     mod = tmp_path / "conexus" / "m.py"
     mod.parent.mkdir(exist_ok=True)
-    mod.write_text('SAM = "the maintainers own row of text"\nREPO = "a row only the nexus checkout gets"\n', encoding="utf-8")
+    mod.write_text('GIT = "a row only a strict fixture gets"\nCI = "a row only the project fixture gets"\n', encoding="utf-8")
     manifest = {"constants": [
-        {"id": "m.py:SAM", "audience": "SAM-WIDE", "gate": "maintainer", "live": True},
-        {"id": "m.py:REPO", "audience": "NEXUS-REPO", "gate": "nexus_repo", "live": True},
-        {"id": "m.py:NOT_LIVE", "audience": "SAM-WIDE", "gate": "maintainer", "live": False},
+        {"id": "m.py:GIT", "audience": "SETTING:subagent_git", "gate": "setting", "live": True},
+        {"id": "m.py:CI", "audience": "SETTING:preflight", "gate": "setting", "live": True},
+        {"id": "m.py:NOT_LIVE", "audience": "SETTING:subagent_git", "gate": "setting", "live": False},
+        {"id": "m.py:EVERYONE", "audience": "EVERY-USER", "gate": "none", "live": True},
     ]}
     return manifest
 
 
-def test_presence_passes_when_each_constant_is_where_its_audience_says(tmp_path) -> None:
-    texts = {"plain": "hello", "plain-dirty": "", "marked": "the maintainers  own row of text\nand a row only the nexus checkout gets",
-             "flagged": "the maintainers own row of text"}
+def test_presence_passes_when_each_constant_is_where_its_setting_says(tmp_path) -> None:
+    """``subagent_git`` is set by both strict fixtures; ``preflight`` is a project key, so only the project fixture sets it."""
+    texts = {"plain": "hello", "plain-dirty": "", "plain-beads": "",
+             "project-strict": "a row  only a strict fixture gets\nand a row only the project fixture gets",
+             "user-strict": "a row only a strict fixture gets"}
     problems, examined = leg.presence_problems(_synthetic(tmp_path), tmp_path, texts)
     assert problems == [] and examined == 2
 
 
-def test_presence_fails_on_a_leak_to_a_user_a_missing_row_and_a_nexus_row_in_a_flagged_repo(tmp_path) -> None:
-    texts = {"plain": "a row only the nexus checkout gets", "plain-dirty": "", "marked": "the maintainers own row of text",
-             "flagged": "the maintainers own row of text and a row only the nexus checkout gets"}
+def test_presence_fails_on_a_leak_to_a_plain_fixture_a_missing_row_and_a_project_row_in_the_user_fixture(tmp_path) -> None:
+    texts = {"plain": "a row only the project fixture gets", "plain-dirty": "", "plain-beads": "",
+             "project-strict": "a row only a strict fixture gets",
+             "user-strict": "a row only a strict fixture gets and a row only the project fixture gets"}
     problems, _ = leg.presence_problems(_synthetic(tmp_path), tmp_path, texts)
     joined = "\n".join(problems)
-    assert "REPO (NEXUS-REPO) never appeared in the marked fixture" in joined
-    assert "REPO (NEXUS-REPO) appeared in the flagged fixture" in joined
-    assert "REPO (NEXUS-REPO) appeared in a user's output" in joined
-    assert "SAM (SAM-WIDE)" not in joined
+    assert "CI (SETTING:preflight) never appeared in the project-strict fixture" in joined
+    assert "CI (SETTING:preflight) appeared in the user-strict fixture, which does not set preflight" in joined
+    assert "CI (SETTING:preflight) appeared in a plain fixture's output" in joined
+    assert "GIT (SETTING:subagent_git)" not in joined
 
 
 def test_presence_fails_when_a_constants_text_cannot_be_read(tmp_path) -> None:
-    manifest = {"constants": [{"id": "m.py:GONE", "audience": "SAM-WIDE", "gate": "maintainer", "live": True}]}
+    manifest = {"constants": [{"id": "m.py:GONE", "audience": "SETTING:subagent_git", "gate": "setting", "live": True}]}
     (tmp_path / "conexus").mkdir(exist_ok=True)
     (tmp_path / "conexus" / "m.py").write_text("X = 1\n", encoding="utf-8")
     problems, examined = leg.presence_problems(manifest, tmp_path, {})
@@ -274,7 +280,7 @@ def test_presence_fails_when_a_constants_text_cannot_be_read(tmp_path) -> None:
 
 def test_the_real_manifests_constants_are_all_readable_from_source(manifest) -> None:
     for c in manifest["constants"]:
-        if c["audience"] in ("SAM-WIDE", "NEXUS-REPO") and c.get("live", True):
+        if c["audience"].startswith("SETTING:") and c.get("live", True):
             text = leg.constant_text(ROOT, c["id"])
             assert text and text.strip(), c["id"]
 
@@ -300,17 +306,18 @@ def _run_leg(plugin: Path, only: str, tmp_path: Path) -> subprocess.CompletedPro
     )
 
 
-def _plugin_copy(tmp_path: Path, helper_returns: bool) -> Path:
+def _plugin_copy(tmp_path: Path, mode: str) -> Path:
+    """A copy of the plugin whose ``guard_mode`` answers *mode* for every session."""
+    import re
+
     dst = tmp_path / "plugin"
     shutil.copytree(PLUGIN, dst, ignore=shutil.ignore_patterns("__pycache__", "evals", "*.pyc"))
     helper = dst / "hooks" / "scripts" / "_audience.py"
     src = helper.read_text(encoding="utf-8")
-    src = src.replace(
-        "def maintainer(payload: object) -> bool:\n    \"\"\"The account flag OR the repo marker; True on any error.\"\"\"\n    try:\n        return account_flag() or nexus_repo(payload)",
-        f"def maintainer(payload: object) -> bool:\n    \"\"\"mutated\"\"\"\n    try:\n        return {helper_returns!r}",
-    )
-    assert f"return {helper_returns!r}" in src and "mutated" in src
-    helper.write_text(src, encoding="utf-8")
+    mutated, n = re.subn(r"(def guard_mode\(payload: object\) -> str:\n)(?:.*\n)*?(?=\n\ndef telemetry_enabled)",
+                         rf'\1    """mutated"""\n    return "{mode}"\n', src)
+    assert n == 1 and f'return "{mode}"' in mutated
+    helper.write_text(mutated, encoding="utf-8")
     return dst
 
 
@@ -319,23 +326,24 @@ def test_the_leg_passes_on_the_real_plugin_for_the_commit_probe(tmp_path) -> Non
     proc = _run_leg(PLUGIN, "git commit -am x", tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "PLUGIN BEHAVIOUR LEG PASSED" in proc.stdout
-    assert "P2: 1 registrations driven, 4 payloads" in proc.stdout, proc.stdout  # plain, marked, flagged, plain-dirty
+    assert "P2: 1 registrations driven, 4 payloads" in proc.stdout, proc.stdout  # plain, plain-dirty, project-strict, user-strict
 
 
 @needs_uv
-def test_the_leg_fails_when_a_user_gets_the_maintainers_deny(tmp_path) -> None:
-    """A helper that calls everyone the maintainer: the plain fixture's commit is denied, and the leg says so."""
-    proc = _run_leg(_plugin_copy(tmp_path, True), "git commit -am x", tmp_path)
+def test_the_leg_fails_when_a_plain_session_gets_the_strict_deny(tmp_path) -> None:
+    """A helper that calls every session strict: the plain fixture's commit is denied, and the leg says so."""
+    proc = _run_leg(_plugin_copy(tmp_path, "strict"), "git commit -am x", tmp_path)
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "P2/plain/" in proc.stdout and "expected the call to pass, got deny" in proc.stdout
 
 
 @needs_uv
-def test_the_leg_fails_when_nexus_loses_its_guard(tmp_path) -> None:
-    """A helper that calls nobody the maintainer: the marked checkout's commit passes, and the leg says so."""
-    proc = _run_leg(_plugin_copy(tmp_path, False), "git commit -am x", tmp_path)
+def test_the_leg_fails_when_a_project_loses_its_strict_guard(tmp_path) -> None:
+    """A helper that calls no session strict: the project-strict fixture's commit passes, and the leg says so."""
+    proc = _run_leg(_plugin_copy(tmp_path, "seatbelt"), "git commit -am x", tmp_path)
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "P2/marked/" in proc.stdout and "expected deny, got none" in proc.stdout
+    assert "P2/project-strict/" in proc.stdout and "expected deny, got none" in proc.stdout
+    assert "P2/user-strict/" in proc.stdout
 
 
 def test_a_plugin_with_no_manifest_is_unverified(tmp_path) -> None:
@@ -354,39 +362,84 @@ def _reg(event: str, tail_end: str) -> dict:
 
 
 def _scenarios_for(reg: dict, name: str) -> dict[str, dict]:
-    fx = leg.Fixture(name, Path("/x") / name, Path("/h"), name == "flagged")
+    fx = leg.Fixture(name, Path("/x") / name, Path("/h"), name == "user-strict")
     return {sc["name"]: sc for sc in leg._scenarios(reg, fx)}
 
 
-def test_the_leg_expects_the_prompt_for_the_seven_tools_for_everyone_but_the_flagged_account() -> None:
-    """U2b: the seven are silent for a user and for the marked checkout (the marker never loosens), allowed for the flag."""
+def test_the_leg_expects_the_seven_tools_allowed_in_every_fixture() -> None:
+    """U2b (D2 re-ruled): all seven are auto-approved for every user, whatever the fixture."""
     reg = _reg("PreToolUse", "auto-approve")
-    for name in ("plain", "plain-dirty", "plain-beads", "marked", "flagged"):
+    for name in leg.FIXTURES:
         sc = _scenarios_for(reg, name)
         assert sc["search"]["expect"] == "allow"
-        for tool in leg.PROMPTED_FOR_USERS:
-            assert sc[tool]["expect"] == ("allow" if name == "flagged" else "none"), (name, tool)
-    assert len(leg.PROMPTED_FOR_USERS) == 7
-    assert "answer_plan_delete" in leg.PROMPTED_FOR_USERS and "plan_delete" in leg.PROMPTED_FOR_USERS
+        for tool in leg.AUTO_APPROVED_FOR_EVERYONE:
+            assert sc[tool]["expect"] == "allow", (name, tool)
+    assert len(leg.AUTO_APPROVED_FOR_EVERYONE) == 7
+    assert "answer_plan_delete" in leg.AUTO_APPROVED_FOR_EVERYONE and "plan_delete" in leg.AUTO_APPROVED_FOR_EVERYONE
+    assert not hasattr(leg, "PROMPTED_FOR_USERS")
 
 
-def test_the_leg_expects_neutral_stop_text_for_users_and_the_ci_text_only_in_the_marked_checkout() -> None:
+def test_the_leg_expects_the_git_guard_by_mode() -> None:
+    reg = _reg("PreToolUse", "subagent_git_write_requires_orchestrator.py")
+    for name, mode in (("plain", "seatbelt"), ("project-strict", "strict"), ("user-strict", "strict")):
+        sc = _scenarios_for(reg, name)
+        assert sc["git commit -am x"]["expect"] == ("deny" if mode == "strict" else "pass"), name
+        assert sc["git push -f origin main"]["expect"] == "deny", "the seatbelt's own list denies in both modes"
+    assert _scenarios_for(reg, "plain-dirty")["git reset --hard"]["expect"] == "deny"
+    assert _scenarios_for(reg, "plain")["git reset --hard"]["expect"] == "pass"
+
+
+def test_the_leg_expects_neutral_stop_text_and_the_ci_command_only_in_the_project_fixture() -> None:
     reg = _reg("Stop", "stop_wake_guard.py")
-    marked = _scenarios_for(reg, "marked")
-    assert marked["ci wait"]["must"] == ("nx ci wait",) and marked["ci wait"]["private_cfg"] is True
-    for name in ("plain", "plain-dirty", "plain-beads", "flagged"):
+    project = _scenarios_for(reg, "project-strict")
+    assert project["ci wait"]["must"] == ("leg-ci-wait",) and project["ci wait"]["private_cfg"] is True
+    for name in ("plain", "plain-dirty", "plain-beads", "user-strict"):
         sc = _scenarios_for(reg, name)
         assert set(leg.CI_TEXT) <= set(sc["ci wait"]["forbid"]) and set(leg.CI_TEXT) <= set(sc["closing promise"]["forbid"]), name
         assert sc["ci wait"]["private_cfg"] is True, "no config directory may appear (U6c)"
 
 
+def test_the_leg_expects_the_credential_helper_only_where_the_project_names_one() -> None:
+    reg = _reg("PreToolUse", "credential_print_guard.py")
+    deny = "cat /proc/1234/environ"
+    assert _scenarios_for(reg, "project-strict")[deny]["must"] == ("tools/leg-credentials.sh",)
+    for name in ("plain", "user-strict"):
+        assert _scenarios_for(reg, name)[deny]["must"] == ("Ask your operator",), name
+
+
+def test_the_leg_expects_the_listed_advice_row_to_block_only_where_a_setting_lists_it() -> None:
+    reg = _reg("PreToolUse", "destructive_action_advice.py")
+    for name in ("plain", "plain-dirty", "plain-beads"):
+        assert _scenarios_for(reg, name)[leg.BLOCKED_ROW_COMMAND]["expect"] == "advice", name
+    for name in ("project-strict", "user-strict"):
+        sc = _scenarios_for(reg, name)
+        assert sc[leg.BLOCKED_ROW_COMMAND]["expect"] == "deny", name
+        assert sc["pkill -f pytest"]["expect"] == "advice", "an unlisted row still only advises"
+    assert "whole_disk_scan" in leg.PROJECT_SETTINGS["advice_block"] and "whole_disk_scan" in leg.USER_SETTINGS["advice_block"]
+
+
+def test_the_leg_expects_the_subagent_start_rows_by_setting() -> None:
+    reg = _reg("SubagentStart", "hook_subagent_start")
+    for name, strict in (("plain", False), ("project-strict", True), ("user-strict", True)):
+        dev = _scenarios_for(reg, name)["conexus:developer"]
+        assert ("| Git |" in dev["must"]) is strict and ("| Git |" in dev["forbid"]) is not strict, name
+        assert "| Search scope |" in dev["must"] and "## Brief check" in dev["must"], name
+        project = name == "project-strict"
+        assert ("tools/leg-preflight.sh" in dev["must"]) is project and ("tools/leg-preflight.sh" in dev["forbid"]) is not project
+        question = "Does it hold on every platform the project supports?"
+        assert (question in dev["must"]) is project and (question in dev["forbid"]) is not project
+        assert "local AND cloud" in dev["forbid"]
+        assert "## Brief check" not in _scenarios_for(reg, name)["general-purpose"]["must"]
+
+
 def test_the_leg_expects_the_compaction_words_by_the_projects_data() -> None:
     inject = _reg("SessionStart", "inject")
-    user, beads, marked = (_scenarios_for(inject, n) for n in ("plain", "plain-beads", "marked"))
+    user, beads, project = (_scenarios_for(inject, n) for n in ("plain", "plain-beads", "project-strict"))
     assert "board" in user["compact, no checkpoint"]["forbid"] and "bd list" in user["compact, no checkpoint"]["forbid"]
     assert "bd list --status=in_progress" in beads["compact, no checkpoint"]["must"]
     assert "board" in beads["compact, no checkpoint"]["forbid"], "a beads project is not a board project"
-    assert "threads board entry" in marked["compact, no checkpoint"]["must"], "the maintainer keeps the board"
+    assert "board" in project["compact, no checkpoint"]["forbid"], "no checkpoint to read: the board is named for no one"
+    assert "threads board entry" not in project["compact, no checkpoint"]["must"]
 
 
 def test_the_beads_fixture_runs_only_the_compaction_registrations(manifest) -> None:
@@ -394,7 +447,7 @@ def test_the_beads_fixture_runs_only_the_compaction_registrations(manifest) -> N
     regs = {r["key"]: r for r in am.registrations(hooks)}
     kept = [k for k, r in regs.items() if leg._is_compaction(r)]
     assert sorted(regs[k]["event"] for k in kept) == ["PostCompact", "PreCompact", "SessionStart"]
-    assert "plain-beads" in leg.USER_FIXTURES and leg.BEADS_FIXTURES == ("plain-beads",)
+    assert "plain-beads" in leg.PLAIN_FIXTURES and leg.BEADS_FIXTURES == ("plain-beads",)
 
 
 def test_the_bd_word_is_a_hit_unless_the_project_has_beads() -> None:

@@ -42,13 +42,12 @@ write verb. "I could not tell whether this tree is shared" is not a good enough
 reason to permit silent, unrecoverable loss of the orchestrator's uncommitted
 work. The ``# routing-allow:`` escape remains.
 
-Audience (nexus-sby49): everything above and below is the MAINTAINER's rule,
-the full structure-agnostic form. It applies when ``_audience.maintainer`` is
-true: the account flag file exists, or the payload's checkout carries the nexus
-marker. For anyone else ``_user_git_seatbelt`` denies a short list of
-irrecoverable forms and allows the rest (commit, add, push, rebase, merge...).
-A predicate error or a missing helper answers "maintainer", so a broken helper
-restores this full rule.
+Mode: everything above and below is the STRICT form of the rule, the full structure-agnostic
+one. It runs when the project's tracked settings or the user's own settings say
+``subagent_git`` is ``strict`` (``_audience.guard_mode``). Otherwise ``_user_git_seatbelt``, the
+default, denies a short list of irrecoverable forms and allows the rest (commit, add, push,
+rebase, merge...). A read error or a missing helper answers strict, so a broken helper restores
+this full rule.
 
 nexus-3c92m (2026-08-20), corrected root cause: the FIRST hypothesis here
 (that the incident guard was simply an older pinned plugin release predating
@@ -621,28 +620,24 @@ _interpreter.reexec_if_needed()
 sys.path.insert(0, os.path.dirname(__file__))
 import _lib  # noqa: E402
 
-# nexus-sby49 audience gate. The predicate answers True on any error, and so does
-# this fallback: a broken or missing helper restores the full guard below, never a
-# wider permission. The user-mode seatbelt is a separate module; when it cannot be
-# imported the full guard runs for everyone.
+# The guard's mode is a setting: the seatbelt (a short deny list) unless the project's tracked
+# settings or the user's own settings say ``strict``. The reader answers strict on any error, and so does
+# this fallback: a broken or missing helper restores the full guard below, never a wider permission. The
+# seatbelt is a separate module; when it cannot be imported the full guard runs for everyone.
 try:
     from _audience import (
-        maintainer as _maintainer,
-        note_marker_only as _note_marker_only,
+        guard_mode as _guard_mode,
         remote_test_hosts as _remote_hosts_reader,
         note_hook_error as _note_hook_error,
     )
 except BaseException:  # noqa: BLE001
-    def _maintainer(payload: object) -> bool:
-        return True
+    def _guard_mode(payload: object) -> str:
+        return "strict"
 
     def _remote_hosts_reader() -> frozenset[str]:  # loosening: no helper, no exempt host
         return frozenset()
 
     def _note_hook_error(payload: object, what: str) -> None:
-        return None
-
-    def _note_marker_only(payload: object) -> None:
         return None
 try:
     import _user_git_seatbelt
@@ -4100,19 +4095,18 @@ def _deny_message(agent_type: str, verb_names: str, *,
         f"Subagents never run git write verbs ({verb_names}) in the shared "
         f"tree ({who}); that includes `gh`/`hub` commands that move HEAD or "
         f"rewrite the working tree (gh pr checkout, gh repo sync). This guard is intentionally STRUCTURE-AGNOSTIC "
-        f"(nexus-3c92m round 4, after three rounds of a structural parser "
-        f"growing a new bypass every round): it denies whenever `git` "
+        f"(a structural parser grew a new bypass every round): it denies whenever `git` "
         f"appears near a write verb ANYWHERE in the raw command text, "
         f"regardless of shell structure — heredocs, pipes, substitutions, "
         f"line-continuations, quoting, and comments create no exemption. "
         f"A false positive here just costs a rephrase or a hand-back; a "
-        f"false negative destroys uncommitted work outright (this bead's "
-        f"own origin: a reviewer's `git checkout -- <file>` silently wiped "
-        f"three uncommitted production fixes)."
+        f"false negative destroys uncommitted work outright (a reviewer's "
+        f"`git checkout -- <file>` once silently wiped three uncommitted "
+        f"production fixes)."
     )
     if "config" in verb_names.split(", "):
         head += (
-            "\n`git config` writes are denied (nexus-dsr6a): `core.hooksPath` "
+            "\n`git config` writes are denied: `core.hooksPath` "
             "redirects the hooks that run on the orchestrator's later commits, "
             "and `user.*` rewrites authorship, in this tree and, with "
             "--global/--system, in every repository on the box. Reads stay "
@@ -4147,7 +4141,7 @@ def _deny_message(agent_type: str, verb_names: str, *,
     if sidefx:
         head += (
             "\nVerbs that write `.git/config` by side effect are denied "
-            "(nexus-k66o5): `git remote add|remove|rm|rename|set-url|set-head|"
+            ": `git remote add|remove|rm|rename|set-url|set-head|"
             "set-branches|prune`, `git branch -u|--set-upstream-to|"
             "--unset-upstream|-t|--track`, `git push|fetch|pull -u|"
             "--set-upstream` (shared tree only), `git checkout|switch -t|--track`, `git submodule "
@@ -4211,8 +4205,7 @@ def _deny_message(agent_type: str, verb_names: str, *,
         f"Hand back your changes as diffs + file paths -- a background "
         f"dispatch does that via SubagentHandback or SendMessage before idling; a foreground "
         f"one's final message IS the hand-back, no separate report call "
-        f"needed -- so the ORCHESTRATOR commits, pathspec-limited "
-        f"(RDR-184 Gap-4, feedback_orchestration_friction).\n"
+        f"needed -- so the orchestrator commits, pathspec-limited.\n"
         f"Rephrase without the literal git verb, or hand the edit back to "
         f"the orchestrator to run.\n"
         f"Read-only git (status/diff/log/show/blame/rev-parse/ls-files) "
@@ -4250,7 +4243,7 @@ def _spliced_expansion_deny_message(agent_type: str, detail: str, *,
             f"`worktree remove`, `cherry-pick`, ...) that no finite word "
             f"list can fully enumerate, which is why this denies on the "
             f"GLUE ALONE once `git` is present, rather than trying to "
-            f"guess what the splice spells (nexus-3c92m round 8)."
+            f"guess what the splice spells."
         )
     else:
         head = (
@@ -4258,7 +4251,7 @@ def _spliced_expansion_deny_message(agent_type: str, detail: str, *,
             f"command or hand the edit to the orchestrator ({who}). The "
             f"letters immediately touching an expansion in this command "
             f"(`{detail}`) reconstruct `git` if the expansion resolves the "
-            f"way it looks like it's meant to (nexus-3c92m round 8)."
+            f"way it looks like it's meant to."
         )
     head += (
         f"\nOrdinary interpolation stays allowed: `file${{i}}.txt`, "
@@ -4595,7 +4588,7 @@ def _scan_command(
 
 
 def _user_mode(payload: dict[str, Any], command: str) -> None:
-    """The seatbelt for a repository that is not nexus; always exits.
+    """The seatbelt, the guard's default mode; always exits.
 
     Text-only forms deny in any cwd; git-state forms deny only when the checkout
     has something to lose. No telemetry is recorded for a user's repository.
@@ -4624,12 +4617,10 @@ def body(payload: dict[str, Any]) -> None:
     if not command:
         _lib.pass_through()
 
-    # Audience gate (nexus-sby49). Everything below is the maintainer's full rule.
-    # Anyone else gets the short seatbelt: it denies or passes and never falls
-    # through, unless the seatbelt module could not be imported.
-    if _maintainer(payload):
-        _note_marker_only(payload)
-    elif _user_git_seatbelt is not None:
+    # Everything below is the full rule, run only when the project or the user set ``subagent_git`` to
+    # strict. Otherwise the short seatbelt answers: it denies or passes and never falls through, unless
+    # the seatbelt module could not be imported.
+    if _guard_mode(payload) != "strict" and _user_git_seatbelt is not None:
         _user_mode(payload, command)
 
     # The chas carve-out (nexus-yc7fs): one ssh command whose git runs on the
@@ -4729,7 +4720,7 @@ def body(payload: dict[str, Any]) -> None:
             summary=(
                 f"subagent Bash command denied: an expansion "
                 f"({'glued to a word char, git present' if git_present else 'reconstructs ' + spliced_fragment}) "
-                f"(nexus-3c92m round 8 adjacency rule)."
+                f"."
             ),
         )
         return
@@ -4762,7 +4753,7 @@ def body(payload: dict[str, Any]) -> None:
         ),
         summary=(
             f"subagent git write verb ({verb_names}) blocked in the shared "
-            f"tree by the structure-agnostic guard (nexus-3c92m round 4)."
+            f"tree by the structure-agnostic guard."
         ),
     )
 

@@ -26,7 +26,7 @@ import urllib.parse
 import pytest
 
 from nexus.daemon.service_registry import service_identity
-from tests.hooks.audience_harness import marked_repo
+from tests.hooks.audience_harness import plain_repo, write_user_settings
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 #: The plugin-resident library both live routing guards import. The wheel
@@ -38,11 +38,21 @@ README_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "READ
 
 
 @pytest.fixture(autouse=True)
-def _a_maintainers_account(plugin_account):
-    """``log_routing_event`` records only under ``maintainer()`` (nexus-sby49.3), and these in-process cases exercise
-    the recorder itself, so they run on an account that carries the flag. The user's case is
+def _an_account_with_telemetry_on(plugin_account):
+    """``log_routing_event`` records only when the user's ``telemetry`` setting is true (opt-in, off by default), and these
+    in-process cases exercise the recorder itself, so they run on an account that turned it on. The default's case is
     tests/test_routing_telemetry_audience.py."""
-    plugin_account(flagged=True)
+    plugin_account(telemetry=True)
+
+
+def _telemetry_home(tmp_path) -> str:
+    """An account home whose ``conexus.json`` turns telemetry on, for the cases that run the recorder in a child process."""
+    return str(write_user_settings(tmp_path / "acct-telemetry", telemetry=True))
+
+
+def _seam(home: str) -> str:
+    """Stub source that points the child's audience helper at *home* (the helper is importable once ``_lib`` is)."""
+    return f"import _audience; _audience._ACCOUNT_HOME_OVERRIDE = {home!r}\n"
 
 
 def _load_lib(*, detached: bool = False):
@@ -1270,13 +1280,15 @@ def _hook_env(tmp_path, port: int) -> dict:
 
 
 def _run_deny_hook(env: dict) -> tuple[subprocess.CompletedProcess, float]:
-    # the event is the maintainer's (nexus-sby49.3): the payload names a nexus checkout, since a child process cannot
-    # reach the in-process account seam and a CI runner has no flag
-    cwd = marked_repo(pathlib.Path(env["NEXUS_CONFIG_DIR"]).parent / "nexus-checkout")
+    # the event is recorded only with the user's telemetry setting on: a child process cannot reach the in-process account
+    # seam, so it runs through the audience harness with an account home whose conexus.json turns it on
+    base = pathlib.Path(env["NEXUS_CONFIG_DIR"]).parent
+    cwd = plain_repo(base / "checkout")
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": _DENY_CMD}, "session_id": "s-1", "cwd": cwd})
     t0 = _time.monotonic()
     proc = subprocess.run(
-        [sys.executable, str(_ROUTING_DIR / "credential_print_guard.py")],
+        [sys.executable, str(PROJECT_ROOT / "tests" / "hooks" / "audience_harness.py"), _telemetry_home(base),
+         str(_ROUTING_DIR / "credential_print_guard.py")],
         input=payload, capture_output=True, text=True, env=env, timeout=30,
     )
     return proc, _time.monotonic() - t0
@@ -1377,14 +1389,15 @@ def test_a_child_that_cannot_start_is_metered_and_the_deny_is_still_emitted(tmp_
     drops = tmp_path / "dropped_writes.jsonl"
     stub = (
         f"import sys; sys.path.insert(0, {str(_ROUTING_DIR)!r}); import _lib\n"
-        "sys.executable = '/nonexistent/python'\n"
+        + _seam(_telemetry_home(tmp_path))
+        + "sys.executable = '/nonexistent/python'\n"
         "def body(p):\n"
         "    _lib.log_routing_event(rule='r', outcome='deny')\n"
         "    _lib.deny('refused')\n"
         "_lib.run_hook(body, fail_closed=True, rule_name='r')\n"
     )
     proc = subprocess.run(
-        [sys.executable, "-c", stub], input=json.dumps({"session_id": "s", "cwd": marked_repo(tmp_path / "nexus-checkout")}),
+        [sys.executable, "-c", stub], input=json.dumps({"session_id": "s", "cwd": plain_repo(tmp_path / "checkout")}),
         capture_output=True, text=True, env=_hook_env(tmp_path, 1), timeout=30,
     )
     assert proc.returncode == 0, proc.stderr
@@ -1403,8 +1416,9 @@ def test_the_bearer_token_goes_to_the_child_over_stdin_never_argv(tmp_path):
     fake.chmod(0o755)
     stub = (
         f"import sys; sys.path.insert(0, {str(_ROUTING_DIR)!r}); import _lib\n"
-        f"_lib._payload = {{'cwd': {marked_repo(tmp_path / 'nexus-checkout')!r}}}  # the event is the maintainer's\n"
-        f"sys.executable = {str(fake)!r}\n"
+        f"_lib._payload = {{'cwd': {plain_repo(tmp_path / 'checkout')!r}}}\n"
+        + _seam(_telemetry_home(tmp_path))
+        + f"sys.executable = {str(fake)!r}\n"
         "_lib.log_routing_event(rule='r', outcome='deny')\n"
     )
     env = _hook_env(tmp_path, 1)

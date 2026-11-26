@@ -31,16 +31,17 @@ pytestmark = pytest.mark.t2_tenant
 
 #: The driver runs in a child process, where the in-process audience seam does not reach, so the account it
 #: sees is named by ``NX_TEST_ACCOUNT_HOME`` (audience_harness.SRC_SEAM_PRELUDE). Default: an account with no
-#: flag. A test that wants the maintainer's text names a flagged home or a marked ``cwd``.
-_UNFLAGGED_HOME = tempfile.mkdtemp(prefix="nx-acct-unflagged-")
-atexit.register(shutil.rmtree, _UNFLAGGED_HOME, ignore_errors=True)
+#: settings file. A test that wants a setting names a settings home or a project with a settings file as ``cwd``.
+_PLAIN_HOME = tempfile.mkdtemp(prefix="nx-acct-unflagged-")
+atexit.register(shutil.rmtree, _PLAIN_HOME, ignore_errors=True)
 
 
-def _flagged_home(tmp_path: Path) -> str:
-    flag = tmp_path / "acct-flagged" / ".config" / "nexus" / "maintainer-profile"
-    flag.parent.mkdir(parents=True)
-    flag.write_text("", encoding="utf-8")
-    return str(tmp_path / "acct-flagged")
+def _strict_home(tmp_path: Path) -> str:
+    """An account home whose user settings turn the strict subagent guard on (the user-strict fixture)."""
+    settings = tmp_path / "acct-strict" / ".config" / "nexus" / "conexus.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"subagent_git": "strict"}), encoding="utf-8")
+    return str(tmp_path / "acct-strict")
 
 STDIN_PAYLOAD = json.dumps({
     "session_id": "test-session",
@@ -96,7 +97,7 @@ def _run_hook(
     env = {
         **{k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"},  # the helper's cwd fallback: a nexus session's would make this a nexus repo
         "PATH": os.environ.get("PATH", ""),
-        **src_seam_env(_UNFLAGGED_HOME),
+        **src_seam_env(_PLAIN_HOME),
         **(env_overrides or {}),
     }
     return subprocess.run(
@@ -496,14 +497,15 @@ class TestBriefCheckInjection:
     _IMPLEMENTERS = ["developer", "conexus:developer", "worktree-developer", "general-purpose", "claude", "conexus:debugger"]
 
     @pytest.mark.parametrize("agent_type", _IMPLEMENTERS)
-    def test_implementer_types_get_the_brief_check_in_a_marked_nexus_checkout(
-        self, agent_type: str, nexus_marked_repo: Path,
+    def test_implementer_types_get_the_brief_check_with_the_projects_own_question(
+        self, agent_type: str, project_settings_repo,
     ) -> None:
-        ctx = self._ctx(agent_type, cwd=nexus_marked_repo)
+        repo = project_settings_repo(brief_questions=["Does it hold in both modes, local AND cloud?"])
+        ctx = self._ctx(agent_type, cwd=repo)
         assert "## Brief check" in ctx
-        for question in ("Consumers:", "Final point:", "Modes:", "Bounds:", "State:"):
+        for question in ("Consumers:", "Final point:", "Bounds:", "State:"):
             assert question in ctx, question
-        assert "3. Modes: behaviour in local AND cloud mode" in ctx
+        assert "5. Does it hold in both modes, local AND cloud?" in ctx
 
     @pytest.mark.parametrize(
         "agent_type",
@@ -517,8 +519,8 @@ class TestBriefCheckInjection:
             "Plan",
         ],
     )
-    def test_read_only_types_do_not(self, agent_type: str, nexus_marked_repo: Path) -> None:
-        assert "## Brief check" not in self._ctx(agent_type, cwd=nexus_marked_repo)
+    def test_read_only_types_do_not(self, agent_type: str, project_strict_repo: Path) -> None:
+        assert "## Brief check" not in self._ctx(agent_type, cwd=project_strict_repo)
 
 
 class TestAgentTypeClassification:

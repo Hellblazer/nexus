@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Golden replay (nexus-sby49 Phase 1, T1): the maintainer path did not move.
+"""Golden replay (nexus-sby49 Phase 1, T1): the strict path did not move.
+
+Reworked in nexus-sby49.4: "the maintainer path" is now the strict subagent git guard, switched on by a project's tracked
+``.nexus/project.json`` or the user's ``conexus.json`` (the old marker files still read as strict). The worker reports
+``maintainer`` as "guard_mode is strict" and ``nexus_repo`` as "the project's own settings say strict".
 
 Phase 1 puts an audience gate in front of the subagent git-write guard. For the
 maintainer (the account flag, or a nexus checkout) the guard must answer exactly
@@ -48,7 +52,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from tests import test_routing_subagent_git_write as guard_tests
-from tests.hooks.audience_harness import flagged_home, mark_nexus
+from tests.hooks.audience_harness import strict_home, mark_strict
 
 pytestmark = pytest.mark.slow
 
@@ -116,6 +120,17 @@ def _worker(tree: pathlib.Path, mode: str, home: pathlib.Path | None, cases: lis
     return rows
 
 
+def _decision(verdict: str) -> str:
+    """The permission decision a hook output carries (``deny``, ``allow``, ``ask``), ``""`` for none. The deny TEXT changed on
+    purpose in nexus-sby49.4 (internal ids removed), so the replay holds the decisions identical, not the words."""
+    if not verdict.strip():
+        return ""
+    try:
+        return str(json.loads(verdict).get("hookSpecificOutput", {}).get("permissionDecision", "text"))
+    except ValueError:
+        return "text"
+
+
 def _both(old_tree, home, cases, *, mode_home_has_hosts: bool = True):
     """Old and new verdicts for *cases*, the two workers running at once."""
     new_tree = PROJECT_ROOT / SCRIPTS_REL
@@ -165,11 +180,11 @@ def test_the_replay_shows_exactly_the_intended_tightening(old_tree, tmp_path):
     primary = tmp_path / "primary"
     primary.mkdir()
     _git("init", "-q", cwd=primary)
-    mark_nexus(primary)
+    mark_strict(primary)
     (primary / "f.txt").write_text("x")
-    _git("add", "f.txt", "scripts/agent-worktree-preflight.sh", cwd=primary)
+    _git("add", "f.txt", ".nexus/project.json", cwd=primary)
     _git("commit", "-q", "-m", "init", cwd=primary)
-    flagged = pathlib.Path(flagged_home(tmp_path / "flagged-home"))
+    flagged = pathlib.Path(strict_home(tmp_path / "flagged-home"))
     unflagged = tmp_path / "unflagged-home"
     unflagged.mkdir()
     for label, cwd, home in (("primary", str(primary), unflagged), ("no cwd (flagged)", "", flagged)):
@@ -185,16 +200,16 @@ def test_the_synthetic_replay_shows_zero_maintainer_path_differences(old_tree, t
     primary = tmp_path / "primary"
     primary.mkdir()
     _git("init", "-q", cwd=primary)
-    mark_nexus(primary)
+    mark_strict(primary)
     (primary / "f.txt").write_text("x")
-    _git("add", "f.txt", "scripts/agent-worktree-preflight.sh", cwd=primary)
+    _git("add", "f.txt", ".nexus/project.json", cwd=primary)
     _git("commit", "-q", "-m", "init", cwd=primary)
     linked = tmp_path / "linked"
     _git("worktree", "add", "-q", "-b", "wt", str(linked), cwd=primary)
     plain = tmp_path / "plain"
     plain.mkdir()
     unflagged = tmp_path / "unflagged-home"
-    flagged = pathlib.Path(flagged_home(tmp_path / "flagged-home"))
+    flagged = pathlib.Path(strict_home(tmp_path / "flagged-home"))
     for h in (unflagged, flagged):
         hosts = h / ".config" / "nexus" / "remote-test-hosts"
         hosts.parent.mkdir(parents=True, exist_ok=True)
@@ -216,7 +231,7 @@ def test_the_synthetic_replay_shows_zero_maintainer_path_differences(old_tree, t
             examined += 1
             denies += '"deny"' in o["verdict"]
             passes += o["verdict"] == ""
-            if o["verdict"] != n["verdict"]:
+            if _decision(o["verdict"]) != _decision(n["verdict"]):
                 differences.append(f"[{label}] {c[:120]!r}")
             assert n["maintainer"] is True, f"[{label}] new guard saw a non-maintainer for {c[:80]!r}"
     print(f"\nsynthetic replay: {len(commands)} commands x {len(places)} places = {examined} verdicts, "
@@ -265,7 +280,7 @@ def test_the_real_corpus_replay_meets_the_floor_and_the_bars(old_tree, tmp_path)
         f"UNVERIFIED: {len(existing)} existing cwds (floor {FLOOR_CWDS}), {len(cases)} commands (floor {FLOOR_COMMANDS})"
     )
 
-    flagged = pathlib.Path(flagged_home(tmp_path / "flagged"))
+    flagged = pathlib.Path(strict_home(tmp_path / "flagged"))
     empty = tmp_path / "empty-home"
     empty.mkdir()
     # The old guard read its exempt ssh hosts from the environment, the new one from a
@@ -284,7 +299,7 @@ def test_the_real_corpus_replay_meets_the_floor_and_the_bars(old_tree, tmp_path)
 
     # Bar 1: with the flag, maintainer() is true everywhere, and the verdicts are identical.
     not_maintainer = sorted({c["cwd"] for c, r in zip(cases, new_rows) if r["maintainer"] is not True})
-    verdict_diffs = [c for c, o, n in zip(cases, old_rows, new_rows) if o["verdict"] != n["verdict"]]
+    verdict_diffs = [c for c, o, n in zip(cases, old_rows, new_rows) if _decision(o["verdict"]) != _decision(n["verdict"])]
     old_denies = sum('"deny"' in r["verdict"] for r in old_rows)
     denied_cwds = len({c["cwd"] for c, r in zip(cases, old_rows) if '"deny"' in r["verdict"]})
     print(f"flag present: maintainer() true for {len(existing) - len(not_maintainer)}/{len(existing)} cwds; "
@@ -309,7 +324,7 @@ def test_the_real_corpus_replay_meets_the_floor_and_the_bars(old_tree, tmp_path)
                 user_mode.append(cwd)
     marker_missing = [
         c for c in user_mode
-        if not any(os.path.isfile(os.path.join(_toplevel(c) or "", *m.split("/"))) for m in ("scripts/agent-worktree-preflight.sh", ".nexus/dev-process.json"))
+        if not any(os.path.isfile(os.path.join(_toplevel(c) or "", *m.split("/"))) for m in ("scripts/agent-worktree-preflight.sh", ".nexus/dev-process.json", ".nexus/project.json"))
     ]
     other_user_mode = sorted(c for c, r in by_cwd.items() if r["maintainer"] is not True and c not in nexus_like)
     print(f"flag removed: nexus_repo() true for {len(nexus_like) - len(user_mode)}/{len(nexus_like)} cwds under a nexus checkout")

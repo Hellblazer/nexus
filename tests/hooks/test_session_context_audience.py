@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The SessionStart half of the audience split (nexus-sby49.3, plan section 7 Phase 2 change 3).
+"""The SessionStart half of the audience model (nexus-sby49.3, plan section 7 Phase 2 change 3; reworked in nexus-sby49.4).
 
 * I1a/I1c: the T1 block's heading and lifetime line are every user's; the retired-``share_t1`` parenthetical is gone.
-* I1b: the dispatch-protocol sentence (nexus-mtheb, Sam's own working rule) goes only to ``maintainer()``.
+* I1b: the dispatch-protocol sentence is process: every session gets it, whoever the user is and whatever the project's settings.
 * I2: the index line names ``beads`` and ``rdr`` only where the project has beads (a ``.beads/`` directory or ``bd``)
   or an RDR directory; with both it is the line this module always carried.
-* The tripwire: a session that is a maintainer's only because the checkout carries the nexus marker gets one line.
+* There is no marker line and no account flag: nothing in this hook asks who the user is.
 
 Everything is in-process and stubs the live sections, so it reaches no engine and mints no tenant.
 """
@@ -18,7 +18,6 @@ from pathlib import Path
 import pytest
 
 from nexus.hooks import board_due, identity_notes, session_context
-from tests._audience_fixtures import broken_audience_import
 
 
 @pytest.fixture()
@@ -44,31 +43,27 @@ def _out(payload: dict | None = None) -> str:
 # --- I1a, I1b, I1c -----------------------------------------------------------------------------
 
 
-def test_a_user_gets_the_heading_and_the_lifetime_line_and_no_dispatch_sentence(project: Path) -> None:
-    out = _out({"cwd": str(project)})
-    lines = out.split("\n")
-    assert lines[0] == session_context._T1_HEADING
-    assert lines[1] == session_context._T1_LIFETIME
-    assert "Before a dispatch" not in out and "design-of-record" not in out
-
-
-def test_the_retired_share_t1_note_is_gone_for_everyone(project: Path, src_maintainer_flag) -> None:
-    assert "share_t1" not in session_context._T1_LIFETIME
-    assert "share_t1" not in _out({"cwd": str(project)})
-
-
-def test_the_account_flag_gets_the_dispatch_sentence(project: Path, src_maintainer_flag) -> None:
+def test_every_session_gets_the_heading_the_dispatch_sentence_and_the_lifetime_line(project: Path) -> None:
     out = _out({"cwd": str(project)})
     assert out.split("\n")[:3] == [
         session_context._T1_HEADING, session_context._T1_DISPATCH_PROTOCOL, session_context._T1_LIFETIME,
     ]
 
 
-def test_a_marked_checkout_gets_the_dispatch_sentence_without_the_flag(project: Path, nexus_marked_repo: Path) -> None:
-    assert session_context._T1_DISPATCH_PROTOCOL in _out({"cwd": str(nexus_marked_repo)})
+def test_the_dispatch_sentence_does_not_depend_on_any_setting(project: Path, project_strict_repo: Path, src_user_strict) -> None:
+    """A project that turns the strict guard on and a user who does get the same T1 block as the plain session."""
+    plain = _out({"cwd": str(project)})
+    assert session_context._T1_DISPATCH_PROTOCOL in plain
+    assert session_context._T1_DISPATCH_PROTOCOL in _out({"cwd": str(project_strict_repo)})
+    assert _out({"cwd": str(project)}) == plain
 
 
-def test_the_maintainers_block_is_the_old_block_less_the_parenthetical() -> None:
+def test_the_retired_share_t1_note_is_gone_for_everyone(project: Path) -> None:
+    assert "share_t1" not in session_context._T1_LIFETIME
+    assert "share_t1" not in _out({"cwd": str(project)})
+
+
+def test_the_block_is_the_old_block_less_the_parenthetical() -> None:
     old_lifetime = (
         "T1 survives compaction; a `/clear`, `/resume` or fresh restart starts a new scope, "
         "an idle session is swept after 24 h, and flagged entries land in T2 at session end "
@@ -79,6 +74,7 @@ def test_the_maintainers_block_is_the_old_block_less_the_parenthetical() -> None
     assert session_context._T1_LIFETIME == old_lifetime.replace(" (`share_t1=True` is retired and raises).", ".")
     assert session_context._T1_TOP_LINES[0] == session_context._T1_HEADING
     assert session_context._T1_TOP_LINES[-1] == ""
+    assert session_context._T1_DISPATCH_PROTOCOL in session_context._T1_TOP_LINES
 
 
 # --- I2: the index line -------------------------------------------------------------------------
@@ -138,41 +134,20 @@ def test_a_gate_that_cannot_be_read_leaves_the_topics_in(project: Path, monkeypa
     assert session_context.brief_index_line(project) == session_context.BRIEF_INDEX_LINE
 
 
-# --- the tripwire -------------------------------------------------------------------------------
+# --- no marker line, no flag -----------------------------------------------------------------------
 
 
-def test_a_marked_checkout_on_an_account_with_no_flag_gets_one_tripwire_line(project: Path, nexus_marked_repo: Path) -> None:
-    out = _out({"cwd": str(nexus_marked_repo)})
-    assert out.count(session_context._TRIPWIRE_LINE) == 1
-    assert out.index(session_context._T1_LIFETIME) < out.index(session_context._TRIPWIRE_LINE) < out.index("More on demand")
+def test_no_session_gets_a_line_about_a_marker_or_a_maintainer_flag(project: Path, project_strict_repo: Path, src_user_strict) -> None:
+    for cwd in (project, project_strict_repo):
+        out = _out({"cwd": str(cwd)})
+        assert "maintainer flag" not in out and "nexus marker" not in out and "maintainer-profile" not in out
+    assert not hasattr(session_context, "_TRIPWIRE_LINE")
+    assert not hasattr(session_context, "_account_flag") and not hasattr(session_context, "_maintainer")
 
 
-def test_a_flagged_account_in_a_marked_checkout_gets_no_tripwire(project: Path, nexus_marked_repo: Path, src_maintainer_flag) -> None:
-    assert session_context._TRIPWIRE_LINE not in _out({"cwd": str(nexus_marked_repo)})
+def test_the_module_imports_no_audience_helper() -> None:
+    import ast
 
-
-def test_a_user_repo_gets_no_tripwire(project: Path) -> None:
-    assert session_context._TRIPWIRE_LINE not in _out({"cwd": str(project)})
-
-
-def test_the_flag_alone_outside_nexus_gets_no_tripwire(project: Path, src_maintainer_flag) -> None:
-    assert session_context._TRIPWIRE_LINE not in _out({"cwd": str(project)})
-
-
-def test_the_tripwire_line_carries_no_internal_name() -> None:
-    import re
-
-    assert re.search(r"\bnexus-[a-z0-9]{4,}\b|RDR-\d+|\bSam\b|\bHal\b", session_context._TRIPWIRE_LINE) is None
-    assert "\n" not in session_context._TRIPWIRE_LINE
-    # a conditional line of its own, on top of the bounded SessionStart ceilings (tests/hooks/test_session_start_combined_budget.py)
-    assert len(session_context._TRIPWIRE_LINE.encode("utf-8")) <= 260
-
-
-# --- T8: a broken helper never thins the maintainer's output ---------------------------------------
-
-
-def test_a_helper_that_cannot_import_gives_the_maintainer_block_to_everyone(tmp_path: Path) -> None:
-    with broken_audience_import(session_context) as reloaded:
-        assert reloaded._maintainer({"cwd": str(tmp_path)}) is True
-        assert reloaded._t1_top_lines({"cwd": str(tmp_path)}) == reloaded._T1_TOP_LINES
-        assert reloaded._account_flag() is False  # a loosening predicate answers False
+    tree = ast.parse(Path(session_context.__file__).read_text(encoding="utf-8"))
+    imported = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and (n.module or "").endswith("_audience")]
+    assert imported == [], "SessionStart reads no setting"

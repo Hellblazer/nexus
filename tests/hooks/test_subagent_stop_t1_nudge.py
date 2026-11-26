@@ -183,8 +183,7 @@ def test_an_agent_with_no_t1_tool_or_a_parsed_return_is_never_nudged(
 
 @pytest.mark.parametrize("agent_type", ["conexus:developer", "conexus:code-review-expert"])
 def test_an_agent_with_the_t1_tool_is_still_nudged(tmp_path: Path, agent_type: str) -> None:
-    """Non-vacuity for the skip list: it names types, it does not silence all. U5a: a conexus plugin agent is nudged
-    for every user, on an account with no flag and outside nexus (the autouse fixture's default)."""
+    """Non-vacuity for the skip list: it names types, it does not silence all. A conexus agent is nudged on a plain account."""
     result = nudge.run(_payload(_no_put_transcript(tmp_path), agent_type=agent_type))
     assert result.stdout is not None
 
@@ -193,23 +192,26 @@ _BUILT_INS = ["general-purpose", "Explore", "Plan", "claude", "worktree-develope
 
 
 @pytest.mark.parametrize("agent_type", _BUILT_INS)
-def test_a_user_is_not_nudged_for_a_built_in_or_another_plugins_agent(tmp_path: Path, agent_type: str) -> None:
-    """U5b (D10, nexus-mtheb): the nudge for Claude Code's built-in agents is Sam's own measured rule. A user's
-    ``general-purpose`` stop is silent, and so is a project's own ``developer``."""
-    assert nudge.run(_payload(_no_put_transcript(tmp_path), agent_type=agent_type)).stdout is None
-
-
-@pytest.mark.parametrize("agent_type", _BUILT_INS)
-def test_the_account_flag_gets_the_nudge_for_every_agent_type(
-    tmp_path: Path, agent_type: str, src_maintainer_flag: Path
-) -> None:
+def test_every_agent_type_is_nudged_on_a_plain_account(tmp_path: Path, agent_type: str) -> None:
+    """The ``t1_nudge`` setting defaults to on: a built-in or another plugin's agent is nudged like a conexus agent, whoever the
+    user is."""
     result = nudge.run(_payload(_no_put_transcript(tmp_path), agent_type=agent_type))
     assert result.stdout is not None
     assert json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"] == NUDGE_SENTENCE
 
 
-def test_a_marked_nexus_checkout_gets_the_nudge_for_a_built_in(tmp_path: Path, nexus_marked_repo: Path) -> None:
-    payload = _payload(_no_put_transcript(tmp_path), agent_type="general-purpose", cwd=str(nexus_marked_repo))
+@pytest.mark.parametrize("agent_type", ["conexus:developer", *_BUILT_INS])
+def test_the_user_setting_turns_the_nudge_off_for_every_agent_type(
+    tmp_path: Path, agent_type: str, src_user_settings
+) -> None:
+    src_user_settings(t1_nudge=False)
+    assert nudge.run(_payload(_no_put_transcript(tmp_path), agent_type=agent_type)).stdout is None
+
+
+def test_a_project_cannot_turn_the_nudge_off(tmp_path: Path, project_settings_repo) -> None:
+    """Tighten-only: a tracked project file that says ``t1_nudge: false`` is ignored."""
+    repo = project_settings_repo(t1_nudge=False)
+    payload = _payload(_no_put_transcript(tmp_path), agent_type="general-purpose", cwd=str(repo))
     assert nudge.run(payload).stdout is not None
 
 
@@ -370,8 +372,9 @@ def test_a_non_object_payload_fails_open() -> None:
 
 
 def test_the_counter_seam_is_called_once_with_the_put_count(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, src_maintainer_flag: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, src_user_settings
 ) -> None:
+    src_user_settings(telemetry=True)
     calls: list[tuple] = []
     monkeypatch.setattr(nudge, "record_dispatch", lambda *a: calls.append(a))
     nudge.run(_payload(_no_put_transcript(tmp_path)))
@@ -379,11 +382,11 @@ def test_the_counter_seam_is_called_once_with_the_put_count(
     assert calls == [("s1", "a1", "conexus:developer", 0), ("s1", "a1", "conexus:developer", 1)]
 
 
-def test_a_user_sends_no_dispatch_record_even_for_a_conexus_agent(
+def test_no_dispatch_record_is_sent_by_default_even_for_a_conexus_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``agent_dispatch_record`` sends the agent type and its put count to the user's engine, for nexus's own census
-    (nexus-sby49.3): SAM-WIDE. The user is still nudged (U5a)."""
+    """``agent_dispatch_record`` sends the agent type and its put count to the user's engine: opt-in, off by default. The
+    session is still nudged."""
     calls: list[tuple] = []
     monkeypatch.setattr(nudge, "record_dispatch", lambda *a: calls.append(a))
     result = nudge.run(_payload(_no_put_transcript(tmp_path)))
@@ -391,31 +394,43 @@ def test_a_user_sends_no_dispatch_record_even_for_a_conexus_agent(
     assert calls == []
 
 
-def test_a_marked_nexus_checkout_records_the_dispatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nexus_marked_repo: Path
+def test_a_project_cannot_turn_the_dispatch_record_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_settings_repo
 ) -> None:
+    repo = project_settings_repo(telemetry=True)
     calls: list[tuple] = []
     monkeypatch.setattr(nudge, "record_dispatch", lambda *a: calls.append(a))
-    nudge.run(_payload(_no_put_transcript(tmp_path), cwd=str(nexus_marked_repo)))
+    nudge.run(_payload(_no_put_transcript(tmp_path), cwd=str(repo)))
+    assert calls == []
+
+
+def test_a_user_with_telemetry_on_and_the_nudge_off_is_recorded_and_not_nudged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, src_user_settings
+) -> None:
+    src_user_settings(telemetry=True, t1_nudge=False)
+    calls: list[tuple] = []
+    monkeypatch.setattr(nudge, "record_dispatch", lambda *a: calls.append(a))
+    assert nudge.run(_payload(_no_put_transcript(tmp_path))).stdout is None
     assert calls == [("s1", "a1", "conexus:developer", 0)]
 
 
-def test_a_helper_that_cannot_import_restores_the_maintainers_behaviour(
+def test_a_helper_that_cannot_import_leaves_the_nudge_on_and_the_record_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The module-level fallback is True: a broken ``_audience`` nudges a built-in and records, as before."""
+    """The nudge adds a reminder (its fallback is True); the record sends data (its fallback is False)."""
     from tests._audience_fixtures import broken_audience_import  # noqa: PLC0415
 
     with broken_audience_import(nudge) as reloaded:
         calls: list[tuple] = []
         monkeypatch.setattr(reloaded, "record_dispatch", lambda *a: calls.append(a))
         result = reloaded.run(_payload(_no_put_transcript(tmp_path), agent_type="general-purpose"))
-        assert result.stdout is not None and len(calls) == 1
+        assert result.stdout is not None and calls == []
 
 
 def test_a_failing_counter_never_costs_the_nudge(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, src_maintainer_flag: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, src_user_settings
 ) -> None:
+    src_user_settings(telemetry=True)
     def boom(*_a: object) -> None:
         raise RuntimeError("engine down")
 

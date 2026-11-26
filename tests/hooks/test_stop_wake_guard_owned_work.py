@@ -23,16 +23,16 @@ _spec.loader.exec_module(swg)  # type: ignore[union-attr]
 #
 # The three real misses of 2026-11-12..19: each ended on the session's own next step with nothing armed, and the guard
 # allowed it, for a present-tense promise ("I'm doing X", "Next I'm starting X") or for a peer named only as the
-# recipient ("handing the draft to halcyon") being read as the wake.
+# recipient ("handing the draft to the peer") being read as the wake.
 
 _OWNED_MISSES = [
-    ("halcyon has the CI result, and the RDR-230 thread is off the board. Next I'm starting RDR-171 Step 5 "
+    ("the peer has the CI result, and the RDR-230 thread is off the board. Next I'm starting RDR-171 Step 5 "
      "(nexus-qrg1r.2).", "Next I'm starting"),
     ("Nothing of mine is dispatched right now. I'm doing the `nexus-uwggq.1.5` switch onto the by-scheme route "
      "myself, in my own worktree, so the commit guard doesn't affect it.", "I'm doing"),
     ("One assumption still needs checking: that repo documents carry no content hash when they're registered. After "
-     "that come the Trade-offs and handing the draft to halcyon. Step 3 is still waiting on wren's fixes and verify "
-     "run, and wren will message me when there's news.", "After that come"),
+     "that come the Trade-offs and handing the draft to the peer. Step 3 is still waiting on the peer's fixes and verify "
+     "run, and the peer will message me when there's news.", "After that come"),
 ]
 
 
@@ -96,22 +96,22 @@ def test_a_present_tense_restraint_does_not_block(text: str) -> None:
 
 @pytest.mark.parametrize(("text", "blocks"), [
     # a peer only as the recipient of my step: the step is mine, nothing will wake me for it
-    ("I'll write the draft and give it to halcyon.", True),
-    ("I'll write the summary for marlowe next.", True),
+    ("I'll write the draft and give it to the peer.", True),
+    ("I'll write the summary for the peer next.", True),
     # a peer as the subject of the arrival, or the gate: their message is the wake
-    ("Once wren reports back, I'll send the result to halcyon.", False),
-    ("I'll push in halcyon's window.", False),
-    ("After halcyon sends the window, I'll push.", False),
+    ("Once the peer reports back, I'll send the result to the peer.", False),
+    ("I'll push in the peer's window.", False),
+    ("After the peer sends the window, I'll push.", False),
     # corpus false positive (1a877265 11-12): a report of a peer's request, no step of mine; the recipient
     # is stripped only from a clause whose actor is me
-    ("marginalia then asked for one more test for wren: timing how long dropping the search index takes while "
+    ("marginalia then asked for one more test for the peer: timing how long dropping the search index takes while "
      "searches are running.", False),
     # a wait cue anywhere in the clause keeps the peer as the wake (code review r1)
-    ("I'll run the test for wren once she's back.", False),
-    ("I'm doing the review for wren after the diff arrives.", False),
+    ("I'll run the test for the peer once she's back.", False),
+    ("I'm doing the review for the peer after the diff arrives.", False),
     # the wait-word lookbehind and the possessive each keep a peer wake
-    ("Waiting for halcyon, I'll run the check.", False),
-    ("I'll rebase for halcyon's window.", False),
+    ("Waiting for the peer, I'll run the check.", False),
+    ("I'll rebase for the peer's window.", False),
 ])
 def test_a_peer_as_recipient_is_not_the_wake(text: str, blocks: bool) -> None:
     assert swg.evaluate_text(text).block is blocks, swg.evaluate_text(text)
@@ -122,7 +122,7 @@ _HELD_BACK = ("Never start work the user held back or asked you to wait on, work
 
 
 def test_the_continuation_never_licenses_held_back_work() -> None:
-    """The same sentence as the post-compaction checkpoint directive (wren, 1776ff7b7): one rule in both places."""
+    """The same sentence as the post-compaction checkpoint directive (the peer, 1776ff7b7): one rule in both places."""
     for cls in (swg.CLASS_PROMISE, swg.CLASS_TIMED, swg.CLASS_CI_WAIT):
         assert _HELD_BACK in " ".join(swg.block_reason(cls, "I'm doing it.").split())
     tree = ast.parse(SCRIPT.with_name("compact_checkpoint.py").read_text(encoding="utf-8"))

@@ -1,59 +1,75 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Who is this hook running for: a user of the plugin, or its maintainer.
+"""Settings the plugin's hooks read: a project's tracked file and the user's own file.
 
-Two predicates answer from the hook payload's ``cwd`` and the OS account:
+Nothing here asks who the user is. The development process is the plugin's product and reaches every user; what a
+project or a user can change is a setting, read from one of two files.
 
-``nexus_repo(payload)``
-    The checkout the payload names carries a tracked nexus marker file.
-``maintainer(payload)``
-    ``account_flag()`` OR ``nexus_repo(payload)``.
-``account_flag()``
-    ``<account home>/.config/nexus/maintainer-profile`` exists.
+Project settings, ``.nexus/project.json`` in the checkout the payload names, found by walking up from the payload's cwd to the
+first ``.git`` (a directory, or the file a linked worktree and a submodule have). A tracked file is written by whoever controls
+the repository, so it can only TIGHTEN or add text; it can never loosen a rule or turn telemetry on. Keys:
 
-The account home comes from the OS account database (``pwd`` on POSIX, the
-known-folder API on Windows), never from ``HOME``, ``USERPROFILE`` or
-``NEXUS_CONFIG_DIR``: no variable a repository or a project settings file can
-set may hide the flag. The one test seam is the in-process module attribute
-``_ACCOUNT_HOME_OVERRIDE`` (see ``tests/hooks/audience_harness.py``); it is
-never read from the environment.
+``subagent_git``
+    ``"strict"`` runs the full subagent git guard in this project; ``"seatbelt"`` (the default) leaves the short deny list.
+``preflight``
+    A command (a string) the SubagentStart worktree row tells a dispatched agent to run first.
+``ci_wait``
+    A command (a string) the Stop guard names for waiting on a push's CI; without it the wording is neutral.
+``credential_helper``
+    Text the credential guard's deny adds, naming this project's safe way to use the credential; without it the deny is neutral.
+``brief_questions``
+    A list of strings added to the implementer brief check.
+``advice_block``
+    A list of advice row ids that block (deny) in this project instead of warning.
 
-Failure goes in the safe direction. A predicate that tightens (``maintainer``,
-``nexus_repo``) answers True on any exception, so a broken helper restores the
-full guard. A predicate that loosens (``account_flag``) answers False, so a
-broken helper never widens a permission. A missing passwd entry is not an
-error: the account has no home, so there is no flag.
+``.nexus/dev-process.json`` (the Phase 2 file) and ``scripts/agent-worktree-preflight.sh`` (the Phase 1 marker) are still
+accepted for two client releases, each read as ``{"subagent_git": "strict"}``. When ``.nexus/project.json`` exists it alone
+decides. A project file that exists but cannot be read or parsed answers the strict reading, so a broken file never loosens.
 
-The cwd is the payload's ``cwd``, then ``CLAUDE_PROJECT_DIR``; never the
-process cwd (uv launches the hook scripts with ``--directory`` at the plugin
-root). An unsubstituted ``${cwd}`` or a relative path counts as no path.
+User settings, ``<account home>/.config/nexus/conexus.json``. Keys: ``subagent_git`` (as above), ``telemetry`` (bool, default
+false: routing events and the dispatch record are sent only when true), ``t1_nudge`` (bool, default true: the SubagentStop
+reminder to write findings to T1) and ``advice_block`` (as above). On any error the defaults apply.
 
-Stdlib only. Keep the copy in ``src/nexus/hooks/`` (Phase 2) byte-identical.
+The account home comes from the OS account database (``pwd`` on POSIX, the known-folder API on Windows), never from ``HOME``,
+``USERPROFILE`` or ``NEXUS_CONFIG_DIR``: no variable a repository or a project settings file can set may move it. The one test
+seam is the in-process module attribute ``_ACCOUNT_HOME_OVERRIDE`` (see ``tests/hooks/audience_harness.py``); it is never read
+from the environment.
+
+The cwd is the payload's ``cwd``, then ``CLAUDE_PROJECT_DIR``; never the process cwd (uv launches the hook scripts with
+``--directory`` at the plugin root). An unsubstituted ``${cwd}`` or a relative path counts as no path.
+
+Stdlib only. Keep the copy in ``src/nexus/hooks/`` byte-identical.
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 
 #: In-process test seam. ``None`` reads the real account home; a path replaces it.
 _ACCOUNT_HOME_OVERRIDE: "str | os.PathLike[str] | None" = None
 
-#: Relative to the account home.
-FLAG_PARTS: tuple[str, ...] = (".config", "nexus", "maintainer-profile")
+#: Relative to the checkout root.
+PROJECT_FILE_PARTS: tuple[str, ...] = (".nexus", "project.json")
 
-#: Tracked files only the nexus checkout has. The Phase 1 marker is kept
-#: accepted for at least two client releases after the Phase 2 one ships.
-MARKERS: tuple[str, ...] = (
-    "scripts/agent-worktree-preflight.sh",
+#: Accepted for two client releases after this one ships: each reads as ``{"subagent_git": "strict"}``.
+LEGACY_MARKERS: tuple[str, ...] = (
     ".nexus/dev-process.json",
+    "scripts/agent-worktree-preflight.sh",
 )
 
-#: ssh host aliases a subagent's git write may name (nexus-yc7fs, D11): one per
-#: line or comma-separated, ``#`` starts a comment. Read from the account home,
-#: never from the environment: a project's own settings can set env.
+#: Relative to the account home.
+USER_FILE_PARTS: tuple[str, ...] = (".config", "nexus", "conexus.json")
+
+#: ssh host aliases a subagent's git write may name: one per line or comma-separated, ``#`` starts a comment. Read from the
+#: account home, never from the environment: a project's own settings can set env.
 REMOTE_HOSTS_PARTS: tuple[str, ...] = (".config", "nexus", "remote-test-hosts")
 
-TRIPWIRE_LINE = "maintainer flag absent on this account; resolved by the repo marker"
+STRICT = "strict"
+SEATBELT = "seatbelt"
+
+#: What a project file that cannot be read gives: the strict reading.
+_UNREADABLE_PROJECT: "dict[str, object]" = {"subagent_git": STRICT}
 
 
 def _windows_profile_dir() -> "str | None":
@@ -89,8 +105,7 @@ def _windows_profile_dir() -> "str | None":
 def account_home() -> "str | None":
     """The OS account's home directory, or None when the account has none.
 
-    Raises on an unexpected failure; callers that must not raise go through
-    :func:`account_flag`.
+    Raises on an unexpected failure; callers that must not raise go through the readers below.
     """
     if _ACCOUNT_HOME_OVERRIDE is not None:
         return os.fspath(_ACCOUNT_HOME_OVERRIDE)
@@ -100,19 +115,8 @@ def account_home() -> "str | None":
 
     try:
         return pwd.getpwuid(os.getuid()).pw_dir or None
-    except KeyError:  # no passwd entry (a bare container): no home, no flag
+    except KeyError:  # no passwd entry (a bare container): no home, no user settings
         return None
-
-
-def account_flag() -> bool:
-    """True when the maintainer flag file exists. False on any error (it loosens)."""
-    try:
-        home = account_home()
-        if not home:
-            return False
-        return os.path.isfile(os.path.join(home, *FLAG_PARTS))
-    except BaseException:  # noqa: BLE001 -- a loosening predicate answers False
-        return False
 
 
 def _payload_cwd(payload: object) -> "str | None":
@@ -126,36 +130,142 @@ def _payload_cwd(payload: object) -> "str | None":
     return cwd
 
 
-def nexus_repo(payload: object) -> bool:
-    """True when the payload's checkout carries a nexus marker; True on any error.
+def project_root(payload: object) -> "str | None":
+    """The checkout root the payload's cwd sits in: the first directory up with a ``.git`` entry; None when none.
 
-    The walk starts at the realpath of the cwd and stops at the first ``.git``
-    entry (a directory, or the file a linked worktree and a submodule have). The
-    markers are checked at that directory only, so a nested repo is its own
-    project. A cwd inside ``.git/`` reaches the checkout root on the way up.
+    The walk starts at the realpath of the cwd. A cwd inside ``.git/`` reaches the checkout root on the way up. A nested
+    repository is its own project.
     """
+    cwd = _payload_cwd(payload)
+    if cwd is None:
+        return None
+    here = os.path.realpath(cwd)
+    while True:
+        if os.path.lexists(os.path.join(here, ".git")):
+            return here
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+
+
+def _clean_project(raw: object) -> "dict[str, object]":
+    """The keys of a parsed project file that have the right type, and only the values that tighten or add text."""
+    if not isinstance(raw, dict):
+        return dict(_UNREADABLE_PROJECT)
+    out: dict[str, object] = {}
+    if raw.get("subagent_git") == STRICT:
+        out["subagent_git"] = STRICT
+    for key in ("preflight", "ci_wait", "credential_helper"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip()
+    for key in ("brief_questions", "advice_block"):
+        value = raw.get(key)
+        if isinstance(value, list):
+            items = [v.strip() for v in value if isinstance(v, str) and v.strip()]
+            if items:
+                out[key] = items
+    return out
+
+
+def project_settings(payload: object) -> "dict[str, object]":
+    """The payload's project settings, tightened; ``{}`` when the project has none; the strict reading on any error."""
     try:
-        cwd = _payload_cwd(payload)
-        if cwd is None:
-            return False
-        here = os.path.realpath(cwd)
-        while True:
-            if os.path.lexists(os.path.join(here, ".git")):
-                return any(os.path.isfile(os.path.join(here, *m.split("/"))) for m in MARKERS)
-            parent = os.path.dirname(here)
-            if parent == here:
-                return False
-            here = parent
-    except BaseException:  # noqa: BLE001 -- a tightening predicate answers True
+        root = project_root(payload)
+        if root is None:
+            return {}
+        path = os.path.join(root, *PROJECT_FILE_PARTS)
+        if os.path.lexists(path):
+            with open(path, encoding="utf-8") as handle:
+                return _clean_project(json.load(handle))
+        if any(os.path.isfile(os.path.join(root, *m.split("/"))) for m in LEGACY_MARKERS):
+            return {"subagent_git": STRICT}
+        return {}
+    except BaseException:  # noqa: BLE001 -- a project file that cannot be read gives the strict reading
+        return dict(_UNREADABLE_PROJECT)
+
+
+def user_settings() -> "dict[str, object]":
+    """The account's ``conexus.json`` with the defaults filled in; the defaults on any error."""
+    defaults: dict[str, object] = {"subagent_git": SEATBELT, "telemetry": False, "t1_nudge": True, "advice_block": []}
+    try:
+        home = account_home()
+        if not home:
+            return defaults
+        path = os.path.join(home, *USER_FILE_PARTS)
+        if not os.path.isfile(path):
+            return defaults
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if not isinstance(raw, dict):
+            return defaults
+        out = dict(defaults)
+        if raw.get("subagent_git") in (STRICT, SEATBELT):
+            out["subagent_git"] = raw["subagent_git"]
+        for key in ("telemetry", "t1_nudge"):
+            if isinstance(raw.get(key), bool):
+                out[key] = raw[key]
+        rows = raw.get("advice_block")
+        if isinstance(rows, list):
+            out["advice_block"] = [v.strip() for v in rows if isinstance(v, str) and v.strip()]
+        return out
+    except BaseException:  # noqa: BLE001 -- a user setting that cannot be read leaves the defaults
+        return defaults
+
+
+def guard_mode(payload: object) -> str:
+    """``"strict"`` when the project or the user asks for the full subagent git guard, else ``"seatbelt"``. Strict on any error."""
+    try:
+        if project_settings(payload).get("subagent_git") == STRICT:
+            return STRICT
+        return STRICT if user_settings().get("subagent_git") == STRICT else SEATBELT
+    except BaseException:  # noqa: BLE001 -- a tightening reader answers strict
+        return STRICT
+
+
+def telemetry_enabled() -> bool:
+    """The user's ``telemetry`` setting (default false). False on any error: it sends data, so it loosens."""
+    try:
+        return user_settings().get("telemetry") is True
+    except BaseException:  # noqa: BLE001
+        return False
+
+
+def t1_nudge_enabled() -> bool:
+    """The user's ``t1_nudge`` setting (default true). True on any error: the nudge adds a reminder."""
+    try:
+        return user_settings().get("t1_nudge") is not False
+    except BaseException:  # noqa: BLE001
         return True
 
 
-def maintainer(payload: object) -> bool:
-    """The account flag OR the repo marker; True on any error."""
+def advice_blocked(payload: object) -> "frozenset[str]":
+    """The advice row ids a project or the user switched to block. Empty on any error (a row only warns)."""
     try:
-        return account_flag() or nexus_repo(payload)
-    except BaseException:  # noqa: BLE001 -- a tightening predicate answers True
-        return True
+        rows = set(user_settings().get("advice_block") or [])
+        rows.update(project_settings(payload).get("advice_block") or [])
+        return frozenset(str(r) for r in rows)
+    except BaseException:  # noqa: BLE001
+        return frozenset()
+
+
+def project_text(payload: object, key: str) -> "str | None":
+    """A project setting that is text (``preflight``, ``ci_wait``, ``credential_helper``), or None."""
+    try:
+        value = project_settings(payload).get(key)
+        return value if isinstance(value, str) and value else None
+    except BaseException:  # noqa: BLE001
+        return None
+
+
+def project_brief_questions(payload: object) -> "list[str]":
+    """The project's extra implementer brief questions, in order."""
+    try:
+        value = project_settings(payload).get("brief_questions")
+        return [str(v) for v in value] if isinstance(value, list) else []
+    except BaseException:  # noqa: BLE001
+        return []
 
 
 def _note_once(kind: str, payload: object, line: str) -> None:
@@ -185,16 +295,6 @@ def _note_once(kind: str, payload: object, line: str) -> None:
             handle.write(f"{stamp}+00:00 WARNING audience: {line}\n")
     except BaseException:  # noqa: BLE001 -- a note must never fail the hook
         pass
-
-
-def note_marker_only(payload: object) -> None:
-    """Tripwire: say once per session that only the marker made this a maintainer."""
-    try:
-        if account_flag() or not nexus_repo(payload):
-            return
-    except BaseException:  # noqa: BLE001
-        return
-    _note_once("tripwire", payload, TRIPWIRE_LINE)
 
 
 def note_hook_error(payload: object, what: str) -> None:

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The audience manifest lint (nexus-sby49.3, plan section 5 item 1; T9).
+"""The audience manifest lint (nexus-sby49.3, plan section 5 item 1; T9; reworked in nexus-sby49.4).
 
-``conexus/hooks/audience.yaml`` declares who every hook registration, rule and injected constant is for. This lint is the
+``conexus/hooks/audience.yaml`` declares who every hook registration, rule and injected constant is for: every user, or whoever
+sets a named setting (``SETTING:<key>``), never a person. This lint is the
 reason a new hook or a new line of injected text cannot reach every user without somebody deciding that: it fails on a
-registration with no entry, an unknown value, a constant that does not exist or is not classified, a gated entry whose
-module never calls its predicate, a predicate called outside a wrapped body, and an audience import whose fallback
+registration with no entry, an unknown value, a constant that does not exist or is not classified, a setting entry whose
+module never reads the setting, a reader called outside a wrapped body, and an audience import whose fallback
 widens a permission (T9). The checker is ``tests/_audience_manifest.py``; the behaviour leg uses it too.
 """
 from __future__ import annotations
@@ -94,13 +95,13 @@ def test_the_registry_and_the_advice_rows_carry_an_audience() -> None:
 
     registry = yaml.safe_load((ROOT / "conexus/hooks/scripts/routing/registry.yaml").read_text(encoding="utf-8"))
     for name, rule in registry["rules"].items():
-        assert rule.get("audience") in am.AUDIENCES, name
+        assert am.audience_kind(str(rule.get("audience"))) in am.AUDIENCES, name
     spec = importlib.util.spec_from_file_location("daa_lint", ROOT / "conexus/hooks/scripts/routing/destructive_action_advice.py")
     daa = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(daa)
     assert len(daa.ROWS) >= 5
     for row in daa.ROWS:
-        assert row.audience in am.AUDIENCES, row.id
+        assert am.audience_kind(row.audience) in am.AUDIENCES, row.id
 
 
 def test_the_registry_audience_agrees_with_the_manifest(manifest) -> None:
@@ -119,16 +120,17 @@ def test_the_registry_audience_agrees_with_the_manifest(manifest) -> None:
     assert seen == 3, "the three routing rules"
 
 
-def test_an_advice_row_may_name_a_narrower_audience_only_in_a_module_that_gates_on_it(manifest) -> None:
-    """``Row.audience`` is read by nothing at run time (every row advises for everyone, U8a), so a row that claimed
-    SAM-WIDE or NEXUS-REPO would look gated and be shown to every user. Until the module imports a predicate and filters on
-    it (U8b, D6), every row is EVERY-USER."""
+def test_an_advice_row_may_name_a_setting_audience_only_in_a_module_that_reads_a_setting(manifest) -> None:
+    """``Row.audience`` is read by nothing at run time (every row advises for everyone; a row blocks only through the
+    ``advice_block`` setting), so a row that claimed a setting audience would look gated and be shown to every user. Every row
+    is EVERY-USER."""
     spec = importlib.util.spec_from_file_location("daa_lint2", ROOT / "conexus/hooks/scripts/routing/destructive_action_advice.py")
     daa = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(daa)
     predicates = manifest["modules"]["hooks/scripts/routing/destructive_action_advice.py"].get("predicates") or []
+    assert predicates == ["advice_blocked"]
     for row in daa.ROWS:
-        assert row.audience == "EVERY-USER" or predicates, f"advice row {row.id} claims {row.audience}, and the module gates on nothing"
+        assert row.audience == "EVERY-USER", f"advice row {row.id} claims {row.audience}"
 
 
 # --- the census sees the value forms text is written in ------------------------------------------------
@@ -226,8 +228,18 @@ def test_an_unknown_or_missing_value_fails(manifest, hooks_json, field, value, n
 
 
 def test_an_audience_that_disagrees_with_its_gate_fails(manifest, hooks_json) -> None:
-    m = _mutated(manifest, lambda m: m["constants"][0].update({"audience": "SAM-WIDE", "gate": "none"}))
+    m = _mutated(manifest, lambda m: m["constants"][0].update({"audience": "SETTING:telemetry", "gate": "none"}))
     assert any("cannot carry gate" in p for p in _problems(m, hooks_json))
+    m = _mutated(manifest, lambda m: m["constants"][0].update({"audience": "EVERY-USER", "gate": "setting"}))
+    assert any("cannot carry gate" in p for p in _problems(m, hooks_json))
+
+
+def test_a_setting_audience_must_name_a_setting_the_checker_knows(manifest, hooks_json) -> None:
+    m = _mutated(manifest, lambda m: m["constants"][0].update({"audience": "SETTING:who_is_sam", "gate": "setting"}))
+    assert any("names no setting the checker knows" in p for p in _problems(m, hooks_json))
+    for retired in ("SAM-WIDE", "NEXUS-REPO"):
+        m = _mutated(manifest, lambda m, a=retired: m["constants"][0].update({"audience": a, "gate": "none"}))
+        assert any("unknown audience" in p for p in _problems(m, hooks_json)), retired
 
 
 def test_a_decision_outside_d1_to_d13_fails(manifest, hooks_json) -> None:
@@ -253,22 +265,22 @@ def test_a_new_string_constant_nobody_classified_fails(manifest, hooks_json) -> 
     assert any("_ORCH_GIT" in p and "does not classify" in p for p in found), found
 
 
-def test_a_live_gated_entry_in_a_module_that_never_calls_its_predicate_fails(manifest, hooks_json) -> None:
+def test_a_live_setting_entry_in_a_module_that_never_reads_the_setting_fails(manifest, hooks_json) -> None:
     def gate_the_setup_notice(m):
         m["rules"].append({
-            "id": "bogus", "module": "hooks/scripts/nx_setup_notice.py", "audience": "SAM-WIDE", "gate": "maintainer",
+            "id": "bogus", "module": "hooks/scripts/nx_setup_notice.py", "audience": "SETTING:ci_wait", "gate": "setting",
             "evidence": "x", "target_state": "x", "phase": "2",
         })
 
     found = _problems(_mutated(manifest, gate_the_setup_notice), hooks_json)
-    assert any("never calls maintainer()" in p for p in found), found
+    assert any("never calls project_text()" in p for p in found), found
 
 
-def test_a_gated_entry_that_is_not_live_may_have_no_call_yet(manifest, hooks_json) -> None:
-    """A row whose gate is declared and not wired (`live: false`) need not be called by its module, where a live one must."""
+def test_a_setting_entry_that_is_not_live_may_have_no_read_yet(manifest, hooks_json) -> None:
+    """A row whose setting is declared and not wired (`live: false`) need not be read by its module, where a live one must."""
     def add_unwired(m):
         m["rules"].append({
-            "id": "unwired", "module": "hooks/scripts/nx_setup_notice.py", "audience": "SAM-WIDE", "gate": "maintainer",
+            "id": "unwired", "module": "hooks/scripts/nx_setup_notice.py", "audience": "SETTING:ci_wait", "gate": "setting",
             "evidence": "x", "target_state": "x", "phase": "3", "live": False,
         })
 
@@ -276,7 +288,7 @@ def test_a_gated_entry_that_is_not_live_may_have_no_call_yet(manifest, hooks_jso
 
 
 def test_a_module_that_declares_the_wrong_predicates_fails(manifest, hooks_json) -> None:
-    m = _mutated(manifest, lambda m: m["modules"]["nexus.hooks.subagent_start"].__setitem__("predicates", ["maintainer"]))
+    m = _mutated(manifest, lambda m: m["modules"]["nexus.hooks.subagent_start"].__setitem__("predicates", ["guard_mode"]))
     assert any("declares predicates" in p for p in _problems(m, hooks_json))
 
 
@@ -291,13 +303,16 @@ def test_a_module_with_text_and_no_entry_fails(manifest, hooks_json) -> None:
 _GOOD_GUARD = textwrap.dedent('''
     import sys
     try:
-        from _audience import maintainer as _maintainer, account_flag as _flag, remote_test_hosts as _hosts, note_hook_error as _note
+        from _audience import guard_mode as _mode, telemetry_enabled as _telemetry, remote_test_hosts as _hosts, note_hook_error as _note, project_text as _text
     except BaseException:
-        def _maintainer(payload):
-            return True
+        def _mode(payload):
+            return "strict"
 
-        def _flag():
+        def _telemetry():
             return False
+
+        def _text(payload, key):
+            return None
 
         def _hosts():
             return frozenset()
@@ -306,14 +321,14 @@ _GOOD_GUARD = textwrap.dedent('''
             return None
 
     def body(payload):
-        if _maintainer(payload):
+        if _mode(payload) == "strict":
             return 1
 
     if __name__ == "__main__":
         _lib.run_hook(body)
 ''')
 
-_PREDICATES = ["account_flag", "maintainer", "note_hook_error", "remote_test_hosts"]
+_PREDICATES = ["guard_mode", "note_hook_error", "project_text", "remote_test_hosts", "telemetry_enabled"]
 
 
 def _check(source: str, *, predicates=None, wrapper="run_hook", **kw) -> list[str]:
@@ -331,18 +346,23 @@ def test_an_unguarded_import_fails() -> None:
 
 
 def test_a_bare_module_import_fails() -> None:
-    src = "import _audience\n\ndef body(payload):\n    return _audience.maintainer(payload)\n\n_lib.run_hook(body)\n"
+    src = "import _audience\n\ndef body(payload):\n    return _audience.guard_mode(payload)\n\n_lib.run_hook(body)\n"
     assert any("imports the audience helper as a module" in p for p in _check(src, predicates=[]))
 
 
-def test_a_tightening_predicate_whose_fallback_answers_false_fails() -> None:
-    src = _GOOD_GUARD.replace("def _maintainer(payload):\n        return True", "def _maintainer(payload):\n        return False")
-    assert any("the fallback for _maintainer returns 'False'" in p for p in _check(src))
+def test_a_tightening_reader_whose_fallback_loosens_fails() -> None:
+    src = _GOOD_GUARD.replace('def _mode(payload):\n        return "strict"', 'def _mode(payload):\n        return "seatbelt"')
+    assert any("the fallback for _mode returns" in p for p in _check(src))
 
 
-def test_a_loosening_predicate_whose_fallback_answers_true_fails() -> None:
-    src = _GOOD_GUARD.replace("def _flag():\n        return False", "def _flag():\n        return True")
-    assert any("the fallback for _flag returns 'True'" in p for p in _check(src))
+def test_a_loosening_reader_whose_fallback_answers_true_fails() -> None:
+    src = _GOOD_GUARD.replace("def _telemetry():\n        return False", "def _telemetry():\n        return True")
+    assert any("the fallback for _telemetry returns 'True'" in p for p in _check(src))
+
+
+def test_a_project_text_fallback_that_names_text_fails() -> None:
+    src = _GOOD_GUARD.replace("def _text(payload, key):\n        return None", 'def _text(payload, key):\n        return "run this"')
+    assert any("the fallback for _text returns" in p for p in _check(src))
 
 
 def test_a_remote_hosts_fallback_that_names_a_host_fails() -> None:
@@ -361,12 +381,12 @@ def test_a_handler_that_catches_nothing_broad_fails() -> None:
 
 
 def test_a_predicate_call_at_import_time_fails() -> None:
-    src = _GOOD_GUARD + "\nSTARTUP = _maintainer({})\n"
+    src = _GOOD_GUARD + "\nSTARTUP = _mode({})\n"
     assert any("runs at import time" in p for p in _check(src))
 
 
 def test_a_predicate_call_in_a_class_body_fails() -> None:
-    src = _GOOD_GUARD + "\nclass K:\n    on = _maintainer({})\n"
+    src = _GOOD_GUARD + "\nclass K:\n    on = _mode({})\n"
     assert any("runs at import time" in p for p in _check(src))
 
 
@@ -404,32 +424,32 @@ def test_an_entry_module_must_be_a_registered_verb_and_an_mcp_module_a_hook_tool
 def test_a_local_try_wrapper_needs_the_call_inside_a_try_that_catches() -> None:
     inside = textwrap.dedent('''
         try:
-            from _audience import maintainer as _maintainer
+            from _audience import telemetry_enabled as _telemetry
         except BaseException:
-            def _maintainer(payload):
-                return True
+            def _telemetry():
+                return False
 
         def record(payload):
             try:
-                if not _maintainer(payload):
+                if not _telemetry():
                     return
             except Exception:
                 pass
     ''')
-    assert _check(inside, predicates=["maintainer"], wrapper="local_try") == []
-    outside = inside.replace("    try:\n        if not _maintainer(payload):\n            return\n    except Exception:\n        pass\n",
-                             "    if not _maintainer(payload):\n        return\n")
+    assert _check(inside, predicates=["telemetry_enabled"], wrapper="local_try") == []
+    outside = inside.replace("    try:\n        if not _telemetry():\n            return\n    except Exception:\n        pass\n",
+                             "    if not _telemetry():\n        return\n")
     assert outside != inside
-    assert any("outside a try/except" in p for p in _check(outside, predicates=["maintainer"], wrapper="local_try"))
+    assert any("outside a try/except" in p for p in _check(outside, predicates=["telemetry_enabled"], wrapper="local_try"))
 
 
 def test_the_real_guard_and_the_real_lib_pass_t9() -> None:
     """The three real shapes, against the real files: the guard (run_hook), the routing library (local_try) and the src hooks."""
     for rel, wrapper, preds, dotted in (
         ("conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py", "run_hook",
-         ["maintainer", "note_hook_error", "note_marker_only", "remote_test_hosts"], None),
-        ("conexus/hooks/scripts/routing/_lib.py", "local_try", ["maintainer"], None),
-        ("src/nexus/hooks/subagent_stop_t1_nudge.py", "never_fail", ["maintainer"], "nexus.hooks.subagent_stop_t1_nudge"),
+         ["guard_mode", "note_hook_error", "remote_test_hosts"], None),
+        ("conexus/hooks/scripts/routing/_lib.py", "local_try", ["telemetry_enabled"], None),
+        ("src/nexus/hooks/subagent_stop_t1_nudge.py", "never_fail", ["t1_nudge_enabled", "telemetry_enabled"], "nexus.hooks.subagent_stop_t1_nudge"),
     ):
         found = am.module_problems(rel, (ROOT / rel).read_text(encoding="utf-8"), declared_predicates=preds, wrapper=wrapper, dotted=dotted)
         assert found == [], found

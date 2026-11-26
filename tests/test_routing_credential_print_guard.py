@@ -179,36 +179,35 @@ ALLOWED_SHAPES: list[tuple[str, str]] = [
 ]
 
 
-def _checkout(root: pathlib.Path, *, marked: bool) -> str:
-    """A directory with a repository entry, and the nexus marker file when *marked*: the payload's cwd decides the audience."""
+HELPER_TEXT = "The project's tools/claude-credentials.sh checks the token and runs a command with it set in the environment."
+
+
+def _checkout(root: pathlib.Path, *, helper: str | None = None) -> str:
+    """A directory with a repository entry, and a tracked ``.nexus/project.json`` naming *helper* when given: the payload's cwd
+    decides whether the project names a credential helper."""
     (root / ".git").mkdir(parents=True)
-    if marked:
-        (root / "scripts").mkdir()
-        (root / "scripts" / "agent-worktree-preflight.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    if helper is not None:
+        (root / ".nexus").mkdir()
+        (root / ".nexus" / "project.json").write_text(json.dumps({"schema": 1, "credential_helper": helper}), encoding="utf-8")
     return str(root)
 
 
-def test_every_denied_shape_is_denied_and_names_the_helper(tmp_path: pathlib.Path) -> None:
-    """In a nexus checkout the redirect names both sanctioned invocations (RDR-219: a message
-    naming ``claude_credentials.py status`` and ``claude_credentials.py run --``)."""
+def test_every_denied_shape_is_denied_and_names_the_projects_helper(tmp_path: pathlib.Path) -> None:
+    """In a project whose settings carry ``credential_helper`` the redirect is that text, after the refusal."""
     bad = []
-    nexus = _checkout(tmp_path / "nexus", marked=True)
-    for label, cmd, proc in _each(DENIED_SHAPES, lambda c: _run(c, cwd=nexus)):
+    project = _checkout(tmp_path / "project", helper=HELPER_TEXT)
+    for label, cmd, proc in _each(DENIED_SHAPES, lambda c: _run(c, cwd=project)):
         reason = _reason(proc)
-        if (
-            _decision(proc) != "deny"
-            or "claude_credentials.py status" not in reason
-            or "claude_credentials.py run --" not in reason
-        ):
+        if _decision(proc) != "deny" or HELPER_TEXT not in reason or "Ask your operator" in reason:
             bad.append(f"{label}: {cmd!r} -> {_decision(proc)!r} reason={reason!r}")
-    assert not bad, "denied shape(s) not denied with the helper redirect:\n" + "\n".join(bad)
+    assert not bad, "denied shape(s) not denied with the project's helper redirect:\n" + "\n".join(bad)
 
 
-def test_a_user_is_denied_the_same_shapes_with_no_wrapper_named(tmp_path: pathlib.Path) -> None:
-    """U7b: the wrapper is the nexus repo's; every other checkout (and a payload with no cwd) is told to ask its operator."""
-    user = _checkout(tmp_path / "user", marked=False)
+def test_every_other_project_is_denied_the_same_shapes_with_no_helper_named(tmp_path: pathlib.Path) -> None:
+    """U7b: the helper is the project's; a project that names none (and a payload with no cwd) is told to ask its operator."""
+    plain = _checkout(tmp_path / "plain")
     bad = []
-    for cwd in (user, None):
+    for cwd in (plain, None):
         for label, cmd, proc in _each(DENIED_SHAPES, lambda c, cwd=cwd: _run(c, cwd=cwd)):
             reason = _reason(proc)
             if (_decision(proc) != "deny" or "Ask your operator" not in reason
@@ -217,8 +216,16 @@ def test_a_user_is_denied_the_same_shapes_with_no_wrapper_named(tmp_path: pathli
     assert not bad, "\n".join(bad)
 
 
-def test_a_forced_error_in_a_user_checkout_still_denies_with_the_user_wording(tmp_path: pathlib.Path) -> None:
-    proc = _drive_forced_error('security find-generic-password -s "Claude Code-credentials" -w', cwd=_checkout(tmp_path / "u", marked=False))
+def test_the_projects_text_is_only_added_to_the_refusal(tmp_path: pathlib.Path) -> None:
+    """The refusal is always the same first words; the project's text follows it and never replaces the deny."""
+    project = _checkout(tmp_path / "project", helper=HELPER_TEXT)
+    reason = _reason(_run(DENIED_SHAPES[0][1], cwd=project))
+    assert reason.startswith("This command would print a Claude Code credential. Harnesses never read")
+    assert HELPER_TEXT in reason.split("\n\nMatched:")[0]
+
+
+def test_a_forced_error_in_a_plain_checkout_still_denies_with_the_neutral_wording(tmp_path: pathlib.Path) -> None:
+    proc = _drive_forced_error('security find-generic-password -s "Claude Code-credentials" -w', cwd=_checkout(tmp_path / "u"))
     reason = json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
     assert "Ask your operator" in reason and "claude_credentials" not in reason
 
@@ -338,20 +345,21 @@ def test_a_forced_error_with_no_marker_passes_through() -> None:
     assert proc.stdout == "", f"expected empty stdout, got: {proc.stdout!r}"
 
 
-def test_a_broken_audience_helper_gives_the_full_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``nexus_repo`` tightens (it adds the redirect text), so an import that fails binds it to True (nexus-sby49.4)."""
+def test_a_broken_audience_helper_gives_the_neutral_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The project's helper text only adds, so an import that fails binds it to None: the deny stays and says ask your operator."""
     import importlib.util
 
     monkeypatch.setitem(sys.modules, "_audience", None)  # an import of it now raises ImportError
     spec = importlib.util.spec_from_file_location("credential_print_guard_no_helper", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert module._nexus_repo({"cwd": "/nowhere"}) is True
+    assert module._project_text({"cwd": "/nowhere"}, "credential_helper") is None
+    assert module._redirect({"cwd": "/nowhere"}) == module._REDIRECT_USER
 
 
 def test_a_payload_with_no_cwd_is_not_decided_by_the_test_runners_project_dir(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The audience falls back to ``CLAUDE_PROJECT_DIR`` when the payload has no cwd; ``_spawn`` scrubs it, so a runner started
-    from a nexus checkout (which sets it) cannot turn the user case into the maintainer's (nexus-sby49.4)."""
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", _checkout(tmp_path / "nexus", marked=True))
+    """The settings reader falls back to ``CLAUDE_PROJECT_DIR`` when the payload has no cwd; ``_spawn`` scrubs it, so a runner
+    started from a project with its own settings file (which sets it) cannot change the plain case (nexus-sby49.4)."""
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", _checkout(tmp_path / "project", helper=HELPER_TEXT))
     proc = _run(DENIED_SHAPES[2][1], cwd=None)
     assert _decision(proc) == "deny" and "Ask your operator" in _reason(proc), _reason(proc)

@@ -1,27 +1,30 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Read and check ``conexus/hooks/audience.yaml`` (nexus-sby49.3, plan section 5 item 1).
+"""Read and check ``conexus/hooks/audience.yaml`` (nexus-sby49.3, plan section 5 item 1; reworked in nexus-sby49.4).
 
 The manifest says, for every hook registration, every module that carries a rule or text, and every injected constant,
-WHO it is for (``EVERY-USER``, ``NEXUS-REPO``, ``SAM-WIDE`` or ``REMOVE``) and what gates it. This module is the checker:
-:func:`problems` returns every way the manifest and the code disagree, and the lint test and the behaviour leg both call it.
+WHO it is for and what gates it. Nothing is gated on who the user is. An item is ``EVERY-USER`` (the product: it fires always,
+a data gate only on the user's own content), ``SETTING:<key>`` (it fires when a project's tracked ``.nexus/project.json`` or the
+user's own ``conexus.json`` sets ``<key>``) or ``REMOVE`` (never). This module is the checker: :func:`problems` returns every
+way the manifest and the code disagree, and the lint test and the behaviour leg both call it.
 
 The checks, each a way a rule can reach the wrong audience unnoticed:
 
 * every ``hooks.json`` registration has an entry, keyed on event plus argv (23 registrations, 22 distinct argv: auto-approve
   is registered for PreToolUse and PermissionRequest with one argv), and an entry names a registration that exists;
-* every value is in its vocabulary, and an audience agrees with its gate (SAM-WIDE <-> ``maintainer`` or ``account_flag``,
-  NEXUS-REPO <-> ``nexus_repo`` or the marker's own file, EVERY-USER <-> none or a gate on the user's data);
+* every value is in its vocabulary, and an audience agrees with its gate (``SETTING:<key>`` <-> ``setting``, EVERY-USER <->
+  none or a gate on the user's data);
 * a declared constant exists, and every module-level string constant of 40 characters or more in a hook module is declared
   as injected or as not injected, with a reason;
-* a module that imports the audience helper declares exactly the predicates it imports, imports them inside a ``try`` whose
-  fallback is the contract's (``True`` for a tightening predicate, ``False`` for ``account_flag``, an empty set for
-  ``remote_test_hosts``, nothing for the notes), never calls one at import time, and calls each only inside a function
-  that sits under one of the accepted wrapper shapes (``run_hook``, ``never_fail``, a verb the dispatcher wraps, an
-  ``mcp`` hook tool, a ``main`` with a ``try``/``except``, or a local ``try``/``except`` around the call);
-* a live entry whose gate names a predicate sits in a module that imports and calls it.
+* a module that imports the audience helper declares exactly the readers it imports, imports them inside a ``try`` whose
+  fallback is the contract's (strict for ``guard_mode``, ``False`` for ``telemetry_enabled``, ``True`` for ``t1_nudge_enabled``,
+  nothing for the project's text, an empty set for ``advice_blocked`` and ``remote_test_hosts``), never calls one at import
+  time, and calls each only inside a function that sits under one of the accepted wrapper shapes (``run_hook``, ``never_fail``,
+  a verb the dispatcher wraps, an ``mcp`` hook tool, a ``main`` with a ``try``/``except``, or a local ``try``/``except`` around
+  the call);
+* a live ``SETTING:<key>`` entry sits in a module that imports and calls the reader of that key.
 
-An entry that is ``live: false`` names a rule whose gate is not wired yet (a Phase 3 row); the behaviour leg's allowlist is
-exactly the set of such rows.
+An entry that is ``live: false`` names a rule whose setting is not wired yet; the behaviour leg's allowlist is exactly the set
+of such rows (empty when the work is done).
 """
 from __future__ import annotations
 
@@ -31,31 +34,50 @@ import re
 from pathlib import Path
 from typing import Any
 
-AUDIENCES = ("EVERY-USER", "NEXUS-REPO", "SAM-WIDE", "REMOVE")
-GATES = ("none", "maintainer", "nexus_repo", "account_flag", "data")
+AUDIENCES = ("EVERY-USER", "SETTING", "REMOVE")
+GATES = ("none", "setting", "data")
 PHASES = ("-", "1", "2", "3", "after-2", "4")
 WRAPPERS = ("run_hook", "never_fail", "entry", "mcp", "main_try", "local_try", "none")
 
-#: predicate -> what its import fallback must return. ``"void"`` is a note writer: it returns nothing.
+#: reader -> what its import fallback must return. ``"void"`` is a note writer: it returns nothing.
 PREDICATES: dict[str, str] = {
-    "maintainer": "True",
-    "nexus_repo": "True",
-    "account_flag": "False",
+    "guard_mode": "'strict'",
+    "telemetry_enabled": "False",
+    "t1_nudge_enabled": "True",
+    "project_text": "None",
+    "project_brief_questions": "[]",
+    "advice_blocked": "frozenset()",
     "remote_test_hosts": "frozenset()",
-    "note_marker_only": "void",
     "note_hook_error": "void",
 }
-#: The gates an audience may carry. SAM-WIDE is the account flag or the marker (``maintainer``), or the flag alone for a
-#: loosening; NEXUS-REPO is the marker predicate, or a data gate that is the marker's own file (the worktree preflight row
-#: keys on the script's presence); EVERY-USER is nothing or a gate on the user's own data.
+#: The settings an audience ``SETTING:<key>`` may name, and the reader a module must call for each.
+SETTING_READERS: dict[str, tuple[str, ...]] = {
+    "subagent_git": ("guard_mode",),
+    "telemetry": ("telemetry_enabled",),
+    "t1_nudge": ("t1_nudge_enabled",),
+    "advice_block": ("advice_blocked",),
+    "preflight": ("project_text",),
+    "ci_wait": ("project_text",),
+    "credential_helper": ("project_text",),
+    "brief_questions": ("project_brief_questions",),
+}
+#: The gates an audience may carry: ``SETTING:<key>`` is the ``setting`` gate; EVERY-USER is nothing or a gate on the user's own
+#: data (``.beads/``, an RDR directory, a board entry found).
 ALLOWED_GATES: dict[str, tuple[str, ...]] = {
-    "SAM-WIDE": ("maintainer", "account_flag"),
-    "NEXUS-REPO": ("nexus_repo", "data"),
+    "SETTING": ("setting",),
     "EVERY-USER": ("none", "data"),
     "REMOVE": ("none", "data"),
 }
-#: A gate that names a predicate must be wired (``live``) in a module that calls it.
-PREDICATE_GATES = ("maintainer", "nexus_repo", "account_flag")
+
+
+def audience_kind(audience: str) -> str:
+    """``"SETTING"`` for ``SETTING:<key>``, else the audience itself."""
+    return "SETTING" if audience.startswith("SETTING:") else audience
+
+
+def audience_setting(audience: str) -> str | None:
+    return audience.split(":", 1)[1] if audience.startswith("SETTING:") else None
+
 
 AUDIENCE_MODULE_NAMES = ("_audience", "nexus.hooks._audience")
 #: A module-level string constant this long is text somebody can read; shorter ones are names and fragments.
@@ -183,8 +205,9 @@ def _catches_all(handler: ast.ExceptHandler) -> bool:
     return "BaseException" in names or "Exception" in names
 
 
-def _fallback_value(fn: ast.FunctionDef) -> str | None:
-    """What a one-return fallback returns: ``"True"``, ``"False"``, ``"frozenset()"``, ``"void"`` or ``None`` (not that shape)."""
+def _fallback_value(fn: ast.FunctionDef, want_none: bool = False) -> str | None:
+    """What a one-return fallback returns: ``"True"``, ``"False"``, ``"'strict'"``, ``"[]"``, ``"frozenset()"``, ``"None"`` or
+    ``"void"`` (a bare ``return``), or ``None`` (not that shape). A returned ``None`` reads as ``"None"`` when *want_none*."""
     body = [s for s in fn.body if not (isinstance(s, ast.Expr) and isinstance(getattr(s, "value", None), ast.Constant))]
     if len(body) != 1 or not isinstance(body[0], ast.Return):
         return None
@@ -197,7 +220,11 @@ def _fallback_value(fn: ast.FunctionDef) -> str | None:
         if value.value is False:
             return "False"
         if value.value is None:
-            return "void"
+            return "None" if want_none else "void"
+        if isinstance(value.value, str):
+            return repr(value.value)
+    if isinstance(value, ast.List) and not value.elts:
+        return "[]"
     if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "frozenset"
             and not value.args and not value.keywords):
         return "frozenset()"
@@ -250,7 +277,7 @@ class _Audit(ast.NodeVisitor):
         for h in catching:
             for stmt in h.body:
                 if isinstance(stmt, ast.FunctionDef) and stmt.name == alias:
-                    got = _fallback_value(stmt)
+                    got = _fallback_value(stmt, want_none=(want == "None"))
                     if got == want:
                         return True, ""
                     return False, f"the fallback for {alias} returns {got!r}, the contract needs {want!r}"
@@ -368,8 +395,11 @@ def _entry_problems(where: str, e: dict, *, allow_decision: bool = True) -> list
             out.append(f"{where}: missing {f}")
     if out:
         return out
-    if e["audience"] not in AUDIENCES:
+    kind = audience_kind(str(e["audience"]))
+    if kind not in AUDIENCES:
         out.append(f"{where}: unknown audience {e['audience']!r}")
+    elif kind == "SETTING" and audience_setting(str(e["audience"])) not in SETTING_READERS:
+        out.append(f"{where}: audience {e['audience']!r} names no setting the checker knows ({', '.join(sorted(SETTING_READERS))})")
     if e["gate"] not in GATES:
         out.append(f"{where}: unknown gate {e['gate']!r}")
     if str(e["phase"]) not in PHASES:
@@ -382,8 +412,8 @@ def _entry_problems(where: str, e: dict, *, allow_decision: bool = True) -> list
     elif live and str(e["phase"]) in ("after-2", "4"):
         out.append(f"{where}: a live rule cannot be phase {e['phase']}")
     aud, gate = e["audience"], e["gate"]
-    if gate not in ALLOWED_GATES.get(aud, ()):
-        out.append(f"{where}: audience {aud} cannot carry gate {gate!r} (allowed: {', '.join(ALLOWED_GATES.get(aud, ()))})")
+    if gate not in ALLOWED_GATES.get(kind, ()):
+        out.append(f"{where}: audience {aud} cannot carry gate {gate!r} (allowed: {', '.join(ALLOWED_GATES.get(kind, ()))})")
     if "decision" in e:
         m = re.fullmatch(r"D(\d+)", str(e["decision"]))
         if not allow_decision or not m or not 1 <= int(m.group(1)) <= MAX_DECISION:
@@ -526,12 +556,13 @@ def problems(manifest: dict, hooks_json: dict, repo: Path, *, plugin_root: Path 
         for entry_id, e in [(f"constant {path}:{n}", c) for n, c in injected.items()] + [
             (f"rule {r.get('id')}", r) for r in rules if r.get("module") == path
         ]:
-            want = e.get("gate") if e.get("gate") in PREDICATE_GATES else None
-            if want is not None and e.get("live", True):
+            setting = audience_setting(str(e.get("audience")))
+            if setting in SETTING_READERS and e.get("live", True):
+                readers = SETTING_READERS[setting]
                 calls = [c for c in audit_source(src).calls]
-                alias_names = {i["alias"] for i in audit_source(src).imports if i["name"] == want}
-                if want not in imported or not any(c["alias"] in alias_names for c in calls):
-                    out.append(f"{entry_id}: audience {e['audience']} is live but {path} never calls {want}()")
+                alias_names = {i["alias"] for i in audit_source(src).imports if i["name"] in readers}
+                if not (imported & set(readers)) or not any(c["alias"] in alias_names for c in calls):
+                    out.append(f"{entry_id}: audience {e['audience']} is live but {path} never calls {' or '.join(readers)}()")
     # -- every module that has text or a predicate is classified
     for f in hook_module_files(repo):
         rel = module_key(repo, f)

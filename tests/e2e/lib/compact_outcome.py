@@ -117,7 +117,7 @@ OVERLAY_SCRIPT = "compact_outcome_fix_overlay.py"
 #: The hook script and every plugin sibling module it imports, transitively. compact_checkpoint.py imports them inside
 #: its guard (a missing one exits 0 and degrades the checkpoint silently), so the harness test derives this set from the
 #: import statements and fails when it drifts.
-SCRIPT_FILES = ("compact_checkpoint.py", "_audience.py", "_cli_lookup.py", "_endpoint_resolve.py", "_exec_path.py",
+SCRIPT_FILES = ("compact_checkpoint.py", "_cli_lookup.py", "_endpoint_resolve.py", "_exec_path.py",
                 "_identity_lookup.py", "_resume_pointer.py", "_session_facts.py")
 #: Variables dropped from the child by name: the parent session's markers that carry no NX_/NEXUS_/CLAUDE_CODE_ prefix.
 PARENT_SESSION_VARS = ("CLAUDECODE", "TMUX", "TMUX_PANE", "CLAUDE_PID")

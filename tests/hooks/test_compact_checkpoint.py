@@ -159,7 +159,7 @@ def env(tmp_path: Path, monkeypatch, mod):
     monkeypatch.delenv("FAKE_READY", raising=False)
     monkeypatch.delenv("FAKE_COMMITS", raising=False)
     monkeypatch.setattr(mod, "_nx_command", lambda: [sys.executable, str(standin)])
-    monkeypatch.setattr(mod, "_maintainer", lambda _p: True); monkeypatch.setenv("CLAUDE_PROJECT_DIR", os.getcwd())  # full text (S2-2)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", os.getcwd())
     # The test checkout's own worktrees must not decide where continuation runs.
     real_git_worktrees = mod._git_worktrees
     monkeypatch.setattr(mod, "_git_worktrees", lambda _cwd, _timeout: [])
@@ -853,7 +853,7 @@ class TestInject:
         assert code == 0
         ctx = self._ctx(out)
         assert "no working-state checkpoint" in ctx and "nothing is restored" in ctx
-        assert "threads" in ctx and SID in ctx and "git" in ctx
+        assert SID in ctx and "git" in ctx and "threads" not in ctx, "no checkpoint to read: the board is not named"
         assert "SUMMARY-SENTINEL" not in ctx, "the summary is already in the new context"
         assert len(ctx.encode("utf-8")) < 1024, "a notice, not a checkpoint"
 

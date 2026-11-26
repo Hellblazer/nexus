@@ -174,10 +174,10 @@ class TestRunHookResultContract:
         result = session_context.run(None)
         assert result.stdout is not None
         assert result.stdout.startswith("## T1: the working layer this session shares with its subagents")
-        # a user's session: no dispatch protocol sentence (nexus-sby49.3, I1b), and an index line with no beads or RDR topic
+        # every session gets the dispatch protocol sentence (process, not a person's rule), and an index line with no beads or RDR topic
         t1_block = "\n".join(session_context._t1_top_lines({}))
         assert result.stdout[len(t1_block) + 1:] == session_context.brief_index_line(tmp_path / "project")
-        assert "Before a dispatch" not in result.stdout and "share_t1" not in result.stdout
+        assert "Before a dispatch" in result.stdout and "share_t1" not in result.stdout
         for gone in ("## T2 Memory", "## Ready Beads", "## nx Capabilities", "## Knowledge Map", "## Hygiene"):
             assert gone not in result.stdout
 

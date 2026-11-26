@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The audience helper exists twice, and a third copy is installed on every user's box (nexus-sby49.3).
+"""The settings helper exists twice, and a third copy is installed on every user's box (nexus-sby49.3; reworked in nexus-sby49.4).
 
 ``conexus/hooks/scripts/_audience.py`` runs in the plugin's command hooks (stdlib only, no ``nexus`` import).
 ``src/nexus/hooks/_audience.py`` runs inside ``nx-hook`` and the MCP server. They must be byte-identical, and the
 older plugin that a newer checkout is paired with (the helper at the newest release tag that carries one) must give the
-same answers on every row it can know. ``tests/fixtures/audience_corpus.json`` holds layouts x flag states -> answers; all
-three copies are driven over it, so a change to one copy's walk, markers or flag file fails here until the others agree.
+same answer on every row it can know (it knows the two legacy markers only). ``tests/fixtures/audience_corpus.json`` holds
+layouts x user settings -> the answer of each reader; the two live copies are driven over it, so a change to one copy's walk,
+files or defaults fails here until the other agrees.
 
 Lives under tests/hooks/ so the Windows set runs the byte identity and the two live copies (LF, and the walk through a
 worktree ``.git`` file on NTFS are claims a Windows checkout can break). The previous-release comparison needs the release
@@ -98,12 +99,15 @@ def _build(tmp: Path, row: dict) -> tuple[dict | None, Path]:
             raise AssertionError(f"unknown layout kind {kind!r}")
     home = tmp / "acct-home"
     home.mkdir()
-    flag = home / ".config" / "nexus" / "maintainer-profile"
-    if row["flag"] == "dir":
-        flag.mkdir(parents=True)
-    elif row["flag"]:
-        flag.parent.mkdir(parents=True)
-        flag.write_text("", encoding="utf-8")
+    user = home / ".config" / "nexus" / "conexus.json"
+    if row["user"] == "dir":
+        user.mkdir(parents=True)
+    elif isinstance(row["user"], str):
+        user.parent.mkdir(parents=True)
+        user.write_text(row["user"], encoding="utf-8")
+    elif row["user"] is not None:
+        user.parent.mkdir(parents=True)
+        user.write_text(json.dumps(row["user"]), encoding="utf-8")
     for entry in row.get("home_files", []):
         target = home.joinpath(*entry["p"].split("/"))
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -118,12 +122,13 @@ def _build(tmp: Path, row: dict) -> tuple[dict | None, Path]:
 
 
 def _answers(mod: ModuleType, payload: object) -> dict:
-    got = {
-        "account_flag": mod.account_flag(),
-        "nexus_repo": mod.nexus_repo(payload),
-        "maintainer": mod.maintainer(payload),
+    return {
+        "guard_mode": mod.guard_mode(payload),
+        "project": mod.project_settings(payload),
+        "telemetry": mod.telemetry_enabled(),
+        "t1_nudge": mod.t1_nudge_enabled(),
+        "advice_blocked": sorted(mod.advice_blocked(payload)),
     }
-    return got
 
 
 def test_the_two_copies_are_byte_identical() -> None:
@@ -139,10 +144,10 @@ def test_the_corpus_is_big_enough_and_complete(corpus: dict) -> None:
     ids = [r["id"] for r in rows]
     assert len(ids) == len(set(ids)), "duplicate corpus row ids"
     for row in rows:
-        assert {"account_flag", "nexus_repo", "maintainer"} <= set(row["expect"]), row["id"]
-    # Both markers are named once, here and in the helper: a marker the corpus does not mention is untested.
+        assert {"guard_mode", "project", "telemetry", "t1_nudge", "advice_blocked"} <= set(row["expect"]), row["id"]
+    # Both legacy markers are named once, here and in the helper: a marker the corpus does not mention is untested.
     plugin = _load(PLUGIN_COPY, "_audience_marker_probe")
-    assert list(plugin.MARKERS) == corpus["markers"]
+    assert list(plugin.LEGACY_MARKERS) == corpus["markers"]
     layout_paths = {e["p"].split("/", 1)[1] for r in rows for e in r["layout"] if "/" in e["p"]}
     for marker in corpus["markers"]:
         assert marker in layout_paths, f"no corpus row builds the marker {marker}"
@@ -169,9 +174,11 @@ def _drive(
             monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp.joinpath(*row["env_project_dir"].split("/"))))
         else:
             monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-        got = _answers(mod, payload)
         expect = dict(row["expect"])
-        if "remote_test_hosts" in expect:
+        got = {"strict": mod.nexus_repo(payload)} if previous else _answers(mod, payload)
+        if previous:
+            expect = {"strict": expect["project"].get("subagent_git") == "strict"}
+        if "remote_test_hosts" in expect and not previous:
             got["remote_test_hosts"] = sorted(mod.remote_test_hosts())
             expect["remote_test_hosts"] = sorted(expect["remote_test_hosts"])
         if got != expect:
@@ -209,5 +216,5 @@ def test_the_previous_releases_copy_gives_the_corpus_answers(
 def test_the_src_copy_imports_as_a_package_module() -> None:
     from nexus.hooks import _audience  # noqa: PLC0415 -- the import path the src hooks use
 
-    assert _audience.MARKERS == _load(PLUGIN_COPY, "_audience_marker_probe_2").MARKERS
+    assert _audience.LEGACY_MARKERS == _load(PLUGIN_COPY, "_audience_marker_probe_2").LEGACY_MARKERS
     assert sys.modules["nexus.hooks._audience"] is _audience
