@@ -820,6 +820,28 @@ def read_config_yml_credentials(
     return result
 
 
+def lease_scheme_ok(lease_scheme: object, url: str) -> bool:
+    """Whether a lease minted over *lease_scheme* may serve *url* (nexus-ec37o).
+
+    The lease is keyed by netloc, which says nothing of the scheme: ``http://h`` would borrow
+    a token minted over ``https://h`` and send it in cleartext. A lease records the scheme it
+    was minted over and serves only that one; one with no field (written before the field
+    existed) serves https or a loopback host. Judged on ``urlsplit``, the parse the lease's
+    own netloc key (and urllib) use. The same text is in the CLI's
+    ``nexus.db.data_token._lease_scheme_ok`` (``tests/db/test_data_token_origin_binding.py``)."""
+    import urllib.parse  # noqa: PLC0415 -- lazy: a hook's import budget
+
+    try:
+        parts = urllib.parse.urlsplit(url)
+        hostname = parts.hostname or ""
+    except ValueError:
+        return False
+    scheme = parts.scheme.lower()
+    if lease_scheme is None:
+        return scheme == "https" or (scheme == "http" and is_loopback_host(hostname))
+    return isinstance(lease_scheme, str) and lease_scheme == scheme
+
+
 def read_data_token_lease(
     config_dir: Path,
     base_url: str,
@@ -843,6 +865,9 @@ def read_data_token_lease(
     own ``tenant`` field, so a lease for a different tenant on the same
     host still reproduces a matching digest and would otherwise be
     indistinguishable from a same-tenant lease by that check alone.
+
+    A lease also records the scheme it was minted over (nexus-ec37o) and serves *base_url*
+    only over that one; see :func:`lease_scheme_ok` for a lease that has no such field.
     """
     import hashlib  # noqa: PLC0415 -- lazy: the session-start hook's 100 ms; only this reader needs them
     import urllib.parse  # noqa: PLC0415
@@ -866,6 +891,8 @@ def read_data_token_lease(
             digest = hashlib.sha256(f"{host}\x00{lease_tenant}".encode("utf-8")).hexdigest()
             if data.get("base_url_digest") != digest:
                 continue
+            if not lease_scheme_ok(data.get("scheme"), base_url):
+                continue  # minted over another scheme (nexus-ec37o)
             token = str(data["token"])
             expires_at = float(data["expires_at"])
             ttl_seconds = float(data["ttl_seconds"])

@@ -159,7 +159,16 @@ SCENARIOS = [
 ]
 
 
-@pytest.mark.parametrize(("saved", "env", "lease", "url"), SCENARIOS)
+# The scenarios that end in a refusal: the storage-touch guard counts a refusal as an endpoint
+# failure, so those (and only those) carry the marker.
+_REFUSED = {1, 3, 6, 7, 9, 10}
+_PARAMS = [
+    pytest.param(*sc, marks=[pytest.mark.expects_unresolvable_endpoint] if i in _REFUSED else [])
+    for i, sc in enumerate(SCENARIOS)
+]
+
+
+@pytest.mark.parametrize(("saved", "env", "lease", "url"), _PARAMS)
 def test_select_service_token_agrees(hook, monkeypatch, saved, env, lease, url):
     config_dir = _save(saved)
     for k, v in env.items():
