@@ -110,8 +110,53 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable, NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# The base unlanded work is measured against is the project's ``integration_branch`` setting (RDR-259 Decision 2). It only
+# names a branch, so a helper that cannot be imported gives none and the default order (origin/HEAD, main, master) answers.
+try:
+    from _audience import integration_branch as _integration_branch, note_problems as _note_problems
+except BaseException:  # noqa: BLE001
+    def _integration_branch(payload: object) -> "str | None":
+        return None
+
+    def _note_problems(payload: object, problems: object) -> None:
+        return None
+
+
+class _BranchProblem(NamedTuple):
+    """The fields of ``_audience.Problem`` the one-line note reads (``format_problem``)."""
+
+    file: str
+    key: str
+    what: str
+    used: str
+    category: str = "environment"
+    forced_strict: bool = False
+
+
+def _integration_base(payload: object) -> "tuple[str | None, Callable[[str], None] | None]":
+    """``(value, report)``: the project's ``integration_branch`` and the callable that says once per session, in ``hook.log``,
+    that ``origin`` has no such branch. ``(None, None)`` when the project sets none or the settings cannot be read."""
+    try:
+        value = _integration_branch(payload)
+        if not value:
+            return None, None
+
+        def report(missing: str) -> None:
+            try:
+                _note_problems(payload, [_BranchProblem(
+                    ".nexus/project.json", "integration_branch", "origin has no branch " + json.dumps(missing),
+                    "origin/HEAD, then main, then master")])
+            except Exception:  # noqa: BLE001 -- a note that cannot be written is not a failure
+                pass
+
+        return value, report
+    except Exception:  # noqa: BLE001 -- the checkpoint is written whatever the settings say
+        return None, None
+
 
 #: The plugin's sibling modules, bound by ``_load_siblings`` inside ``main``'s guard.
 _cli_lookup = None
@@ -1032,7 +1077,7 @@ def _board_facts(board: str, cwd: str | None, deadline: float) -> tuple[list[str
 
 
 def _worktree_lines(board: str, worktree: str | None, others: list[tuple[str, str, float]],
-                    deadline: float) -> tuple[list[str], list[str]]:
+                    deadline: float, payload: object = None) -> tuple[list[str], list[str]]:
     """Worktrees holding work no thread names, newest ``MAX_WORKTREES`` first, read in parallel."""
     sf = _session_facts
     git = _cli_lookup.resolve("git")
@@ -1045,9 +1090,10 @@ def _worktree_lines(board: str, worktree: str | None, others: list[tuple[str, st
     if len(trees) > sf.MAX_WORKTREES:
         unchecked.append(f"only the newest {sf.MAX_WORKTREES} of {len(trees)} worktrees were checked for work")
         trees = trees[: sf.MAX_WORKTREES]
+    base, report = _integration_base(payload)
     pool = _pool(min(len(trees), 6))
     try:
-        jobs = {p: pool.submit(sf.worktree_work, p, b, git) for p, b in trees}
+        jobs = {p: pool.submit(sf.worktree_work, p, b, git, 3.0, base, report) for p, b in trees}
         got, cut = _gather(jobs, deadline)
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
@@ -1079,7 +1125,7 @@ def _running_lines(session_id: str, worktrees: list[str], cwd: str | None) -> li
 
 
 def _facts_sections(session_id: str, board: str, board_error: str | None, worktree: str | None,
-                    others: list[tuple[str, str, float]], cwd: str | None) -> list[str]:
+                    others: list[tuple[str, str, float]], cwd: str | None, payload: object = None) -> list[str]:
     """The checkpoint's two checked sections (nexus-ct74m). Never raises: a failure is one line in the file."""
     deadline = time.monotonic() + _FACTS_BUDGET_S
     out = [f"## Board checked against the facts\n\n(checked {_now().isoformat(timespec='seconds')})\n"]
@@ -1091,7 +1137,7 @@ def _facts_sections(session_id: str, board: str, board_error: str | None, worktr
             pool = _pool(2)
             try:
                 jobs = {"board": pool.submit(_board_facts, board, cwd, deadline),
-                        "trees": pool.submit(_worktree_lines, board, worktree, others, deadline)}
+                        "trees": pool.submit(_worktree_lines, board, worktree, others, deadline, payload)}
                 got, _cut = _gather(jobs, deadline + 1.0)
             finally:
                 pool.shutdown(wait=False, cancel_futures=True)
@@ -1138,7 +1184,7 @@ def run_pre(payload: dict) -> str:
     try:
         # The fact checks run beside continuation, so they add no wall clock unless they are the slower;
         # they hold their own budget, and one second past it they are dropped, never waited on.
-        checked = pool.submit(_facts_sections, session_id, board, board_error, worktree, other_worktrees, cwd)
+        checked = pool.submit(_facts_sections, session_id, board, board_error, worktree, other_worktrees, cwd, payload)
         state, error = _run_nx(["command-context", "continuation"], cwd, max(1.0, min(_NX_TIMEOUT_S, left)))
         state_stamp = _now().isoformat(timespec="seconds")
         got, _cut = _gather({"checks": checked}, time.monotonic() + _FACTS_BUDGET_S + 2.0)

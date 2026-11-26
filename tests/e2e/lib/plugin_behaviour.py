@@ -70,6 +70,10 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 from tests import _audience_manifest as am  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import plugin_behaviour_labels as labels  # noqa: E402
+from plugin_behaviour_labels import PROJECT_SETTINGS, USER_SETTINGS  # noqa: E402,F401 -- the fixtures' settings, re-exported
+
 HARNESS = REPO / "tests" / "hooks" / "audience_harness.py"
 DEFAULT_ALLOWLIST = REPO / "tests" / "e2e" / "plugin-behaviour-allowlist.txt"
 SEAM_ENV = "NX_TEST_ACCOUNT_HOME"
@@ -173,18 +177,7 @@ AUTO_APPROVED_FOR_EVERYONE = (
 #: U6b: the stop guard's CI wording, which only a project's ``ci_wait`` brings.
 CI_TEXT = ("nx ci wait", "CI board", "develop and main")
 
-#: What the project-strict fixture's tracked ``.nexus/project.json`` carries: every project key.
-PROJECT_SETTINGS: dict[str, Any] = {
-    "schema": 1,
-    "subagent_git": "strict",
-    "preflight": "tools/leg-preflight.sh",
-    "ci_wait": "leg-ci-wait <sha>",
-    "credential_helper": "The project's tools/leg-credentials.sh checks the token and runs a command with it set in the environment.",
-    "brief_questions": ["Does it hold on every platform the project supports?"],
-    "advice_block": ["whole_disk_scan"],
-}
-#: What the user-strict fixture's account ``conexus.json`` carries: every user key but telemetry (it needs an engine).
-USER_SETTINGS: dict[str, Any] = {"subagent_git": "strict", "t1_nudge": True, "advice_block": ["whole_disk_scan"]}
+# PROJECT_SETTINGS and USER_SETTINGS (every key each fixture sets) live in plugin_behaviour_labels with the label check.
 
 FIXTURES = ("plain", "plain-dirty", "plain-beads", "project-strict", "user-strict")
 #: The fixtures with no setting on: the seatbelt, neutral text, no blocked row.
@@ -205,6 +198,7 @@ class Fixture:
     repo: Path
     home: Path
     user_settings: bool
+    worktree: Path | None = None    # a linked worktree of the repository, for the SubagentStart worktree-dispatch payload
 
 
 @dataclasses.dataclass
@@ -481,7 +475,11 @@ def make_fixtures(work: Path) -> dict[str, Fixture]:
         if name == "plain-dirty":
             (repo / "f").write_text("two\n")
             (repo / "untracked.txt").write_text("x\n")
-        out[name] = Fixture(name, repo, homes["user-strict"] if name == "user-strict" else homes["plain"], name == "user-strict")
+        wt = None
+        if name in ("plain", "project-strict", "user-strict"):
+            wt = labels.worktree_path(work, name)
+            _git(repo, "worktree", "add", "-q", str(wt), "-b", "leg-worktree")
+        out[name] = Fixture(name, repo, homes["user-strict"] if name == "user-strict" else homes["plain"], name == "user-strict", wt)
     return out
 
 
@@ -785,6 +783,7 @@ def _scenarios(reg: dict, fx: Fixture) -> list[dict]:
                 forbid.append("local AND cloud")
             sc["must"], sc["forbid"] = tuple(must), tuple(forbid)
             starts.append(sc)
+        starts += labels.subagent_start_scenarios(fx, _common)  # the worktree-dispatch and implementer-type payloads
         # The Phase Boundary Gate block is task-keyed; its closing sentence is the same for everyone.
         starts.append({"name": "phase close", "expect": None, "payload": _common(
             fx, "SubagentStart", agent_id=f"aleg-{fx.name}-phase", agent_type="conexus:developer", prompt_id="p2",
@@ -974,8 +973,11 @@ def run_leg(args: argparse.Namespace) -> int:
                 hard.append(f"stale allowlist entry: {e.row} / {e.hit!r} matched nothing")
         presence: list[str] = []
         examined = 0
+        labelled = 0
         if "P2" in postures and not args.only:
             presence, examined = presence_problems(manifest, REPO, texts)
+            label_bad, labelled = labels.label_problems(outcomes)
+            presence += label_bad + labels.shape_problems(outcomes)
         for post in postures:
             ps = [o for o in outcomes if o.probe.posture == post]
             keys = {o.probe.reg_key for o in ps}
@@ -984,7 +986,7 @@ def run_leg(args: argparse.Namespace) -> int:
         if args.verbose:
             for o in outcomes:
                 print(f"--- {o.probe.id}: rc {o.rc}, {o.decision}\n{o.text[:4000]}\n[stderr] {o.stderr.strip()[:200]}")
-        print(f"   allowlisted outputs: {len(allowed)}; constants whose presence was checked: {examined}")
+        print(f"   allowlisted outputs: {len(allowed)}; constants whose presence was checked: {examined}; labelled settings texts seen: {labelled}")
         by_decision: dict[str, int] = {}
         for o in outcomes:
             by_decision[o.decision] = by_decision.get(o.decision, 0) + 1

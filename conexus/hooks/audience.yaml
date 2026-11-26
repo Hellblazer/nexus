@@ -389,6 +389,7 @@ modules:
     wrapper: run_hook
     predicates:
     - project_text
+    - provenance_label
   nexus.session_start_guidance:
     wrapper: none
     predicates: []
@@ -408,8 +409,10 @@ modules:
     wrapper: none
     predicates: []
   hooks/scripts/compact_checkpoint.py:
-    wrapper: none
-    predicates: []
+    wrapper: local_try
+    predicates:
+    - integration_branch
+    - note_problems
   hooks/scripts/mailbox_drain.py:
     wrapper: none
     predicates: []
@@ -423,6 +426,7 @@ modules:
     wrapper: main_try
     predicates:
     - project_text
+    - provenance_label
     not_injected:
       _ROLE: a regular-expression fragment the promise classifier compiles; never injected
       _FUNCTION_WORDS: a regular-expression fragment the promise classifier compiles; never injected
@@ -477,9 +481,12 @@ modules:
   nexus.hooks.subagent_start:
     wrapper: mcp
     predicates:
+    - clean_text
     - guard_mode
     - project_brief_questions
     - project_text
+    - provenance_label
+    - user_brief_questions
   nexus.hooks.session_context:
     wrapper: entry
     predicates: []
@@ -850,7 +857,7 @@ rules:
   audience: EVERY-USER
   gate: data
   evidence: The compaction text names the threads board and `bd list --status=in_progress`, whether or not the project has either; landing is
-    measured against the repository's default branch
+    measured against the project's integration_branch, else origin/HEAD, main or master
   target_state: the board and bd words only where a board entry was found or .beads/ exists; with no checkpoint to read the board is not named
   phase: '3'
 - id: U6c
@@ -882,6 +889,14 @@ rules:
   evidence: A project's own implementer brief questions are added after the four generic ones
   target_state: extra questions only from the project's brief_questions
   phase: '3'
+- id: integration-branch
+  module: hooks/scripts/compact_checkpoint.py
+  audience: SETTING:integration_branch
+  gate: setting
+  evidence: The compaction checkpoint measures "not yet landed" against the project's integration_branch when origin has it; origin/develop is no longer guessed
+  target_state: a named base only from the project's integration_branch
+  phase: '3'
+  decision: D2
 - id: credential-helper
   module: hooks/scripts/routing/credential_print_guard.py
   audience: SETTING:credential_helper

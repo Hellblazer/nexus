@@ -162,6 +162,8 @@ ship-blocking. Report it as a Critical and name the fix line that introduced it.
 
 **Git in the brief.** The guard judges a subagent's git from the primary checkout, so the brief gives the worktree root (made before dispatch), the one git shape and who pushes: [reference.md](./reference.md) § Git in an implementer brief.
 
+**Worktree base commit.** An `isolation: "worktree"` dispatch may not start at the primary's `HEAD`, so a dispatch whose work depends on a particular commit names that commit in the brief and has the agent check it first (`git merge-base --is-ancestor <commit> HEAD`), or the orchestrator creates the worktree at that commit (`git worktree add <path> <commit>`) and points the agent at it.
+
 **Shared-host clauses.** Every developer, test or debugger brief that touches a test host or the laptop carries these four, verbatim or tightened, because the agent cannot infer them and a stop message arrives after the script has started:
 
 - Delete only paths your own commands created and recorded, by exact name; use your own directory (`~/tmp/<owner>/`), never a shared filename prefix; never delete by glob or by modification time.

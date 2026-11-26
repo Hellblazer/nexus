@@ -46,6 +46,11 @@ PREDICATES: dict[str, str] = {
     "t1_nudge_enabled": "True",
     "project_text": "None",
     "project_brief_questions": "[]",
+    "user_brief_questions": "[]",
+    "provenance_label": "None",
+    "clean_text": "''",
+    "integration_branch": "None",
+    "note_problems": "void",
     "advice_blocked": "frozenset()",
     "remote_test_hosts": "frozenset()",
     "note_hook_error": "void",
@@ -60,6 +65,7 @@ SETTING_READERS: dict[str, tuple[str, ...]] = {
     "ci_wait": ("project_text",),
     "credential_helper": ("project_text",),
     "brief_questions": ("project_brief_questions",),
+    "integration_branch": ("integration_branch",),
 }
 #: The gates an audience may carry: ``SETTING:<key>`` is the ``setting`` gate; EVERY-USER is nothing or a gate on the user's own
 #: data (``.beads/``, an RDR directory, a board entry found).

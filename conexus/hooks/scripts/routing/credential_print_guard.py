@@ -142,11 +142,15 @@ sys.path.insert(0, os.path.dirname(__file__))
 import _lib  # noqa: E402
 
 # The deny's redirect is neutral unless the project's tracked settings carry a ``credential_helper`` text naming its own safe
-# way to use the credential. The setting only adds text, so a helper that cannot be imported gives the neutral redirect.
+# way to use the credential; that text is introduced by its source, never in this guard's voice (RDR-259 Decision 2). The
+# setting only adds text, so a helper that cannot be imported gives the neutral redirect.
 try:
-    from _audience import project_text as _project_text  # noqa: E402 -- the sys.path insert above reaches it
+    from _audience import project_text as _project_text, provenance_label as _provenance_label  # noqa: E402 -- the sys.path insert above reaches it
 except BaseException:  # noqa: BLE001
     def _project_text(payload: object, key: str) -> "str | None":
+        return None
+
+    def _provenance_label(key: str, source: str, value: "str | None" = None) -> "str | None":
         return None
 
 RULE_NAME = "credential_print_guard"
@@ -200,7 +204,8 @@ _REDIRECT_USER = (
 
 def _redirect(payload: dict) -> str:
     helper = _project_text(payload, "credential_helper")
-    return f"{_REFUSAL} {helper}" if helper else _REDIRECT_USER
+    label = _provenance_label("credential_helper", "project", helper) if helper else None
+    return f"{_REFUSAL}\n{label}" if label else _REDIRECT_USER
 
 
 # ---------------------------------------------------------------------------

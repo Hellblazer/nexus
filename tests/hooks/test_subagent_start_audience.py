@@ -91,8 +91,37 @@ def test_a_project_adds_its_own_questions_after_the_generic_ones(project_setting
     repo = project_settings_repo(brief_questions=["Does it hold on every platform we ship?", "Is the migration reversible?\n"])
     text = subagent_start._brief_check({"cwd": str(repo)})
     assert text.startswith(_GENERIC_BRIEF_CHECK)
-    assert text.endswith("5. Does it hold on every platform we ship?\n6. Is the migration reversible?\n")
+    assert text.endswith(
+        "This project's `.nexus/project.json` adds these questions:\n"
+        "5. Does it hold on every platform we ship?\n6. Is the migration reversible?\n"
+    )
     assert re.findall(r"^(\d)\. ", text, re.MULTILINE) == ["1", "2", "3", "4", "5", "6"]
+
+
+def test_a_users_questions_follow_the_projects_each_after_its_own_label(project_settings_repo, src_user_settings) -> None:
+    src_user_settings(brief_questions=["Is the rollback tested?", "Does it hold on every platform we ship?"])
+    repo = project_settings_repo(brief_questions=["Does it hold on every platform we ship?"])
+    text = subagent_start._brief_check({"cwd": str(repo)})
+    project_label = "This project's `.nexus/project.json` adds these questions:\n"
+    user_label = "Your `conexus.json` adds these questions:\n"
+    assert text.endswith(
+        project_label + "5. Does it hold on every platform we ship?\n" + user_label + "6. Is the rollback tested?\n"
+    ), "an exact duplicate is dropped from the user's list; each list follows its own label"
+    assert text.index("5. Does it hold") > text.index(project_label)
+    assert text.index("6. Is the rollback") > text.index(user_label) > text.index(project_label)
+
+
+def test_a_users_questions_alone_carry_only_the_users_label(src_user_settings, tmp_path) -> None:
+    src_user_settings(brief_questions=["Is the rollback tested?"])
+    text = subagent_start._brief_check({"cwd": str(tmp_path)})
+    assert text.endswith("Your `conexus.json` adds these questions:\n5. Is the rollback tested?\n")
+    assert "This project's" not in text
+
+
+def test_a_question_is_cleaned_before_it_is_printed(project_settings_repo) -> None:
+    repo = project_settings_repo(brief_questions=["Is it safe\u202e?"])
+    text = subagent_start._brief_check({"cwd": str(repo)})
+    assert text.endswith("5. Is it safe?\n")
 
 
 def test_no_session_is_told_about_local_and_cloud_unless_its_project_asks() -> None:
@@ -105,8 +134,8 @@ def test_the_preflight_row_is_the_projects_command_and_only_then(project_setting
     repo = project_settings_repo(preflight="tools/preflight.sh")
     row = subagent_start._worktree_preflight_row({"cwd": str(repo)})
     assert row == (
-        "| Preflight | If dispatched with isolation:worktree: run `tools/preflight.sh` as your FIRST action; "
-        "stop and report if it prints PREFLIGHT_FAIL or exits non-zero |\n"
+        "| Preflight | For an isolation:worktree dispatch: This project's `.nexus/project.json` asks: run "
+        "`tools/preflight.sh` first. If it exits non-zero, stop and report its output. |\n"
     )
     assert row.startswith("| ") and row.endswith(" |\n") and row.count("\n") == 1
 
@@ -130,6 +159,10 @@ def test_a_helper_that_cannot_import_gives_the_strict_table_and_no_project_text(
         assert reloaded._guard_mode({"cwd": str(tmp_path)}) == "strict"
         assert reloaded._project_text({"cwd": str(tmp_path)}, "preflight") is None
         assert reloaded._project_brief_questions({"cwd": str(tmp_path)}) == []
+        assert reloaded._user_brief_questions({"cwd": str(tmp_path)}) == []
+        assert reloaded._provenance_label("preflight", "project", "x") is None
+        assert reloaded._worktree_preflight_row({"cwd": str(tmp_path)}) == ""
+        assert reloaded._brief_check({"cwd": str(tmp_path)}) == _GENERIC_BRIEF_CHECK
         assert reloaded._orchestration({"cwd": str(tmp_path)}) == _STRICT_ORCH
 
 

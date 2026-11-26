@@ -18,9 +18,10 @@ import pytest
 from nexus.hooks import subagent_start
 from tests.hooks.test_subagent_start_hook import _run_hook
 
+#: Decision 2: the project's command is introduced by its source, and the plugin's own words stop at the colon.
 _ROW = (
-    "| Preflight | If dispatched with isolation:worktree: run `{cmd}` as your FIRST action; stop and report if it "
-    "prints PREFLIGHT_FAIL or exits non-zero |\n"
+    "| Preflight | For an isolation:worktree dispatch: This project's `.nexus/project.json` asks: run `{cmd}` first. "
+    "If it exits non-zero, stop and report its output. |\n"
 )
 
 

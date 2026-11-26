@@ -43,7 +43,7 @@ capped at ``_CLAUSE_CAP`` characters, which also bounds the regex cost). A claus
 its actor is Sam (it addresses "you", asks a question, says "say go and I'll", is a ``!`` command,
 names Sam, or is gated on an approval: a gate word (once, when, after, until, pending, if, awaits, needs,
 hold for) governing an approval predicate, however it is phrased: "once it is cleared", "when someone gives
-the word", "pending the ack"; see ``is_sam_gated``. An approval word alone, as the subject of a test or a
+the word", "pending the ack"; see ``is_user_gated``. An approval word alone, as the subject of a test or a
 log ("approval-flow tests", "the decision log"), gates nothing) or when it names a peer, mailbox, notification or restart as the wake (a peer named only as the
 recipient of the session's own step, "handing the draft to halcyon", is not the wake: :func:`_recipients_stripped`), or
 when it is a past-tense report. If the LAST clause asks Sam something, tells him to do something or gates on his
@@ -100,9 +100,12 @@ KILL_SWITCH_ENV = "NX_STOP_WAKE_GUARD"
 # The block's CI wording is neutral unless the project's tracked settings name a CI-wait command (``ci_wait`` in
 # ``.nexus/project.json``). A helper that cannot be imported gives the neutral wording: the setting only adds text.
 try:
-    from _audience import project_text as _project_text
+    from _audience import project_text as _project_text, provenance_label as _provenance_label
 except BaseException:  # noqa: BLE001
     def _project_text(payload: object, key: str) -> "str | None":
+        return None
+
+    def _provenance_label(key: str, source: str, value: "str | None" = None) -> "str | None":
         return None
 _REASON_CLAUSE_CAP = 240
 _LOG_CLAUSE_CAP = 140
@@ -167,8 +170,8 @@ def clauses(text: str) -> list[str]:
 #: exception is the default-proceed idiom "unless you'd rather ...", which names him only to offer an
 #: override while the session carries on. Naming Sam ("I'll ping Sam once the build finishes") is NOT
 #: addressing him: a name alone drops nothing. A handover to him is a separate, structural test
-#: (``is_sam_gated``).
-_SAM_YOU = re.compile(r"\b(?:you|your|yours|you'd|you'll|you've|you're|yourself)\b(?!')", re.I)
+#: (``is_user_gated``).
+_USER_YOU = re.compile(r"\b(?:you|your|yours|you'd|you'll|you've|you're|yourself)\b(?!')", re.I)
 
 #: The principal: the person whose reply is the wake. One pattern for every rule below. Sam, Hal and "you" are
 #: always the person. "the user", "the owner", "the operator" (a role word) count only when what follows is a
@@ -241,7 +244,7 @@ _NOT_AN_APPROVER = re.compile(
     r"backlog|disk|logs?|checks?|pipelines?|rollouts?|clusters?|limits?|locks?|alerts?|tokens?|status|conflicts?)\b",
     re.I,
 )
-_NON_SAM_ACTOR = re.compile(
+_NON_USER_ACTOR = re.compile(
     r"\b(?:reviewers?|critics?|peers?|agents?|bots?|planner|review(?!\s+(?:is|was|has been))|mailbox)\b",
     re.I,
 )
@@ -258,12 +261,12 @@ _WEAK_NOUN = ("decision", "permission", "ok", "confirm", "clearance")
 
 #: The user acts: a possessive approval noun ("Sam's call"), or the principal with an approval verb. A modal of
 #: permission between them ("Sam can review", "you can approve") is an offer, not a wait.
-_SAM_POSSESSIVE = re.compile(
+_USER_POSSESSIVE = re.compile(
     r"\b" + _PRINCIPAL_NAME + r"'s (?:calls?|words?|nods?|ok|okay|choice|pick|say|go|approval|decisions?|rulings?|"
     r"sign-?off|go-?ahead|blessing|permission)\b",
     re.I,
 )
-_SAM_VERB = re.compile(
+_USER_VERB = re.compile(
     _P + r"(?:(?!\b(?:can|could|may|might)\b)[^,.;:!?]){0,25}?\b(?:decid\w*+|approv\w*+|"
     r"rule[sd]?|sign\w*+|okay\w*+|ok\w*+|greenlight\w*+|authori[sz]\w*+|merges?|clears?|cleared|permits?|says?|gives?|gave|calls?|"
     r"chooses|picks|nods?)\b",
@@ -328,7 +331,7 @@ def _gate_level(window: str) -> int:
     for pattern, strong in ((_STRONG_TERM, True), (_WEAK_TERM, False)):
         for hit in pattern.finditer(window):
             subject = _SUBJECT_SPLIT.split(window[: hit.start()])[-1].strip()
-            if _NOT_AN_APPROVER.search(subject) or _NON_SAM_ACTOR.search(subject):
+            if _NOT_AN_APPROVER.search(subject) or _NON_USER_ACTOR.search(subject):
                 continue
             if strong or _WEAK_SUBJECT.fullmatch(subject):
                 return 2
@@ -337,21 +340,21 @@ def _gate_level(window: str) -> int:
     return level
 
 
-def sam_gate_level(clause: str) -> int:
+def user_gate_level(clause: str) -> int:
     """How strongly the clause waits on the user: 0 not at all; 1 a condition on "you" ("Waiting on you", "Ready when
     you are"); 2 an approval or a handover (what hangs from it, even "once it lands", is his to unblock)."""
     if _COURTESY.search(clause):
         return 0
-    if _SAM_VERB.search(clause) or _HANDOVER.search(clause):
+    if _USER_VERB.search(clause) or _HANDOVER.search(clause):
         return 2
-    if _SAM_POSSESSIVE.search(clause) and not (_APPROVAL_OBJECT.search(clause) and not _GATE_WORD.search(clause)):
+    if _USER_POSSESSIVE.search(clause) and not (_APPROVAL_OBJECT.search(clause) and not _GATE_WORD.search(clause)):
         return 2
     if _APPROVAL_PENDING.search(clause):
         return 2
     return max((_gate_level(w) for w in _windows(clause)), default=0)
 
 
-def is_sam_gated(clause: str) -> bool:
+def is_user_gated(clause: str) -> bool:
     """The clause waits on an approval that only the user (Sam, the operator) gives, however it is phrased.
 
     Structural, not a word list: a gate word (once, when, after, until, pending, if, awaits, needs, ...)
@@ -361,7 +364,7 @@ def is_sam_gated(clause: str) -> bool:
     ("approval-flow tests", "the decision log"), a state change ("once the lock clears") and a bare mention of
     Sam ("I'll ping Sam once the build finishes") gate nothing.
     """
-    return sam_gate_level(clause) > 0
+    return user_gate_level(clause) > 0
 
 
 #: "The approval is pending", "the ruling has not come": an approval named together with its open state.
@@ -374,8 +377,8 @@ _APPROVAL_PENDING = re.compile(
 _GATE_WORD = re.compile(r"\b(?:once|when|after|until|before|pending|waiting|awaiting|needs?|gated|if|unless)\b", re.I)
 
 
-_SAM_DEFAULT_PROCEED = re.compile(r"\bunless you(?:'d| would| want| prefer)\b", re.I)
-_SAM_IMPERATIVE = re.compile(
+_USER_DEFAULT_PROCEED = re.compile(r"\bunless you(?:'d| would| want| prefer)\b", re.I)
+_USER_IMPERATIVE = re.compile(
     r"^(?:please\b|say\b|tell me\b|let me know\b|want me\b|should i\b|shall i\b|do you\b|would you\b|"
     r"can you\b|could you\b|which\b.*\?|!)"
     r"|^(?:or |and |so )?(?:name|pick|point|give|send|choose|approve|reply|ping|confirm|merge|run)\b.*\band i'?ll\b",
@@ -383,7 +386,7 @@ _SAM_IMPERATIVE = re.compile(
 )
 #: A clause that gates on Sam (a condition about "you", a hand-off to you, a wait on you, a question)
 #: makes the sentences that chain from it ("After it publishes, ...") Sam's too.
-_SAM_GATE = re.compile(
+_USER_GATE = re.compile(
     r"\b(?:once|when|if|after|until|before|as soon as)\b[^,.]{0,40}" + _P + r"|\b(?:hand|give|send|ask) " + _P + r"|"
     r"\bwait(?:s|ing)? (?:on|for) " + _P + r"|\byour (?:go|call|decision|approval)\b",
     re.I,
@@ -519,10 +522,10 @@ class Verdict(NamedTuple):
     block: bool
     cls: str  # "" when allowed
     clause: str  # the matched clause, "" when allowed
-    sam_dropped: int
+    user_dropped: int
     peer_dropped: int
     past_dropped: int
-    final_sam: bool = False  # the last clause addresses Sam, so a would-be block was allowed
+    final_user: bool = False  # the last clause addresses Sam, so a would-be block was allowed
 
 
 #: A courtesy to Sam, not a request to him: "keep you posted", "update you", "report back to Sam", "see you
@@ -535,32 +538,32 @@ _COURTESY = re.compile(
 )
 
 
-def _is_sam(clause: str) -> bool:
-    if clause.endswith("?") or _SAM_IMPERATIVE.search(clause) or is_sam_gated(clause):
+def _is_user(clause: str) -> bool:
+    if clause.endswith("?") or _USER_IMPERATIVE.search(clause) or is_user_gated(clause):
         return True
-    if _SAM_YOU.search(clause) and not _SAM_DEFAULT_PROCEED.search(clause) and not _COURTESY.search(clause):
+    if _USER_YOU.search(clause) and not _USER_DEFAULT_PROCEED.search(clause) and not _COURTESY.search(clause):
         return True
     return False
 
 
 #: A closing clause that waits on Sam: his reply is the wake. "wait on you", "your call", "needs Sam".
-_SAM_WAIT = re.compile(r"\bwait(?:s|ing)? (?:on|for) " + _P + r"|\byour (?:go|calls?|decision|approval)\b", re.I)
+_USER_WAIT = re.compile(r"\bwait(?:s|ing)? (?:on|for) " + _P + r"|\byour (?:go|calls?|decision|approval)\b", re.I)
 
 
-def _ends_on_sam(clause: str) -> bool:
+def _ends_on_user(clause: str) -> bool:
     """The last clause asks Sam something, tells him to do something, or gates on his approval.
 
     A bare "you" is not enough: "I'll keep you posted", "See you then" and "Thanks for your patience" are
     courtesies, and the promise before them still has nothing to wake it.
     """
-    if _SAM_DEFAULT_PROCEED.search(clause) or _COURTESY.search(clause):
+    if _USER_DEFAULT_PROCEED.search(clause) or _COURTESY.search(clause):
         return False
     return bool(
         clause.endswith("?")
-        or _SAM_IMPERATIVE.search(clause)
-        or _SAM_GATE.search(clause)
-        or _SAM_WAIT.search(clause)
-        or is_sam_gated(clause)
+        or _USER_IMPERATIVE.search(clause)
+        or _USER_GATE.search(clause)
+        or _USER_WAIT.search(clause)
+        or is_user_gated(clause)
     )
 
 
@@ -568,7 +571,7 @@ def evaluate_text(text: str, ci_covered: "Callable[[str], bool] | None" = None) 
     """Classify a closing text. Pure: no environment, no I/O. *ci_covered*, when given, names the CI-wait
     clauses a wake already covers (nexus-1d6pz.11.5): each is skipped and the rest of the text is still read,
     so a covered CI wait never hides a later promise or timed step."""
-    sam = peer = past = 0
+    user = peer = past = 0
     #: 0 none; 1 a gate on "you" or a question (a follow-up that starts on a chain word hangs from it); 2 an
     #: approval gate on Sam (a follow-up that merely depends on "that" or "it" hangs from it too). A clause that
     #: only names Sam or an approval word chains nothing: "Sam can review. After CI, I'll check." still waits on CI.
@@ -577,21 +580,21 @@ def evaluate_text(text: str, ci_covered: "Callable[[str], bool] | None" = None) 
     #: between the gate and its follow-up (fixture sel3-25), not a paragraph.
     gap = 0
     parts = clauses(text)
-    final_sam = bool(parts) and _ends_on_sam(parts[-1])
+    final_user = bool(parts) and _ends_on_user(parts[-1])
     for clause in parts:
-        if _is_sam(clause):
-            sam += 1
+        if _is_user(clause):
+            user += 1
             gap = 0
-            level = sam_gate_level(clause)
+            level = user_gate_level(clause)
             if level:
                 chain = level
-            elif clause.endswith("?") or _SAM_GATE.search(clause):
+            elif clause.endswith("?") or _USER_GATE.search(clause):
                 chain = 1
             else:
                 chain = 0
             continue
         if chain and (_CHAIN_START.search(clause) or _CHAIN_TAIL.search(clause) or (chain == 2 and _CHAIN_CONT.search(clause))):
-            sam += 1
+            user += 1
             gap = 0
             continue
         gap += 1
@@ -619,11 +622,11 @@ def evaluate_text(text: str, ci_covered: "Callable[[str], bool] | None" = None) 
                 continue
             if cls == CLASS_CI_WAIT and ci_covered is not None and ci_covered(clause):
                 break  # covered by an armed wake: on to the next clause
-            if final_sam:
+            if final_user:
                 # The message ends on Sam (a question, a hand-off, an approval to wait for): his reply is the wake.
-                return Verdict(False, cls, clause, sam, peer, past, True)
-            return Verdict(True, cls, clause, sam, peer, past)
-    return Verdict(False, "", "", sam, peer, past)
+                return Verdict(False, cls, clause, user, peer, past, True)
+            return Verdict(True, cls, clause, user, peer, past)
+    return Verdict(False, "", "", user, peer, past)
 
 
 # ---------------------------------------------------------------------------
@@ -649,13 +652,11 @@ class Decision(NamedTuple):
 # write_channel_status, rewritten at every park of at most 25 s), never from the model's words:
 # the waiter alive and fresh, the claude launch flag present (channel_flag, read by
 # nexus.channel_launch), and a board/ci/*--done topic subscribed. A subscription without the flag
-# is not a wake (its posts wait for the next prompt), and the block then names `nx ci wait <sha>`,
-# the background command that is. A running `nx ci wait` is a background task, armed already.
+# is not a wake (its posts wait for the next prompt), so it reads as no record at all: the generic CI-wait
+# block, which names the project's ``ci_wait`` command when it set one (RDR-259 Decision 12).
 
 CI_WAKE_ARMED = "armed"
-CI_WAKE_NO_CHANNEL = "subscribed-no-channel"
 CI_WAKE_NONE = "none"
-CLASS_CI_WAIT_NO_CHANNEL = "ci-wait-no-channel"
 #: A status record older than this is a waiter that stopped, or a server that is gone.
 CI_WAKE_FRESH_S = 120.0
 _SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -697,10 +698,9 @@ def _server_config_dir(env: dict[str, str]) -> str:
 
 
 def ci_wake_state(session_id: object, env: dict[str, str], *, now: float | None = None) -> str:
-    """CI_WAKE_ARMED, CI_WAKE_NO_CHANNEL (a live waiter with a --done subscription in a session read as
-    launched without the channel flag) or CI_WAKE_NONE. Any doubt (no record, unreadable, stale or from the
-    future, waiter not alive, the client's initialize handshake not seen or a send stalled, the flag
-    unreadable) is CI_WAKE_NONE, which blocks as before."""
+    """CI_WAKE_ARMED or CI_WAKE_NONE. Any doubt (no record, unreadable, stale or from the future, waiter not alive,
+    the client's initialize handshake not seen or a send stalled, the flag missing or unreadable) is CI_WAKE_NONE,
+    which blocks as the generic CI-wait class."""
     if not isinstance(session_id, str) or not _SAFE_SESSION_ID.fullmatch(session_id):
         return CI_WAKE_NONE
     path = os.path.join(_server_config_dir(env), "tuple-watch", "channel-status.d", session_id)
@@ -717,8 +717,6 @@ def ci_wake_state(session_id: object, env: dict[str, str], *, now: float | None 
         return CI_WAKE_NONE
     if status.get("alive") is not True or status.get("gate_stalled") is True:
         return CI_WAKE_NONE
-    if status.get("channel_flag") is False:
-        return CI_WAKE_NO_CHANNEL
     if status.get("channel_flag") is not True or status.get("gate_open") is not True:
         return CI_WAKE_NONE
     return CI_WAKE_ARMED
@@ -742,7 +740,7 @@ def decide(payload: object, env: dict[str, str], *, now: float | None = None) ->
     if not isinstance(text, str) or not text.strip():
         return Decision(False, "no-text", "", "")
     verdict = evaluate_text(text)
-    detail = f"sam_dropped={verdict.sam_dropped} peer_dropped={verdict.peer_dropped} past_dropped={verdict.past_dropped}"
+    detail = f"user_dropped={verdict.user_dropped} peer_dropped={verdict.peer_dropped} past_dropped={verdict.past_dropped}"
     if verdict.block and verdict.cls == CLASS_CI_WAIT:
         wake = ci_wake_state(payload.get("session_id"), env, now=now)
         if wake == CI_WAKE_ARMED:
@@ -750,12 +748,10 @@ def decide(payload: object, env: dict[str, str], *, now: float | None = None) ->
             if not covered.block:
                 return Decision(False, "ci-wake-armed", "", detail)
             verdict = covered
-        elif wake == CI_WAKE_NO_CHANNEL and is_develop_ci_clause(verdict.clause):
-            return Decision(True, CLASS_CI_WAIT_NO_CHANNEL, verdict.clause, detail)
     if verdict.block:
         return Decision(True, verdict.cls, verdict.clause, detail)
-    if verdict.final_sam:
-        return Decision(False, "final-to-sam", "", f"{detail} would_block_class={verdict.cls}")
+    if verdict.final_user:
+        return Decision(False, "final-to-user", "", f"{detail} would_block_class={verdict.cls}")
     return Decision(False, "no-match", "", detail)
 
 
@@ -765,15 +761,8 @@ def block_reason(cls: str, clause: str, ci_wait: "str | None" = None) -> str:
     quoted = " ".join(clause.split())
     if len(quoted) > _REASON_CLAUSE_CAP:
         quoted = quoted[: _REASON_CLAUSE_CAP - 3] + "..."
-    if cls == CLASS_CI_WAIT_NO_CHANNEL and not ci_wait:
-        cls = CLASS_CI_WAIT  # no project CI command to name: the plain wording
-    if cls == CLASS_CI_WAIT_NO_CHANNEL:
-        return (
-            f'Stop-hook wake guard: your last message closes on a CI wait ("{quoted}"). This session is subscribed to '
-            "a CI completion topic, but it was not launched with the conexus channel, so that post will not wake "
-            f"it. Run `{ci_wait}` as a background command now (its exit is the wake and its line is the result), then "
-            "end the turn."
-        )
+    # The project's command is its text: it is cleaned and introduced by its source (Decision 2), never in this guard's voice.
+    label = _provenance_label("ci_wait", "project", ci_wait) if cls == CLASS_CI_WAIT and ci_wait else None
     what = {
         CLASS_CI_WAIT: "a CI or run wait",
         CLASS_PROMISE: "a promise to check or do something later",
@@ -781,16 +770,15 @@ def block_reason(cls: str, clause: str, ci_wait: "str | None" = None) -> str:
     }.get(cls, "an open step")
     # "Do it now" is wrong when the step may be gated on the user (an approval gate or a handover) and for any clause
     # that carries a gate word outside the CI-wait class: those wait on something, and the model should say who.
-    gated = is_sam_gated(quoted) or (cls != CLASS_CI_WAIT and bool(_REMINDER_GATE.search(quoted)))
+    gated = is_user_gated(quoted) or (cls != CLASS_CI_WAIT and bool(_REMINDER_GATE.search(quoted)))
     do_now = "" if gated else "If the step can be done right now, do it. "
     return (
         f'Stop-hook wake guard: your last message closes on {what} ("{quoted}"), and nothing is armed to wake this '
         "session: no background task, Monitor or scheduled wakeup is running. Arm the wake now, then end the turn: "
-        + (f"`{ci_wait}` as a background command for a push, release or PR's CI, a Monitor or a background Bash "
-           "until-loop for another run, " if cls == CLASS_CI_WAIT and ci_wait else
-           "a Monitor or a background Bash until-loop for a run or CI, ")
-        + "ScheduleWakeup or CronCreate for a timed step. "
-        f"{do_now}Never start work the user held back or asked you to wait on, work that needs the user's approval, "
+        "a Monitor or a background Bash until-loop for a run or CI, "
+        "ScheduleWakeup or CronCreate for a timed step. "
+        + (f"{label} " if label else "")
+        + f"{do_now}Never start work the user held back or asked you to wait on, work that needs the user's approval, "
         "or work another session owns. If the wake is someone else (the user, a peer, a notification), say plainly "
         "in one sentence who it is, then end the turn."
     )

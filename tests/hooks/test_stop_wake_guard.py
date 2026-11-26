@@ -47,7 +47,12 @@ def _load():
     spec = importlib.util.spec_from_file_location("stop_wake_guard_under_test", SCRIPT)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # hooks.json runs the script with its own directory on the path, so the audience helper imports; so it does here.
+    sys.path.insert(0, str(SCRIPT.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(SCRIPT.parent))
     return module
 
 
@@ -216,7 +221,7 @@ _SAM_ACTOR_TEXTS = [
 def test_sam_actor_is_never_blocked(text: str) -> None:
     verdict = swg.evaluate_text(text)
     assert verdict.block is False, verdict
-    assert verdict.sam_dropped >= 1
+    assert verdict.user_dropped >= 1
 
 
 def test_default_proceed_idiom_is_not_a_sam_actor_clause() -> None:
@@ -240,13 +245,13 @@ def test_sam_clause_without_a_gate_does_not_hide_an_independent_step() -> None:
     assert verdict.block is True and "rebase" in verdict.clause
 
 
-def test_a_message_that_ends_on_sam_is_allowed_whole() -> None:
+def test_a_message_that_ends_on_the_user_is_allowed_whole() -> None:
     """His reply is the wake, so an independent step earlier in the message does not block it."""
     text = "Your calls: the cut after the freeze. Next, I'll rebase both branches. Say if you want the job first."
     verdict = swg.evaluate_text(text)
-    assert (verdict.block, verdict.final_sam, verdict.cls) == (False, True, swg.CLASS_PROMISE)
+    assert (verdict.block, verdict.final_user, verdict.cls) == (False, True, swg.CLASS_PROMISE)
     decision = swg.decide(_payload(text), {})
-    assert (decision.block, decision.reason) == (False, "final-to-sam")
+    assert (decision.block, decision.reason) == (False, "final-to-user")
     # The same step with the Sam sentence moved off the end blocks again: the rule reads the LAST clause.
     assert swg.evaluate_text("Your calls: the cut after the freeze. Next, I'll rebase both branches.").block is True
 
@@ -334,7 +339,7 @@ def test_text_preparation_ignores_code_and_fences() -> None:
 def test_bullets_and_newlines_split_sentences() -> None:
     text = "- **Waiting on you:** the tag.\n- I'll check CI on the tip once it finishes the shards."
     verdict = swg.evaluate_text(text)
-    assert verdict.block is True and verdict.sam_dropped == 1
+    assert verdict.block is True and verdict.user_dropped == 1
 
 
 def test_curly_apostrophes_are_normalised() -> None:
@@ -755,7 +760,7 @@ def test_known_false_allows_stay_visible(text: str) -> None:
 @pytest.mark.parametrize("text", _N1_GATED)
 def test_a_gate_on_an_approval_is_gated_in_the_reminder_too(text: str) -> None:
     """The reminder never tells the model to 'do it now' for a gate clause outside the CI-wait class."""
-    clause = next(c for c in swg.clauses(text) if swg.is_sam_gated(c))
+    clause = next(c for c in swg.clauses(text) if swg.is_user_gated(c))
     for cls in (swg.CLASS_PROMISE, swg.CLASS_TIMED):
         assert "do it" not in swg.block_reason(cls, clause), (cls, clause)
 
@@ -775,9 +780,9 @@ def test_a_denied_run_state_resets_the_chain_but_a_status_sentence_does_not() ->
     assert swg.evaluate_text(gate + "The planner is idle. After the shards finish, I'll check CI.").block is False
 
 
-def test_final_sam_is_set_only_for_a_question_an_imperative_or_an_approval_gate() -> None:
+def test_final_user_is_set_only_for_a_question_an_imperative_or_an_approval_gate() -> None:
     for text in ("Thanks for your patience.", "See you then.", "I'll keep you posted.", "Your fix is in."):
-        assert swg.evaluate_text("I'll check the build later. " + text).final_sam is False, text
+        assert swg.evaluate_text("I'll check the build later. " + text).final_user is False, text
     for text in ("Which one?", "Say go.", "Waiting on the user for the tag.", "Once you approve, I'll push."):
         assert swg.evaluate_text("I'll check the build later. " + text).block is False, text
 
@@ -890,8 +895,8 @@ def _run_in_repo(repo: Path, config: Path, text: str) -> subprocess.CompletedPro
                           text=True, encoding="utf-8", env=env, timeout=60)
 
 
-@pytest.mark.parametrize("cls", [swg.CLASS_CI_WAIT, swg.CLASS_CI_WAIT_NO_CHANNEL])
-def test_the_ci_command_is_the_projects_and_everyone_else_gets_neutral_wording(cls: str) -> None:
+def test_the_ci_command_is_the_projects_and_everyone_else_gets_neutral_wording() -> None:
+    cls = swg.CLASS_CI_WAIT
     named = swg.block_reason(cls, "The runs are still going.", ci_wait=_CI_COMMAND)
     assert f"`{_CI_COMMAND}`" in named and "The runs are still going." in named
     assert "CI board" not in named and "develop and main" not in named, "the project's command only; no nexus wording"
@@ -900,6 +905,27 @@ def test_the_ci_command_is_the_projects_and_everyone_else_gets_neutral_wording(c
         assert word not in neutral, word
     for word in ("Monitor", "until-loop", "ScheduleWakeup", "CronCreate", "who it is", "The runs are still going."):
         assert word in neutral, word
+
+
+def test_the_project_command_follows_its_provenance_label() -> None:
+    """Decision 2: the project's text is introduced by its source, never in the plugin's own voice."""
+    named = swg.block_reason(swg.CLASS_CI_WAIT, "The runs are still going.", ci_wait=_CI_COMMAND)
+    label = ("This project's `.nexus/project.json` names its CI wait command: "
+             f"`{_CI_COMMAND}`. Run it as a background command; its exit is the wake.")
+    assert label in named
+    assert named.count(_CI_COMMAND) == 1, "the command appears once, inside the label"
+
+
+def test_the_ci_command_is_cleaned_before_it_is_printed() -> None:
+    named = swg.block_reason(swg.CLASS_CI_WAIT, "The runs are still going.", ci_wait="wait-ci\x1b[31m <sha>\nrm -rf")
+    assert "\x1b" not in named and "wait-ci[31m <sha>rm -rf" in named
+
+
+def test_no_channel_class_remains() -> None:
+    """Decision 12: the "no channel" class is a nexus fact; only the generic CI-wait class is left."""
+    assert not hasattr(swg, "CLASS_CI_WAIT_NO_CHANNEL") and not hasattr(swg, "CI_WAKE_NO_CHANNEL")
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "ci-wait-no-channel" not in text and "subscribed-no-channel" not in text
 
 
 def test_a_session_gets_the_neutral_block_and_a_project_with_ci_wait_gets_its_command(tmp_path: Path) -> None:
@@ -1066,11 +1092,11 @@ def test_replay_flags_every_true_row_but_the_known_misses() -> None:
     assert len(marked) <= 2
 
 
-def test_the_known_miss_is_the_final_to_sam_rule() -> None:
+def test_the_known_miss_is_the_final_to_user_rule() -> None:
     for row in (r for r in _rows() if r.get("known_miss")):
         decision = swg.decide(_payload(row["text"]), {})
-        assert (decision.block, decision.reason) == (False, "final-to-sam"), row["id"]
-        assert row["known_miss"] == "final-to-sam"
+        assert (decision.block, decision.reason) == (False, "final-to-user"), row["id"]
+        assert row["known_miss"] == "final-to-user"
 
 
 def test_replay_holdout_recall_and_false_blocks_stay_bounded() -> None:
@@ -1121,7 +1147,7 @@ class TestCiWakeArmed:
         decision = self._decide(tmp_path)
         assert decision.block and decision.reason == swg.CLASS_CI_WAIT, decision
         reason = swg.block_reason(decision.reason, decision.clause, ci_wait=_CI_COMMAND)
-        assert f"`{_CI_COMMAND}` as a background command" in reason and "release or PR" in reason
+        assert f"`{_CI_COMMAND}`. Run it as a background command" in reason
         assert "Monitor" in reason  # still offered for a run that is not CI
         assert "CI board" not in swg.block_reason(decision.reason, decision.clause)
 
@@ -1130,13 +1156,13 @@ class TestCiWakeArmed:
         decision = self._decide(tmp_path)
         assert not decision.block and decision.reason == "ci-wake-armed", decision
 
-    def test_a_subscription_without_the_channel_blocks_and_names_nx_ci_wait(self, tmp_path: Path) -> None:
+    def test_a_subscription_without_the_channel_blocks_as_the_generic_ci_wait(self, tmp_path: Path) -> None:
         _status(tmp_path, channel_flag=False)
         decision = self._decide(tmp_path)
-        assert decision.block and decision.reason == swg.CLASS_CI_WAIT_NO_CHANNEL, decision
+        assert decision.block and decision.reason == swg.CLASS_CI_WAIT, decision
         reason = swg.block_reason(decision.reason, decision.clause, ci_wait=_CI_COMMAND)
-        assert "not launched with the conexus channel" in reason and f"`{_CI_COMMAND}`" in reason
-        assert "channel" not in swg.block_reason(decision.reason, decision.clause), "no project command: the plain wording"
+        assert f"`{_CI_COMMAND}`" in reason and "channel" not in reason
+        assert "channel" not in swg.block_reason(decision.reason, decision.clause)
 
     @pytest.mark.parametrize("fields", [
         {"alive": False}, {"gate_stalled": True}, {"gate_open": False}, {"board_topics": ["board/ci/nexus-develop"]},

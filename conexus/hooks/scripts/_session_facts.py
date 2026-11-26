@@ -349,29 +349,45 @@ class WorktreeWork:
     dirty: int  # tracked files changed; -1 unknown
 
 
-def default_branch_ref(path: str, git: str, timeout: float = 3.0) -> str:
-    """The remote ref of the repository's default branch: what ``origin/HEAD`` points at, else ``origin/main``,
-    ``origin/master`` or ``origin/develop`` when one exists. Empty when none resolves."""
+def default_branch_ref(path: str, git: str, timeout: float = 3.0, integration_branch: "str | None" = None,
+                       unresolved: "Callable[[str], None] | None" = None) -> str:
+    """The remote ref unlanded work is measured against: ``origin/<integration_branch>`` when the project set one and that
+    branch exists on ``origin``; else what ``origin/HEAD`` points at, else ``origin/main`` or ``origin/master`` when one
+    exists. Empty when none resolves: there is no ``origin/develop`` guess (RDR-259 Research 5), so a project whose branch is
+    ``develop`` says so in its settings. The value goes to git after ``--end-of-options``, so even one the settings
+    validation missed cannot be read as an option. A value ``origin`` does not have calls *unresolved* once (it may raise;
+    the measure goes on) and falls back to the default order."""
+    if integration_branch:
+        ref = "origin/" + integration_branch
+        code, _ = run([git, "-C", path, "rev-parse", "--verify", "--quiet", "--end-of-options", ref], timeout)
+        if code == 0:
+            return ref
+        if unresolved is not None:
+            try:
+                unresolved(integration_branch)
+            except Exception:  # noqa: BLE001 -- a note that cannot be written must not stop the measure
+                pass
     code, out = run([git, "-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], timeout)
     if code == 0 and out.strip().startswith("origin/"):
         return out.strip()
-    for ref in ("origin/main", "origin/master", "origin/develop"):
+    for ref in ("origin/main", "origin/master"):
         code, _ = run([git, "-C", path, "rev-parse", "--verify", "--quiet", ref], timeout)
         if code == 0:
             return ref
     return ""
 
 
-def worktree_work(path: str, branch: str, git: str, timeout: float = 3.0) -> WorktreeWork:
-    """Commits not landed on the repository's default branch and changed tracked files. "Landed" is against that branch
-    (``origin/HEAD``), never the branch's own upstream: a pushed feature branch whose tracking ref is behind would count work
-    that is already on the default branch. HEAD inside it is 0; otherwise ``git cherry`` counts commits whose patch it does
-    not hold (a cherry-picked fix counts as landed). The count is -1 (unknown) when no default branch resolves.
-    An empty *branch* is looked up (``HEAD`` stays empty: detached)."""
+def worktree_work(path: str, branch: str, git: str, timeout: float = 3.0, integration_branch: "str | None" = None,
+                  unresolved: "Callable[[str], None] | None" = None) -> WorktreeWork:
+    """Commits not landed on the project's integration branch (:func:`default_branch_ref` says how the base is chosen) and
+    changed tracked files. "Landed" is against that branch, never the branch's own upstream: a pushed feature branch whose
+    tracking ref is behind would count work that is already on the integration branch. HEAD inside it is 0; otherwise
+    ``git cherry`` counts commits whose patch it does not hold (a cherry-picked fix counts as landed). The count is -1
+    (unknown) when no base resolves. An empty *branch* is looked up (``HEAD`` stays empty: detached)."""
     if not branch:
         code, head = run([git, "-C", path, "rev-parse", "--abbrev-ref", "HEAD"], timeout)
         branch = head.strip() if code == 0 and head.strip() != "HEAD" else ""
-    base = default_branch_ref(path, git, timeout)
+    base = default_branch_ref(path, git, timeout, integration_branch, unresolved)
     if not base:
         unlanded = -1
     else:

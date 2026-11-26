@@ -853,7 +853,9 @@ class TestInject:
         assert code == 0
         ctx = self._ctx(out)
         assert "no working-state checkpoint" in ctx and "nothing is restored" in ctx
-        assert SID in ctx and "git" in ctx and "threads" not in ctx, "no checkpoint to read: the board is not named"
+        # S2-2 (manifest: "with no checkpoint to read the board is not named"): the session id is only in the board clause,
+        # so with no board named it is absent too; the resumed session is pointed at git and the branch.
+        assert "git" in ctx and "threads" not in ctx and SID not in ctx, "no checkpoint to read: the board is not named"
         assert "SUMMARY-SENTINEL" not in ctx, "the summary is already in the new context"
         assert len(ctx.encode("utf-8")) < 1024, "a notice, not a checkpoint"
 
