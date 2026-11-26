@@ -1511,7 +1511,7 @@ while the engine serves:
   `ADD ... USING INDEX`, which "is not currently supported on partitioned
   tables" but is on a leaf. P3.3c's swap does not add the key. Its
   `on_complete` refuses unless a valid unique key on the id columns is
-  already there (`Rdr229SwapMove.java:206-223`, SQLSTATE 55000; T2
+  already there (`Rdr229SwapMove.java:207-224`, SQLSTATE 55000; T2
   `229-research-102`). So P3.3c has, per table (`nexus.chunks`,
   `nexus.taxonomy_centroids`), a move that P3.3b's pass registers when
   that table's indexes are all valid and its parent key is attached (above), whose driving table is that
@@ -1562,7 +1562,7 @@ while the engine serves:
   `rdr229-fkvalidate-chunks-leaf-<leaf>`, and then one adoption move,
   `rdr229-fkadopt-chunks`. `registered_at` orders them leaves first, so the
   worker, which takes the oldest first, validates the leaves before the
-  adoption looks (`Rdr229SwapMove.java:293-305`; `Rdr229ChunksFk.java:38-42`,
+  adoption looks (`Rdr229SwapMove.java:294-306`; `Rdr229ChunksFk.java:38-42`,
   `:49-55`, `:144-200`, `:218-238`). Unlike the validation moves above, both
   kinds drive `nexus.catalog_collections` with the registry's own stamp move
   text (`vectors-070-1`) as template and verification, a walk of a small

@@ -443,7 +443,16 @@ a *background worker* is a pg_background process in the database.
   ASCII (PostgreSQL reads every such character as part of an identifier and
   the driver does not, so the two disagree on where a dollar-quote tag ends).
   A `$1` counts as standalone only when no word character, `$` or non-ASCII
-  character stands beside it. The
+  character stands beside it. A verification that reads only the catalogs may
+  begin with the comment `/* nexus:table-wide-only */`: the completion's
+  re-check then runs it table-wide alone and makes no per-tenant run, so it
+  must return no row in a per-tenant run by construction. A verification over a
+  row-security-scoped table never carries it, because there the table-wide run
+  sees nothing and the tenant's own run is the check. Nothing at run time looks
+  at what the text reads: `TableWideOnlyMarkerTest` holds the set of marked
+  texts (the two swaps') and that they read only `pg_catalog` relations. A swap
+  row registered before the marker existed keeps its text and the per-tenant
+  path (the registration inserts only when no row has the label). The
   changeset gate refuses a registering INSERT whose verification breaks these
   rules, and the move worker refuses to run one (`MoveSql`, Stage
   `VERIFICATION_REFUSED`, a permanent failure), because the JDBC driver binds
@@ -1600,4 +1609,4 @@ the first registered move.
 - 2026-11-20: wording to reviewed code (grant 3), RDR-229 P2.10 (nexus-p2m1x.15, reviews T2 nexus/review-p2m1x15-2026-11-20-r2 and nexus/critique-p2m1x15-2026-11-20-r2): the owner-read policy also covers a tenant-scoped support table a move's template or verification joins (`catalog_collections_owner_read`, which RDR-229 D2's `vectors-065` adds and P2.10 reuses), and the boot check covers it through `DrivingTableIsolationCheck.SUPPORT_TABLES`.
 - 2026-11-24: wording to the tree at the 8.5.6 docs audit (nexus-856): the per-leaf Critical Assumption and the cloud pg_background Critical Assumption are marked verified (the leaf tests in `DataMoveWorkerIntegrationTest`; the 2026-11-19 live install and AMI re-bake), the Prerequisites that waited on Phase 1 Step 4, Step 3c and Activation Step 1 are ticked, and Activation Step 1 says it was done. No design change; status unchanged.
 - 2026-11-26: wording to landed, reviewed code (grant 3), nexus-p2m1x.48, a2f8ced290 and b0b5aa7d7e: the `MoveBootWork` sampler runs every 250 ms for the first 60 s after it starts and every 5 s after that (it was every 5 s from the start, so a move registered after the first sample showed up to 5 s late); a sample that cannot read the registry is retried at 5 s.
-- 2026-11-26: wording to reviewed code (grant 3), nexus-p2m1x.21 residual, feature/rdr229-nextcut-recheck (commits 83ffd850a4, 572ad66f5a): the re-check's shared `statement_timeout_ms` is a budget of database time, not a wall clock over round trips (T2 nexus/review-83ffd850a4-nexus-p2m1x.21-2026-11-26 and critique-83ffd850a4-nexus-p2m1x.21-2026-11-26; a 78 ms RTT fork walk spent it at the 4th of 6 tenants); a verification that reads only the catalogs declares `/* nexus:table-wide-only */` and its re-check runs no per-tenant statement; the wall hold of the registry row for any other move is not bounded by it. No bound or constant changed.
+- 2026-11-26: wording to reviewed code (grant 3), nexus-p2m1x.21 residual, feature/rdr229-nextcut-recheck (commits 83ffd850a4, 572ad66f5a, 21b197b756): the re-check's shared `statement_timeout_ms` is a budget of database time, not a wall clock over round trips (T2 nexus/review-83ffd850a4-nexus-p2m1x.21-2026-11-26 and critique-83ffd850a4-nexus-p2m1x.21-2026-11-26; a 78 ms RTT fork walk spent it at the 4th of 6 tenants); a verification that reads only the catalogs declares `/* nexus:table-wide-only */` and its re-check runs no per-tenant statement (the contract is in the verification-query bullet; a swap row registered by an earlier engine keeps the per-tenant path); the wall hold of the registry row for any other move is not bounded by it. No bound or constant changed.
