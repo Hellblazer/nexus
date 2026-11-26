@@ -43,8 +43,8 @@
 #
 #   A release worktree is the exception (nexus-sby49). When REQUIRED_SHA is
 #   omitted and the branch is release/* or release-prep/*, or HEAD is detached
-#   at a commit any tag points to (a release or engine-service cut), there is no base to compare against: the tree is cut from
-#   the last tag (the plugin-only fast lane) or from a develop that has since
+#   at a commit any tag points to (a release or engine-service cut), there is
+#   no base to compare against: the tree is cut from the last tag (the plugin-only fast lane) or from a develop that has since
 #   moved on, and its contents ARE the release, so a fast-forward to develop
 #   would change what ships. The script touches nothing, prints the usual
 #   PREFLIGHT_OK line with recovered=no, then one PREFLIGHT_NOTE line saying it
