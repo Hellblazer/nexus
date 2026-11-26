@@ -45,6 +45,7 @@ DECISION_KEYWORDS = frozenset({"trust_env", "mounts", "proxy", "proxies", "trans
 #: ``**bearer_httpx_kwargs(...)`` carries ``trust_env=False`` and the proxy of config.yml (nexus.db.t2.bearer_transport)
 DECISION_SPLATS = frozenset({"bearer_httpx_kwargs", "_bearer_httpx_kwargs"})
 #: urllib factories that decide the proxy: the stdlib handler, and the config-only handler and opener of bearer_transport / _endpoint_resolve
+BEARER_CONTEXT_FUNCS = frozenset({"bearer_ssl_context"})
 PROXY_HANDLER_NAMES = frozenset({"ProxyHandler", "bearer_proxy_handler", "bearer_opener"})
 
 
@@ -123,10 +124,21 @@ class _Proxy(_Scope):
             return bool(self.functions) and any(_mentions(self.functions[-1], word) for word in PROXY_HANDLER_NAMES)
         return False
 
+    @staticmethod
+    def _verify_is_not_bearer_context(call: ast.Call) -> bool:
+        """``verify=`` set to anything but ``bearer_ssl_context()``: the shared context reads SSL_CERT_FILE and
+        SSL_CERT_DIR, which a repository's env can set (a ``**bearer_httpx_kwargs()`` splat carries the right one)."""
+        for kw in call.keywords:
+            if kw.arg == "verify":
+                return not (isinstance(kw.value, ast.Call) and _name(kw.value.func) in BEARER_CONTEXT_FUNCS)
+        return False
+
     def visit_Call(self, node: ast.Call) -> None:
         kind = self._client_kind(node)
         if kind is not None and not self._decided(node, kind):
             self.site(f"{kind} with no proxy decision", node)
+        if kind is not None and kind.startswith("httpx.") and self._verify_is_not_bearer_context(node):
+            self.site(f"{kind} verify= is not the bearer context", node)
         self.generic_visit(node)
 
 
@@ -247,6 +259,11 @@ def proxy_scan() -> tuple[list[Site], int, int]:
         ("import httpx\ndef f(m):\n    return httpx.Client(mounts=m)\n", 0),
         ("import httpx\ndef f():\n    return httpx.Client(proxy=None)\n", 0),
         ("import httpx\ndef f():\n    return httpx.Client(timeout=1, **bearer_httpx_kwargs())\n", 0),
+        # trust_env=False is a proxy decision, but verify=get_shared_ssl_context() still reads SSL_CERT_FILE
+        ("import httpx\ndef f():\n    return httpx.Client(trust_env=False, verify=get_shared_ssl_context())\n", 1),
+        ("import httpx\ndef f(h):\n    return httpx.get('u', headers=h, trust_env=False, verify=get_shared_ssl_context())\n", 1),
+        ("import httpx\ndef f(h):\n    return httpx.get('u', headers=h, trust_env=False, verify=bearer_ssl_context())\n", 0),
+        ("import httpx\ndef f():\n    return httpx.Client(trust_env=False, verify=ctx)\n", 1),
         ("import httpx\ndef f(h, u):\n    return httpx.get(u, headers=h, **bearer_httpx_kwargs(u))\n", 0),
         ("import httpx\ndef f(h):\n    return httpx.get('u', headers=h, **other())\n", 1),
         ("import urllib.request as u\ndef f(r):\n    o = u.build_opener(bearer_proxy_handler())\n    return o.open(r)\n", 0),
