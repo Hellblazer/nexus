@@ -448,7 +448,8 @@ def test_the_real_guard_and_the_real_lib_pass_t9() -> None:
     for rel, wrapper, preds, dotted in (
         ("conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py", "run_hook",
          ["guard_mode", "note_hook_error", "remote_test_hosts"], None),
-        ("conexus/hooks/scripts/routing/_lib.py", "local_try", ["telemetry_enabled"], None),
+        ("conexus/hooks/scripts/routing/_lib.py", "local_try", ["telemetry_child_env", "telemetry_enabled"], None),
+        ("src/nexus/hooks/agent_dispatch_record.py", "local_try", ["telemetry_child_env"], "nexus.hooks.agent_dispatch_record"),
         ("src/nexus/hooks/subagent_stop_t1_nudge.py", "never_fail", ["t1_nudge_enabled", "telemetry_enabled"], "nexus.hooks.subagent_stop_t1_nudge"),
     ):
         found = am.module_problems(rel, (ROOT / rel).read_text(encoding="utf-8"), declared_predicates=preds, wrapper=wrapper, dotted=dotted)

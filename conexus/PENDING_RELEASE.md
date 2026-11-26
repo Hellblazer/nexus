@@ -61,6 +61,9 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/resources/agent-shared/RELAY_TEMPLATE.md`: the Bead field also takes a tracking id (D10), nexus-sby49.3; a one-line pointer to the orchestration skill's reference.md for what a brief gives a subagent about git, nexus-5y47c.
 - `conexus/hooks/scripts/routing/_lib.py`: `log_routing_event` records only under `maintainer()`, so a user's command fragments no longer reach their engine as routing_events rows, nexus-sby49.3.
 - `conexus/hooks/scripts/_audience.py`: the settings reader (RDR-259): one `SETTINGS` table, `.nexus/project.json` and `conexus.json` checked and bounded, every problem reported, the strictness keys also read from `HEAD`, the session-root and cwd-checkout copies, `integration_branch`, and `python3 _audience.py show`, nexus-sby49.8.
+- `conexus/hooks/scripts/_endpoint_resolve.py`: `pinned_endpoint(config_dir)` resolves the telemetry endpoint from the account's config directory alone, with no environment leg, nexus-sby49.10.
+- `conexus/hooks/scripts/routing/_lib.py`: the routing poster resolves its endpoint through `pinned_endpoint` and starts with the environment `telemetry_child_env` builds (`_poster_env` and the environment legs of the poster's endpoint are gone from the telemetry path); an account with no home or no configured engine sends nothing and meters one `unresolvable` drop carrying the report, nexus-sby49.10.
+- `conexus/hooks/scripts/_audience.py`: `telemetry_child_env(environ)` builds the telemetry children's environment, nexus-sby49.10.
 - `conexus/README.md`: the relay example's Bead field takes a tracking id, nexus-sby49.3.
 - `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md`: the relay validation and the relay example take a tracking id in the Bead field, nexus-sby49.3.
 - `conexus/commands/debug.md`: the relay's Bead field takes a tracking id, nexus-sby49.3.

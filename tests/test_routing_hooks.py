@@ -468,20 +468,24 @@ def _drop_records(path: pathlib.Path) -> list[dict]:
 
 
 def _isolate_endpoint_discovery(tmp_path, monkeypatch):
-    """nexus-gjv9b PART 2 CRITICAL review fix: ``_engine_endpoint`` now
-    also reads a ServiceRegistry lease file and ``config.yml`` under
-    ``NEXUS_CONFIG_DIR`` (t2_prefix_scan.py-style discovery), not just
-    env vars. Without isolating that directory, these tests would
-    resolve against whatever is REALLY configured on the box running
-    them (a live lease, a real service_url) instead of the scenario
-    each test constructs -- the identical class of leak the routing-log/
-    dropped-writes isolation fixes in this same
-    bead already closed for their own env surfaces."""
-    cfg_dir = tmp_path / "isolated-nexus-config"
-    cfg_dir.mkdir(exist_ok=True)
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+    """The account's config directory, ``<account home>/.config/nexus``: where telemetry resolves its endpoint
+    (RDR-259 Decision 9, nexus-sby49.10: the routing poster reads nothing from the environment, so a test steers it by
+    what it writes there). The autouse account fixture pins the account home to a tmp directory, so nothing here sees what
+    is really configured on the box running the tests. ``NEXUS_CONFIG_DIR`` points at an empty decoy: it must change
+    nothing."""
+    cfg_dir = pathlib.Path(sys.modules["_audience"]._ACCOUNT_HOME_OVERRIDE) / ".config" / "nexus"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "decoy-nexus-config"))
     monkeypatch.delenv("NX_SERVICE_URL", raising=False)
     return cfg_dir
+
+
+def _configure_engine(cfg_dir: pathlib.Path, url: str, token: str) -> None:
+    """Name the engine telemetry sends to, in the account's ``config.yml``."""
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.yml").write_text(
+        f"credentials:\n  service_url: {url}\n  service_token: {token}\n", encoding="utf-8",
+    )
 
 
 def test_log_routing_event_no_engine_env_drops_to_meter(tmp_path, monkeypatch):
@@ -559,14 +563,12 @@ def test_log_routing_event_drop_record_omits_absent_optional_fields(tmp_path, mo
 
 
 def test_log_routing_event_http_success_no_drop(tmp_path, monkeypatch):
-    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
     log_path = tmp_path / "routing_log.jsonl"
     drop_path = tmp_path / "dropped_writes.jsonl"
     monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log_path))
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
-    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
-    monkeypatch.setenv("NX_SERVICE_PORT", "9999")
-    monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
+    _configure_engine(cfg_dir, "http://127.0.0.1:9999", "test-token")
     lib = _load_lib()
 
     sent: list[dict] = []
@@ -720,12 +722,10 @@ def test_log_routing_event_resolves_from_config_yml_service_url(tmp_path, monkey
 
 
 def test_log_routing_event_http_failure_drops_to_meter(tmp_path, monkeypatch):
-    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
     drop_path = tmp_path / "dropped_writes.jsonl"
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
-    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
-    monkeypatch.setenv("NX_SERVICE_PORT", "9999")
-    monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
+    _configure_engine(cfg_dir, "http://127.0.0.1:9999", "test-token")
     lib = _load_lib()
 
     import urllib.request as _ur
@@ -922,14 +922,12 @@ def test_log_routing_event_expired_data_token_lease_falls_back_to_static_token(t
 
 
 def test_log_routing_event_401_response_meters_with_cause_401(tmp_path, monkeypatch):
-    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
     drop_path = tmp_path / "dropped_writes.jsonl"
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
     monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
     monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
-    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
-    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
-    monkeypatch.setenv("NX_SERVICE_TOKEN", "wrong-scope-token")
+    _configure_engine(cfg_dir, "http://127.0.0.1:4242", "wrong-scope-token")
     lib = _load_lib()
 
     def _fake_urlopen(req, timeout=None):  # noqa: ARG001
@@ -951,12 +949,10 @@ def test_log_routing_event_404_response_meters_with_cause_route_absent(tmp_path,
     routing_events route yet, so every hook decision 404s until the
     engine catches up. Must classify as route_absent (version skew),
     never a generic failure."""
-    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
     drop_path = tmp_path / "dropped_writes.jsonl"
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
-    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
-    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
-    monkeypatch.setenv("NX_SERVICE_TOKEN", "some-token")
+    _configure_engine(cfg_dir, "http://127.0.0.1:4242", "some-token")
     lib = _load_lib()
 
     def _fake_urlopen(req, timeout=None):  # noqa: ARG001
@@ -973,12 +969,10 @@ def test_log_routing_event_404_response_meters_with_cause_route_absent(tmp_path,
 
 
 def test_log_routing_event_405_response_meters_with_cause_route_absent(tmp_path, monkeypatch):
-    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
     drop_path = tmp_path / "dropped_writes.jsonl"
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
-    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
-    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
-    monkeypatch.setenv("NX_SERVICE_TOKEN", "some-token")
+    _configure_engine(cfg_dir, "http://127.0.0.1:4242", "some-token")
     lib = _load_lib()
 
     def _fake_urlopen(req, timeout=None):  # noqa: ARG001
@@ -995,12 +989,10 @@ def test_log_routing_event_405_response_meters_with_cause_route_absent(tmp_path,
 
 
 def test_log_routing_event_5xx_response_meters_with_cause_5xx(tmp_path, monkeypatch):
-    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
     drop_path = tmp_path / "dropped_writes.jsonl"
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
-    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
-    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
-    monkeypatch.setenv("NX_SERVICE_TOKEN", "some-token")
+    _configure_engine(cfg_dir, "http://127.0.0.1:4242", "some-token")
     lib = _load_lib()
 
     def _fake_urlopen(req, timeout=None):  # noqa: ARG001
@@ -1017,12 +1009,10 @@ def test_log_routing_event_5xx_response_meters_with_cause_5xx(tmp_path, monkeypa
 
 
 def test_log_routing_event_connect_failure_meters_with_cause_connect(tmp_path, monkeypatch):
-    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
     drop_path = tmp_path / "dropped_writes.jsonl"
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
-    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
-    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
-    monkeypatch.setenv("NX_SERVICE_TOKEN", "some-token")
+    _configure_engine(cfg_dir, "http://127.0.0.1:4242", "some-token")
     lib = _load_lib()
 
     def _fake_urlopen(req, timeout=None):  # noqa: ARG001
@@ -1039,12 +1029,10 @@ def test_log_routing_event_connect_failure_meters_with_cause_connect(tmp_path, m
 
 
 def test_log_routing_event_timeout_meters_with_cause_timeout(tmp_path, monkeypatch):
-    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
     drop_path = tmp_path / "dropped_writes.jsonl"
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
-    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
-    monkeypatch.setenv("NX_SERVICE_PORT", "4242")
-    monkeypatch.setenv("NX_SERVICE_TOKEN", "some-token")
+    _configure_engine(cfg_dir, "http://127.0.0.1:4242", "some-token")
     lib = _load_lib()
 
     def _fake_urlopen(req, timeout=None):  # noqa: ARG001
@@ -1266,14 +1254,17 @@ def _refused_port() -> int:
     return port
 
 
-def _hook_env(tmp_path, port: int) -> dict:
+def _hook_env(tmp_path, port: int, token: str = "t") -> dict:
+    """The hook's environment, with the engine named where telemetry looks: the account's ``config.yml`` (the account home
+    :func:`_run_deny_hook` and the stubs below use). The environment's own endpoint variables are decoys."""
+    _configure_engine(pathlib.Path(_telemetry_home(tmp_path)) / ".config" / "nexus", f"http://127.0.0.1:{port}", token)
     env = dict(os.environ)
     env.update({
         "NEXUS_CONFIG_DIR": str(tmp_path / "isolated-nexus-config"),
         "NX_DROPPED_WRITES_LOG_PATH": str(tmp_path / "dropped_writes.jsonl"),
         "NX_SERVICE_HOST": "127.0.0.1",
-        "NX_SERVICE_PORT": str(port),
-        "NX_SERVICE_TOKEN": "t",
+        "NX_SERVICE_PORT": "9",
+        "NX_SERVICE_TOKEN": "decoy-token",
     })
     env.pop("NX_SERVICE_URL", None)
     return env
@@ -1421,8 +1412,7 @@ def test_the_bearer_token_goes_to_the_child_over_stdin_never_argv(tmp_path):
         + f"sys.executable = {str(fake)!r}\n"
         "_lib.log_routing_event(rule='r', outcome='deny')\n"
     )
-    env = _hook_env(tmp_path, 1)
-    env["NX_SERVICE_TOKEN"] = "tok-SENTINEL-njn1a"
+    env = _hook_env(tmp_path, 1, "tok-SENTINEL-njn1a")
     proc = subprocess.run([sys.executable, "-c", stub], capture_output=True, text=True, env=env, timeout=30)
     assert proc.returncode == 0, proc.stderr
     deadline = _time.monotonic() + 10

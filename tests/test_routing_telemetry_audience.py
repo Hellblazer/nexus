@@ -196,6 +196,11 @@ def test_a_project_that_asks_for_telemetry_sends_no_row(engine, tmp_path) -> Non
 
 def test_a_user_with_telemetry_on_sends_the_row_from_any_repo(engine, tmp_path) -> None:
     bodies, env, dropped = engine
-    out = _credential_read(plain_repo(tmp_path / "other"), write_user_settings(tmp_path / "acct", telemetry=True), env)
+    home = write_user_settings(tmp_path / "acct", telemetry=True)
+    # telemetry resolves its endpoint from the account's config directory alone (RDR-259 Decision 9)
+    (pathlib.Path(home) / ".config" / "nexus" / "config.yml").write_text(
+        f"credentials:\n  service_url: http://127.0.0.1:{env['NX_SERVICE_PORT']}\n  service_token: test-token\n", encoding="utf-8",
+    )
+    out = _credential_read(plain_repo(tmp_path / "other"), home, env)
     assert out["permissionDecision"] == "deny"
     assert _settled(bodies, dropped, expect=True) and [b["outcome"] for b in bodies] == ["deny"]

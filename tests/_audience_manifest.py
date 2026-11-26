@@ -43,6 +43,7 @@ WRAPPERS = ("run_hook", "never_fail", "entry", "mcp", "main_try", "local_try", "
 PREDICATES: dict[str, str] = {
     "guard_mode": "'strict'",
     "telemetry_enabled": "False",
+    "telemetry_child_env": "None",
     "t1_nudge_enabled": "True",
     "project_text": "None",
     "project_brief_questions": "[]",

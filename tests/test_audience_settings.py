@@ -101,8 +101,13 @@ def test_the_module_is_stdlib_only_and_reads_one_environment_variable():
                 reads.append(n)
         src = path.read_text(encoding="utf-8")
         assert reads, "the probe found no os.environ use at all (CLAUDE_PROJECT_DIR is read)"
-        for name in ("HOME", "USERPROFILE", "NEXUS_CONFIG_DIR", "XDG_CONFIG_HOME", "NX_SERVICE_URL"):
-            assert '"' + name + '"' not in src and "'" + name + "'" not in src, name
+        # The names may appear where telemetry_child_env strips or sets them in a copy of the environment it is GIVEN
+        # (RDR-259 Decision 9); what is forbidden is reading them from this process: no ``os.environ[...]``, no getenv.
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Attribute) and n.value.attr == "environ":
+                raise AssertionError("the reader may only .get the CLAUDE_PROJECT_DIR variable")
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("getenv", "putenv"):
+                raise AssertionError("the reader reads no environment variable but CLAUDE_PROJECT_DIR")
         assert src.count("CLAUDE_PROJECT_DIR") >= 1
         for n in ast.walk(tree):
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("get", "pop", "setdefault", "copy"):

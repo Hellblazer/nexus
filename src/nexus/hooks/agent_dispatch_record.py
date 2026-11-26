@@ -14,6 +14,11 @@ minute on a cold mint, longer waiting on the mint lock), so a watchdog ends
 the child after ``_CHILD_LIFETIME_S`` whatever it is doing: no row then, as
 with any other failure.
 
+The child is started with the environment ``nexus.hooks._audience.telemetry_child_env`` builds (RDR-259 Decision 9): no
+endpoint, token, mint, config-directory or proxy variable from the hook's environment, and ``HOME`` and
+``NEXUS_CONFIG_DIR`` pinned to the OS account's own, so the resolve and the mint below read only the account's
+configuration. An account with no home gets no child and one drop-meter row.
+
 Best effort end to end: a missing endpoint, an engine without the route
 (404), a slow engine or any other failure leaves no row and no output. The
 engine upsert keeps the larger count per (session, agent), so the re-stop
@@ -33,6 +38,14 @@ import subprocess
 import sys
 import warnings
 from typing import Any
+
+# The environment a telemetry child starts with (RDR-259 Decision 9). A helper that cannot be imported builds none, which
+# is no child: telemetry sends data, so a broken helper sends nothing.
+try:
+    from nexus.hooks._audience import telemetry_child_env
+except BaseException:  # noqa: BLE001
+    def telemetry_child_env(environ):
+        return None
 
 __all__ = ["OFF_ENV", "main", "run_child", "spawn"]
 
@@ -63,6 +76,16 @@ def _disabled() -> bool:
     return os.environ.get(OFF_ENV, "").strip().lower() in {"off", "0"}
 
 
+def _report_no_home(text: str) -> None:
+    """Meter the refusal to send, as the routing poster does: a row in the drop meter, which ``nx doctor`` reads. Never raises."""
+    try:
+        from nexus.dropped_writes import record_drop  # noqa: PLC0415 — only when there is something to report
+
+        record_drop(hook="agent_dispatches", collection="", rows=1, error=text, cause="unresolvable")
+    except Exception:  # noqa: BLE001 — a counter must never cost the hook anything
+        pass
+
+
 def spawn(session_id: str, agent_id: str, agent_type: str, t1_puts: int) -> bool:
     """Start the recorder child and return at once; ``True`` when one started.
 
@@ -75,6 +98,10 @@ def spawn(session_id: str, agent_id: str, agent_type: str, t1_puts: int) -> bool
         from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 — stdlib-only helper, deferred to the spawn
         from nexus.util.stable_cwd import detached_spawn_kwargs  # noqa: PLC0415 — stdlib-only helper, deferred to the spawn
 
+        env = telemetry_child_env(os.environ)
+        if env is None:
+            _report_no_home("telemetry is on, but this account has no home directory, so no telemetry is sent")
+            return False
         payload = json.dumps({
             "session_id": session_id,
             "agent_id": agent_id,
@@ -88,6 +115,7 @@ def spawn(session_id: str, agent_id: str, agent_type: str, t1_puts: int) -> bool
             "stderr": subprocess.DEVNULL,
             "close_fds": True,
             **detached_spawn_kwargs(),
+            "env": env,
         }
         if os.name == "nt":
             base = _CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP

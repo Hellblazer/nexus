@@ -461,6 +461,7 @@ modules:
   hooks/scripts/routing/_lib.py:
     wrapper: local_try
     predicates:
+    - telemetry_child_env
     - telemetry_enabled
   hooks/scripts/routing/_user_git_seatbelt.py:
     wrapper: none
@@ -483,6 +484,10 @@ modules:
   nexus.hooks.session_context:
     wrapper: entry
     predicates: []
+  nexus.hooks.agent_dispatch_record:
+    wrapper: local_try
+    predicates:
+    - telemetry_child_env
   nexus.hooks.subagent_stop_t1_nudge:
     wrapper: never_fail
     predicates:

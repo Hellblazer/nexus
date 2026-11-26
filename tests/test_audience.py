@@ -373,8 +373,11 @@ def test_without_the_seam_the_home_is_the_account_databases_even_with_home_chang
 def test_the_override_is_never_read_from_the_environment(monkeypatch):
     src = (SCRIPTS / "_audience.py").read_text()
     assert "environ" in src and "CLAUDE_PROJECT_DIR" in src
-    for name in ("HOME", "USERPROFILE", "NEXUS_CONFIG_DIR", "XDG_CONFIG_HOME"):
-        assert f'"{name}"' not in src and f"'{name}'" not in src, name
+    # The names appear only where telemetry_child_env strips or sets them in a copy of the environment it is GIVEN (RDR-259
+    # Decision 9); no line reads the process environment for anything but CLAUDE_PROJECT_DIR.
+    reads = [ln for ln in src.splitlines() if "os.environ" in ln and not ln.lstrip().startswith(("#", '"""'))]
+    assert len(reads) == 1 and "CLAUDE_PROJECT_DIR" in reads[0], reads
+    assert "getenv" not in src and "environ[" not in src and "environ.copy" not in src
     monkeypatch.setenv("_ACCOUNT_HOME_OVERRIDE", "/nonexistent")
     monkeypatch.setattr(_audience, "_ACCOUNT_HOME_OVERRIDE", None)
     assert _audience.account_home() != "/nonexistent"

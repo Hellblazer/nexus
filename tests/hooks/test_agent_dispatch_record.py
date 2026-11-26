@@ -68,13 +68,27 @@ class _Engine:
 
 
 @pytest.fixture
-def engine_env(monkeypatch: pytest.MonkeyPatch):
-    """Point both this process and any child at a fresh stub engine."""
+def engine_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Point this process, and the account's config directory a spawned child reads, at a fresh stub engine.
+
+    ``spawn`` starts the child with ``telemetry_child_env``'s environment (RDR-259 Decision 9): no ``NX_SERVICE_*``, and
+    ``HOME`` and ``NEXUS_CONFIG_DIR`` pinned to the account, so a spawned child finds the engine only in the account's
+    ``config.yml``. The ``NX_SERVICE_*`` set here serve the in-process ``main`` and the ``python -m`` runs.
+    """
+    from nexus.hooks import _audience
+
     made: list[_Engine] = []
+    account = tmp_path / "account-home"
+    monkeypatch.setattr(_audience, "_ACCOUNT_HOME_OVERRIDE", str(account))
 
     def make(status: int = 200, delay: float = 0.0) -> _Engine:
         eng = _Engine(status, delay)
         made.append(eng)
+        config_dir = account / ".config" / "nexus"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yml").write_text(
+            f"credentials:\n  service_url: {eng.url}\n  service_token: test-token\n", encoding="utf-8",
+        )
         monkeypatch.setenv("NX_SERVICE_URL", eng.url)
         monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
         monkeypatch.delenv(rec.OFF_ENV, raising=False)
