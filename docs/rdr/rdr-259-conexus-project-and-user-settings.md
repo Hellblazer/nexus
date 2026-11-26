@@ -296,23 +296,27 @@ https://code.claude.com/docs/en/).**
   `agent_id` and `agent_type` are present inside a subagent. Command hooks get
   `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA`.
 
-**Research 7 (Verified by source reading).** nexus's preflight script exits
-non-zero (2, 3, 4, 5) on every `PREFLIGHT_FAIL_*` line
-(`scripts/agent-worktree-preflight.sh:46-88`), so an exit-status contract
-covers it without the plugin knowing the `PREFLIGHT_FAIL` convention. `nx ci
+**Research 7 (Verified by source reading).** nexus's preflight script
+documents a non-zero exit (2, 3, 4, 5) for each of its four
+`PREFLIGHT_FAIL_*` kinds (`scripts/agent-worktree-preflight.sh:46-52`; two of
+the echo-then-exit sites read, at :81-82 and :88), so an exit-status contract
+fits it without the plugin knowing the `PREFLIGHT_FAIL` convention. `nx ci
 wait` reads "the CI board where the branch has a topic, otherwise GitHub's
 check-runs" (`src/nexus/commands/ci_cmd.py:38`); the board and its channel
 posts exist only where a project runs the board.
 
 **Research 8 (Verified in passing).** While reading for this RDR, the
 installed 8.5.7 full guard denied a read-only `git symbolic-ref --short
-refs/remotes/origin/HEAD` from this subagent, which is the over-match class
-nexus-5y47c fixes. The full guard is what a user opting into `strict` gets, so
+refs/remotes/origin/HEAD` from this subagent, a false denial of the
+read-only kind nexus-5y47c targets (whether 86a5fa0ff1 admits this exact
+command was not tested). The full guard is what a user opting into `strict` gets, so
 that fix matters more once strict is an option for everyone (Decision 10).
 
-**Research 9 (Documented).** `systemMessage` is a top-level hook output
-field the nx hook runtime already emits for user-visible notices
-(`src/nexus/_hook_runtime/_io.py:243-255`, used by `mcp_connect_check.py`).
+**Research 9 (Verified by source reading, for the emitter only).**
+`systemMessage` is a top-level hook output field the nx hook runtime already
+emits (`src/nexus/_hook_runtime/_io.py:243-255`, used by
+`mcp_connect_check.py`). The code does not say the user sees it; that is an
+assumption below.
 
 ### Critical Assumptions
 
@@ -327,8 +331,9 @@ field the nx hook runtime already emits for user-visible notices
   `project.json`, which is the same tracked content on the same commit; the
   design holds, and the spike result goes into `docs/settings.md`.
 - [ ] A SessionStart command hook's `systemMessage` is shown to the user in
-  the CLI and in Desktop. **Status**: Documented for the CLI by the existing
-  `mcp_connect_check` use; Desktop unverified. **Method**: Spike.
+  the CLI and in Desktop. **Status**: Unverified in both; the existing
+  `mcp_connect_check` use shows only that the field is written. **Method**:
+  Spike.
 - [ ] Reading two small JSON files and walking up to `.git` adds under 5 ms
   to a hook call. **Status**: Unverified. **Method**: measure in Phase 1 on
   the laptop and on Windows; the git guard already stats and shells to git on
@@ -365,9 +370,11 @@ worktree reads its own copy, which is the tracked file on that worktree's
 branch. A `cwd` outside any repository has no project settings. Sam ruled the
 name (ruling 7). The file is tracked so it reaches every place the project's
 sessions run: the primary, every worktree, a copy made for a remote test
-host, Desktop, `claude -p`, and cloud sessions (where a repository's
-`.claude/settings.json` hooks and env are ignored, but the plugin's own hook
-can still read a file in the checkout).
+host, Desktop and `claude -p`. Cloud sessions are a weaker case: a
+repository's `.claude/settings.json` hooks and env are ignored there, and
+plugins installed at user or local scope are not available, so the file
+applies in a cloud session only where the plugin itself runs there (not
+settled by the docs; Research 6).
 
 **User file: `<account home>/.config/nexus/conexus.json`.** The account
 home comes from the OS account database (`pwd` on POSIX, the
@@ -390,9 +397,10 @@ Alternatives weighed for the user file:
 
 - *Plugin `userConfig`.* Discoverable (Claude Code shows a dialog at install),
   but rejected for four reasons. Its values reach hooks as environment
-  variables, and a project's `env` can set the same names, so a user-only key
-  such as `telemetry` could be turned on by a repository (Research 6). It has
-  no project scope. It lives in `~/.claude/settings.json`, which is not read in
+  variables, and a project's `env` can set the same names, so if project env
+  reaches command hooks (assumed, not measured) a user-only key such as
+  `telemetry` could be turned on by a repository (Research 6). No project
+  scope is documented for it. It lives in `~/.claude/settings.json`, which is not read in
   cloud sessions and which nx (outside Claude Code) would have to parse to
   show the effective settings. And it couples the settings contract to a
   Claude Code feature whose shape the plugin does not control.
@@ -682,8 +690,9 @@ The two open questions, bounded:
   matter here, because no plugin setting lives in `.claude/settings.json`;
   the plugin reads `project.json` from the payload's `cwd`. The Phase 0 spike
   records which `cwd` a worktree subagent's hook sees.
-- *Can plugin `userConfig` be set per project?* No: the documented scope is
-  user or managed (Research 6). That is one of the reasons Decision 1 does
+- *Can plugin `userConfig` be set per project?* Not as far as the docs go:
+  the only documented scope is user or managed, and the negative is inferred
+  from their silence, not stated or tested (Research 6). That is one of the reasons Decision 1 does
   not use it.
 
 #### Decision 9: Security
@@ -735,8 +744,9 @@ Loosenings that remain, and why each is acceptable:
 
 Out of the threat model: an agent that deliberately edits the user's own
 `conexus.json` to escape the guard. The guard prevents accidents by
-cooperative agents; writing outside the project directory raises Claude
-Code's own prompt in the default permission mode. This is recorded as a risk.
+cooperative agents, and we assume (not checked in the docs or tested) that
+writing outside the project directory raises Claude Code's own prompt in the
+default permission mode. This is recorded as a risk.
 
 #### Decision 10: The subagent git guard fix (nexus-5y47c) and the merge order
 
@@ -748,7 +758,7 @@ swaps `maintainer` for `guard_mode`, with the fallback answering strict.
 
 Merge order: **nexus-5y47c lands on `develop` first**, then the Phase 3
 branch rebases onto it. The fix is reviewed and confirmed, it does not touch
-the settings model, and it removes false denials (Research 8) that users
+the settings model, and it removes false denials of the kind Research 8 shows, which users
 would otherwise meet the first time they opt into `strict`. Rebasing the
 rework onto it is a conflict in two places (the gate line and the deny
 text), both small. The reverse order would ship strict mode to users with the
@@ -1159,7 +1169,7 @@ changes only which copy of the same tracked file is read.
 | PreToolUse `permissionDecision: allow` vs `permissions.ask` | Claude Code | Docs Only (stated) |
 | PermissionRequest `allow` vs `permissions.ask` | Claude Code | Spike (Phase 0) |
 | Hook payload `cwd` in a worktree subagent | Claude Code | Spike (Phase 0) |
-| `systemMessage` at SessionStart | Claude Code | Source Search (existing use) plus Spike for Desktop |
+| `systemMessage` at SessionStart | Claude Code | Spike (Phase 0), CLI and Desktop |
 
 ### Scope Verification
 
