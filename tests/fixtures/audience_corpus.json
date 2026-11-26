@@ -1,5 +1,22 @@
 {
- "comment": "Parity corpus for the audience helper (nexus-sby49.3; reworked in nexus-sby49.4). Each row builds a layout under a tmp dir, picks a payload and the user's settings file (user: null, an object for conexus.json, \"dir\" for a directory in its place, or a raw string), and names the answer of each reader: guard_mode, project_settings, telemetry_enabled, t1_nudge_enabled and advice_blocked. The plugin copy (conexus/hooks/scripts/_audience.py) and the src copy (src/nexus/hooks/_audience.py) must give it. The previous release's plugin copy (git show <tag>:...) knows only the two legacy markers, so on every row that does not set prev_release to false its nexus_repo answer must equal 'the project is strict'. Paths are relative to the tmp dir and use '/'. A file entry is a file, a dir entry a directory, a link entry a symlink (posix only: a row with a link sets posix_only).",
+ "comment": "Parity corpus for the audience helper (RDR-259 Decisions 1-4, 7 and 11; nexus-sby49.8). Each row lays out a tree under a tmp dir and names the user settings file and the account home. payload is a dict whose cwd is relative to tmp (raw_cwd: taken as written), or null (not a dict), or {} (no cwd). Layout kinds: dir; file (c as text, or bytes_b64 for raw bytes; pad_to appends spaces up to that many bytes); symlink or link (t, relative to tmp); fifo (posix only); rm (deletes a file); git (dir, args: runs git in tmp/dir with no global or system config). home_files use the same kinds, relative to the account home. user is null, an object (written as JSON), a raw string, or \"dir\" (a directory in its place). expect lists only the fields that differ from defaults; a listed field replaces the default whole. Compared fields: guard_mode, project, user, telemetry, t1_nudge, advice_blocked, brief_questions, integration_branch and problems (sorted [file, key] pairs); remote_test_hosts when a row lists it. Flags: head (readers called with head=True), needs_git (skipped without git on PATH), posix_only, env_project_dir (CLAUDE_PROJECT_DIR, relative to tmp), no_home (no account home), prev_release false (the previous release's helper cannot know the row), covers (the Decision 4 and related cases the row exercises). Expectations were derived by hand from the RDR, not taken from running a reader.",
+ "defaults": {
+  "guard_mode": "seatbelt",
+  "project": {},
+  "user": {
+   "subagent_git": "seatbelt",
+   "advice_block": [],
+   "brief_questions": [],
+   "telemetry": false,
+   "t1_nudge": true
+  },
+  "telemetry": false,
+  "t1_nudge": true,
+  "advice_blocked": [],
+  "brief_questions": [],
+  "integration_branch": null,
+  "problems": []
+ },
  "markers": [
   ".nexus/dev-process.json",
   "scripts/agent-worktree-preflight.sh"
@@ -16,14 +33,11 @@
    "payload": {
     "cwd": "r"
    },
-   "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
-   "user": null
+   "user": null,
+   "covers": [
+    "project:absent",
+    "user:absent"
+   ]
   },
   {
    "id": "plain-repo-user-strict",
@@ -36,16 +50,24 @@
    "payload": {
     "cwd": "r"
    },
+   "user": {
+    "subagent_git": "strict",
+    "advice_block": [],
+    "brief_questions": [],
+    "telemetry": false,
+    "t1_nudge": true
+   },
    "expect": {
     "guard_mode": "strict",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    }
    },
-   "user": {
-    "subagent_git": "strict"
-   }
+   "prev_release": false
   },
   {
    "id": "phase1-marker-no-user-file",
@@ -62,16 +84,16 @@
    "payload": {
     "cwd": "r"
    },
+   "user": null,
+   "covers": [
+    "legacy-marker-1"
+   ],
    "expect": {
     "guard_mode": "strict",
     "project": {
      "subagent_git": "strict"
-    },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
-   "user": null
+    }
+   }
   },
   {
    "id": "phase2-marker-no-user-file",
@@ -89,16 +111,16 @@
    "payload": {
     "cwd": "r"
    },
+   "user": null,
+   "covers": [
+    "legacy-marker-2"
+   ],
    "expect": {
     "guard_mode": "strict",
     "project": {
      "subagent_git": "strict"
-    },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
-   "user": null
+    }
+   }
   },
   {
    "id": "both-markers",
@@ -109,7 +131,8 @@
     },
     {
      "p": "r/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     },
     {
      "p": "r/scripts/agent-worktree-preflight.sh",
@@ -119,18 +142,27 @@
    "payload": {
     "cwd": "r"
    },
+   "user": {
+    "subagent_git": "strict",
+    "advice_block": [],
+    "brief_questions": [],
+    "telemetry": false,
+    "t1_nudge": true
+   },
    "expect": {
     "guard_mode": "strict",
     "project": {
      "subagent_git": "strict"
     },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    }
    },
-   "user": {
-    "subagent_git": "strict"
-   }
+   "prev_release": false
   },
   {
    "id": "strict-project-repo-subdir",
@@ -141,7 +173,8 @@
     },
     {
      "p": "r/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     },
     {
      "p": "r/src/pkg",
@@ -151,16 +184,13 @@
    "payload": {
     "cwd": "r/src/pkg"
    },
+   "user": null,
    "expect": {
     "guard_mode": "strict",
     "project": {
      "subagent_git": "strict"
-    },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
-   "user": null
+    }
+   }
   },
   {
    "id": "strict-project-repo-cwd-in-dot-git",
@@ -171,22 +201,20 @@
     },
     {
      "p": "r/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     }
    ],
    "payload": {
     "cwd": "r/.git/hooks"
    },
+   "user": null,
    "expect": {
     "guard_mode": "strict",
     "project": {
      "subagent_git": "strict"
-    },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
-   "user": null
+    }
+   }
   },
   {
    "id": "strict-project-repo-cwd-gone",
@@ -197,22 +225,20 @@
     },
     {
      "p": "r/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     }
    ],
    "payload": {
     "cwd": "r/deleted/worktree"
    },
+   "user": null,
    "expect": {
     "guard_mode": "strict",
     "project": {
      "subagent_git": "strict"
-    },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
-   "user": null
+    }
+   }
   },
   {
    "id": "nested-repo-inside-strict-project-no-user-file",
@@ -223,7 +249,8 @@
     },
     {
      "p": "r/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     },
     {
      "p": "r/vendor/lib/.git",
@@ -232,13 +259,6 @@
    ],
    "payload": {
     "cwd": "r/vendor/lib"
-   },
-   "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
    },
    "user": null
   },
@@ -251,7 +271,8 @@
     },
     {
      "p": "r/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     },
     {
      "p": "r/vendor/lib/.git",
@@ -261,16 +282,24 @@
    "payload": {
     "cwd": "r/vendor/lib"
    },
+   "user": {
+    "subagent_git": "strict",
+    "advice_block": [],
+    "brief_questions": [],
+    "telemetry": false,
+    "t1_nudge": true
+   },
    "expect": {
     "guard_mode": "strict",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    }
    },
-   "user": {
-    "subagent_git": "strict"
-   }
+   "prev_release": false
   },
   {
    "id": "submodule-git-file",
@@ -281,7 +310,8 @@
     },
     {
      "p": "r/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     },
     {
      "p": "r/sub/.git",
@@ -291,13 +321,6 @@
    ],
    "payload": {
     "cwd": "r/sub"
-   },
-   "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
    },
    "user": null
   },
@@ -311,22 +334,20 @@
     },
     {
      "p": "wt/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     }
    ],
    "payload": {
     "cwd": "wt"
    },
+   "user": null,
    "expect": {
     "guard_mode": "strict",
     "project": {
      "subagent_git": "strict"
-    },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
-   "user": null
+    }
+   }
   },
   {
    "id": "linked-worktree-older-branch-no-user-file",
@@ -339,13 +360,6 @@
    ],
    "payload": {
     "cwd": "wt"
-   },
-   "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
    },
    "user": null
   },
@@ -361,16 +375,24 @@
    "payload": {
     "cwd": "wt"
    },
+   "user": {
+    "subagent_git": "strict",
+    "advice_block": [],
+    "brief_questions": [],
+    "telemetry": false,
+    "t1_nudge": true
+   },
    "expect": {
     "guard_mode": "strict",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    }
    },
-   "user": {
-    "subagent_git": "strict"
-   }
+   "prev_release": false
   },
   {
    "id": "no-git-anywhere",
@@ -383,13 +405,6 @@
    "payload": {
     "cwd": "plain/dir"
    },
-   "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
    "user": null
   },
   {
@@ -397,7 +412,8 @@
    "layout": [
     {
      "p": "o/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     },
     {
      "p": "o/inner/.git",
@@ -406,13 +422,6 @@
    ],
    "payload": {
     "cwd": "o/inner"
-   },
-   "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
    },
    "user": null
   },
@@ -431,17 +440,10 @@
    "payload": {
     "cwd": "r"
    },
-   "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
    "user": null
   },
   {
-   "id": "user-file-is-a-directory",
+   "id": "user-file-is-a-directory-gives-strict",
    "layout": [
     {
      "p": "r/.git",
@@ -451,18 +453,30 @@
    "payload": {
     "cwd": "r"
    },
+   "user": "dir",
+   "covers": [
+    "user:not-regular"
+   ],
    "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    "guard_mode": "strict",
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      ""
+     ]
+    ]
    },
-   "user": "dir"
+   "prev_release": false
   },
   {
    "id": "symlinked-cwd-to-strict-project-repo",
-   "posix_only": true,
    "layout": [
     {
      "p": "r/.git",
@@ -470,27 +484,26 @@
     },
     {
      "p": "r/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     },
     {
      "p": "elsewhere/here",
-     "k": "link",
+     "k": "symlink",
      "t": "r"
     }
    ],
    "payload": {
     "cwd": "elsewhere/here"
    },
+   "user": null,
    "expect": {
     "guard_mode": "strict",
     "project": {
      "subagent_git": "strict"
-    },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    }
    },
-   "user": null
+   "posix_only": true
   },
   {
    "id": "project-dir-env-names-a-strict-project-repo",
@@ -501,24 +514,23 @@
     },
     {
      "p": "r/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     }
    ],
    "payload": {},
-   "env_project_dir": "r",
+   "user": null,
    "expect": {
     "guard_mode": "strict",
     "project": {
      "subagent_git": "strict"
-    },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    }
    },
-   "user": null
+   "env_project_dir": "r",
+   "prev_release": false
   },
   {
-   "id": "payload-cwd-wins-over-project-dir",
+   "id": "payload-cwd-does-not-override-project-dir",
    "layout": [
     {
      "p": "r/.git",
@@ -526,7 +538,8 @@
     },
     {
      "p": "r/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     },
     {
      "p": "u/.git",
@@ -536,15 +549,18 @@
    "payload": {
     "cwd": "u"
    },
-   "env_project_dir": "r",
+   "user": null,
+   "covers": [
+    "session-root-env-wins"
+   ],
    "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    }
    },
-   "user": null
+   "env_project_dir": "r",
+   "prev_release": false
   },
   {
    "id": "unsubstituted-cwd",
@@ -552,15 +568,8 @@
    "payload": {
     "cwd": "${cwd}"
    },
-   "raw_cwd": true,
-   "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
-   "user": null
+   "user": null,
+   "raw_cwd": true
   },
   {
    "id": "relative-cwd",
@@ -571,21 +580,15 @@
     },
     {
      "p": "r/.nexus/dev-process.json",
-     "k": "file"
+     "k": "file",
+     "c": ""
     }
    ],
    "payload": {
     "cwd": "relative/path"
    },
-   "raw_cwd": true,
-   "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
-   "user": null
+   "user": null,
+   "raw_cwd": true
   },
   {
    "id": "nul-byte-cwd",
@@ -593,61 +596,49 @@
    "payload": {
     "cwd": "bad\u0000path"
    },
-   "raw_cwd": true,
-   "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
-   "user": null
+   "user": null,
+   "raw_cwd": true
   },
   {
    "id": "empty-payload-no-user-file",
    "layout": [],
    "payload": {},
-   "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
    "user": null
   },
   {
    "id": "empty-payload-user-strict",
    "layout": [],
    "payload": {},
+   "user": {
+    "subagent_git": "strict",
+    "advice_block": [],
+    "brief_questions": [],
+    "telemetry": false,
+    "t1_nudge": true
+   },
    "expect": {
     "guard_mode": "strict",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    }
    },
-   "user": {
-    "subagent_git": "strict"
-   }
+   "prev_release": false
   },
   {
    "id": "payload-is-not-a-dict",
    "layout": [],
    "payload": null,
-   "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   },
    "user": null
   },
   {
    "id": "hosts-file-lines-commas-comments",
    "layout": [],
    "payload": {},
+   "user": null,
    "home_files": [
     {
      "p": ".config/nexus/remote-test-hosts",
@@ -655,34 +646,36 @@
     }
    ],
    "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": [],
     "remote_test_hosts": [
      "chas",
      "hellmini",
      "qwent"
     ]
-   },
-   "user": null
+   }
   },
   {
    "id": "hosts-file-absent",
    "layout": [],
    "payload": {},
+   "user": {
+    "subagent_git": "strict",
+    "advice_block": [],
+    "brief_questions": [],
+    "telemetry": false,
+    "t1_nudge": true
+   },
    "expect": {
     "guard_mode": "strict",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": [],
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
     "remote_test_hosts": []
    },
-   "user": {
-    "subagent_git": "strict"
-   }
+   "prev_release": false
   },
   {
    "id": "project-file-every-key",
@@ -694,7 +687,7 @@
     {
      "p": "r/.nexus/project.json",
      "k": "file",
-     "c": "{\"schema\": 1, \"subagent_git\": \"strict\", \"preflight\": \"tools/pre.sh\", \"ci_wait\": \"ci <sha>\", \"credential_helper\": \"Use tools/c.sh.\", \"brief_questions\": [\"Q1?\"], \"advice_block\": [\"pattern_kill\"]}"
+     "c": "{\"version\": 1, \"subagent_git\": \"strict\", \"preflight\": \"tools/pre.sh\", \"ci_wait\": \"ci <sha>\", \"credential_helper\": \"Use tools/c.sh.\", \"brief_questions\": [\"Q1?\"], \"advice_block\": [\"pattern_kill\"], \"integration_branch\": \"develop\"}"
     }
    ],
    "payload": {
@@ -713,13 +706,16 @@
      ],
      "advice_block": [
       "pattern_kill"
-     ]
+     ],
+     "integration_branch": "develop"
     },
-    "telemetry": false,
-    "t1_nudge": true,
+    "brief_questions": [
+     "Q1?"
+    ],
     "advice_blocked": [
      "pattern_kill"
-    ]
+    ],
+    "integration_branch": "develop"
    },
    "prev_release": false
   },
@@ -740,12 +736,23 @@
     "cwd": "r"
    },
    "user": null,
+   "covers": [
+    "project:wrong-file-key"
+   ],
    "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    "project": {
+     "subagent_git": "seatbelt"
+    },
+    "problems": [
+     [
+      ".nexus/project.json",
+      "telemetry"
+     ],
+     [
+      ".nexus/project.json",
+      "t1_nudge"
+     ]
+    ]
    },
    "prev_release": false
   },
@@ -766,14 +773,20 @@
     "cwd": "r"
    },
    "user": null,
+   "covers": [
+    "project:notjson"
+   ],
    "expect": {
     "guard_mode": "strict",
     "project": {
      "subagent_git": "strict"
     },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    "problems": [
+     [
+      ".nexus/project.json",
+      ""
+     ]
+    ]
    },
    "prev_release": false
   },
@@ -794,14 +807,20 @@
     "cwd": "r"
    },
    "user": null,
+   "covers": [
+    "project:notobject"
+   ],
    "expect": {
     "guard_mode": "strict",
     "project": {
      "subagent_git": "strict"
     },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    "problems": [
+     [
+      ".nexus/project.json",
+      ""
+     ]
+    ]
    },
    "prev_release": false
   },
@@ -826,19 +845,18 @@
     "cwd": "r"
    },
    "user": null,
+   "covers": [
+    "legacy-beside-project"
+   ],
    "expect": {
-    "guard_mode": "seatbelt",
     "project": {
      "preflight": "tools/pre.sh"
-    },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    }
    },
    "prev_release": false
   },
   {
-   "id": "project-file-wrong-types-are-ignored",
+   "id": "project-file-wrong-types-keep-the-rest",
    "layout": [
     {
      "p": "r/.git",
@@ -847,7 +865,290 @@
     {
      "p": "r/.nexus/project.json",
      "k": "file",
-     "c": "{\"subagent_git\": 1, \"preflight\": 3, \"advice_block\": [1, \"a\", \"\"]}"
+     "c": "{\"subagent_git\": 1, \"preflight\": 3, \"advice_block\": [1, \"pattern_kill\", \"nope\"]}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:subagent-git-bad",
+    "project:list-item-wrong"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict",
+     "advice_block": [
+      "pattern_kill"
+     ]
+    },
+    "advice_blocked": [
+     "pattern_kill"
+    ],
+    "problems": [
+     [
+      ".nexus/project.json",
+      "subagent_git"
+     ],
+     [
+      ".nexus/project.json",
+      "preflight"
+     ],
+     [
+      ".nexus/project.json",
+      "advice_block"
+     ],
+     [
+      ".nexus/project.json",
+      "advice_block"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-list-not-a-list",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"advice_block\": \"pattern_kill\", \"brief_questions\": \"Q1?\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:list-notlist"
+   ],
+   "expect": {
+    "problems": [
+     [
+      ".nexus/project.json",
+      "advice_block"
+     ],
+     [
+      ".nexus/project.json",
+      "brief_questions"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-list-item-wrong-type",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"brief_questions\": [5, \"Q1?\"]}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:list-item-wrong"
+   ],
+   "expect": {
+    "project": {
+     "brief_questions": [
+      "Q1?"
+     ]
+    },
+    "brief_questions": [
+     "Q1?"
+    ],
+    "problems": [
+     [
+      ".nexus/project.json",
+      "brief_questions"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-advice-unknown-id",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"advice_block\": [\"pattern_kil\", \"whole_disk_scan\"]}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:advice-unknown-id"
+   ],
+   "expect": {
+    "project": {
+     "advice_block": [
+      "whole_disk_scan"
+     ]
+    },
+    "advice_blocked": [
+     "whole_disk_scan"
+    ],
+    "problems": [
+     [
+      ".nexus/project.json",
+      "advice_block"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-text-over-limit",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:text-over-limit"
+   ],
+   "expect": {
+    "problems": [
+     [
+      ".nexus/project.json",
+      "preflight"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-text-multiline",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"tools/pre.sh\\nrm -rf x\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:text-multiline"
+   ],
+   "expect": {
+    "problems": [
+     [
+      ".nexus/project.json",
+      "preflight"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-text-control",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"tools/pre\\u0007.sh\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:text-control"
+   ],
+   "expect": {
+    "problems": [
+     [
+      ".nexus/project.json",
+      "preflight"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-text-multibyte-over-limit",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:text-multibyte"
+   ],
+   "expect": {
+    "problems": [
+     [
+      ".nexus/project.json",
+      "preflight"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-text-multibyte-at-limit",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\\u00e9\"}"
     }
    ],
    "payload": {
@@ -855,16 +1156,1721 @@
    },
    "user": null,
    "expect": {
-    "guard_mode": "seatbelt",
     "project": {
-     "advice_block": [
-      "a"
+     "preflight": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9"
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-text-empty-is-unset",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"  \"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:text-empty"
+   ],
+   "prev_release": false
+  },
+  {
+   "id": "project-ci-wait-at-limit-with-sha",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"ci_wait\": \"wait <sha> xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "project": {
+     "ci_wait": "wait <sha> xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-ci-wait-over-limit",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"ci_wait\": \"ci <sha> xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "problems": [
+     [
+      ".nexus/project.json",
+      "ci_wait"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-credential-helper-over-limit",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"credential_helper\": \"Use tools/c.sh. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "problems": [
+     [
+      ".nexus/project.json",
+      "credential_helper"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-integration-branch-develop",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"integration_branch\": \"develop\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "project": {
+     "integration_branch": "develop"
+    },
+    "integration_branch": "develop"
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-integration-branch-leading-dash",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"integration_branch\": \"-x\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "problems": [
+     [
+      ".nexus/project.json",
+      "integration_branch"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-integration-branch-dotdot",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"integration_branch\": \"a..b\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "problems": [
+     [
+      ".nexus/project.json",
+      "integration_branch"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-unknown-key",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent-git\": \"strict\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:unknown-key"
+   ],
+   "expect": {
+    "problems": [
+     [
+      ".nexus/project.json",
+      "subagent-git"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-dollar-keys-ignored",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"$comment\": \"why\", \"$schema\": \"x\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:dollar-key"
+   ],
+   "prev_release": false
+  },
+  {
+   "id": "project-version-newer",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"version\": 2, \"subagent_git\": \"strict\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:version-newer"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "problems": [
+     [
+      ".nexus/project.json",
+      "version"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-version-bad",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"version\": \"x\", \"subagent_git\": \"strict\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:version-bad"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "problems": [
+     [
+      ".nexus/project.json",
+      "version"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-version-zero",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"version\": 0, \"preflight\": \"tools/pre.sh\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:version-bad"
+   ],
+   "expect": {
+    "project": {
+     "preflight": "tools/pre.sh"
+    },
+    "problems": [
+     [
+      ".nexus/project.json",
+      "version"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-version-bool",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"version\": true, \"preflight\": \"tools/pre.sh\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:version-bool"
+   ],
+   "expect": {
+    "project": {
+     "preflight": "tools/pre.sh"
+    },
+    "problems": [
+     [
+      ".nexus/project.json",
+      "version"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-brief-cap",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"brief_questions\": [\"Q1?\", \"Q2?\", \"Q3?\", \"Q4?\"]}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:brief-cap"
+   ],
+   "expect": {
+    "project": {
+     "brief_questions": [
+      "Q1?",
+      "Q2?",
+      "Q3?",
+      "Q4?"
      ]
     },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": [
-     "a"
+    "brief_questions": [
+     "Q1?",
+     "Q2?",
+     "Q3?"
+    ],
+    "problems": [
+     [
+      ".nexus/project.json",
+      "brief_questions"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-brief-question-over-limit",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"brief_questions\": [\"Qxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\", \"Q2?\"]}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "project": {
+     "brief_questions": [
+      "Q2?"
+     ]
+    },
+    "brief_questions": [
+     "Q2?"
+    ],
+    "problems": [
+     [
+      ".nexus/project.json",
+      "brief_questions"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-symlink-to-regular-file-is-not-followed",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/target.json",
+     "k": "file",
+     "c": "{\"preflight\": \"tools/pre.sh\"}"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "symlink",
+     "t": "r/target.json"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:symlink"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "problems": [
+     [
+      ".nexus/project.json",
+      ""
+     ]
+    ]
+   },
+   "posix_only": true,
+   "prev_release": false
+  },
+  {
+   "id": "project-not-regular-directory",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:not-regular"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "problems": [
+     [
+      ".nexus/project.json",
+      ""
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-fifo-is-not-opened",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "fifo"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:not-regular"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "problems": [
+     [
+      ".nexus/project.json",
+      ""
+     ]
+    ]
+   },
+   "posix_only": true,
+   "prev_release": false
+  },
+  {
+   "id": "project-oversize",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"seatbelt\"}",
+     "pad_to": 65537
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:oversize"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "problems": [
+     [
+      ".nexus/project.json",
+      ""
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-exact-limit",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"seatbelt\"}",
+     "pad_to": 65536
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:exact-limit"
+   ],
+   "expect": {
+    "project": {
+     "subagent_git": "seatbelt"
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-unreadable-not-utf8",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "bytes_b64": "eyJzdWJhZ2VudF9naXQiOiAic2VhdGJlbHQiff8="
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:unreadable-notutf8"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "problems": [
+     [
+      ".nexus/project.json",
+      ""
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-bom-read-normally",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "bytes_b64": "77u/eyJzdWJhZ2VudF9naXQiOiAic3RyaWN0IiwgInByZWZsaWdodCI6ICJ0b29scy9wcmUuc2gifQ=="
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "project:bom"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict",
+     "preflight": "tools/pre.sh"
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-json-not-an-object-gives-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": "[1]",
+   "covers": [
+    "user:notobject"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      ""
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-file-malformed-gives-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": "{bad",
+   "covers": [
+    "user:notjson"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      ""
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-file-symlink-to-regular-is-followed",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "home_files": [
+    {
+     "p": "dotfiles/conexus.json",
+     "c": "{\"subagent_git\": \"strict\", \"telemetry\": true}"
+    },
+    {
+     "k": "symlink",
+     "p": ".config/nexus/conexus.json",
+     "t": "dotfiles/conexus.json"
+    }
+   ],
+   "covers": [
+    "user:symlink"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "telemetry": true,
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": true,
+     "t1_nudge": true
+    }
+   },
+   "posix_only": true,
+   "prev_release": false
+  },
+  {
+   "id": "user-file-symlink-to-directory-gives-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "home_files": [
+    {
+     "k": "dir",
+     "p": "dotfiles/dir"
+    },
+    {
+     "k": "symlink",
+     "p": ".config/nexus/conexus.json",
+     "t": "dotfiles/dir"
+    }
+   ],
+   "covers": [
+    "user:not-regular"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      ""
+     ]
+    ]
+   },
+   "posix_only": true,
+   "prev_release": false
+  },
+  {
+   "id": "user-file-fifo-gives-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "home_files": [
+    {
+     "k": "fifo",
+     "p": ".config/nexus/conexus.json"
+    }
+   ],
+   "covers": [
+    "user:not-regular"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      ""
+     ]
+    ]
+   },
+   "posix_only": true,
+   "prev_release": false
+  },
+  {
+   "id": "user-file-oversize-gives-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "home_files": [
+    {
+     "p": ".config/nexus/conexus.json",
+     "c": "{\"subagent_git\": \"seatbelt\"}",
+     "pad_to": 65537
+    }
+   ],
+   "covers": [
+    "user:oversize"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      ""
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-file-exact-limit-is-read",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "home_files": [
+    {
+     "p": ".config/nexus/conexus.json",
+     "c": "{\"telemetry\": true}",
+     "pad_to": 65536
+    }
+   ],
+   "covers": [
+    "user:exact-limit"
+   ],
+   "expect": {
+    "telemetry": true,
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": true,
+     "t1_nudge": true
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-file-not-utf8-gives-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "home_files": [
+    {
+     "p": ".config/nexus/conexus.json",
+     "bytes_b64": "eyJ0ZWxlbWV0cnkiOiB0cnVlff8="
+    }
+   ],
+   "covers": [
+    "user:unreadable-notutf8"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      ""
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-file-bom-read-normally",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "home_files": [
+    {
+     "p": ".config/nexus/conexus.json",
+     "bytes_b64": "77u/eyJ0ZWxlbWV0cnkiOiB0cnVlfQ=="
+    }
+   ],
+   "covers": [
+    "user:bom"
+   ],
+   "expect": {
+    "telemetry": true,
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": true,
+     "t1_nudge": true
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-subagent-git-bad-gives-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "subagent_git": 1
+   },
+   "covers": [
+    "user:subagent-git-bad"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      "subagent_git"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-list-not-a-list",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "advice_block": "whole_disk_scan"
+   },
+   "covers": [
+    "user:list-notlist"
+   ],
+   "expect": {
+    "problems": [
+     [
+      "conexus.json",
+      "advice_block"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-list-item-wrong-type",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "brief_questions": [
+     5,
+     "U1?"
+    ]
+   },
+   "covers": [
+    "user:list-item-wrong"
+   ],
+   "expect": {
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [],
+     "brief_questions": [
+      "U1?"
+     ],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "brief_questions": [
+     "U1?"
+    ],
+    "problems": [
+     [
+      "conexus.json",
+      "brief_questions"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-advice-unknown-id",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "advice_block": [
+     "pattern_kil"
+    ]
+   },
+   "covers": [
+    "user:advice-unknown-id"
+   ],
+   "expect": {
+    "problems": [
+     [
+      "conexus.json",
+      "advice_block"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-text-over-limit-is-wrong-file",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "preflight": "ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+   },
+   "covers": [
+    "user:text-over-limit"
+   ],
+   "expect": {
+    "problems": [
+     [
+      "conexus.json",
+      "preflight"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-text-multiline-is-wrong-file",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "ci_wait": "wait\nnow"
+   },
+   "covers": [
+    "user:text-multiline"
+   ],
+   "expect": {
+    "problems": [
+     [
+      "conexus.json",
+      "ci_wait"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-text-control-is-wrong-file",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "credential_helper": "x\u0007"
+   },
+   "covers": [
+    "user:text-control"
+   ],
+   "expect": {
+    "problems": [
+     [
+      "conexus.json",
+      "credential_helper"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-text-multibyte-is-wrong-file",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "preflight": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9"
+   },
+   "covers": [
+    "user:text-multibyte"
+   ],
+   "expect": {
+    "problems": [
+     [
+      "conexus.json",
+      "preflight"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-text-empty-is-wrong-file",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "preflight": ""
+   },
+   "covers": [
+    "user:text-empty"
+   ],
+   "expect": {
+    "problems": [
+     [
+      "conexus.json",
+      "preflight"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-telemetry-not-boolean",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "telemetry": "yes"
+   },
+   "covers": [
+    "user:telemetry-notbool"
+   ],
+   "expect": {
+    "problems": [
+     [
+      "conexus.json",
+      "telemetry"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-t1-nudge-not-boolean",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "t1_nudge": 0
+   },
+   "covers": [
+    "user:t1-nudge-notbool"
+   ],
+   "expect": {
+    "problems": [
+     [
+      "conexus.json",
+      "t1_nudge"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-unknown-key",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "telemtry": true
+   },
+   "covers": [
+    "user:unknown-key"
+   ],
+   "expect": {
+    "problems": [
+     [
+      "conexus.json",
+      "telemtry"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-dollar-keys-ignored",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "$comment": "mine",
+    "$schema": "x",
+    "telemetry": true
+   },
+   "covers": [
+    "user:dollar-key"
+   ],
+   "expect": {
+    "telemetry": true,
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": true,
+     "t1_nudge": true
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-wrong-file-keys",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "preflight": "x",
+    "integration_branch": "develop"
+   },
+   "covers": [
+    "user:wrong-file-key"
+   ],
+   "expect": {
+    "problems": [
+     [
+      "conexus.json",
+      "preflight"
+     ],
+     [
+      "conexus.json",
+      "integration_branch"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-version-newer",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "version": 2,
+    "subagent_git": "strict"
+   },
+   "covers": [
+    "user:version-newer"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      "version"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-version-bad",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "version": "1",
+    "telemetry": true
+   },
+   "covers": [
+    "user:version-bad"
+   ],
+   "expect": {
+    "telemetry": true,
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": true,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      "version"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-version-bool",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "version": true,
+    "telemetry": true
+   },
+   "covers": [
+    "user:version-bool"
+   ],
+   "expect": {
+    "telemetry": true,
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": true,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      "version"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-brief-cap",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "brief_questions": [
+     "U1?",
+     "U2?",
+     "U3?",
+     "U4?"
+    ]
+   },
+   "covers": [
+    "user:brief-cap"
+   ],
+   "expect": {
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [],
+     "brief_questions": [
+      "U1?",
+      "U2?",
+      "U3?",
+      "U4?"
+     ],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "brief_questions": [
+     "U1?",
+     "U2?",
+     "U3?"
+    ],
+    "problems": [
+     [
+      "conexus.json",
+      "brief_questions"
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "brief-dup-across-files",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"brief_questions\": [\"Q1?\"]}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "brief_questions": [
+     "Q1?",
+     "U2?"
+    ]
+   },
+   "covers": [
+    "project:brief-dup",
+    "user:brief-dup"
+   ],
+   "expect": {
+    "project": {
+     "brief_questions": [
+      "Q1?"
+     ]
+    },
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [],
+     "brief_questions": [
+      "Q1?",
+      "U2?"
+     ],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "brief_questions": [
+     "Q1?",
+     "U2?"
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "project-and-user-brief-questions-merge",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"brief_questions\": [\"P1?\"]}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "brief_questions": [
+     "U1?"
+    ]
+   },
+   "expect": {
+    "project": {
+     "brief_questions": [
+      "P1?"
+     ]
+    },
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [],
+     "brief_questions": [
+      "U1?"
+     ],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "brief_questions": [
+     "P1?",
+     "U1?"
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "user-brief-question-control-char-dropped",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "brief_questions": [
+     "Q\u0007x",
+     "U2?"
+    ]
+   },
+   "expect": {
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [],
+     "brief_questions": [
+      "U2?"
+     ],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "brief_questions": [
+     "U2?"
+    ],
+    "problems": [
+     [
+      "conexus.json",
+      "brief_questions"
+     ]
     ]
    },
    "prev_release": false
@@ -893,13 +2899,20 @@
     ]
    },
    "expect": {
-    "guard_mode": "seatbelt",
-    "project": {},
     "telemetry": true,
     "t1_nudge": false,
     "advice_blocked": [
      "whole_disk_scan"
-    ]
+    ],
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [
+      "whole_disk_scan"
+     ],
+     "brief_questions": [],
+     "telemetry": true,
+     "t1_nudge": false
+    }
    },
    "prev_release": false
   },
@@ -925,14 +2938,20 @@
     ]
    },
    "expect": {
-    "guard_mode": "seatbelt",
     "project": {
      "advice_block": [
       "pattern_kill"
      ]
     },
-    "telemetry": false,
-    "t1_nudge": true,
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [
+      "whole_disk_scan"
+     ],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
     "advice_blocked": [
      "pattern_kill",
      "whole_disk_scan"
@@ -963,15 +2982,1231 @@
     "guard_mode": "strict",
     "project": {
      "subagent_git": "strict"
-    },
-    "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
+    }
    },
    "prev_release": false
   },
   {
-   "id": "user-file-malformed-leaves-defaults",
+   "id": "no-home-plain",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "no-home"
+   ],
+   "expect": {
+    "problems": [
+     [
+      "environment",
+      ""
+     ]
+    ]
+   },
+   "no_home": true,
+   "prev_release": false
+  },
+  {
+   "id": "no-home-project-file-still-read",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"tools/pre.sh\", \"subagent_git\": \"strict\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "preflight": "tools/pre.sh",
+     "subagent_git": "strict"
+    },
+    "problems": [
+     [
+      "environment",
+      ""
+     ]
+    ]
+   },
+   "no_home": true,
+   "prev_release": false
+  },
+  {
+   "id": "no-home-ignores-the-user-file",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "subagent_git": "strict",
+    "advice_block": [],
+    "brief_questions": [],
+    "telemetry": false,
+    "t1_nudge": true
+   },
+   "expect": {
+    "problems": [
+     [
+      "environment",
+      ""
+     ]
+    ]
+   },
+   "no_home": true,
+   "prev_release": false
+  },
+  {
+   "id": "head-committed-strict-worktree-drops-the-key",
+   "layout": [
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "add",
+      "--",
+      ".nexus/project.json"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"tools/pre.sh\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "head-lowers-strict-cannot-lower-wt"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "preflight": "tools/pre.sh"
+    }
+   },
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "head-committed-strict-worktree-seatbelt",
+   "layout": [
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "add",
+      "--",
+      ".nexus/project.json"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"seatbelt\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "head-lowers-strict-cannot-lower-wt"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "seatbelt"
+    }
+   },
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "head-committed-strict-worktree-file-deleted",
+   "layout": [
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "add",
+      "--",
+      ".nexus/project.json"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "rm"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "head-lowers-strict-cannot-lower-wt"
+   ],
+   "expect": {
+    "guard_mode": "strict"
+   },
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "head-committed-without-strict-worktree-strict",
+   "layout": [
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{}"
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "add",
+      "--",
+      ".nexus/project.json"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "head-union"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    }
+   },
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "head-commit-lacks-the-file-worktree-plain",
+   "layout": [
+    {
+     "p": "r/README.md",
+     "k": "file",
+     "c": "x\n"
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "add",
+      "--",
+      "README.md"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"tools/pre.sh\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "head-absent"
+   ],
+   "expect": {
+    "project": {
+     "preflight": "tools/pre.sh"
+    }
+   },
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "head-unborn-head-is-not-strict",
+   "layout": [
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"tools/pre.sh\"}"
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "head-unborn"
+   ],
+   "expect": {
+    "project": {
+     "preflight": "tools/pre.sh"
+    }
+   },
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "head-committed-invalid-json-gives-strict",
+   "layout": [
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{not json"
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "add",
+      "--",
+      ".nexus/project.json"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "rm"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "head-invalid-json"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "problems": [
+     [
+      ".nexus/project.json at HEAD",
+      ""
+     ]
+    ]
+   },
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "head-committed-oversize-gives-strict",
+   "layout": [
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"seatbelt\"}",
+     "pad_to": 65537
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "add",
+      "--",
+      ".nexus/project.json"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "rm"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "head-oversize"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "problems": [
+     [
+      ".nexus/project.json at HEAD",
+      ""
+     ]
+    ]
+   },
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "head-advice-union-with-worktree-and-user",
+   "layout": [
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"advice_block\": [\"pattern_kill\"]}"
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "add",
+      "--",
+      ".nexus/project.json"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"advice_block\": [\"whole_disk_scan\"]}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "advice_block": [
+     "hook_verb_by_hand"
+    ]
+   },
+   "covers": [
+    "head-union"
+   ],
+   "expect": {
+    "project": {
+     "advice_block": [
+      "whole_disk_scan"
+     ]
+    },
+    "user": {
+     "subagent_git": "seatbelt",
+     "advice_block": [
+      "hook_verb_by_hand"
+     ],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "advice_blocked": [
+     "hook_verb_by_hand",
+     "pattern_kill",
+     "whole_disk_scan"
+    ]
+   },
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "head-text-keys-come-from-the-worktree",
+   "layout": [
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"old\"}"
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "add",
+      "--",
+      ".nexus/project.json"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"new\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "expect": {
+    "project": {
+     "preflight": "new"
+    }
+   },
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "head-text-keys-not-read-from-the-commit",
+   "layout": [
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"old\", \"ci_wait\": \"ci <sha>\"}"
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "add",
+      "--",
+      ".nexus/project.json"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "head-plain-repository-no-project-file",
+   "layout": [
+    {
+     "p": "r/README.md",
+     "k": "file",
+     "c": "x\n"
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "add",
+      "--",
+      "README.md"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "cwd-checkout-strict-adds",
+   "layout": [
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "u",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "p": "u/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "u"
+   },
+   "user": null,
+   "covers": [
+    "cwd-checkout-adds"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {}
+   },
+   "head": true,
+   "needs_git": true,
+   "env_project_dir": "r",
+   "prev_release": false
+  },
+  {
+   "id": "cwd-checkout-seatbelt-cannot-lower-the-session-root",
+   "layout": [
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    },
+    {
+     "k": "git",
+     "dir": "u",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "p": "u/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"seatbelt\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "u"
+   },
+   "user": null,
+   "covers": [
+    "cwd-checkout-cannot-lower"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    }
+   },
+   "head": true,
+   "needs_git": true,
+   "env_project_dir": "r",
+   "prev_release": false
+  },
+  {
+   "id": "session-root-text-keys-win-over-cwd-checkout",
+   "layout": [
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"preflight\": \"tools/pre.sh\"}"
+    },
+    {
+     "k": "git",
+     "dir": "u",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "p": "u/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"seatbelt\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "u"
+   },
+   "user": null,
+   "covers": [
+    "session-root-env-wins"
+   ],
+   "expect": {
+    "project": {
+     "preflight": "tools/pre.sh"
+    }
+   },
+   "head": true,
+   "needs_git": true,
+   "env_project_dir": "r",
+   "prev_release": false
+  },
+  {
+   "id": "cwd-checkout-unparseable-gives-strict",
+   "layout": [
+    {
+     "k": "git",
+     "dir": "r",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "u",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "p": "u/.nexus/project.json",
+     "k": "file",
+     "c": "{not json"
+    }
+   ],
+   "payload": {
+    "cwd": "u"
+   },
+   "user": null,
+   "expect": {
+    "guard_mode": "strict",
+    "problems": [
+     [
+      ".nexus/project.json (cwd checkout)",
+      ""
+     ]
+    ]
+   },
+   "head": true,
+   "needs_git": true,
+   "env_project_dir": "r",
+   "prev_release": false
+  },
+  {
+   "id": "linked-worktree-session-root-is-the-strict-primary",
+   "layout": [
+    {
+     "p": "p/README.md",
+     "k": "file",
+     "c": "x\n"
+    },
+    {
+     "k": "git",
+     "dir": "p",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "p",
+     "args": [
+      "add",
+      "--",
+      "README.md"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "p",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    },
+    {
+     "p": "p/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    },
+    {
+     "k": "git",
+     "dir": "p",
+     "args": [
+      "add",
+      "--",
+      ".nexus/project.json"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "p",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "settings"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "p",
+     "args": [
+      "worktree",
+      "add",
+      "-q",
+      "--detach",
+      "../wt",
+      "HEAD~1"
+     ]
+    }
+   ],
+   "payload": {
+    "cwd": "wt"
+   },
+   "user": null,
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    }
+   },
+   "head": true,
+   "needs_git": true,
+   "env_project_dir": "p",
+   "prev_release": false
+  },
+  {
+   "id": "linked-worktree-without-primary-root-is-plain",
+   "layout": [
+    {
+     "p": "p/README.md",
+     "k": "file",
+     "c": "x\n"
+    },
+    {
+     "k": "git",
+     "dir": "p",
+     "args": [
+      "init",
+      "-q",
+      "-b",
+      "main"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "p",
+     "args": [
+      "add",
+      "--",
+      "README.md"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "p",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "base"
+     ]
+    },
+    {
+     "p": "p/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    },
+    {
+     "k": "git",
+     "dir": "p",
+     "args": [
+      "add",
+      "--",
+      ".nexus/project.json"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "p",
+     "args": [
+      "commit",
+      "-q",
+      "-m",
+      "settings"
+     ]
+    },
+    {
+     "k": "git",
+     "dir": "p",
+     "args": [
+      "worktree",
+      "add",
+      "-q",
+      "--detach",
+      "../wt",
+      "HEAD~1"
+     ]
+    }
+   ],
+   "payload": {
+    "cwd": "wt"
+   },
+   "user": null,
+   "head": true,
+   "needs_git": true,
+   "prev_release": false
+  },
+  {
+   "id": "matrix-project-absent-user-absent",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "precedence-matrix"
+   ],
+   "expect": {
+    "guard_mode": "seatbelt"
+   }
+  },
+  {
+   "id": "matrix-project-absent-user-seatbelt",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "subagent_git": "seatbelt",
+    "advice_block": [],
+    "brief_questions": [],
+    "telemetry": false,
+    "t1_nudge": true
+   },
+   "covers": [
+    "precedence-matrix"
+   ],
+   "expect": {
+    "guard_mode": "seatbelt"
+   },
+   "prev_release": false
+  },
+  {
+   "id": "matrix-project-absent-user-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "subagent_git": "strict",
+    "advice_block": [],
+    "brief_questions": [],
+    "telemetry": false,
+    "t1_nudge": true
+   },
+   "covers": [
+    "precedence-matrix"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "matrix-project-absent-user-broken",
    "layout": [
     {
      "p": "r/.git",
@@ -982,14 +4217,314 @@
     "cwd": "r"
    },
    "user": "{bad",
-   "prev_release": false,
+   "covers": [
+    "precedence-matrix"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      ""
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "matrix-project-seatbelt-user-absent",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"seatbelt\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "precedence-matrix"
+   ],
    "expect": {
     "guard_mode": "seatbelt",
-    "project": {},
+    "project": {
+     "subagent_git": "seatbelt"
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "matrix-project-seatbelt-user-seatbelt",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"seatbelt\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "subagent_git": "seatbelt",
+    "advice_block": [],
+    "brief_questions": [],
     "telemetry": false,
-    "t1_nudge": true,
-    "advice_blocked": []
-   }
+    "t1_nudge": true
+   },
+   "covers": [
+    "precedence-matrix"
+   ],
+   "expect": {
+    "guard_mode": "seatbelt",
+    "project": {
+     "subagent_git": "seatbelt"
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "matrix-project-seatbelt-user-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"seatbelt\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "subagent_git": "strict",
+    "advice_block": [],
+    "brief_questions": [],
+    "telemetry": false,
+    "t1_nudge": true
+   },
+   "covers": [
+    "precedence-matrix"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "seatbelt"
+    },
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "matrix-project-seatbelt-user-broken",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"seatbelt\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": "{bad",
+   "covers": [
+    "precedence-matrix"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "seatbelt"
+    },
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      ""
+     ]
+    ]
+   },
+   "prev_release": false
+  },
+  {
+   "id": "matrix-project-strict-user-absent",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": null,
+   "covers": [
+    "precedence-matrix"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "matrix-project-strict-user-seatbelt",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "subagent_git": "seatbelt",
+    "advice_block": [],
+    "brief_questions": [],
+    "telemetry": false,
+    "t1_nudge": true
+   },
+   "covers": [
+    "precedence-matrix"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "matrix-project-strict-user-strict",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": {
+    "subagent_git": "strict",
+    "advice_block": [],
+    "brief_questions": [],
+    "telemetry": false,
+    "t1_nudge": true
+   },
+   "covers": [
+    "precedence-matrix"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    }
+   },
+   "prev_release": false
+  },
+  {
+   "id": "matrix-project-strict-user-broken",
+   "layout": [
+    {
+     "p": "r/.git",
+     "k": "dir"
+    },
+    {
+     "p": "r/.nexus/project.json",
+     "k": "file",
+     "c": "{\"subagent_git\": \"strict\"}"
+    }
+   ],
+   "payload": {
+    "cwd": "r"
+   },
+   "user": "{bad",
+   "covers": [
+    "precedence-matrix"
+   ],
+   "expect": {
+    "guard_mode": "strict",
+    "project": {
+     "subagent_git": "strict"
+    },
+    "user": {
+     "subagent_git": "strict",
+     "advice_block": [],
+     "brief_questions": [],
+     "telemetry": false,
+     "t1_nudge": true
+    },
+    "problems": [
+     [
+      "conexus.json",
+      ""
+     ]
+    ]
+   },
+   "prev_release": false
   }
  ]
 }

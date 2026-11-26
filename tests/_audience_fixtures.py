@@ -13,7 +13,11 @@ fixtures: **plain** (the default), **project-strict** and **user-strict**.
   helper);
 * ``project_strict_repo``: a directory shaped like a project whose tracked ``.nexus/project.json`` turns the strict subagent
   git guard on, to pass as the payload's ``cwd``; ``project_settings_repo(**settings)`` writes other keys;
-* ``plugin_account(**settings)``: the same for the plugin copy of the helper.
+* ``plugin_account(**settings)``: the same for the plugin copy of the helper;
+* ``plain_posture``, ``project_strict_posture``, ``user_strict_posture`` (nexus-sby49.8, RDR-259 Decision 11): the three
+  postures as a :class:`Posture` (a repository, an account home and the payload to hand a hook). Their settings are the
+  module constants below, so the rows differ (``whole_disk_scan`` against ``pattern_kill``) and a combined case proves the
+  union, and the behaviour leg has labelled texts to look for.
 
 A hook run as a CHILD process cannot reach the in-process seam: it goes through ``tests/hooks/audience_harness.py``.
 It lives in its own module because ``tests/conftest.py`` is over its size ceiling (``scripts/file_size_ratchet.py``).
@@ -21,12 +25,97 @@ It lives in its own module because ``tests/conftest.py`` is over its size ceilin
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import importlib
 import json
 import sys
 from pathlib import Path
 
 import pytest
+
+
+#: The project-strict posture's ``.nexus/project.json`` and the user-strict posture's ``conexus.json`` (Decision 11): the advice
+#: rows differ, and each file carries texts the provenance labels introduce.
+PROJECT_STRICT_SETTINGS: "dict[str, object]" = {
+    "version": 1, "subagent_git": "strict", "advice_block": ["whole_disk_scan"],
+    "preflight": "scripts/agent-worktree-preflight.sh", "brief_questions": ["Does this change touch the cloud path?"],
+}
+USER_STRICT_SETTINGS: "dict[str, object]" = {
+    "version": 1, "subagent_git": "strict", "advice_block": ["pattern_kill"],
+    "brief_questions": ["Which test command did you run?"],
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class Posture:
+    """A repository (a bare ``git init``'s shape: a ``.git`` directory), an account home, and the payload for a hook."""
+
+    name: str
+    repo: Path
+    home: Path
+
+    @property
+    def payload(self) -> dict:
+        return {"cwd": str(self.repo)}
+
+
+def build_posture(root: Path, name: str) -> Posture:
+    """Build one posture under *root*. The account home is returned, never installed: a test pins it through
+    ``_ACCOUNT_HOME_OVERRIDE`` (the only seam)."""
+    repo, home = root / (name + "-repo"), root / (name + "-home")
+    (repo / ".git").mkdir(parents=True)
+    home.mkdir()
+    if name == "project-strict":
+        (repo / ".nexus").mkdir()
+        (repo / ".nexus" / "project.json").write_text(json.dumps(PROJECT_STRICT_SETTINGS), encoding="utf-8")
+    elif name == "user-strict":
+        _write_user_settings(home, USER_STRICT_SETTINGS)
+    elif name != "plain":
+        raise ValueError("unknown posture " + repr(name))
+    return Posture(name, repo, home)
+
+
+def _load_copy(path: Path, name: str):
+    import importlib.util  # noqa: PLC0415
+
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture(params=["plugin", "src"])
+def audience_copy(request, tmp_path, monkeypatch):
+    """Each of the two byte copies of the reader in turn, loaded as its own module object and pinned to an empty account home
+    (``mod.HOME``, a test-only handle) with ``CLAUDE_PROJECT_DIR`` unset. For a test that must pass on both copies."""
+    root = Path(__file__).resolve().parents[1]
+    path = root / "conexus" / "hooks" / "scripts" / "_audience.py" if request.param == "plugin" else root / "src" / "nexus" / "hooks" / "_audience.py"
+    mod = _load_copy(path, "_audience_" + request.param + "_under_test")
+    home = tmp_path / "acct"
+    home.mkdir()
+    monkeypatch.setattr(mod, "_ACCOUNT_HOME_OVERRIDE", str(home))
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    mod.HOME = home
+    return mod
+
+
+@pytest.fixture
+def plain_posture(tmp_path) -> Posture:
+    """A bare repository, no project file, an account home with no ``conexus.json``."""
+    return build_posture(tmp_path, "plain")
+
+
+@pytest.fixture
+def project_strict_posture(tmp_path) -> Posture:
+    """``project.json`` with ``subagent_git`` strict, the advice row ``whole_disk_scan``, a preflight and one question."""
+    return build_posture(tmp_path, "project-strict")
+
+
+@pytest.fixture
+def user_strict_posture(tmp_path) -> Posture:
+    """``conexus.json`` with ``subagent_git`` strict, the advice row ``pattern_kill`` and one question."""
+    return build_posture(tmp_path, "user-strict")
 
 
 @pytest.fixture(scope="session")
@@ -88,7 +177,7 @@ def project_settings_repo(tmp_path):
         repo = tmp_path / f"project-{next(counter)}"
         (repo / ".git").mkdir(parents=True)
         (repo / ".nexus").mkdir()
-        (repo / ".nexus" / "project.json").write_text(json.dumps({"schema": 1, **settings}))
+        (repo / ".nexus" / "project.json").write_text(json.dumps({"version": 1, **settings}))
         return repo
 
     return make

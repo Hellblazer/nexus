@@ -68,7 +68,9 @@ def _p(cwd) -> dict:
 def test_a_plain_repo_on_a_plain_account_reads_every_default(home, tmp_path):
     repo = plain_repo(tmp_path / "r")
     assert _audience.project_settings(_p(repo)) == {}
-    assert _audience.user_settings() == {"subagent_git": "seatbelt", "telemetry": False, "t1_nudge": True, "advice_block": []}
+    assert _audience.user_settings() == {
+        "subagent_git": "seatbelt", "telemetry": False, "t1_nudge": True, "advice_block": [], "brief_questions": [],
+    }
     assert _audience.guard_mode(_p(repo)) == "seatbelt"
     assert _audience.telemetry_enabled() is False
     assert _audience.t1_nudge_enabled() is True
@@ -86,7 +88,7 @@ def test_a_project_file_carries_every_project_key(home, tmp_path):
     assert got == {
         "subagent_git": "strict", "preflight": "tools/pre.sh", "ci_wait": "ci-wait <sha>",
         "credential_helper": "Use tools/cred.sh.", "brief_questions": ["One?", "Two?"], "advice_block": ["pattern_kill"],
-    }
+    }, "the validated keys, without version"
     assert _audience.guard_mode(_p(repo)) == "strict"
     assert _audience.project_text(_p(repo), "preflight") == "tools/pre.sh"
     assert _audience.project_brief_questions(_p(repo)) == ["One?", "Two?"]
@@ -117,7 +119,8 @@ def test_a_project_file_cannot_loosen_or_turn_telemetry_on(home, tmp_path):
     repo = tmp_path / "r"
     plain_repo(repo)
     write_project_settings(repo, subagent_git="seatbelt", telemetry=True, t1_nudge=False, auto_approve=["x"])
-    assert _audience.project_settings(_p(repo)) == {}, "only the keys that tighten or add text are read"
+    assert _audience.project_settings(_p(repo)) == {"subagent_git": "seatbelt"}, "a user key or an unknown key in a project file is ignored"
+    assert sorted(p.key for p in _audience.read_settings(_p(repo)).problems) == ["auto_approve", "t1_nudge", "telemetry"]
     assert _audience.guard_mode(_p(repo)) == "seatbelt"
     assert _audience.telemetry_enabled() is False
     assert _audience.t1_nudge_enabled() is True
@@ -134,9 +137,13 @@ def test_a_value_of_the_wrong_type_is_ignored_not_trusted(home, tmp_path):
     plain_repo(repo)
     write_project_settings(repo, subagent_git=1, preflight=5, ci_wait=["a"], credential_helper="", brief_questions="one",
                            advice_block=[3, None, "pattern_kill", " "])
-    assert _audience.project_settings(_p(repo)) == {"advice_block": ["pattern_kill"]}
+    assert _audience.project_settings(_p(repo)) == {"subagent_git": "strict", "advice_block": ["pattern_kill"], "brief_questions": []}, (
+        "a bad subagent_git is strict, a bad list is empty, a bad text is absent"
+    )
     write_user_settings(home, subagent_git="loose", telemetry="yes", t1_nudge=0, advice_block="all")
-    assert _audience.user_settings() == {"subagent_git": "seatbelt", "telemetry": False, "t1_nudge": True, "advice_block": []}
+    assert _audience.user_settings() == {
+        "subagent_git": "strict", "telemetry": False, "t1_nudge": True, "advice_block": [], "brief_questions": [],
+    }
 
 
 @pytest.mark.parametrize("body", ["{not json", "[1, 2]", "null", '"strict"', ""])
@@ -155,11 +162,15 @@ def test_a_project_file_that_is_a_directory_gives_the_strict_reading(home, tmp_p
 
 
 @pytest.mark.parametrize("body", ["{not json", "[1]", "null"])
-def test_a_user_file_that_cannot_be_read_leaves_the_defaults(home, tmp_path, body):
+def test_a_user_file_that_cannot_be_read_reads_strict_and_leaves_the_other_defaults(home, tmp_path, body):
+    """Sam's S2 (RDR-259 Decision 4): a broken conexus.json is most likely a failed edit toward strict."""
     (home / ".config" / "nexus").mkdir(parents=True)
     (home / ".config" / "nexus" / "conexus.json").write_text(body)
-    assert _audience.user_settings() == {"subagent_git": "seatbelt", "telemetry": False, "t1_nudge": True, "advice_block": []}
-    assert _audience.guard_mode(_p(plain_repo(tmp_path / "r"))) == "seatbelt"
+    assert _audience.user_settings() == {
+        "subagent_git": "strict", "telemetry": False, "t1_nudge": True, "advice_block": [], "brief_questions": [],
+    }
+    assert _audience.guard_mode(_p(plain_repo(tmp_path / "r"))) == "strict"
+    assert _audience.telemetry_enabled() is False
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +205,7 @@ def test_guard_mode_answers_strict_when_it_raises(home, tmp_path, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("broken")
 
-    monkeypatch.setattr(_audience, "project_settings", boom)
+    monkeypatch.setattr(_audience, "read_settings", boom)
     assert _audience.guard_mode(_p(tmp_path)) == "strict"
 
 
@@ -213,8 +224,8 @@ def test_the_readers_that_loosen_or_add_nothing_answer_their_default_when_they_r
     def boom(*a, **k):
         raise RuntimeError("broken")
 
-    monkeypatch.setattr(_audience, "user_settings", boom)
-    monkeypatch.setattr(_audience, "project_settings", boom)
+    monkeypatch.setattr(_audience, "read_settings", boom)
+    monkeypatch.setattr(_audience, "_read_user", boom)
     assert _audience.telemetry_enabled() is False
     assert _audience.t1_nudge_enabled() is True
     assert _audience.advice_blocked(_p(tmp_path)) == frozenset()
@@ -372,8 +383,12 @@ def test_the_override_is_never_read_from_the_environment(monkeypatch):
 def test_the_helper_asks_nothing_about_who_the_user_is():
     """The rework's point (Sam, 2026-11-25): no flag file, no maintainer predicate, no repo-is-nexus test."""
     src = (SCRIPTS / "_audience.py").read_text()
-    for gone in ("maintainer", "account_flag", "nexus_repo", "note_marker_only", "TRIPWIRE", "maintainer-profile"):
-        assert gone not in src.split('"""', 2)[2], gone
+    body = src.split('"""', 2)[2]
+    for gone in ("account_flag", "nexus_repo", "note_marker_only", "TRIPWIRE"):
+        assert gone not in body, gone
+    # The one place the retired flag file is named is the list `show` reports it from (RDR-259 Decision 5).
+    uses = [line for line in body.splitlines() if "maintainer" in line]
+    assert len(uses) == 1 and "RETIRED_USER_FILES" in uses[0], uses
     for name in ("account_flag", "maintainer", "nexus_repo", "note_marker_only"):
         assert not hasattr(_audience, name), name
 
@@ -462,7 +477,7 @@ def test_a_payload_without_a_cwd_names_no_checkout(home, payload, monkeypatch):
     assert _audience.project_settings(payload) == {}
 
 
-def test_claude_project_dir_is_the_fallback_and_the_process_cwd_never_is(home, tmp_path, monkeypatch):
+def test_claude_project_dir_names_the_session_root_and_the_process_cwd_never_is(home, tmp_path, monkeypatch):
     strict = strict_repo(tmp_path / "strict")
     plain = plain_repo(tmp_path / "plain")
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
@@ -470,7 +485,11 @@ def test_claude_project_dir_is_the_fallback_and_the_process_cwd_never_is(home, t
     assert _audience.guard_mode({}) == "seatbelt"  # the process cwd is a project with settings, and is ignored
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(strict))
     assert _audience.guard_mode({}) == "strict"
-    assert _audience.guard_mode({"cwd": str(plain)}) == "seatbelt"  # the payload wins
+    # RDR-259 Decision 1: the session root (CLAUDE_PROJECT_DIR) decides, and a payload cwd elsewhere can only add
+    assert _audience.guard_mode({"cwd": str(plain)}) == "strict"
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(plain))
+    assert _audience.guard_mode({"cwd": str(strict)}) == "strict", "a cwd checkout that says strict adds it"
+    assert _audience.guard_mode({"cwd": str(plain)}) == "seatbelt"
 
 
 def test_a_path_with_no_repo_above_it_has_no_project(home, tmp_path):

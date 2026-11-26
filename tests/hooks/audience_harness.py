@@ -30,7 +30,7 @@ LEGACY_MARKER = "scripts/agent-worktree-preflight.sh"
 
 def write_project_settings(repo: "os.PathLike[str] | str", **settings: object) -> None:
     """Write *repo*'s tracked ``.nexus/project.json`` with *settings* (default: ``subagent_git`` strict)."""
-    body = {"schema": 1, **(settings or {"subagent_git": "strict"})}
+    body = {"version": 1, **(settings or {"subagent_git": "strict"})}
     path = os.path.join(os.fspath(repo), ".nexus", "project.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
