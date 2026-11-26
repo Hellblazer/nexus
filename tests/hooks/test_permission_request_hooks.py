@@ -251,7 +251,7 @@ class TestDestructiveToolsRequireManualApproval:
 
     @pytest.mark.parametrize("tool_name", ["mcp__plugin_conexus_nexus__setup", "mcp__plugin_conexus_nexus__setup_status"])
     def test_the_setup_tools_require_manual_approval(self, tool_name: str) -> None:
-        """RDR-228: on both events, and in neither allowlist, so a later edit that
+        """RDR-228: on PreToolUse (the one event nx answers), and in neither allowlist, so a later edit that
         adds them to ``_ALLOWED_TOOLS`` or ``_ALLOWED_HOOK_TOOLS`` fails here by
         name and not only through the shared drift guard."""
         from nexus.hooks import auto_approve
