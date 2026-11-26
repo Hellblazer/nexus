@@ -20,6 +20,7 @@ from nexus.corpus import (
     t3_collection_names_for_read,
 )
 from nexus.db import make_t3
+from nexus.db.expire_sweep import ExpireReport, RetiredNote
 from nexus.db.t3 import T3Database
 from nexus.entity_keys import EntityConfigError, EntityKeyError
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
@@ -935,28 +936,38 @@ def _delete_by_title(
 
 
 @store.command("expire")
-def expire_cmd() -> None:
+@click.option("--dry-run", is_flag=True, default=False,
+              help="List the notes this would retire and write nothing. Judged by the same catalog TTL the real run uses.")
+def expire_cmd(dry_run: bool) -> None:
     """Remove T3 knowledge__ entries whose TTL has expired.
 
     Each note is judged by its own TTL and its own put time, kept in its catalog entry (nexus-6pfgb.15),
     not by the chunk row it shares with any note of identical text. A lapsed note is retired; its chunk
-    is deleted only when no other live note holds it.
+    is deleted only when no other live note holds it. Every retired note is printed (collection, title,
+    tumbler, the instant its TTL ran out) before the totals.
     """
     from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — command-local; keeps CLI startup flat
 
     db = _t3()
     if not isinstance(db, HttpVectorClient):  # the in-memory facade (tests) has no catalog to judge notes by
+        if dry_run:
+            raise click.ClickException("--dry-run needs the service-backed store: only it judges notes by their catalog TTL.")
         count = db.expire()
         click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
         return
-    report = db.expire_report()
+    report = db.expire_report(dry_run=dry_run)
     count = report.chunks_deleted
     held = len(report.catalog_ttl_stale)
     held_text = f" {held} lapsed {'note' if held == 1 else 'notes'} held, not retired." if held else ""
-    click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.{held_text}")
-    if report.notes_tombstoned:
-        n = report.notes_tombstoned
-        click.echo(f"{n} {'note' if n == 1 else 'notes'} retired; {count} {'chunk' if count == 1 else 'chunks'} deleted.")
+    if dry_run:
+        _echo_expire_dry_run(report, held_text)
+    else:
+        for note in report.retired:
+            click.echo(_retired_line("retired", note))
+        click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.{held_text}")
+        if report.notes_tombstoned:
+            n = report.notes_tombstoned
+            click.echo(f"{n} {'note' if n == 1 else 'notes'} retired; {count} {'chunk' if count == 1 else 'chunks'} deleted.")
     if report.row_ttl_unattributed:
         click.echo(
             f"{report.row_ttl_unattributed} chunk(s) carry a lapsed TTL on the chunk row but are held by "
@@ -974,11 +985,41 @@ def expire_cmd() -> None:
                 err=True,
             )
     if report.failures:
+        verb = "would NOT be retired" if dry_run else "was NOT retired"
         for tumbler, why in report.failures:
-            click.echo(f"  note {tumbler} was NOT retired: {why}", err=True)
+            click.echo(f"  note {tumbler} {verb}: {why}", err=True)
         raise click.ClickException(
-            f"{len(report.failures)} lapsed note(s) were not retired and stay live; run it again once fixed."
+            f"{len(report.failures)} lapsed note(s) {'could not be judged' if dry_run else 'were not retired and stay live'}"
+            f"{'' if dry_run else '; run it again once fixed'}."
         )
+
+
+def _retired_line(verb: str, note: RetiredNote) -> str:
+    """One audit line: ``<verb>  <collection>  '<title>' (<tumbler>)  expired <instant>``; the basis is named
+    only when it is not the catalog's."""
+    expired = note.expires_at or "(instant unknown)"
+    via = "" if note.basis == "catalog" else f" (judged by its {note.basis})"
+    # Catalog titles are user and file data: repr() quotes them and escapes control characters.
+    return f"  {verb}  {note.collection}  {note.title!r} ({note.tumbler})  expired {expired}{via}"
+
+
+def _echo_expire_dry_run(report: ExpireReport, held_text: str) -> None:
+    """The ``--dry-run`` summary: each note it would retire, then what the real run would send to the engine's
+    delete. It never says anything was expired or retired: nothing was."""
+    retired = report.retired
+    for note in retired:
+        click.echo(_retired_line("would retire", note))
+    n = len(retired)
+    click.echo(f"Would retire {n} {'note' if n == 1 else 'notes'}.{held_text}")
+    chunks = report.candidate_chunks
+    orphans = report.orphan_chunks
+    if chunks:
+        extra = f" ({orphans} with no live note)" if orphans else ""
+        click.echo(
+            f"{chunks} {'chunk' if chunks == 1 else 'chunks'} would go to the delete{extra}; the engine keeps any "
+            "chunk another live note still holds."
+        )
+    click.echo("Dry run: nothing was written.")
 
 
 def _echo_left_out(result: dict) -> None:
