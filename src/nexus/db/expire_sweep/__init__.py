@@ -253,7 +253,7 @@ def sweep_expired(client: HttpVectorClient, *, dry_run: bool = False) -> ExpireR
         reap_lapsed_note_documents,
     )
     from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
-    from nexus.metadata_schema import is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
+    from nexus.metadata_schema import chunk_row_expires_at, is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
     now = datetime.now(UTC)
     now_iso = now.isoformat()
@@ -342,8 +342,7 @@ def sweep_expired(client: HttpVectorClient, *, dry_run: bool = False) -> ExpireR
                         # one note, no TTL of its own on record, and the row is that note's own write
                         legacy_ids.append(chash)
                         targets[chash] = None
-                        row_meta = expired_row_meta.get(chash) or {}
-                        at = note_ttl.expires_at(row_meta, str(row_meta.get("indexed_at") or ""))
+                        at = chunk_row_expires_at(expired_row_meta.get(chash) or {})
                         legacy_notes.setdefault(str(owners[0].tumbler), RetiredNote(
                             name, str(owners[0].tumbler), owners[0].title or "",
                             at.isoformat() if at is not None else "", "chunk row"))
