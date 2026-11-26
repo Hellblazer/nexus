@@ -1141,7 +1141,7 @@ class _Run:
             if assigns:
                 self.other = True  # `X=1 cmd`: an environment only that command sees
             if (
-                head.lit and name not in ("git", "cd") and name not in _INERT_HEADS
+                head.lit and name != "git" and name != "cd" and name not in _INERT_HEADS
                 and self._names_a_directory(head.text)
             ):
                 raise _Refuse  # zsh auto_cd: a bare directory path as a command is a `cd`
