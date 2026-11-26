@@ -501,16 +501,63 @@ def test_detached_at_version_tag_explicit_sha_still_recovers(
 def test_detached_at_untagged_commit_default_base_still_recovers(
     tagged_repo: tuple[Path, str, str], tmp_path: Path
 ) -> None:
-    """Detached but not at a v* tag (a non-version tag does not count either): the ordinary stale-worktree path."""
+    """Detached with no tag on the commit: the ordinary stale-worktree path."""
     main, tag_sha, tip = tagged_repo
-    _git(main, "tag", "nightly-1", tag_sha)
+    mid = _git(main, "rev-parse", "develop~1")
     wt = tmp_path / "wt-detached-plain"
-    _git(main, "worktree", "add", "--detach", str(wt), tag_sha)
-    _git(main, "tag", "-d", "v1.0.0")  # leave only the non-version tag on this commit
+    _git(main, "worktree", "add", "--detach", str(wt), mid)
 
     result = _run_preflight(wt)
 
     assert result.stdout.strip() == f"PREFLIGHT_OK head={tip} recovered=yes"
+
+
+def test_detached_at_non_version_tag_default_base_is_left_alone(
+    tagged_repo: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    """Any tag pins a detached tree: engine cuts sit on `engine-service-vX.Y.Z`, not `v*`."""
+    main, tag_sha, tip = tagged_repo
+    _git(main, "tag", "engine-service-v0.1.0", tag_sha)
+    _git(main, "tag", "-d", "v1.0.0")  # leave only the engine tag on this commit
+    wt = tmp_path / "wt-detached-engine-tag"
+    _git(main, "worktree", "add", "--detach", str(wt), "engine-service-v0.1.0")
+
+    result = _run_preflight(wt)
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [f"PREFLIGHT_OK head={tag_sha} recovered=no", RELEASE_NOTE]
+    assert _git(wt, "rev-parse", "HEAD") == tag_sha
+
+
+def test_detached_at_annotated_version_tag_default_base_is_left_alone(
+    tagged_repo: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    """An annotated tag's own object is not the commit; `--points-at` must still see through it."""
+    main, tag_sha, tip = tagged_repo
+    _git(main, "tag", "-d", "v1.0.0")
+    _git(main, "tag", "-a", "v1.0.0", "-m", "release 1.0.0", tag_sha)
+    wt = tmp_path / "wt-detached-annotated"
+    _git(main, "worktree", "add", "--detach", str(wt), "v1.0.0")
+
+    result = _run_preflight(wt)
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [f"PREFLIGHT_OK head={tag_sha} recovered=no", RELEASE_NOTE]
+    assert _git(wt, "rev-parse", "HEAD") == tag_sha
+
+
+def test_release_prep_branch_at_tag_default_base_is_left_alone(
+    tagged_repo: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    main, tag_sha, tip = tagged_repo
+    wt = tmp_path / "wt-release-prep"
+    _git(main, "worktree", "add", "-b", "release-prep/v1.0.1", str(wt), "v1.0.0")
+
+    result = _run_preflight(wt)
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [f"PREFLIGHT_OK head={tag_sha} recovered=no", RELEASE_NOTE]
+    assert _git(wt, "rev-parse", "HEAD") == tag_sha
 
 
 def test_feature_branch_at_tag_default_base_still_recovers(

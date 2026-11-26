@@ -42,8 +42,8 @@
 #   preflight refuses. Dispatchers should pass the sha explicitly anyway.
 #
 #   A release worktree is the exception (nexus-sby49). When REQUIRED_SHA is
-#   omitted and the branch is release/*, or HEAD is detached at a commit a v*
-#   tag points to, there is no base to compare against: the tree is cut from
+#   omitted and the branch is release/* or release-prep/*, or HEAD is detached
+#   at a commit any tag points to (a release or engine-service cut), there is no base to compare against: the tree is cut from
 #   the last tag (the plugin-only fast lane) or from a develop that has since
 #   moved on, and its contents ARE the release, so a fast-forward to develop
 #   would change what ships. The script touches nothing, prints the usual
@@ -83,14 +83,14 @@ register_worktree() {
   return 0
 }
 
-# True on a release/* branch, or with HEAD detached at a commit a v* tag points to.
+# True on a release/* or release-prep/* branch, or with HEAD detached at a commit any tag points to.
 is_release_tree() {
   local branch
   if branch="$(git symbolic-ref -q --short HEAD)"; then
-    case "$branch" in release/*) return 0 ;; esac
+    case "$branch" in release/*|release-prep/*) return 0 ;; esac
     return 1
   fi
-  [ -n "$(git tag --points-at HEAD --list 'v*')" ]
+  [ -n "$(git tag --points-at HEAD)" ]
 }
 
 git_dir="$(git rev-parse --git-dir)"
