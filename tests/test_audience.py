@@ -306,7 +306,7 @@ def test_a_broken_or_missing_helper_gives_the_full_deny_everywhere(tmp_path, var
     repo = strict_repo(tmp_path / "r") if strict else plain_repo(tmp_path / "r")
     out = _run_guard(copy, "git commit -am x", pathlib.Path(repo))
     assert out.get("permissionDecision") == "deny"
-    assert "STRUCTURE-AGNOSTIC" in out["permissionDecisionReason"]
+    assert "reads the raw command text" in out["permissionDecisionReason"]
 
 
 def test_a_missing_seatbelt_module_also_gives_the_full_deny(tmp_path):

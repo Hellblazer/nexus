@@ -497,7 +497,7 @@ def test_an_account_with_the_strict_user_setting_gets_the_full_form_in_any_repo(
     settings.write_text('{"subagent_git": "strict"}')
     out = _hook("git commit -am x", clean_repo, home)
     assert out["permissionDecision"] == "deny"
-    assert "STRUCTURE-AGNOSTIC" in out["permissionDecisionReason"]
+    assert "reads the raw command text" in out["permissionDecisionReason"]
 
 
 def test_a_project_with_the_strict_setting_gets_the_full_form_on_a_plain_account(clean_repo, tmp_path):
@@ -505,7 +505,7 @@ def test_a_project_with_the_strict_setting_gets_the_full_form_on_a_plain_account
     (clean_repo / ".nexus" / "project.json").write_text('{"subagent_git": "strict"}')
     out = _hook("git commit -am x", clean_repo, tmp_path / "plain-account")
     assert out["permissionDecision"] == "deny"
-    assert "STRUCTURE-AGNOSTIC" in out["permissionDecisionReason"]
+    assert "reads the raw command text" in out["permissionDecisionReason"]
 
 
 # ---------------------------------------------------------------------------

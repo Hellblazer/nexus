@@ -647,6 +647,7 @@ import _lib  # noqa: E402
 # seatbelt is a separate module; when it cannot be imported the full guard runs for everyone.
 try:
     from _audience import (
+        forced_strict_clause as _forced_strict_clause,
         guard_mode as _guard_mode,
         remote_test_hosts as _remote_hosts_reader,
         note_hook_error as _note_hook_error,
@@ -654,6 +655,9 @@ try:
 except BaseException:  # noqa: BLE001
     def _guard_mode(payload: object) -> str:
         return "strict"
+
+    def _forced_strict_clause(payload: object, head: bool = False) -> "str | None":
+        return None
 
     def _remote_hosts_reader() -> frozenset[str]:  # loosening: no helper, no exempt host
         return frozenset()
@@ -4106,10 +4110,10 @@ def _current_branch(cwd: str) -> str | None:
 
 def _deny_message(agent_type: str, verb_names: str, *,
                   undeterminable: bool = False, in_worktree: bool = False,
-                  sidefx: bool = False) -> str:
+                  sidefx: bool = False, forced_clause: "str | None" = None) -> str:
     head = (
         f"Denied: subagent `{agent_type or 'unknown'}` may not run git write verbs ({verb_names}) "
-        f"in the shared tree. The guard is STRUCTURE-AGNOSTIC (it reads the raw command text): a "
+        f"in the shared tree. The guard reads the raw command text, not the command's shape: a "
         f"verb word that an interpreter, a pipe, a file or a variable could run denies; rephrase.\n"
         f"Allowed shape, in a linked worktree you were given: `git -C <absolute worktree root> "
         f"<verb> ...`, or `cd <worktree root> && git <verb> ...` (a `cd <wt>` counts only before "
@@ -4119,8 +4123,8 @@ def _deny_message(agent_type: str, verb_names: str, *,
         f"through `-F <file>`. Also open: read-only git, `git fetch`, `git push [-u] origin "
         f"HEAD` of that worktree's own branch. Or dispatch with isolation: worktree.\n"
         f"Not from a subagent: checkout, stash, restore, reset --hard, clean, or any write in "
-        f"the primary checkout (`gh pr checkout` and `gh repo sync` too). Ask the orchestrator: "
-        f"hand back diffs and paths (a background agent does that via SubagentHandback or "
+        f"the primary checkout (`gh pr checkout` and `gh repo sync` too). "
+        f"Ask the orchestrator (the session that dispatched you): hand back diffs and paths (a background agent does that via SubagentHandback or "
         f"SendMessage before idling; a foreground agent's final message is the hand-back) and "
         f"it commits."
     )
@@ -4218,6 +4222,8 @@ def _deny_message(agent_type: str, verb_names: str, *,
         "\nTo compare a file with a committed ref, `git show HEAD:<path> > <scratch>/<name>` "
         "then `diff <scratch>/<name> <path>`."
     )
+    if forced_clause:
+        head += "\nNote: " + forced_clause.rstrip(".") + "."
     return (
         f"{head}\n"
         f"A `# routing-allow: <reason>` escape exists only on the user's explicit "
@@ -4822,6 +4828,7 @@ def body(payload: dict[str, Any]) -> None:
         _deny_message(
             agent_type, verb_names, undeterminable=worktree is None,
             in_worktree=wt_config, sidefx=sidefx,
+            forced_clause=_forced_strict_clause(payload),
         ),
         summary=(
             f"subagent git write verb ({verb_names}) blocked in the shared "

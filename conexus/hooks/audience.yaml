@@ -442,6 +442,7 @@ modules:
   hooks/scripts/routing/subagent_git_write_requires_orchestrator.py:
     wrapper: run_hook
     predicates:
+    - forced_strict_clause
     - guard_mode
     - note_hook_error
     - remote_test_hosts
