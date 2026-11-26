@@ -58,6 +58,7 @@ PREDICATES: dict[str, str] = {
     "forced_strict_clause": "None",
     "settings_problems": "[]",
     "format_problem": "''",
+    "claim_session_once": "None",
 }
 #: The settings an audience ``SETTING:<key>`` may name, and the reader a module must call for each.
 SETTING_READERS: dict[str, tuple[str, ...]] = {

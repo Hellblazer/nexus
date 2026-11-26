@@ -1042,6 +1042,80 @@ def note_problems(payload: object, problems: "list[Problem] | tuple[Problem, ...
         pass
 
 
+#: A once-per-session mark older than this is deleted by the next claim in its directory, and the most entries one pass looks at.
+_MARK_MAX_AGE_S = 7 * 24 * 3600
+_MARK_PRUNE_LIMIT = 400
+
+
+def _claim_file(path: str) -> "bool | None":
+    """Create *path* with ``O_EXCL``: True when this call made it, False when it was already there, None on any other failure."""
+    try:
+        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        return True
+    except FileExistsError:
+        return False
+    except OSError:
+        return None
+
+
+def _prune_marks(directory: str) -> None:
+    """Delete the marks in *directory* older than a week. Bounded; never raises."""
+    try:
+        cutoff = time.time() - _MARK_MAX_AGE_S
+        with os.scandir(directory) as entries:
+            for seen, entry in enumerate(entries):
+                if seen >= _MARK_PRUNE_LIMIT:
+                    return
+                try:
+                    if entry.is_file(follow_symlinks=False) and entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                        os.unlink(entry.path)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+def claim_session_once(kind: str, payload: object) -> "bool | None":
+    """Whether this is the first call for (*kind*, the payload's session).
+
+    True: first, so speak. False: an earlier call in this session spoke. None: the payload has no session id or no mark can be
+    kept, so the caller must stay silent (a hook that cannot remember having spoken would speak on every prompt).
+
+    The mark is ``<account home>/.config/nexus/logs/audience-<kind>/<session_id>``, beside the per-problem log marks, and like
+    them it is kept only where the logs directory already exists (a machine that has used nexus). Anywhere else, and when that
+    directory cannot be written, a file in the system temporary directory takes its place, so a machine with no nexus
+    configuration gets no new directory. A mark older than a week is deleted by the next claim beside it. A repeat call costs
+    one failed ``open``. Never raises.
+    """
+    try:
+        sid = str(payload.get("session_id") or "") if isinstance(payload, dict) else ""
+        sid = "".join(c for c in sid if c.isalnum() or c in "-_")[:80]
+        if not sid:
+            return None
+        home = account_home()
+        logs = os.path.join(home, ".config", "nexus", "logs") if home else ""
+        if logs and os.path.isdir(logs):
+            marks = os.path.join(logs, f"audience-{kind}")
+            path = os.path.join(marks, sid)
+            claimed = _claim_file(path)
+            if claimed is None:  # the directory is not there yet, or cannot be written: make it once and try again
+                try:
+                    os.makedirs(marks, exist_ok=True)
+                    claimed = _claim_file(path)
+                except OSError:
+                    claimed = None
+            if claimed is not None:
+                if claimed:
+                    _prune_marks(marks)
+                return claimed
+        import tempfile  # noqa: PLC0415 -- only the fallback pays for it
+
+        who = str(os.getuid()) if hasattr(os, "getuid") else "w"
+        return _claim_file(os.path.join(tempfile.gettempdir(), f"conexus-{kind}-{who}-{sid}"))
+    except BaseException:  # noqa: BLE001
+        return None
+
+
 def remote_test_hosts() -> "frozenset[str]":
     """The ssh aliases named in ``<account home>/.config/nexus/remote-test-hosts``.
 

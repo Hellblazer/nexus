@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The SessionStart settings problem notice (nexus-sby49.12, RDR-259 Decision 4 item 1).
+"""The settings problem notice (nexus-sby49.12, RDR-259 Decision 4 item 1).
 
-``conexus/hooks/scripts/settings_notice.py`` is a stdlib SessionStart command hook. When the session's directory has a settings
-problem it prints one top-level ``systemMessage`` (the only field a plugin command hook's SessionStart output shows the user in
-the CLI, measured in nexus-sby49.15 item 1) and one ``additionalContext`` line of counts and a pointer for the model, on
-``startup``, ``resume`` and ``clear``. It says nothing on ``compact`` or ``fork`` and nothing when there is no problem. File text
-reaches the user's message only cleaned, quoted and cut to 60 bytes, and never reaches the model's line.
+``conexus/hooks/scripts/settings_notice.py`` is a stdlib UserPromptSubmit command hook. On the first prompt of a session, when the
+session's directory has a settings problem, it prints one top-level ``systemMessage`` (Claude Desktop shows a UserPromptSubmit
+message and hides a SessionStart one, RDR-259 records 60 and 61; the CLI shows both) and one ``additionalContext`` line of counts
+and a pointer for the model. It says nothing on a later prompt of the same session, which exits before it reads any settings, and
+nothing when there is no problem. File text reaches the user's message only cleaned, quoted and cut to 60 bytes, and never
+reaches the model's line.
 
 The cases run the real script as a child process. A child cannot reach the in-process account-home seam, so each runs through
 ``tests/hooks/audience_harness.py`` (or, for an account with no home at all, a small driver that does the same).
@@ -18,6 +19,8 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -96,10 +99,12 @@ _NO_HOME_DRIVER = (
 
 
 def _run(
-    tmp_path: Path, repo: Path, home: "Path | None", *, source: "str | None" = "startup", nx: str = "none",
+    tmp_path: Path, repo: Path, home: "Path | None", *, nx: str = "none",
     session_id: str = "sess-1", script: Path = SCRIPT, nx_mark: "Path | None" = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run the notice for a session in *repo*. *nx* is ``new`` (has ``nx settings``), ``old`` or ``none`` (no ``nx`` on PATH)."""
+    """Run the notice for one prompt of a session in *repo*. *nx* is ``new`` (has ``nx settings``), ``old`` or ``none`` (no
+    ``nx`` on PATH). The system temporary directory is ``<tmp_path>/tmp``, where a session's mark goes when the account has no
+    logs directory."""
     fake = tmp_path / "fake-bin"
     env = dict(os.environ)
     env["PATH"] = path_without(("nx", "nx.exe", "nx.cmd"), tmp_path / "mirror")
@@ -111,9 +116,13 @@ def _run(
     env["NX_TOOLS_DIR"] = str(tools)
     for name in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT", "CLAUDE_CODE_REMOTE"):
         env.pop(name, None)
-    payload: dict = {"hook_event_name": "SessionStart", "session_id": session_id, "cwd": str(repo)}
-    if source is not None:
-        payload["source"] = source
+    temp = tmp_path / "tmp"
+    temp.mkdir(exist_ok=True)
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        env[name] = str(temp)
+    payload: dict = {"hook_event_name": "UserPromptSubmit", "prompt": "hello", "cwd": str(repo)}
+    if session_id:
+        payload["session_id"] = session_id
     if home is None:
         argv = [sys.executable, "-c", _NO_HOME_DRIVER, str(script.parent), str(script)]
     else:
@@ -130,7 +139,7 @@ def _out(proc: subprocess.CompletedProcess[str]) -> dict:
 
 
 def _context(out: dict) -> str:
-    assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
     return out["hookSpecificOutput"]["additionalContext"]
 
 
@@ -193,28 +202,179 @@ def test_a_plain_repository_with_no_settings_files_is_silent(tmp_path):
 
 # -- when it speaks --------------------------------------------------------------------------------------------------------
 
-
-@pytest.mark.parametrize("source", ["startup", "resume", "clear"])
-def test_it_speaks_on_startup_resume_and_clear(tmp_path, source):
-    repo = _repo(tmp_path / "repo", {"version": 1, "subagent-git": "strict"})
-    out = _out(_run(tmp_path, repo, _home(tmp_path / "home"), source=source))
-    assert "did you mean subagent_git" in out["systemMessage"]
+BROKEN = {"version": 1, "subagent-git": "strict"}
 
 
-@pytest.mark.parametrize("source", ["compact", "fork"])
-def test_it_is_silent_on_compact_and_fork(tmp_path, source):
-    repo = _repo(tmp_path / "repo", {"version": 1, "subagent-git": "strict"})
-    proc = _run(tmp_path, repo, _home(tmp_path / "home"), source=source)
+def _marks(home: Path) -> Path:
+    return home / ".config" / "nexus" / "logs" / "audience-settings-notice"
+
+
+def _temp_marks(tmp_path: Path) -> list[Path]:
+    return sorted((tmp_path / "tmp").glob("conexus-settings-notice-*"))
+
+
+@pytest.mark.parametrize("logs", [True, False], ids=["logs-dir", "no-logs-dir"])
+def test_the_first_prompt_shows_and_the_second_prompt_of_the_session_is_silent(tmp_path, logs):
+    repo = _repo(tmp_path / "repo", BROKEN)
+    home = _home(tmp_path / "home", logs=logs)
+    first = _out(_run(tmp_path, repo, home, session_id="s-a"))
+    assert "did you mean subagent_git" in first["systemMessage"]
+    for _ in range(2):
+        again = _run(tmp_path, repo, home, session_id="s-a")
+        assert again.returncode == 0 and again.stdout == "" and again.stderr == ""
+
+
+@pytest.mark.parametrize("logs", [True, False], ids=["logs-dir", "no-logs-dir"])
+def test_a_new_session_shows_it_again(tmp_path, logs):
+    repo = _repo(tmp_path / "repo", BROKEN)
+    home = _home(tmp_path / "home", logs=logs)
+    first = _out(_run(tmp_path, repo, home, session_id="s-a"))
+    assert _run(tmp_path, repo, home, session_id="s-a").stdout == ""
+    second = _out(_run(tmp_path, repo, home, session_id="s-b"))  # after /clear the session id is new
+    assert second["systemMessage"] == first["systemMessage"]
+
+
+def test_a_later_prompt_exits_before_it_reads_any_settings_or_asks_nx(tmp_path):
+    """The fast path is the mark check. A clean first prompt marks the session; after the settings are broken, the session's next
+    prompt still says nothing and starts no ``nx``, and a new session reads them and speaks."""
+    mark = tmp_path / "nx-ran"
+    repo = _repo(tmp_path / "repo", {"version": 1})
+    home = _home(tmp_path / "home", logs=True)
+    assert _run(tmp_path, repo, home, session_id="s-a", nx="new", nx_mark=mark).stdout == ""
+    (repo / ".nexus" / "project.json").write_text(json.dumps(BROKEN), encoding="utf-8")
+    later = _run(tmp_path, repo, home, session_id="s-a", nx="new", nx_mark=mark)
+    assert later.returncode == 0 and later.stdout == "" and later.stderr == ""
+    assert not mark.exists(), "a later prompt must not start nx"
+    assert "did you mean" in _out(_run(tmp_path, repo, home, session_id="s-b", nx="new", nx_mark=mark))["systemMessage"]
+
+
+def test_a_clean_first_prompt_is_silent_and_still_marks_the_session(tmp_path):
+    repo = _repo(tmp_path / "repo", {"version": 1, "subagent_git": "strict"})
+    home = _home(tmp_path / "home", logs=True)
+    proc = _run(tmp_path, repo, home, session_id="s-clean")
+    assert proc.returncode == 0 and proc.stdout == "" and proc.stderr == ""
+    assert (_marks(home) / "s-clean").exists()
+
+
+def test_the_mark_is_kept_with_the_audience_log_marks_when_the_logs_directory_exists(tmp_path):
+    repo = _repo(tmp_path / "repo", BROKEN)
+    home = _home(tmp_path / "home", logs=True)
+    _out(_run(tmp_path, repo, home, session_id="s-a"))
+    assert (_marks(home) / "s-a").is_file()
+    assert _temp_marks(tmp_path) == []
+
+
+def test_without_a_logs_directory_the_mark_is_a_temporary_file_and_no_config_directory_is_made(tmp_path):
+    repo = _repo(tmp_path / "repo", BROKEN)
+    home = _home(tmp_path / "home")
+    _out(_run(tmp_path, repo, home, session_id="s-a"))
+    assert len(_temp_marks(tmp_path)) == 1
+    assert not (home / ".config").exists(), "a machine with no nexus configuration gets no new directory"
+
+
+def test_a_mark_directory_that_cannot_be_made_falls_back_to_the_temporary_file(tmp_path):
+    """State unwritable is not silence and not a notice on every prompt: the temporary file keeps the once-per-session promise."""
+    repo = _repo(tmp_path / "repo", BROKEN)
+    home = _home(tmp_path / "home", logs=True)
+    _marks(home).write_text("in the way", encoding="utf-8")  # a file where the mark directory should be
+    first = _out(_run(tmp_path, repo, home, session_id="s-a"))
+    assert "did you mean" in first["systemMessage"]
+    assert len(_temp_marks(tmp_path)) == 1
+    assert _run(tmp_path, repo, home, session_id="s-a").stdout == ""
+
+
+#: A driver for a machine where no mark can be kept at all: no account home, and a temporary directory that is not there.
+_NO_MARK_DRIVER = (
+    "import os, runpy, sys, tempfile\n"
+    "scripts, script = sys.argv[1], sys.argv[2]\n"
+    "sys.path.insert(0, scripts)\n"
+    "import _audience\n"
+    "_audience.account_home = lambda: None\n"
+    "tempfile.gettempdir = lambda: os.path.join(scripts, 'no', 'such', 'dir')\n"
+    "os.environ['NX_HOOK_INTERPRETER_REEXEC'] = '1'\n"
+    "sys.argv = [script]\n"
+    "runpy.run_path(script, run_name='__main__')\n"
+)
+
+
+def test_when_no_mark_can_be_kept_anywhere_it_is_silent_rather_than_speaking_on_every_prompt(tmp_path):
+    repo = _repo(tmp_path / "repo", BROKEN)
+    proc = subprocess.run(
+        [sys.executable, "-c", _NO_MARK_DRIVER, str(SCRIPT.parent), str(SCRIPT)],
+        input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s-a", "cwd": str(repo)}),
+        capture_output=True, text=True, timeout=60, check=False,
+    )
     assert proc.returncode == 0 and proc.stdout == "" and proc.stderr == ""
 
 
-def test_it_is_registered_for_startup_resume_and_clear_and_not_for_compact():
+def test_a_payload_with_no_session_id_is_silent(tmp_path):
+    repo = _repo(tmp_path / "repo", BROKEN)
+    proc = _run(tmp_path, repo, _home(tmp_path / "home", logs=True), session_id="")
+    assert proc.returncode == 0 and proc.stdout == "" and proc.stderr == ""
+
+
+def test_it_is_registered_for_the_prompt_and_not_for_the_session_start():
+    """Desktop hides a SessionStart systemMessage, so the hook is a UserPromptSubmit one (and only that: the CLI shows both, so a
+    second registration would tell a CLI user twice). Its timeout is the user's wait on a first prompt."""
     data = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-    groups = [g for g in data["hooks"]["SessionStart"] if any("settings_notice.py" in " ".join(h.get("args", [])) for h in g["hooks"])]
-    assert len(groups) == 1, groups
-    assert set(groups[0]["matcher"].split("|")) == {"startup", "resume", "clear"}
-    (hook,) = [h for h in groups[0]["hooks"] if "settings_notice.py" in " ".join(h.get("args", []))]
-    assert hook["args"][-1].endswith("hooks/scripts/settings_notice.py") and hook["timeout"] >= 20
+    mine = [
+        (event, h)
+        for event, groups in data["hooks"].items()
+        for g in groups
+        for h in g["hooks"]
+        if "settings_notice.py" in " ".join(h.get("args", []))
+    ]
+    assert [e for e, _ in mine] == ["UserPromptSubmit"], mine
+    ((_, hook),) = mine
+    assert hook["args"][-1].endswith("hooks/scripts/settings_notice.py") and 15 <= hook["timeout"] <= 30
+
+
+def test_the_prompt_hooks_are_the_mailbox_drain_and_the_notice_in_groups_of_their_own():
+    data = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    groups = data["hooks"]["UserPromptSubmit"]
+    assert [[h["args"][-1].rsplit("/", 1)[-1] for h in g["hooks"]] for g in groups] == [["mailbox_drain.py"], ["settings_notice.py"]]
+
+
+# -- the cost of a later prompt --------------------------------------------------------------------------------------------
+
+#: A repeat claim is one failed open(); this is generous (a slow disk, a Windows runner) and still catches a settings read
+#: (several file reads and, with a project file, a git process) or a directory scan on every prompt.
+REPEAT_CLAIM_MAX_MS = 5.0
+
+
+@pytest.mark.parametrize("logs", [True, False], ids=["logs-dir", "no-logs-dir"])
+def test_a_repeat_claim_is_cheap_and_scans_nothing(audience_copy, tmp_path, monkeypatch, logs):
+    if logs:
+        (audience_copy.HOME / ".config" / "nexus" / "logs").mkdir(parents=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    payload = {"session_id": "s-cost"}
+    assert audience_copy.claim_session_once("settings-notice", payload) is True
+    scans: list = []
+    real_scandir = os.scandir
+    monkeypatch.setattr(os, "scandir", lambda *a, **k: scans.append(a) or real_scandir(*a, **k))
+    start = time.perf_counter()
+    for _ in range(200):
+        assert audience_copy.claim_session_once("settings-notice", payload) is False
+    per_call_ms = (time.perf_counter() - start) * 1000 / 200
+    assert scans == [], "a repeat claim must not scan the mark directory"
+    assert per_call_ms < REPEAT_CLAIM_MAX_MS, per_call_ms
+
+
+def test_a_mark_older_than_a_week_is_deleted_by_the_next_claim_beside_it(audience_copy):
+    marks = audience_copy.HOME / ".config" / "nexus" / "logs" / "audience-settings-notice"
+    marks.mkdir(parents=True)
+    old, fresh = marks / "old-session", marks / "fresh-session"
+    for f in (old, fresh):
+        f.write_text("", encoding="utf-8")
+    eight_days = time.time() - 8 * 24 * 3600
+    os.utime(old, (eight_days, eight_days))
+    assert audience_copy.claim_session_once("settings-notice", {"session_id": "new-session"}) is True
+    assert not old.exists() and fresh.exists() and (marks / "new-session").exists()
+
+
+def test_claim_session_once_says_none_without_a_session_and_never_raises(audience_copy):
+    assert audience_copy.claim_session_once("settings-notice", {}) is None
+    assert audience_copy.claim_session_once("settings-notice", object()) is None
 
 
 # -- what the model is told ------------------------------------------------------------------------------------------------
@@ -255,10 +415,10 @@ def test_it_names_the_stdlib_command_when_nx_has_no_settings_command(tmp_path, n
 def test_the_installed_nx_is_asked_only_when_there_is_a_problem(tmp_path):
     mark = tmp_path / "nx-ran"
     clean = _repo(tmp_path / "clean")
-    assert _run(tmp_path, clean, _home(tmp_path / "home"), nx="new", nx_mark=mark).stdout == ""
+    assert _run(tmp_path, clean, _home(tmp_path / "home"), nx="new", nx_mark=mark, session_id="s-clean").stdout == ""
     assert not mark.exists(), "a session with nothing to report starts no nx"
     broken = _repo(tmp_path / "broken", {"version": 1, "subagent-git": "strict"})
-    _out(_run(tmp_path, broken, _home(tmp_path / "home2"), nx="new", nx_mark=mark))
+    _out(_run(tmp_path, broken, _home(tmp_path / "home2"), nx="new", nx_mark=mark, session_id="s-broken"))
     assert mark.exists()
 
 
@@ -300,7 +460,7 @@ def test_many_problems_stay_inside_the_byte_bounds_and_say_how_many_more(tmp_pat
     assert "more" in out["systemMessage"]
 
 
-# -- once per session ------------------------------------------------------------------------------------------------------
+# -- the log ---------------------------------------------------------------------------------------------------------------
 
 
 def _log(home: Path) -> str:
@@ -308,14 +468,13 @@ def _log(home: Path) -> str:
     return f.read_text(encoding="utf-8") if f.exists() else ""
 
 
-def test_each_problem_is_logged_once_per_session_and_the_message_is_shown_each_start(tmp_path):
-    repo = _repo(tmp_path / "repo", {"version": 1, "subagent-git": "strict"})
+def test_each_problem_is_logged_once_per_session(tmp_path):
+    repo = _repo(tmp_path / "repo", BROKEN)
     home = _home(tmp_path / "home", logs=True)
-    first = _out(_run(tmp_path, repo, home, session_id="s-a"))
+    _out(_run(tmp_path, repo, home, session_id="s-a"))
     assert _log(home).count("settings problem") == 1 and "subagent-git" in _log(home)
-    again = _out(_run(tmp_path, repo, home, session_id="s-a", source="resume"))
+    _run(tmp_path, repo, home, session_id="s-a")
     assert _log(home).count("settings problem") == 1, "the same session logs the same problem once"
-    assert again["systemMessage"] == first["systemMessage"], "the user is told on every start, resume and clear"
     _out(_run(tmp_path, repo, home, session_id="s-b"))
     assert _log(home).count("settings problem") == 2
 
@@ -331,7 +490,7 @@ def test_without_the_settings_helper_it_is_silent_and_exits_zero(tmp_path):
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH",)}
     proc = subprocess.run(
         [sys.executable, str(lone / "settings_notice.py")],
-        input=json.dumps({"source": "startup", "cwd": str(repo)}), capture_output=True, text=True, env=env, timeout=60, check=False,
+        input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s-a", "cwd": str(repo)}), capture_output=True, text=True, env=env, timeout=60, check=False,
     )
     assert proc.returncode == 0 and proc.stdout == "" and proc.stderr == ""
 

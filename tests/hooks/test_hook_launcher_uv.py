@@ -106,7 +106,7 @@ def test_the_walk_finds_the_launcher_entries() -> None:
     ``compact_checkpoint.py`` (nexus-3lqxv; the fourth is the SessionEnd ``end`` mode, RDR-253 Step 6); the sixth script is the Stop wake guard
     (nexus-4cgop). The twenty-first is ``destructive_action_advice.py`` (nexus-qo7ie.36), the
     advise-mode PreToolUse guard on ``Bash|Edit|Write|MultiEdit``. The twenty-third is the SessionStart
-    ``settings_notice.py`` (nexus-sby49.12, RDR-259)."""
+    ``settings_notice.py`` (nexus-sby49.12, RDR-259), a UserPromptSubmit entry."""
     entries = _launcher_entries()
     assert len(entries) == 23, [(e, _script(h)) for e, h in entries]
     assert sum(1 for _, h in entries if _script(h) == "nx_launch.py") == 7
@@ -263,7 +263,7 @@ def test_the_uv_alias_needs_no_symlink_privilege(tmp_path) -> None:
     assert proc.returncode == 0 and proc.stdout.startswith("uv "), (proc.returncode, proc.stderr)
 
 
-def test_uv_with_no_interpreter_exits_2_which_blocks_six_entries(tmp_path) -> None:
+def test_uv_with_no_interpreter_exits_2_which_blocks_seven_entries(tmp_path) -> None:
     """MEASURED, not fixed: hooks.json launches in exec form (``args`` set, so no
     shell), and an exec-form entry cannot map a launcher failure to a non-blocking
     code. With no Python 3.12+ findable and none fetchable (offline, proxied,
@@ -275,7 +275,7 @@ def test_uv_with_no_interpreter_exits_2_which_blocks_six_entries(tmp_path) -> No
     env = _no_interpreter_env(tmp_path)
     entries = _launcher_entries()
     blocking = [(e, h) for e, h in entries if e in _BLOCKING_EVENTS]
-    assert len(blocking) == 6, [(e, _script(h)) for e, h in blocking]
+    assert len(blocking) == 7, [(e, _script(h)) for e, h in blocking]
     # The plugin root is a copy outside the repo: `--directory <plugin root>` makes uv
     # discover interpreters from there, and the repo's own .venv above conexus/ would
     # supply one.

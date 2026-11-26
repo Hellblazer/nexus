@@ -149,7 +149,7 @@ def test_the_walk_finds_the_uv_entries() -> None:
     nexus-mtheb.3, the SubagentStop ``subagent-stop-t1-nudge`` entry; 19 to 20 at
     nexus-4cgop, the Stop ``stop_wake_guard.py`` entry; 20 to 21 at nexus-qo7ie.36, the
     PreToolUse ``destructive_action_advice.py`` entry; 21 to 22 at RDR-253 Step 6, the SessionEnd
-    ``compact_checkpoint.py end`` entry; 22 to 23 at nexus-sby49.12, the SessionStart ``settings_notice.py`` entry)."""
+    ``compact_checkpoint.py end`` entry; 22 to 23 at nexus-sby49.12, the UserPromptSubmit ``settings_notice.py`` entry)."""
     counts = {p: sum(1 for plugin, _, _ in _uv_entries() if plugin == p) for p in _PLUGINS}
     assert counts == {"conexus": 23, "sn": 4}, counts
 

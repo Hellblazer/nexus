@@ -109,7 +109,7 @@ conexus/
 │       │                              # hook dispatches
 │       ├── routing/                   # PreToolUse(Bash) guards + their shared _lib.py
 │       ├── nx_setup_notice.py         # SessionStart: report the first-of-eight setup state (RDR-228)
-│       ├── settings_notice.py         # SessionStart(startup|resume|clear): tell the user about a settings file problem (RDR-259)
+│       ├── settings_notice.py         # UserPromptSubmit (first prompt of a session): tell the user about a settings file problem (RDR-259)
 │       ├── _interpreter.py            # Shared helper: re-exec under an interpreter that
 │       │                              # can serve the hook (3.12 floor, and the
 │       │                              # generation python that can import nexus)
@@ -320,8 +320,8 @@ uv starts; a warm hook returns when it is done and pays nothing for the larger l
 **Known blocking failure.** When uv can find no Python 3.12 or newer and cannot fetch one
 (offline, behind a proxy that blocks the download, air-gapped), `uv tool run` exits 2 with
 `No interpreter found`. Claude Code treats a hook's exit 2 as blocking on `PreToolUse`,
-`PermissionRequest` and `UserPromptSubmit`, so six of the twenty-two uv-launched entries (the
-three `PreToolUse` guards, both `auto-approve` entries, the mailbox drain) refuse every Bash call, every
+`PermissionRequest` and `UserPromptSubmit`, so seven of the twenty-three uv-launched entries (the
+three `PreToolUse` guards, both `auto-approve` entries, the mailbox drain, the settings notice) refuse every Bash call, every
 edit and write, every conexus tool call and every prompt until Python exists; the `SessionStart` and `SessionEnd`
 entries only print the error. The entries are in exec form (`args` is set, so there is no shell), and an
 exec-form entry cannot turn a launcher failure into a non-blocking code. The remedy is one
@@ -340,7 +340,7 @@ names each handler by its program and verb.
 | Event | Handler | Purpose |
 |-------|--------|---------|
 | `SessionStart` | `hooks/scripts/nx_setup_notice.py` | First in the list. Reports the first of eight states (RDR-228): a setup run is live; the CLI is found and cannot start; the CLI resolves and a service is usable (nothing); a run was interrupted; the last run failed; no CLI (puts the one question with its table of choices: Local, Cloud, CLI only, Not now); a provisioned local service is down; no service is set up. The user's choice is honoured: after "not now" the no-CLI, down, no-service and stale failed or interrupted states are one quiet line naming `/conexus:setup` that asks nothing, and a recorded CLI-only choice makes the last two the same line. Says nothing in a cloud session (`CLAUDE_CODE_REMOTE`), where the servers are not. Starts no process, opens no socket, writes nothing |
-| `SessionStart` (startup, resume, clear) | `hooks/scripts/settings_notice.py` | When a settings file has a problem (`.nexus/project.json` or `conexus.json`: an unknown or misspelled key, a bad value, a file that cannot be read, no account home), prints one user-visible `systemMessage` naming each file, the problem and the value used, with a "did you mean" for a misspelled key, and one line for the model with the count and the pointer. File text in the message is cleaned, quoted and cut to 60 bytes and never reaches the model's line. The pointer is `nx settings show` when the installed `nx` has the `settings` command, else the plugin's own `_audience.py show`. Silent on `compact` and `fork` and when nothing is wrong; logs each problem once per session; standard library only |
+| `UserPromptSubmit` (first prompt of a session) | `hooks/scripts/settings_notice.py` | When a settings file has a problem (`.nexus/project.json` or `conexus.json`: an unknown or misspelled key, a bad value, a file that cannot be read, no account home), prints one user-visible `systemMessage` naming each file, the problem and the value used, with a "did you mean" for a misspelled key, and one line for the model with the count and the pointer. It is a prompt hook, not a session-start hook, because Claude Desktop shows a prompt hook's message and hides a session-start hook's; the CLI shows both. It speaks on the session's first prompt only (one mark file per session id, so a later prompt exits before reading any settings) and is silent when nothing is wrong. File text in the message is cleaned, quoted and cut to 60 bytes and never reaches the model's line. The pointer is `nx settings show` when the installed `nx` has the `settings` command, else the plugin's own `_audience.py show`; logs each problem once per session; standard library only |
 | `SessionStart` | `nx-hook upgrade-auto` | Auto-converge the CLI to the plugin's minimum required version. Spawns `nx upgrade --auto`; the shell form's `2>/dev/null` and its version-skew `|| echo` guidance live in the verb (`nexus.hooks.upgrade_auto`) |
 | `SessionStart` | `nx-hook self-gc` | Reap superseded install generations no live process is holding. Spawns `nx self gc` and prints nothing; gc's own record goes to `<config>/logs/install-gc.log` (1 MB, one previous file kept; it names this sweep as the caller and keeps parent commands redacted) (`nexus.hooks.self_gc`) |
 | `SessionStart` | `nx-hook preflight` | Silent health check of skill-routed tool reachability; emits a `## nx Preflight: FAILED` marker on gaps (nexus-hwbj) |
