@@ -74,6 +74,14 @@ final class MoveTenants {
     }
 
     /**
+     * The most statements {@link #reread} sends: the token read, the check that the table is partitioned, and the leaf listing, twice
+     * (once to ask whether any leaf has a tenant, once to read them). The re-check charges the re-read less one round trip for each
+     * ({@code RecheckBudget#chargeCatalogRead}); {@code VerifyingFinisherRecheckLatencyIntegrationTest} counts what it sends and fails if
+     * it sends more.
+     */
+    static final int REREAD_STATEMENTS = 4;
+
+    /**
      * The tenants listed at the start of the pass, then those the catalogs name now that it was not listed with: a tenant that
      * has a {@code nexus.service_tokens} row since, and on a table partitioned one tenant per leaf a tenant with a leaf since. Both
      * are catalog-sized reads (no scan of the driving table), so the completion transaction can make them. A tenant that holds rows

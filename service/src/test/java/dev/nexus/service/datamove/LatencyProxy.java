@@ -10,6 +10,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A TCP relay that holds every chunk of bytes for {@code oneWayMs} before forwarding it, in both directions: a client that
@@ -24,6 +25,7 @@ final class LatencyProxy implements AutoCloseable {
     private final int targetPort;
     private final long oneWayMs;
     private final List<Socket> open = new ArrayList<>();
+    private final AtomicInteger clientChunks = new AtomicInteger();
     private volatile boolean closed;
 
     LatencyProxy(String targetHost, int targetPort, long oneWayMs) throws IOException {
@@ -32,6 +34,11 @@ final class LatencyProxy implements AutoCloseable {
         this.oneWayMs = oneWayMs;
         this.listener = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
         Thread.ofPlatform().daemon().name("latency-proxy-accept").start(this::acceptLoop);
+    }
+
+    /** How many chunks of bytes clients have sent the database so far: a count of the round trips a test makes, give or take a split. */
+    int clientChunks() {
+        return clientChunks.get();
     }
 
     int port() {
@@ -49,8 +56,8 @@ final class LatencyProxy implements AutoCloseable {
                     open.add(client);
                     open.add(server);
                 }
-                pump(client, server);
-                pump(server, client);
+                pump(client, server, true);
+                pump(server, client, false);
             } catch (IOException e) {
                 if (!closed) {
                     throw new IllegalStateException("the latency proxy could not relay a connection", e);
@@ -60,13 +67,16 @@ final class LatencyProxy implements AutoCloseable {
     }
 
     /** One direction: a reader stamps each chunk with its release time, a writer waits for that time and forwards it. */
-    private void pump(Socket from, Socket to) {
+    private void pump(Socket from, Socket to, boolean fromClient) {
         var queue = new java.util.concurrent.LinkedBlockingQueue<Object[]>();
         Thread.ofPlatform().daemon().name("latency-proxy-read").start(() -> {
             byte[] buf = new byte[16 * 1024];
             try (InputStream in = from.getInputStream()) {
                 int n;
                 while ((n = in.read(buf)) >= 0) {
+                    if (fromClient) {
+                        clientChunks.incrementAndGet();
+                    }
                     queue.put(new Object[] {System.nanoTime() + oneWayMs * 1_000_000L, java.util.Arrays.copyOf(buf, n)});
                 }
             } catch (IOException | InterruptedException ignored) {

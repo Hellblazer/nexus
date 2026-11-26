@@ -601,10 +601,13 @@ final class VerifyingFinisher implements MoveFinisher {
      * {@code nexus.tenant}, then once per tenant, each under {@code SET LOCAL nexus.tenant} (the first pass runs the tenants and
      * then table-wide; the order here does not matter, every run is made). The per-tenant runs are not redundant: a verification that
      * reads a row-security-scoped table or helper sees nothing without a tenant, so the table-wide run is empty whatever the table
-     * holds and the tenant's own run is the check. The whole re-check shares {@code statement_timeout_ms}: each run gets what is left
-     * of it (the catalog reads of the tenant re-read are bounded by all of it and charged to it), and the move's own statement and lock bounds are set again for {@code on_complete}, which gets a fresh
-     * {@code statement_timeout_ms} (so the transaction can run up to twice that, plus the UPDATE). The first pass has warmed what
-     * the runs read, but only what the verification itself reads: the registrant writes the verification to read what
+     * holds and the tenant's own run is the check. A verification that reads only the catalogs says so ({@link DataMove#tableWideOnly}):
+     * every tenant's run returns nothing by construction, so the re-check is the table-wide run alone, with no re-read and no
+     * per-tenant statement (the swaps' leaf-key verification is one). The whole re-check shares {@code statement_timeout_ms} of
+     * DATABASE time ({@link RecheckBudget}): each run gets what is left of it, the catalog re-read of the tenant list is charged to it,
+     * and the move's own statement and lock bounds are set again for {@code on_complete}, which gets a fresh
+     * {@code statement_timeout_ms}, so the database spends at most twice that in the transaction, plus the UPDATE. The first pass has
+     * warmed what the runs read, but only what the verification itself reads: the registrant writes the verification to read what
      * {@code on_complete} reads (the table, and the index or foreign-key side it will scan), or the first pass warms nothing for it.
      *
      * <p><b>What it covers, and what it does not.</b> It is a point-in-time check: it sees the rows committed when each run's
@@ -615,22 +618,24 @@ final class VerifyingFinisher implements MoveFinisher {
      * tenant per leaf, a tenant with a leaf since). The remaining limit: a tenant whose first rows appear in a table the probe listed,
      * after the probe, that has neither a token nor a leaf, is not run here; only a rescan of the table could find it.
      *
-     * <p><b>Why one shared budget, not one bound per tenant.</b> The completion transaction holds the row lock of the move's
-     * registry row (and the transaction its snapshot) from the UPDATE to commit, and the number of tenants is the user count, which
-     * the registry does not bound. With a bound per tenant the hold grows as tenants times {@code statement_timeout_ms} (1.4 s for
-     * Phase 3: ten tenants could hold it 14 s); with one shared budget it is at most the re-check's {@code statement_timeout_ms} plus
-     * {@code on_complete}'s own. The price is that a move with many tenants whose warm runs add up past the bound times out (57014,
-     * stage {@code RECHECK}, transient: the move retries with backoff and every retry repeats the first pass, so an under-sized
-     * bound loops), so a registrant sets {@code statement_timeout_ms} for the sum of the tenants' warm runs;
-     * {@code DataMoveSplitBoundsIntegrationTest} pins both sides (runs whose sum fits complete; runs each under the bound whose sum
-     * is over it time out and complete nothing).
+     * <p><b>Why one shared budget, not one bound per tenant.</b> The number of tenants is the user count, which the registry does not
+     * bound. With a bound per tenant the database time in the transaction grows as tenants times {@code statement_timeout_ms}
+     * (1.4 s for Phase 3: ten tenants could spend 14 s); with one shared budget it is at most the re-check's
+     * {@code statement_timeout_ms} plus {@code on_complete}'s own. The price is that a move with many tenants whose warm runs add up
+     * past the bound times out (57014, stage {@code RECHECK}, transient: the move retries with backoff and every retry repeats the
+     * first pass, so an under-sized bound loops), so a registrant sets {@code statement_timeout_ms} for the sum of the tenants' warm
+     * runs; {@code DataMoveSplitBoundsIntegrationTest} pins both sides (runs whose sum fits complete; runs each under the bound whose
+     * sum is over it time out and complete nothing).
      *
-     * <p><b>What the budget counts.</b> The time the database spends on the runs, not the round trips to it ({@link RecheckBudget}):
-     * a wall clock over the re-check also charged {@code set_config}, {@code SET LOCAL statement_timeout} and the count's own trips
-     * of every tenant, so the cost grew as RTT x (6 + 3 x tenants) and a database an RTT away, or a store with many tenants,
-     * timed out with every statement fast ({@code VerifyingFinisherRecheckLatencyIntegrationTest}). The hold on the registry row
-     * still grows with the round trips of the tenants (they are not free in wall time), but the budget that decides a failure
-     * does not.
+     * <p><b>What the budget counts, and what is not bounded.</b> The time the database spends ({@link RecheckBudget}), not the round
+     * trips to it: a wall clock over the re-check also charged {@code set_config}, {@code SET LOCAL statement_timeout} and the
+     * count's own trips of every tenant, so the cost grew as RTT x (6 + 3 x tenants) and a database an RTT away, or a store with many
+     * tenants, timed out with every statement fast ({@code VerifyingFinisherRecheckLatencyIntegrationTest}). The bounds are the ones
+     * the rulings declare and they are unchanged: {@code statement_timeout} 1400 ms (never more than what is left of it) and
+     * {@code lock_timeout} 700 ms. What no setting bounds is the WALL time this transaction holds the registry row (and its snapshot):
+     * for a move that is not table-wide-only each tenant's run still adds about four round trips, so the hold grows with the tenant
+     * count times the round trip, on loopback a few milliseconds a tenant. A table-wide-only move (the swaps) holds it for a constant
+     * number of round trips, whatever the tenant count.
      *
      * <p><b>Errors.</b> The re-check runs under the transaction's {@code lock_timeout}, so a wait behind an ACCESS EXCLUSIVE holder
      * raises 55P03, and a deadlock or a serialization failure is possible: these are stage {@code RECHECK}, classified as
@@ -654,13 +659,16 @@ final class VerifyingFinisher implements MoveFinisher {
             requireNoTenant(tx, move, "before the re-check");
             RecheckBudget budget = move.unbounded() ? RecheckBudget.unbounded() : RecheckBudget.of(move.statementTimeoutMs());
             budget.observeRoundTrip(System.nanoTime() - tripBegan);
-            // a move over a table that is not tenant-scoped has no tenant list, and keeps none; the catalog reads of the re-read
-            // are bounded by the whole budget and charged to it (a constant number of statements, whatever the tenant count)
+            // a move over a table that is not tenant-scoped has no tenant list, and keeps none; so does a move whose verification
+            // reads only the catalogs (DataMove#tableWideOnly): every tenant's run returns nothing by construction, so there is no
+            // re-read and no per-tenant statement, and the re-check is the same few round trips whatever the tenant count
             clampToBudget(tx, budget);
-            long readBegan = System.nanoTime();
-            List<String> listed = tenants.isEmpty() ? tenants
-                : MoveTenants.reread(tx, move.drivingSchema(), move.drivingTable(), tenants);
-            budget.chargeWall(System.nanoTime() - readBegan);
+            List<String> listed = List.of();
+            if (!tenants.isEmpty() && !move.tableWideOnly()) {
+                long readBegan = System.nanoTime();
+                listed = MoveTenants.reread(tx, move.drivingSchema(), move.drivingTable(), tenants);
+                budget.chargeCatalogRead(System.nanoTime() - readBegan, MoveTenants.REREAD_STATEMENTS);
+            }
             Map<String, Long> found = new LinkedHashMap<>();
             runWithinBudget(tx, c, move, null, budget, found);
             for (String tenant : listed) {

@@ -41,6 +41,21 @@ public record DataMove(
     /** The lock wait of a move with no statement bound (what the other moves get as the ceiling of {@code min(5 s, bound / 2)}). */
     public static final int UNBOUNDED_LOCK_TIMEOUT_MS = 5_000;
 
+    /**
+     * The first thing in the text of a verification that reads only the catalogs and returns no row but in the table-wide run
+     * ({@code $1} NULL): a leaf's index is the table's, not a tenant's, so every tenant's run returns nothing by construction. The
+     * finisher then runs the table-wide run alone, in the completion's re-check (so its round trips and its hold on the registry row
+     * do not grow with the tenant count). A comment, so the text is the same SQL to the server and to the registration gate. The
+     * registrant guarantees what it says (nothing checks that the text reads only the catalogs): a verification that reads a
+     * row-security scoped table or helper never carries it, because there the tenant's own run is the check.
+     */
+    public static final String TABLE_WIDE_ONLY_MARKER = "/* nexus:table-wide-only */";
+
+    /** True when the verification opens with {@link #TABLE_WIDE_ONLY_MARKER} (white space before it is ignored). */
+    public boolean tableWideOnly() {
+        return verification != null && verification.stripLeading().startsWith(TABLE_WIDE_ONLY_MARKER);
+    }
+
     /** True when the completion of this move has no statement bound, only {@link #UNBOUNDED_LOCK_TIMEOUT_MS}. */
     public boolean unbounded() {
         return statementTimeoutMs == NO_STATEMENT_BOUND_MS;
