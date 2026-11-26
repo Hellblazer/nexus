@@ -460,7 +460,14 @@ def _read_data_token_lease(config_dir: pathlib.Path, base_url: str) -> str | Non
     sibling module. ``tests/test_routing_hooks.py``'s
     ``test_parity_read_data_token_lease_*`` suite still runs both
     wrappers against the same on-disk lease fixture and asserts
-    identical return values."""
+    identical return values.
+
+    nexus-ec37o: a lease is bound to its host, not to a transport, so a data token is
+    served only over https or to a loopback host, as a stored credential is."""
+    try:
+        _ep.require_secure_transport(base_url)
+    except _ep.EndpointUnresolvable:
+        return None
     return _ep.read_data_token_lease(config_dir, base_url)
 
 
@@ -692,6 +699,10 @@ def _post_routing_event_once(
                 "Content-Type": "application/json",
             },
         )
+        if not _ep.bearer_may_use_proxy(base_url):
+            # nexus-ec37o: a plain-http bearer (the lease token always) never goes through a proxy.
+            # This is the detached one-shot poster, so the process-wide opener is ours to set.
+            urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed internal engine URL, not user input
             if 200 <= resp.status < 300:
                 return ""

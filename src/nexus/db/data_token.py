@@ -263,6 +263,7 @@ from nexus.db.request_gate import before_request
 from nexus.db.engine_reasons import error_reason
 from nexus.db.service_endpoint import (
     InsecureServiceTransportError,
+    bearer_may_use_proxy,
     bound_mint_credential,
     is_loopback_host,
     require_secure_transport,
@@ -1099,19 +1100,6 @@ def _lease_scheme_ok(lease_scheme: object, url: str) -> bool:
     return isinstance(lease_scheme, str) and lease_scheme == scheme
 
 
-def _cleartext_off_machine(url: str) -> bool:
-    """True when a POST to *url* would be plain http to a host that is not this machine (or
-    its scheme is neither). Judged on ``urlsplit``, the parse urllib connects by, so a URL
-    the origin normaliser refuses (userinfo) is not turned away for that alone."""
-    try:
-        parts = urllib.parse.urlsplit(url)
-        hostname = parts.hostname or ""
-    except ValueError:
-        return True
-    scheme = parts.scheme.lower()
-    return scheme != "https" and not (scheme == "http" and is_loopback_host(hostname))
-
-
 def _url_scheme(url: str) -> str:
     try:
         return urllib.parse.urlsplit(url).scheme.lower()
@@ -1155,8 +1143,10 @@ def _default_poster(
         method="POST",
     )
     before_request()  # nexus-ldf2s: a mint is a request like any other
+    # nexus-ec37o: the mint credential never goes through a proxy over plain http (loopback only)
+    opener = urllib.request.build_opener(*([] if bearer_may_use_proxy(url) else [urllib.request.ProxyHandler({})]))
     try:
-        with urllib.request.urlopen(req, timeout=_mint_transport_timeout.get()) as resp:  # noqa: S310 — fixed https/http scheme from configured base_url
+        with opener.open(req, timeout=_mint_transport_timeout.get()) as resp:  # noqa: S310 — fixed https/http scheme from configured base_url
             raw = resp.read()
             return resp.status, (json.loads(raw) if raw else {}), dict(resp.headers)
     except urllib.error.HTTPError as exc:
@@ -2146,9 +2136,9 @@ class DataTokenManager:
         """
         url = base_url.rstrip("/") + "/v1/data-tokens/mint"
         try:
-            # nexus-ec37o: no mint credential over cleartext off this machine
-            if _cleartext_off_machine(base_url):
-                require_secure_transport(base_url)
+            # nexus-ec37o: no mint credential over cleartext off this machine, judged by the same
+            # origin rule as every other bearer (a URL it cannot normalize, userinfo included, is refused)
+            require_secure_transport(base_url)
         except InsecureServiceTransportError as exc:
             raise DataTokenMintError(str(exc)) from None
         headers = {"Authorization": f"Bearer {credential}"}

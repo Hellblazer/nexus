@@ -755,7 +755,8 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     def _do() -> None:
         try:
             handlers: list[urllib.request.BaseHandler] = []
-            if is_local:
+            if is_local or not _ep.bearer_may_use_proxy(base_url):
+                # nexus-ec37o: a plain-http bearer (the lease token always) never goes through a proxy
                 handlers.append(urllib.request.ProxyHandler({}))
             opener = urllib.request.build_opener(*handlers)
             with opener.open(req, timeout=call_timeout) as resp:  # noqa: S310 — fixed engine URL
@@ -807,7 +808,8 @@ def _get(base_url: str, token: str, route: str, params: dict[str, str],
     def _do() -> None:
         try:
             handlers: list[urllib.request.BaseHandler] = []
-            if is_local:
+            if is_local or not _ep.bearer_may_use_proxy(base_url):
+                # nexus-ec37o: a plain-http bearer (the lease token always) never goes through a proxy
                 handlers.append(urllib.request.ProxyHandler({}))
             opener = urllib.request.build_opener(*handlers)
             with opener.open(req, timeout=call_timeout) as resp:  # noqa: S310 — fixed engine URL
@@ -1492,6 +1494,12 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
 
     data_token = _ep.read_data_token_lease(config_dir, base_url)
     if data_token:
+        # nexus-ec37o: a lease is bound to its host, not to a transport; the data token goes only
+        # over https or to a loopback host, as a stored credential does.
+        try:
+            _ep.require_secure_transport(base_url)
+        except _ep.EndpointUnresolvable as exc:
+            raise _Skip(str(exc)) from exc
         return base_url, data_token, is_local
 
     # Each stored credential goes only to the origin it was issued for (nexus-ec37o): the URL

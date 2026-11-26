@@ -1021,7 +1021,7 @@ def choose_bound_token(
 
 def mismatch_message(url_source: str, refused: list[str]) -> str:
     return (
-        f"{url_source} names a service that the {' and the '.join(refused)} was not issued for, "
+        f"{url_source} names a service that {' and '.join(refused)} was not issued for, "
         "so that credential is not sent there. Export NX_SERVICE_TOKEN for this service, or "
         "point it at the service the credential belongs to (`nx config set service_url`)."
     )
@@ -1052,6 +1052,18 @@ def require_secure_transport(url: str, *, url_source: str | None = None) -> None
     if origin is not None and (origin[0] == "https" or is_loopback_host(origin[1])):
         return
     raise CredentialRefused(insecure_message(url_source or describe_url_source()))
+
+
+def bearer_may_use_proxy(url: str) -> bool:
+    """True only for an https endpoint, where a proxy can only tunnel ciphertext.
+
+    A plain-http request is sent direct, whatever ``HTTP_PROXY`` / ``ALL_PROXY`` name: a proxy
+    would read its ``Authorization`` header, and the supervisor lease token (loopback http
+    only, by its binding) and every cleartext bearer travel that way. A URL that does not
+    normalize gets no proxy either. Mirrors ``nexus.db.service_endpoint.bearer_may_use_proxy``;
+    the drains and the routing poster build an empty ``ProxyHandler`` for a URL it refuses."""
+    origin = normalize_origin(url)
+    return origin is not None and origin[0] == "https"
 
 
 def stored_credential(

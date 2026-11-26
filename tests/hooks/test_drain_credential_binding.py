@@ -29,6 +29,14 @@ from tests.hooks.test_mailbox_drain_hook import (
 )
 
 _BOTH = pytest.mark.parametrize("argv", [_VERB_ARGV, _PLUGIN_ARGV], ids=["wheel", "plugin"])
+#: A case the wheel drain refuses through the CLI's resolver, which raises a guarded storage error on
+#: purpose (``expects_unresolvable_endpoint``); the plugin script never imports nexus and raises none,
+#: so the marker (reported stale when nothing is raised) sits on the wheel variant only.
+_REFUSED = pytest.mark.parametrize(
+    "argv",
+    [pytest.param(_VERB_ARGV, id="wheel", marks=pytest.mark.expects_unresolvable_endpoint),
+     pytest.param(_PLUGIN_ARGV, id="plugin")],
+)
 
 _SAVED = "saved-service-token"
 _LEASE = "local-supervisor-token"  # what _write_storage_lease puts in the lease
@@ -54,8 +62,8 @@ def _drain(tmp_path, argv, env):
     return _run(tmp_path=tmp_path, argv=argv, env_overrides=env)
 
 
-@_BOTH
 class TestSavedTokenIsBoundToItsServiceUrl:
+    @_REFUSED
     def test_env_url_naming_another_host_gets_no_saved_token(self, tmp_path, engine, argv) -> None:
         real, decoy = engine(), engine()
         _save(tmp_path, url=_url(real))
@@ -65,6 +73,7 @@ class TestSavedTokenIsBoundToItsServiceUrl:
         assert real.auth == [], real.auth
         assert str(decoy.port) not in res.stderr + res.stdout, res.stderr
 
+    @_BOTH
     def test_env_url_naming_the_bound_origin_still_sends_it(self, tmp_path, engine, argv) -> None:
         real, decoy = engine(), engine()
         real.rows = [_row("bd11", body="bound mail")]
@@ -75,6 +84,7 @@ class TestSavedTokenIsBoundToItsServiceUrl:
         assert real.auth and set(real.auth) == {f"Bearer {_SAVED}"}, real.auth
         assert decoy.auth == []
 
+    @_REFUSED
     def test_no_saved_service_url_binds_the_token_to_the_default_managed_url(
         self, tmp_path, engine, argv,
     ) -> None:
@@ -85,8 +95,8 @@ class TestSavedTokenIsBoundToItsServiceUrl:
         assert real.auth == [], real.auth
 
 
-@_BOTH
 class TestLeaseTokenIsBoundToTheLeaseEndpoint:
+    @_REFUSED
     def test_env_url_naming_another_host_gets_no_lease_token(self, tmp_path, engine, argv) -> None:
         real, decoy = engine(), engine()
         _write_storage_lease(tmp_path / "config", host="127.0.0.1", port=real.port)
@@ -95,6 +105,7 @@ class TestLeaseTokenIsBoundToTheLeaseEndpoint:
         assert decoy.auth == [], decoy.auth
         assert str(decoy.port) not in res.stderr + res.stdout, res.stderr
 
+    @_REFUSED
     def test_env_host_and_port_naming_another_port_gets_no_lease_token(
         self, tmp_path, engine, argv,
     ) -> None:
@@ -106,6 +117,7 @@ class TestLeaseTokenIsBoundToTheLeaseEndpoint:
         assert res.returncode == 0, res.stderr
         assert decoy.auth == [], decoy.auth
 
+    @_BOTH
     def test_env_port_naming_the_lease_endpoint_still_sends_it(self, tmp_path, engine, argv) -> None:
         real = engine()
         real.rows = [_row("ls11", body="lease mail")]
@@ -115,6 +127,7 @@ class TestLeaseTokenIsBoundToTheLeaseEndpoint:
         assert "lease mail" in res.stdout, res.stderr
         assert real.auth and set(real.auth) == {f"Bearer {_LEASE}"}, real.auth
 
+    @_BOTH
     def test_the_bare_lease_still_drains(self, tmp_path, engine, argv) -> None:
         real = engine()
         real.rows = [_row("ls22", body="bare lease mail")]
@@ -123,6 +136,7 @@ class TestLeaseTokenIsBoundToTheLeaseEndpoint:
         assert "bare lease mail" in res.stdout, res.stderr
         assert set(real.auth) == {f"Bearer {_LEASE}"}
 
+    @_BOTH
     def test_a_saved_token_bound_elsewhere_does_not_hide_the_lease_token(
         self, tmp_path, engine, argv,
     ) -> None:
@@ -150,8 +164,8 @@ class TestEnvTokenIsTheKnownLimit:
         assert set(decoy.auth) == {"Bearer exported-by-the-user"}, decoy.auth
 
 
-@_BOTH
 class TestCleartextOffMachine:
+    @_REFUSED
     def test_a_bearer_is_not_sent_over_plain_http_to_a_non_loopback_host(
         self, tmp_path, argv,
     ) -> None:

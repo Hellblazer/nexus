@@ -27,7 +27,7 @@ _SCRIPTS = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
 
 PURE = (
     "normalize_origin", "origins_equal", "is_loopback_host", "bound_origin_for_saved",
-    "choose_bound_token", "mismatch_message", "insecure_message",
+    "choose_bound_token", "mismatch_message", "insecure_message", "bearer_may_use_proxy",
 )
 
 MANAGED = "https://api.conexus-nexus.com"
@@ -123,6 +123,22 @@ def test_messages_agree_and_never_carry_a_url(hook, refused):
         assert cli.insecure_message(label) == hook.insecure_message(label)
         assert "://" not in cli.mismatch_message(label, refused)
     assert "nx config set service_url" in cli.mismatch_message("NX_SERVICE_URL", refused)
+
+
+def test_mismatch_message_names_each_source_once_without_a_doubled_article(hook):
+    """The sources already start with "the": the builder adds no second one (a "the the" read)."""
+    refused = ["the saved service_token", "the supervisor lease token"]
+    for fn in (cli.mismatch_message, hook.mismatch_message):
+        text = fn("NX_SERVICE_URL", refused)
+        assert "the the" not in text
+        assert "that the saved service_token and the supervisor lease token was not issued for" in text
+
+
+@pytest.mark.parametrize("url", URLS)
+def test_bearer_may_use_proxy_agrees_and_is_https_only(hook, url):
+    assert cli.bearer_may_use_proxy(url) == hook.bearer_may_use_proxy(url)
+    origin = cli.normalize_origin(url)
+    assert cli.bearer_may_use_proxy(url) is (origin is not None and origin[0] == "https")
 
 
 # ── the IO wrappers, against one config directory and one environment ────────
