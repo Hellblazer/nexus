@@ -1082,11 +1082,12 @@ class TestResolveConfig:
     def test_valid_config_returns_tuple_with_default_host(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("NX_SERVICE_HOST", "10.0.0.1")
+        # A loopback host that is not the default: a bearer is not sent over plain http to another host (nexus-ec37o).
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.2")
         monkeypatch.setenv("NX_SERVICE_PORT", "9090")
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok123")
         host, port, token = _resolve_config()
-        assert host == "10.0.0.1", "explicit host must be honored"
+        assert host == "127.0.0.2", "explicit host must be honored"
         assert port == 9090
         assert token == "tok123"
 
