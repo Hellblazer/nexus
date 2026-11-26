@@ -62,6 +62,7 @@ def test_all_command_modules_registered():
         "self_cmd": "self",
         "search_cmd": "search",
         "service_cmd": "service",
+        "settings_cmd": "settings",
         "storage_cmd": "storage",
         "stranded_cmd": "stranded",
         "taxonomy_cmd": "taxonomy",

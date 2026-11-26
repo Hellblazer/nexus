@@ -101,7 +101,10 @@ _SIGNUP = {
 
 @click.group("config")
 def config_group() -> None:
-    """Manage Nexus credentials and settings."""
+    """Manage Nexus credentials and settings.
+
+    The conexus plugin's project and user settings files are shown by `nx settings`, not here.
+    """
 
 
 # ── set ───────────────────────────────────────────────────────────────────────

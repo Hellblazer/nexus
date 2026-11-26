@@ -3678,6 +3678,29 @@ Resolution is env first, then `config.yml`, for both. See
 
 ---
 
+## nx settings
+
+Inspect the conexus plugin's project and user settings files. The project file is `.nexus/project.json` in the repository; the user file is `conexus.json` under `.config/nexus` in your account home. Neither holds a credential, and there is no command that writes them: edit them by hand. The user file is read from the operating system's account home even when `NEXUS_CONFIG_DIR` is set, because that is the file the hooks read. Credentials stay in [`nx config`](#nx-config).
+
+```
+nx settings show [--cwd PATH] [--json]
+nx settings check [--cwd PATH]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `show` | Print both file paths and whether each exists, whether the project file at `HEAD` differs from the working tree, every setting's effective value and its source (`default`, `user`, `project`, `project (HEAD)` or `legacy marker`) plus each file's own value where it differs, every text the hooks print under its label, every problem, the retired files that still exist, and the plugin's and the CLI's versions with a warning when they differ. The plugin's version comes from Claude Code's record of installed plugins; when that record names none, `show` says so and names the plugin's own `python3 <plugin root>/hooks/scripts/_audience.py show`. Its output equals that command's except for the version lines. When `telemetry` is on and no engine is named under the account's config directory, it reports that too. |
+| `check` | Print only the problems, and exit 1 when a settings file has one, so a project can lint its file in CI. A problem in the machine (no account home, a missing remote branch in a shallow clone, no telemetry engine) is printed but does not change the exit code. |
+
+**`show` and `check` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--cwd PATH` | The directory to read the settings for. Defaults to the current directory. |
+| `--json` | (`show` only) Print the same report as JSON. |
+
+---
+
 ## nx doc
 
 Author, validate, and cite documents backed by the Nexus content-addressed chunk surface
