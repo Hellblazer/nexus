@@ -41,8 +41,19 @@
 #   Neither branch is ever fetched; if neither resolves locally,
 #   preflight refuses. Dispatchers should pass the sha explicitly anyway.
 #
+#   A release worktree is the exception (nexus-sby49). When REQUIRED_SHA is
+#   omitted and the branch is release/*, or HEAD is detached at a commit a v*
+#   tag points to, there is no base to compare against: the tree is cut from
+#   the last tag (the plugin-only fast lane) or from a develop that has since
+#   moved on, and its contents ARE the release, so a fast-forward to develop
+#   would change what ships. The script touches nothing, prints the usual
+#   PREFLIGHT_OK line with recovered=no, then one PREFLIGHT_NOTE line saying it
+#   did not compare against develop, and exits 0. A passed REQUIRED_SHA keeps
+#   the behaviour above everywhere, release branches included.
+#
 # Exit codes (every failure path prints a named discriminator line first):
-#   0  PREFLIGHT_OK head=<sha> recovered=<yes|no>
+#   0  PREFLIGHT_OK head=<sha> recovered=<yes|no>; a defaulted base on a
+#      release tree adds a second line, PREFLIGHT_NOTE release branch: ...
 #   2  PREFLIGHT_FAIL_PRIMARY_CHECKOUT — not a linked worktree. STOP: zero
 #      edits, zero git writes.
 #   3  PREFLIGHT_FAIL_DIVERGED — REQUIRED_SHA is not fast-forward reachable
@@ -72,6 +83,16 @@ register_worktree() {
   return 0
 }
 
+# True on a release/* branch, or with HEAD detached at a commit a v* tag points to.
+is_release_tree() {
+  local branch
+  if branch="$(git symbolic-ref -q --short HEAD)"; then
+    case "$branch" in release/*) return 0 ;; esac
+    return 1
+  fi
+  [ -n "$(git tag --points-at HEAD --list 'v*')" ]
+}
+
 git_dir="$(git rev-parse --git-dir)"
 case "$git_dir" in
   */.git/worktrees/*)
@@ -88,6 +109,12 @@ if [ -n "$required_sha_input" ]; then
     echo "PREFLIGHT_FAIL_BAD_SHA ${required_sha_input}"
     exit 5
   fi
+elif is_release_tree; then
+  # Defaulted base on a release tree (nexus-sby49): leave it exactly as found.
+  echo "PREFLIGHT_OK head=$(git rev-parse HEAD) recovered=no"
+  echo "PREFLIGHT_NOTE release branch: base is its own tag/cut, not develop; pass a sha to check one"
+  register_worktree
+  exit 0
 else
   # No sha given: pick the NEWER of local develop and origin/develop rather than
   # preferring local unconditionally (nexus-aukeu).

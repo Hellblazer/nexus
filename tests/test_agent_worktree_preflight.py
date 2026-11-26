@@ -384,3 +384,145 @@ def test_omitted_required_sha_resolves_origin_develop_without_fetching(
     assert result.stdout.strip() == f"PREFLIGHT_OK head={sha2} recovered=yes"
     assert _git(wt, "rev-parse", "HEAD") == sha2
     assert _git(main, "rev-parse", "origin/develop") == sha2  # still unfetched
+
+
+# --- release branches: a defaulted base is never develop (nexus-sby49) -------------------------------------------------
+#
+# A release worktree is cut from the last tag (the plugin-only fast lane) or from a develop that has since moved on. Its
+# contents ARE the release, so fast-forwarding it to develop's tip changes what ships. With no REQUIRED_SHA the script
+# must leave such a tree alone; an explicit sha still means "check this one" everywhere.
+
+RELEASE_NOTE = (
+    "PREFLIGHT_NOTE release branch: base is its own tag/cut, not develop; pass a sha to check one"
+)
+
+
+@pytest.fixture
+def tagged_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    """develop is two commits past a v1.0.0 tag. Returns (main, tag_sha, develop_tip)."""
+    main = tmp_path / "main-tagged"
+    _init_repo(main)
+    tag_sha = _commit(main, "c1")
+    _git(main, "branch", "-m", "develop")
+    _git(main, "tag", "v1.0.0")
+    _commit(main, "c2")
+    tip = _commit(main, "c3")
+    return main, tag_sha, tip
+
+
+def test_release_branch_at_tag_default_base_is_left_alone(
+    tagged_repo: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    main, tag_sha, tip = tagged_repo
+    wt = tmp_path / "wt-release"
+    _git(main, "worktree", "add", "-b", "release/v1.0.1", str(wt), "v1.0.0")
+
+    result = _run_preflight(wt)  # no REQUIRED_SHA arg
+
+    assert result.returncode == 0
+    lines = result.stdout.splitlines()
+    assert lines[0] == f"PREFLIGHT_OK head={tag_sha} recovered=no"
+    assert lines[1:] == [RELEASE_NOTE]
+    assert _git(wt, "rev-parse", "HEAD") == tag_sha
+    assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "release/v1.0.1"
+
+
+def test_release_branch_default_base_leaves_a_dirty_tree_alone(
+    tagged_repo: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    main, tag_sha, tip = tagged_repo
+    wt = tmp_path / "wt-release-dirty"
+    _git(main, "worktree", "add", "-b", "release/v1.0.1", str(wt), "v1.0.0")
+    (wt / "f.txt").write_text("release edit, uncommitted")
+
+    result = _run_preflight(wt)
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines()[0] == f"PREFLIGHT_OK head={tag_sha} recovered=no"
+    assert (wt / "f.txt").read_text() == "release edit, uncommitted"
+
+
+def test_release_branch_default_base_needs_no_develop_ref(tmp_path: Path) -> None:
+    """The default is not consulted at all, so a repo with no develop is not a PREFLIGHT_FAIL_BAD_SHA."""
+    main = tmp_path / "main-release-no-develop"
+    _init_repo(main)
+    sha1 = _commit(main, "c1")
+    _git(main, "branch", "-m", "trunk")
+    wt = tmp_path / "wt-release-no-develop"
+    _git(main, "worktree", "add", "-b", "release/v9.9.9", str(wt), sha1)
+
+    result = _run_preflight(wt)
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [f"PREFLIGHT_OK head={sha1} recovered=no", RELEASE_NOTE]
+
+
+def test_release_branch_explicit_sha_still_recovers(
+    tagged_repo: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    main, tag_sha, tip = tagged_repo
+    wt = tmp_path / "wt-release-explicit"
+    _git(main, "worktree", "add", "-b", "release/v1.0.1", str(wt), "v1.0.0")
+
+    result = _run_preflight(wt, tip)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == f"PREFLIGHT_OK head={tip} recovered=yes"
+    assert _git(wt, "rev-parse", "HEAD") == tip
+
+
+def test_detached_at_version_tag_default_base_is_left_alone(
+    tagged_repo: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    main, tag_sha, tip = tagged_repo
+    wt = tmp_path / "wt-detached-tag"
+    _git(main, "worktree", "add", "--detach", str(wt), "v1.0.0")
+
+    result = _run_preflight(wt)
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [f"PREFLIGHT_OK head={tag_sha} recovered=no", RELEASE_NOTE]
+    assert _git(wt, "rev-parse", "HEAD") == tag_sha
+
+
+def test_detached_at_version_tag_explicit_sha_still_recovers(
+    tagged_repo: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    main, tag_sha, tip = tagged_repo
+    wt = tmp_path / "wt-detached-tag-explicit"
+    _git(main, "worktree", "add", "--detach", str(wt), "v1.0.0")
+
+    result = _run_preflight(wt, tip)
+
+    assert result.stdout.strip() == f"PREFLIGHT_OK head={tip} recovered=yes"
+    assert _git(wt, "rev-parse", "HEAD") == tip
+
+
+def test_detached_at_untagged_commit_default_base_still_recovers(
+    tagged_repo: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    """Detached but not at a v* tag (a non-version tag does not count either): the ordinary stale-worktree path."""
+    main, tag_sha, tip = tagged_repo
+    _git(main, "tag", "nightly-1", tag_sha)
+    wt = tmp_path / "wt-detached-plain"
+    _git(main, "worktree", "add", "--detach", str(wt), tag_sha)
+    _git(main, "tag", "-d", "v1.0.0")  # leave only the non-version tag on this commit
+
+    result = _run_preflight(wt)
+
+    assert result.stdout.strip() == f"PREFLIGHT_OK head={tip} recovered=yes"
+
+
+def test_feature_branch_at_tag_default_base_still_recovers(
+    tagged_repo: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    """Regression: a feature branch behind develop recovers as before, even when its commit carries a v* tag."""
+    main, tag_sha, tip = tagged_repo
+    wt = tmp_path / "wt-feature-at-tag"
+    _git(main, "worktree", "add", "-b", "feature/x-y", str(wt), "v1.0.0")
+
+    result = _run_preflight(wt)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == f"PREFLIGHT_OK head={tip} recovered=yes"
+    assert _git(wt, "rev-parse", "HEAD") == tip
