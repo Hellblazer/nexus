@@ -35,7 +35,8 @@ import java.util.function.Consumer;
  *   <li>if every run returned no rows, the row is read once more (a pause set now still stops it), and the completion
  *       transaction runs: the UPDATE that sets {@code completed_at}, then the verification again, warm now, table-wide and once per
  *       listed tenant, plus the tenants the catalogs name now (under {@code SET LOCAL nexus.tenant}; a verification that reads a row-security-scoped table is empty
- *       without a tenant, so the tenants' runs are the check), all sharing {@code statement_timeout_ms}, then {@code on_complete} (if any). A write between the two transactions that leaves an
+ *       without a tenant, so the tenants' runs are the check; a verification that declares itself table-wide-only,
+ *       {@link DataMove#tableWideOnly}, is run table-wide alone), all sharing {@code statement_timeout_ms}, then {@code on_complete} (if any). A write between the two transactions that leaves an
  *       old-shape row is caught by that second run, which rolls the transaction back, so neither {@code completed_at} nor
  *       {@code on_complete} takes effect without the other, or past a non-empty verification.</li>
  * </ol>
@@ -634,8 +635,9 @@ final class VerifyingFinisher implements MoveFinisher {
      * the rulings declare and they are unchanged: {@code statement_timeout} 1400 ms (never more than what is left of it) and
      * {@code lock_timeout} 700 ms. What no setting bounds is the WALL time this transaction holds the registry row (and its snapshot):
      * for a move that is not table-wide-only each tenant's run still adds about four round trips, so the hold grows with the tenant
-     * count times the round trip, on loopback a few milliseconds a tenant. A table-wide-only move (the swaps) holds it for a constant
-     * number of round trips, whatever the tenant count.
+     * count times the round trip, on loopback a few milliseconds a tenant. A table-wide-only move (the swaps, for a row registered from the engine that
+     * added the marker on; an older row keeps its text and the per-tenant path) holds it for a constant number of round trips, whatever
+     * the tenant count.
      *
      * <p><b>Errors.</b> The re-check runs under the transaction's {@code lock_timeout}, so a wait behind an ACCESS EXCLUSIVE holder
      * raises 55P03, and a deadlock or a serialization failure is possible: these are stage {@code RECHECK}, classified as

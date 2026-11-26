@@ -23,7 +23,7 @@ package dev.nexus.service.datamove;
  *
  * <p>What this does NOT bound is the wall time the transaction holds the move's registry row: each tenant's run still costs about
  * four round trips (set the tenant, set the statement timeout, describe, execute) that are not charged. A move whose verification
- * reads only the catalog declares it ({@link MoveSql#tableWideOnly}) and the finisher then runs no per-tenant statement at all.
+ * reads only the catalog declares it ({@link DataMove#tableWideOnly}) and the finisher then runs no per-tenant statement at all.
  *
  * <p>Not thread-safe: one re-check, one session.
  */

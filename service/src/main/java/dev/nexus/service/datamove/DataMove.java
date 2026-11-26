@@ -47,7 +47,9 @@ public record DataMove(
      * finisher then runs the table-wide run alone, in the completion's re-check (so its round trips and its hold on the registry row
      * do not grow with the tenant count). A comment, so the text is the same SQL to the server and to the registration gate. The
      * registrant guarantees what it says (nothing checks that the text reads only the catalogs): a verification that reads a
-     * row-security scoped table or helper never carries it, because there the tenant's own run is the check.
+     * row-security scoped table or helper never carries it, because there the tenant's own run is the check. A row registered before the
+     * text carried it (a swap row of 0.1.202 or 0.1.203: {@code LeafIndexPass} inserts only when no row has the label) keeps its text and
+     * the per-tenant path, which is still correct and independent of the round trip.
      */
     public static final String TABLE_WIDE_ONLY_MARKER = "/* nexus:table-wide-only */";
 
