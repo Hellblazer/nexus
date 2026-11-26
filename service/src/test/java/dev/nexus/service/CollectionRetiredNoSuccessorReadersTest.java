@@ -72,10 +72,12 @@ class CollectionRetiredNoSuccessorReadersTest {
         "/v1/vectors/search-aspect-scoped", "/v1/vectors/get", "/v1/vectors/get-all-metadata", "/v1/vectors/store-get",
         "/v1/vectors/get-embeddings", "/v1/vectors/store-list", "/v1/vectors/manifest-less-census", "/v1/vectors/reapable",
         "/v1/taxonomy/assignments/cross-preview", "/v1/taxonomy/assignments/unassigned", "/v1/taxonomy/meta/last_discover_batch",
-        "/v1/taxonomy/centroids/query", "/v1/pipeline/pages", "/v1/pipeline/chunks");
+        "/v1/taxonomy/centroids/query");
 
     /** The POST routes of the census that write, embed or start a job: not readers. (Re-embed's two are {@code ReembedRetiredNoSuccessorTest}'s.) */
     static final Set<String> POST_WRITES = Set.of(
+        // the POSTs write ({REF, pages} -> {written}, {REF, chunks} -> {inserted}); only the GETs of these two paths read
+        "/v1/pipeline/pages", "/v1/pipeline/chunks",
         "/v1/catalog/collections/set_aspects_enabled",
         "/v1/catalog/collections/supersede",
         "/v1/catalog/collections/rehome",
@@ -212,7 +214,7 @@ class CollectionRetiredNoSuccessorReadersTest {
             assertThat(r.slots().get(0).nested()).as(r.label()).isFalse();
             assertThat(r.engine()).as(r.label()).isEqualTo(CollectionRouteCensus.Engine.STANDARD);
         }
-        assertThat(readers.size()).as("the readers the sweep runs, in each gate state").isEqualTo(53);
+        assertThat(readers.size()).as("the readers the sweep runs, in each gate state").isEqualTo(51);
         assertThat(readers.stream().map(Route::handler).distinct().sorted().toList()).as("non-vacuity: every store has readers").containsExactly(
             "AspectHandler.java", "CatalogHandler.java", "ChashHandler.java", "PipelineHandler.java", "RemapHandler.java",
             "TaxonomyHandler.java", "TelemetryHandler.java", "VectorHandler.java");
