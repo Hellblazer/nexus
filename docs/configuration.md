@@ -63,7 +63,8 @@ A credential you saved (`service_token`, `mint_token`), the local supervisor's l
 - When the URL in use is another origin, nothing is sent and the command stops with a message like: `NX_SERVICE_URL names a service that the saved service_token was not issued for, so that credential is not sent there. Export NX_SERVICE_TOKEN for this service, or point it at the service the credential belongs to (nx config set service_url).` The message names where the URL came from and never prints the URL itself.
 - To use another service (a staging or self-hosted one), either `nx config set service_url <its URL>` together with its token, or export `NX_SERVICE_TOKEN` for it. A second local engine on another port needs its own `NX_SERVICE_TOKEN`.
 - Plain `http` to a host that is not this machine is refused whenever a token would be sent, and there is no switch to allow it. A LAN or docker-network engine needs `https`, or a loopback address (`localhost`, `127.0.0.1`, `[::1]`, for example through a port forward). Origins are compared exactly: `localhost` and `127.0.0.1` are different origins.
-- A lease token is never sent through an HTTP proxy (`http_proxy`, `https_proxy`, `all_proxy`); the request goes straight to the local engine.
+- A request that carries a token over plain `http` (the local engine's lease token above all) goes straight to the engine whatever `http_proxy`, `https_proxy` or `all_proxy` name, so the supervisor lease token never meets a proxy. `https` traffic, for example a data token to the managed service, still uses a configured proxy, and the proxy sees only a `CONNECT` with no credential in it.
+- A URL the client cannot read as an origin (one carrying `user:password@`, a backslash or a `%`) is refused for any token, and the password is never echoed to the terminal or a log.
 
 Known limits, accepted and not detected:
 
