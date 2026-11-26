@@ -57,28 +57,33 @@ class QuarantineRetagSiblingLockTest extends AtomicWriteTestBase {
         }
     }
 
-    @Timeout(120)
-    @Test
-    void aRetagTakesTheSiblingsRegistryRow_andWaitsOnAVerbThatHoldsItForUpdate_beforeChangingAChunk() throws Exception {
+    /** One run of the retag against a verb that holds the sibling's registry row FOR UPDATE: {@code latched} reads by id (gate 3), else by label. */
+    private void retagWaitsOnTheSibling(boolean latched) throws Exception {
         String tenant = "qrt" + seq.incrementAndGet();
         String from = col("from");
         String to = col("to");
         String sibling = "quarantine-" + from;
+        long originId;
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, tenant, from);
             PgContainerHelper.insertCollection(ctx, tenant, sibling);
+            originId = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(from))
+                .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
+            // the tag names the origin by its id as well, as the move writes it: from gate 3 that key is the one read
             PgContainerHelper.insertChunks(ctx, tenant, sibling, List.of(Chash.ofText("qrt retag " + from).toHex()), List.of("qrt retag"),
-                List.of(new float[384]), List.of(Map.<String, Object>of("origin_collection", from)));
+                List.of(new float[384]), List.of(Map.<String, Object>of("origin_collection", from, QuarantineOrigin.ORIGIN_ID_KEY, originId)));
         }
         assertThat(tagsIn(tenant, sibling)).as("setup: the sibling holds a row tagged for the origin").containsExactly(from);
+        Gate3 gate3 = latched ? () -> true : Gate3.never();
 
         Future<Integer> retag;
         try (Connection verb = pg.createConnection("")) {
             verb.setAutoCommit(false);
             DSL.using(verb, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(sibling)).forUpdate().fetch();
-            retag = pool.submit(() -> tenantScope.withTenant(tenant, ctx -> QuarantineOrigin.retagRowsOf(ctx, tenant, from, to, Gate3.never())));
+            retag = pool.submit(() -> tenantScope.withTenant(tenant, ctx -> QuarantineOrigin.retagRowsOf(ctx, tenant, from, to, gate3)));
 
             assertThat(PgActivityProbe.waitsOnALock(pg, "%key share%catalog_collections%"))
                 .as("the retag waits on the sibling's registry row, read FOR KEY SHARE, held FOR UPDATE by the verb").isTrue();
@@ -89,5 +94,18 @@ class QuarantineRetagSiblingLockTest extends AtomicWriteTestBase {
 
         assertThat(retag.get(60, TimeUnit.SECONDS)).as("rows retagged once the verb let go").isEqualTo(1);
         assertThat(tagsIn(tenant, sibling)).as("the row now names the new origin label").containsExactly(to);
+    }
+
+    @Timeout(120)
+    @Test
+    void aRetagTakesTheSiblingsRegistryRow_andWaitsOnAVerbThatHoldsItForUpdate_beforeChangingAChunk() throws Exception {
+        retagWaitsOnTheSibling(false);
+    }
+
+    /** The same, from gate 3: the siblings are found by the chunks' collection ids, and their rows are locked by those ids. */
+    @Timeout(120)
+    @Test
+    void fromGate3_aRetagTakesTheSiblingsRowById_andWaitsOnAVerbThatHoldsItForUpdate_beforeChangingAChunk() throws Exception {
+        retagWaitsOnTheSibling(true);
     }
 }
