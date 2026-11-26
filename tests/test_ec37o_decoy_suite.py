@@ -452,7 +452,9 @@ def _redirect_matrix() -> list[pytest.param]:
             if kind == "saved_service_token_no_url":
                 continue  # bound to the managed default: it goes nowhere on this box
             for code in (302, 307):
-                params.append(pytest.param(caller, kind, code, id=f"{caller.name}-{kind}-{code}", marks=_marks(caller.name == "nx_t3_vector_client")))
+                # no refusal mark: the probe is answered normally here (``_Server.redirect_to``), so the T3 caller
+                # reaches its bearer-carrying request and constructs no resolver error; the guard calls a mark stale
+                params.append(pytest.param(caller, kind, code, id=f"{caller.name}-{kind}-{code}"))
     return params
 
 
