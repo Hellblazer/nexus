@@ -153,8 +153,8 @@ def test_the_restart_notice_is_still_visible_and_never_renders_as_bare_safe_to_s
     from nexus.progress.boot_work import render
 
     lines = render([dict(_RESTART_ENTRY)], now=1_800_000_000.0)
-    assert any("restart the engine once" in line for line in lines)
-    assert any("nothing is lost" in line for line in lines)
+    assert any(line.startswith("The engine needs one restart: ") for line in lines)
+    assert any("Nothing is lost" in line for line in lines)
 
 
 def test_control_other_work_beside_the_restart_notice_still_defers_the_swap_and_holds_the_harness(monkeypatch, tmp_path):

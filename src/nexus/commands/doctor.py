@@ -3056,8 +3056,13 @@ def _engine_work_lines() -> list[str]:
          "OTHER chunk survives the distance threshold. A collection whose "
          "nearest real neighbours all fall past its threshold is a WARNING "
          "row naming that distance, the threshold, and the sample it rests "
-         "on. Exits 2 only when a surface raises or a collection's embedding "
-         "model disagrees with its name. RDR-087 Phase 3.",
+         "on. Exits 2 only when a surface raises or a collection's registered "
+         "embedding model disagrees with the model its own catalog row's "
+         "content type calls for (a row-consistency check, not a compare "
+         "against the label's model token, which is not authority once the "
+         "one-row rename is live: 8.5.6 and later, after the engine's restart, "
+         "a rename changes only the label). "
+         "RDR-087 Phase 3.",
 )
 @click.option(
     "--check-resources",
