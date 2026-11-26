@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -84,6 +85,10 @@ public final class MoveBootWork implements AutoCloseable {
     public static final long MIN_STALL_MINUTES = 1;
     public static final long MAX_STALL_MINUTES = 1_440;
     public static final Duration DEFAULT_INTERVAL = Duration.ofSeconds(5);
+    /** How long after {@link #start} the sampler keeps the short period: the engine registers moves at run time just after boot. */
+    static final Duration WARMUP = Duration.ofSeconds(60);
+    /** The sampling period inside {@link #WARMUP}. */
+    static final Duration WARMUP_INTERVAL = Duration.ofMillis(250);
 
     /** What one sample read. */
     record Snapshot(List<DataMove> open, List<DataMoveRegistry.FailedMove> failed,
@@ -191,7 +196,11 @@ public final class MoveBootWork implements AutoCloseable {
         return stallAfter;
     }
 
-    /** Samples every {@link #DEFAULT_INTERVAL}, on a daemon thread. A second call does nothing. */
+    /**
+     * Samples on a daemon thread: every {@link #WARMUP_INTERVAL} for the first {@link #WARMUP} (a move the engine registers just
+     * after boot is in {@code boot_work} within a fraction of a second, not a period later), then every {@link #DEFAULT_INTERVAL}.
+     * A second call does nothing.
+     */
     public synchronized void start() {
         start(DEFAULT_INTERVAL);
     }
@@ -200,20 +209,37 @@ public final class MoveBootWork implements AutoCloseable {
         if (scheduler != null) {
             return;
         }
-        scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        ScheduledExecutorService s = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "data-move-boot-work");
             t.setDaemon(true);
             return t;
         });
-        scheduler.scheduleWithFixedDelay(() -> {
-            try {
-                publish();
-            } catch (VirtualMachineError e) {
-                throw e;
-            } catch (Throwable t) {   // a surprise costs one sample, never the thread
-                log.warn("event=data_move_boot_work_failed cause=\"{}\"", FailureHandler.oneLine(t.toString()));
+        scheduler = s;
+        Instant startedAt = clock.instant();
+        s.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    publish();
+                } catch (VirtualMachineError e) {
+                    throw e;
+                } catch (Throwable t) {   // a surprise costs one sample, never the thread
+                    log.warn("event=data_move_boot_work_failed cause=\"{}\"", FailureHandler.oneLine(t.toString()));
+                }
+                try {
+                    // fixed delay, as before: the next sample is one period after this one ENDS
+                    s.schedule(this, periodAfter(startedAt, clock.instant(), interval).toMillis(), TimeUnit.MILLISECONDS);
+                } catch (RejectedExecutionException closed) {
+                    // close() shut the scheduler down: no next sample
+                }
             }
-        }, 0, interval.toMillis(), TimeUnit.MILLISECONDS);
+        });
+    }
+
+    /** The period before the next sample: {@link #WARMUP_INTERVAL} inside {@link #WARMUP} of {@code startedAt}, never above {@code steady}. */
+    Duration periodAfter(Instant startedAt, Instant now, Duration steady) {
+        boolean warm = Duration.between(startedAt, now).compareTo(WARMUP) < 0;
+        return warm && WARMUP_INTERVAL.compareTo(steady) < 0 ? WARMUP_INTERVAL : steady;
     }
 
     /** Stops sampling, ends a read in flight, and takes the entries off. Does not wait for a sample. */

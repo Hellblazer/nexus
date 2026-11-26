@@ -347,6 +347,58 @@ class MoveBootWorkTest {
         });
     }
 
+    // ── the first minute after boot: a move registered after the first sample is reported at once ───────────
+
+    /**
+     * F37 (nexus-p2m1x.48): a move registered after the first sample (the engine's run-time registrations, 2 s after a first
+     * boot's first doctor) used to wait for the next 5 s sample, so a first-run client saw no move and then one. The sampler
+     * keeps a short period for the first minute and the steady one after.
+     */
+    @Test
+    void aMoveRegisteredAfterTheFirstSample_isReportedWithinHalfASecond_inTheFirstMinute() throws Exception {
+        var w = work(Duration.ofMinutes(15));
+        try {
+            w.start(MoveBootWork.DEFAULT_INTERVAL);   // the steady period of a running engine: 5 s
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (reader.reads.get() == 0 && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+            assertThat(reader.reads.get()).as("the first sample ran at start").isGreaterThan(0);
+            assertThat(registry.snapshot()).as("nothing is registered yet").isEmpty();
+
+            reader.open = List.of(move("late"));   // registered after the first sample
+            long registeredAt = System.nanoTime();
+            String id = MoveBootWork.ID_PREFIX + "late";
+            while (registry.snapshot().stream().noneMatch(e -> e.id().equals(id))
+                && System.nanoTime() - registeredAt < TimeUnit.SECONDS.toNanos(6)) {
+                Thread.sleep(5);
+            }
+            long lagMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - registeredAt);
+
+            assertThat(registry.snapshot()).as("boot_work names the move").anyMatch(e -> e.id().equals(id));
+            assertThat(lagMs).as("boot_work named it within 500 ms of its registration, not a 5 s period later")
+                .isLessThan(500L);
+        } finally {
+            w.close();
+        }
+    }
+
+    @Test
+    void theSamplingPeriod_isShortForTheFirstMinuteAndTheSteadyOneAfter_neverAboveTheSteadyOne() {
+        var w = work(Duration.ofMinutes(15));
+        var steady = Duration.ofSeconds(5);
+        assertThat(w.periodAfter(Instant.parse("2026-11-17T00:00:00Z"), clock.instant(), steady))
+            .as("at boot").isEqualTo(MoveBootWork.WARMUP_INTERVAL);
+        clock.advance(MoveBootWork.WARMUP.minusSeconds(1));
+        assertThat(w.periodAfter(Instant.parse("2026-11-17T00:00:00Z"), clock.instant(), steady))
+            .as("still inside the first minute").isEqualTo(MoveBootWork.WARMUP_INTERVAL);
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(w.periodAfter(Instant.parse("2026-11-17T00:00:00Z"), clock.instant(), steady))
+            .as("the steady-state cost is unchanged after the first minute").isEqualTo(steady);
+        assertThat(w.periodAfter(Instant.parse("2026-11-17T00:00:00Z"), Instant.parse("2026-11-17T00:00:00Z"),
+            Duration.ofMillis(50))).as("a steady period shorter than the warm-up one wins").isEqualTo(Duration.ofMillis(50));
+    }
+
     // ── close ───────────────────────────────────────────────────────────────────────────────────────────────
 
     @Test

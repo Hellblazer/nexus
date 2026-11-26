@@ -1,0 +1,3 @@
+### Fixed
+
+- **`/v1/status` `boot_work` names a data move at once in the first minute after boot.** The data-move reporter sampled the registry once at start and then every 5 s, so a move the engine registered at run time just after boot (the RDR-229 fkvalidate, fkadopt and swap moves) showed up to 5 s late: a first-run `nx doctor` read "no data move is open" and a capture a moment later listed eight. The reporter now samples every 250 ms for the first 60 s after it starts and every 5 s after that, so the steady-state sampling cost is unchanged. What `boot_work` reports is unchanged; only when. A move registered after the first minute still waits up to one 5 s period.
