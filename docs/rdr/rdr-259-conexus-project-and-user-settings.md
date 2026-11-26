@@ -9,7 +9,7 @@ reviewed-by: pending
 created: 2026-11-25
 accepted_date:
 related_issues: [nexus-sby49, nexus-sby49.3, nexus-sby49.4, nexus-5y47c]
-related: [RDR-184, RDR-219, RDR-143, RDR-201, RDR-245, RDR-253]
+related: [RDR-184, RDR-219, RDR-143, RDR-201, RDR-215, RDR-023, RDR-035, RDR-242, RDR-245, RDR-253]
 ---
 
 # RDR-259: conexus project and user settings
@@ -138,10 +138,13 @@ open: which `.claude/settings.json` a worktree-isolated subagent runs under,
 and whether a permission `ask` rule survives the plugin's PermissionRequest
 auto-approve. The spikes answered both (Research 10). The second answer is a
 defect in every shipped release: the plugin's PermissionRequest allow
-silently overrides a user's `ask` rule for any conexus tool. A further spike
-shows the PermissionRequest answer is not needed for the auto-approval
-itself: an allow given on PreToolUse alone approves a tool that has no rule,
-and leaves an `ask` or `deny` rule in force (Research 11, record 33).
+silently overrides a user's `ask` rule for any conexus tool (shown for a
+Bash command; that it holds for conexus MCP tools is inferred from the
+plugin printing the same answer, record 26). A further spike shows the
+PermissionRequest answer is not needed for the auto-approval itself: an
+allow given on PreToolUse alone approves a Bash command that has no rule,
+and leaves a project-scope `ask` or `deny` rule in force (Research 11,
+record 33); the MCP-tool and user-scope cases are Stage 1 spikes.
 
 #### Gap 8: A repository could use its file to weaken a protection
 
@@ -168,7 +171,7 @@ portability", "settings", "git guard" and "credential".
 | RDR-219 (harness credentials never leave the keychain, closed) | Precedent | Its credential deny stays for every user. Only the redirect text naming nexus's wrapper becomes a project setting (`credential_helper`). |
 | RDR-143 (plugin and CLI version lockstep, closed) | Precedent | It upgrades the CLI in a detached process, so lockstep arrives at the next session ("Shape B achieves **next-session** lockstep, not within-session lockstep", rdr-143:70), and it skips editable installs ("skipping editable / dev installs", rdr-143:70). Mixed-version sessions are therefore normal for one session after any upgrade and indefinite on an editable install (record 36); Decision 7 plans for both. |
 | RDR-215 (plugin hooks as nx verbs, closed) | Precedent | It moved the hooks behind `nx-hook` verbs reached through `nx_hook_shim.py`, whose reason is that "a plugin can update before its CLI does" (`nx_hook_shim.py:5-6`). The auto-approve hook is one of those verbs (`auto_approve.py:3`), so a change to its answers ships with the CLI (record 36). |
-| RDR-023 (agent tool permissions audit) and RDR-035 (plugin agent MCP tool access) | Origin | The PermissionRequest auto-approver dates from their period (commit 240731431b, 2026-04-05), when RDR-035 recorded "GitHub #21460 - PreToolUse hooks not enforced on subagent tool calls" (rdr-035:20). The PreToolUse registration was added later, 2026-08-28 (91c0cddebc), because "PermissionRequest fires only when a permission prompt would be shown" and auto mode never consults it. The 2026-11-26 spike shows the PreToolUse allow now reaches subagent calls (record 33), so the reason for the PermissionRequest answer has expired (Decision 9). |
+| RDR-023 (agent tool permissions audit) and RDR-035 (plugin agent MCP tool access) | Precedent | RDR-035 made the PermissionRequest hook "the runtime enforcement layer for tool access control" for plugin agents. The conexus MCP auto-approver itself came later, in commit 240731431b of 2026-04-05 ("No more manual permission prompts for nexus MCP tools"); its PreToolUse registration was added on 2026-08-28 (91c0cddebc) for auto mode. The sources give convenience, the two events firing in different modes (`conexus/README.md:362`) and a hedge across Claude Code versions (cc-validation scenario 07) as the reasons for keeping both; Decision 9 weighs that hedge and removes the PermissionRequest answer (records 33 and 43). |
 | RDR-242 (sandboxed Lua runtime) | Adjacent | Its S5 made a project `.claude/settings.json` env value, `NX_PROCEDURES_REPO_ROOT=1`, the switch that turns on a repository's own `.nexus/procedures`; nexus turns it on that way (rdr-242:1344, record 40). That is an environment switch a repository controls, outside conexus hook settings. Decision 9 lists it among the loosenings that remain, with Sam's ruling as its reason; this RDR does not move it. |
 | RDR-201 (closed vocabularies as checked tables, closed) | Precedent | The settings keys and their allowed values are a closed vocabulary. Decision 2 keeps them in one checked table that the docs, the JSON Schema files and the readers are tested against. |
 | RDR-245 (structured asks on the threads board) | Adjacent | Its answer frame names "Sam" (developer item 16). Decision 12 treats that as a leak with a contract attached and leaves the switch to Sam. |
@@ -404,13 +407,20 @@ records hold the commands and outputs.
   with a `deny` rule it was denied. With no hook answer and no rule the call
   needed approval, as expected. Bash stood in for an MCP tool; auto mode and
   an interactive dialog were not run.
-- *Why the PermissionRequest answer exists* (record 33, source reading). It
-  came first, in commit 240731431b of 2026-04-05, "PermissionRequest hook
-  auto-approves all nexus MCP tools", when RDR-035 recorded "PreToolUse hooks
-  not enforced on subagent tool calls". The PreToolUse answer was added on
-  2026-08-28 (91c0cddebc) because "under defaultMode: auto the classifier
-  decides an unlisted tool first and never consults that event". Record 33
-  shows the subagent limitation is gone in the current release.
+- *Why the PermissionRequest answer exists* (records 33 and 43, source
+  reading). It came first, in commit 240731431b of 2026-04-05, "No more
+  manual permission prompts for nexus MCP tools". The PreToolUse answer was
+  added on 2026-08-28 (91c0cddebc) because "under defaultMode: auto the
+  classifier decides an unlisted tool first and never consults that event".
+  The README says the two are paired "because the two events fire in
+  different permission modes" (`conexus/README.md:362`), and cc-validation
+  scenario 07 keeps the pair "as a hedge whichever way this lands", because
+  whether an allow rule pre-empts a PermissionRequest hook "has flipped
+  across Claude Code versions". Round 1 tied 240731431b to RDR-035's note
+  that PreToolUse hooks did not reach subagent calls; no source makes that
+  link, so it is withdrawn (record 43). Scenario 28 verified live, at Claude
+  Code 2.1.251, that the PreToolUse decision governs in auto mode (record
+  43).
 - *The telemetry senders take their endpoint from the environment* (record
   34, source reading at d6a0b258b0). `routing/_lib.py` reads `NX_SERVICE_URL`
   (line 511), `NX_SERVICE_TOKEN` (522) and `NX_SERVICE_PORT` and
@@ -453,12 +463,14 @@ What is still assumed after the spikes:
   (Research 10: origin's default branch in the spike, the primary's tracked
   branch in nexus). **Method**: Spike. The design no longer depends on it
   (Decision 1, which copy is read).
-- [ ] A PreToolUse-only allow behaves for a conexus MCP tool, and in auto
-  mode, as it did for Bash in default and `acceptEdits` modes (Decision 9).
-  **Status**: Verified for Bash only (record 33); MCP tools and auto mode
-  inferred, not tested. **Method**: Spike in Stage 1 with the real plugin
-  loaded and a harmless conexus tool, in default, `acceptEdits` and auto
-  mode, with and without a user `ask` rule.
+- [ ] A PreToolUse-only allow behaves for a conexus MCP tool, and under a
+  user-scope `ask` rule, as it did for a Bash command under a project-scope
+  rule (Decision 9). **Status**: Verified for Bash, default and
+  `acceptEdits`, project scope (record 33); auto mode verified by
+  cc-validation scenario 28 at Claude Code 2.1.251, not re-run at 2.1.332
+  (record 43); a conexus MCP tool and a user-scope `ask` rule inferred, not
+  tested. **Method**: the early release's own spike ("What ships when"),
+  with the real plugin in a sandboxed session.
 - [ ] `CLAUDE_PROJECT_DIR` reaches the nx-side hooks (the MCP server's hook
   tools), not only command hooks. **Status**: Documented for command hooks
   only. **Method**: Spike in Stage 1; where it is absent the reader uses the
@@ -525,10 +537,8 @@ does not depend on the worktree's base:
   one of them (record 40). Under `strict` the planting also needs a commit,
   which the guard denies in the shared checkout; under the seatbelt a
   subagent can still commit (record 31), so the `HEAD` read narrows that
-  path to a commit that shows in the history rather than closing it. The cost
-  is one `git show` of the file each time a hook is about to print a project
-  text: once per SubagentStart, and for the Stop guard and the credential
-  guard only when they block. That cost is not measured (inferred, not read).
+  path to a commit that shows in the history rather than closing it. Its
+  cost is set out under "HEAD-read cost" below.
 - The tightening keys (`subagent_git`, `advice_block`) are combined, tighter
   wins, across the session root's working-tree file, the session root's file
   at `HEAD`, and the file in the checkout the payload `cwd` sits in when that
@@ -536,8 +546,26 @@ does not depend on the worktree's base:
   works in). Any copy can add strictness at once; only the session root's
   committed copy can remove it.
 
+**HEAD-read cost.** Reading text keys from `HEAD` makes a git process
+routine on four paths, each bounded at one `git show` per hook invocation
+with a two-second timeout: every SubagentStart that has a project (for
+`preflight` and `brief_questions`); every Stop that the wake guard is about
+to continue (for `ci_wait`); every credential-guard deny (for
+`credential_helper`); and every compaction checkpoint (for
+`integration_branch`, beside the git calls the checkpoint already makes). A
+path that prints no project text runs none. The time of one `git show` is
+not measured (inferred, not read); Stage 1 measures it per path on the laptop
+and on native Windows. The 5 ms bound (Research 10) applies to the file
+reads alone; a path that runs the `HEAD` read is held to a separate bound of
+50 ms added at the median on each platform. A per-session cache of the
+parsed `HEAD` copy, keyed on the commit `HEAD` names, was considered and is
+not adopted by default: finding the commit id is itself a git call or a
+hand reading of `.git` internals that linked worktrees and packed refs make
+fragile (inferred, not read), and a stale cache would print an old text.
+Stage 1 adopts it only if a path misses the 50 ms bound.
+
 The `HEAD` read meets these cases. `git show HEAD:.nexus/project.json` exits
-128 for all of the failures (record 37), so the reader tells them apart by
+128 for each of the three failures tried (record 37), so the reader tells them apart by
 their cause (whether `HEAD` exists, whether the path is in its tree), never
 by parsing git's message, which is locale-dependent (inferred, not read).
 
@@ -627,8 +655,8 @@ hooks on a P0 machine cannot import `nexus.tables`.
 | `version` | integer, 1 or more | 1 | yes | yes | per file |
 | `subagent_git` | `"strict"` or `"seatbelt"` | `"seatbelt"` | yes | yes | strictest wins |
 | `advice_block` | list of advice row ids | `[]` | yes | yes | union |
-| `brief_questions` | list of strings, each one line of at most 300 characters; at most 8 added in total across both files | `[]` | yes | yes | append: project's, then user's, exact duplicates dropped |
-| `preflight` | one line, at most 200 characters | none | yes | no | project only, from `HEAD` |
+| `brief_questions` | list of strings, each one line of at most 160 characters; at most 3 added in total across both files | `[]` | yes | yes | append: project's, then user's, exact duplicates dropped |
+| `preflight` | one line, at most 160 characters | none | yes | no | project only, from `HEAD` |
 | `ci_wait` | one line, at most 200 characters; may contain the literal `<sha>` | none | yes | no | project only, from `HEAD` |
 | `credential_helper` | one paragraph, at most 600 characters | none | yes | no | project only, from `HEAD` |
 | `integration_branch` | a branch name (no whitespace, no `..`, no leading `-`), at most 100 characters | none | yes | no | project only, from `HEAD` |
@@ -651,9 +679,9 @@ What each key does:
   keeps its old id as an accepted alias for two client releases.
 - `brief_questions`: added after the plugin's four generic implementer brief
   questions.
-- `preflight`: the SubagentStart worktree row tells a dispatched agent "This
-  project's `.nexus/project.json` asks: run `<preflight>` first. If it exits
-  non-zero, stop and report its output." The plugin shows the command; it
+- `preflight`: the SubagentStart worktree row tells a dispatched agent to
+  run the command first and to stop and report on a non-zero exit, worded as
+  the Provenance table below gives it. The plugin shows the command; it
   never runs it. Research 7 shows nexus's script fits the exit-status
   contract.
 - `ci_wait`: the command the Stop wake guard names when a turn promises to
@@ -667,13 +695,9 @@ What each key does:
   `origin/main`, then `origin/master`, then unknown; the rework's
   `origin/develop` guess is removed (Research 5). nexus sets `"develop"`.
   The value is passed to git after `--end-of-options`, so even a value the
-  validation missed cannot be read as an option.
-
-Every project text the plugin prints (`preflight`, `ci_wait`,
-`credential_helper`, `brief_questions`) is introduced as coming from the
-project's `.nexus/project.json`, never in the plugin's own voice, so the model
-can weigh it as project content, the same standing as the project's
-`CLAUDE.md`.
+  validation missed cannot be read as an option. A value that names no
+  branch `origin` has falls back to the default order, with a problem
+  reported.
 - `telemetry`: sends `routing_events` and the dispatch record to the user's
   own engine; one key for both, because both answer the same question ("may
   my hooks record what my agents did?") and two keys would invite a half-on
@@ -686,6 +710,40 @@ can weigh it as project content, the same standing as the project's
   `<account home>/.config/nexus/remote-test-hosts` into `conexus.json`, so a
   user has one file to read and one command shows all of it; the old file is
   still read, as a union, through the compatibility window (Decision 7).
+
+**Provenance.** Every text the plugin prints from a settings file is
+introduced by its source, never in the plugin's own voice, so the model can
+weigh it as project or user content, with the standing of a `CLAUDE.md`. The
+labels, fixed in the plugin, are:
+
+| Key and source | Printed as |
+| --- | --- |
+| `preflight`, project | "This project's committed `.nexus/project.json` asks: run `<preflight>` first. If it exits non-zero, stop and report its output." |
+| `brief_questions`, project | "This project's committed `.nexus/project.json` adds these questions:" followed by the list |
+| `brief_questions`, user | "Your `conexus.json` adds these questions:" followed by the list |
+| `ci_wait`, project | "This project's committed `.nexus/project.json` names its CI wait command: `<ci_wait>`. Run it as a background command; its exit is the wake." |
+| `credential_helper`, project | after the fixed refusal: "This project's committed `.nexus/project.json` adds: <credential_helper>" |
+
+`nx settings show` prints the same labels beside each value (Decision 5), and
+the behaviour leg checks that in the project-strict and user-strict
+fixtures each settings text appears only after its label, and that a
+project text never carries the user label or the reverse (Decision 11).
+
+**Byte budget.** The project and user texts land in SubagentStart, whose
+injection the budget test holds to 11,850 bytes, or 13,950 with a worktree
+(`tests/hooks/test_subagent_start_byte_budget.py:183, :208`). Its last
+recorded measures, 10,969 and 12,923 bytes, leave about 880 and 1,030 bytes
+(record 44), and whether they already include the rework's preflight row is
+not read. The round-1 caps (8 questions of 300 characters, a 200-character
+preflight) could add about 2,600 bytes, which does not fit. The caps are
+therefore: `preflight` at most 160 characters; `brief_questions` at most 3
+added in total across both files, each at most 160 characters. With the
+labels that is at most about 870 bytes (counted from the caps and the label
+wording, not measured), close to the smaller headroom, which is why the
+measure decides. Stage 1 runs the budget test with every key at its cap, which
+the test already treats as the largest injection (`:34`, record 44); if it
+fails, the caps shrink again. Raising a budget is a change to a pre-declared
+test criterion and is Sam's, not this RDR's.
 
 **Growth.** `version` is 1 and is expected to stay 1. A key's meaning is
 never changed in place; a new behaviour gets a new key name, so old files
@@ -706,17 +764,26 @@ Problems are reported as Decision 4 describes; they never raise.
 
 #### Decision 3: Precedence and what "tighten-only" means
 
-The invariant: **no value a repository controls, whether in its project file
-or in an environment variable its `.claude/settings.json` sets, can remove a
-deny, remove a permission prompt, exempt anything from a guard, or cause data
-to leave the machine or go to a host the repository names.** The draft
-stated this for the project file alone, and it was false for telemetry: the
-senders take their endpoint and token from `NX_SERVICE_*` and
-`NEXUS_CONFIG_DIR` (record 34), which a repository's `env` sets (record 27).
-Decision 9 pins the senders, which is what makes the invariant true. A
-project may add text the model reads, because a repository already controls
-its `CLAUDE.md`; the plugin never executes project text. The listed
-exceptions in Decision 9 are outside this invariant by name.
+The invariant, in two parts:
+
+1. **No value in a repository's `.nexus/project.json` can remove a deny,
+   remove a permission prompt, exempt anything from a guard, or cause data
+   to leave the machine.** This holds by construction: the reader keeps only
+   tightening values and text from that file.
+2. **No environment value a repository's `.claude/settings.json` sets can
+   send this RDR's telemetry to a host the repository names.** This holds
+   because Decision 9 pins the two telemetry senders.
+
+The round-1 text claimed part 2 for every hook, and that is false. A census
+of the hooks (record 41) finds four more modules that take a service
+endpoint or token from `NX_SERVICE_*` and send a request (the mailbox drain
+in both copies, the T2 prefix scan, and the dispatch-record child before
+Decision 9 pins it), hooks that run `nx` children with the session's
+environment, and, outside the hooks, the MCP server. Each of these follows
+the environment as nx does everywhere. They are named exceptions in
+Decision 9, with the risk stated, and whether to close them is Sam's
+decision S7. A project may add text the model reads, because a repository
+already controls its `CLAUDE.md`; the plugin never executes project text.
 
 Per key:
 
@@ -728,8 +795,8 @@ Per key:
 - `advice_block`: union over the same project copies and the user file.
   Adding a row tightens; no file can remove an entry another file added.
 - `brief_questions`: append, generic questions first, then the project's,
-  then the user's; capped at 8 added questions in total, extra ones reported
-  and dropped.
+  then the user's; capped at 3 added questions in total (Decision 2, byte
+  budget), extra ones reported and dropped.
 - `preflight`, `ci_wait`, `credential_helper`, `integration_branch`: project
   only. They are facts about the project. In the user file they are reported
   and ignored.
@@ -805,17 +872,23 @@ outranked (a project's `seatbelt` under a user's `strict`) is not a problem;
   `user`, `project`, `project (HEAD)`, `legacy marker`, or `user
   (remote-test-hosts file)`, plus each file's own value where it differs from
   the effective one;
-- the project text keys' values as the hooks will print them (`preflight`,
-  `ci_wait`, `credential_helper`, `brief_questions`), with their source
-  `project (HEAD)`, so a user sees every instruction a project feeds to
-  dispatched agents;
+- every settings text as the hooks will print it, under the label the
+  Provenance table gives it (`preflight`, `ci_wait`, `credential_helper` and
+  the project's `brief_questions` with source `project (HEAD)`; the user's
+  `brief_questions` with source `user`), so a user sees every instruction a
+  file feeds to dispatched agents;
 - every problem, as in Decision 4;
 - retired files that still exist (`maintainer-profile`, a legacy marker
   beside `project.json`) with "no effect; safe to delete after <version>";
 - the plugin's version and the installed nx's version, with a warning when
   they differ: the nx-side hooks (auto-approve, SubagentStart, SubagentStop)
   follow the installed CLI, so during a skew the report can name a setting
-  that some hooks do not yet implement (record 36).
+  that some hooks do not yet implement (record 36). The stdlib `show` knows
+  its own plugin's version from the `plugin.json` beside it; `nx settings
+  show` knows the CLI's and finds the plugin's in Claude Code's record of
+  installed plugins (where that record lives is inferred, not read), and
+  when it finds none it says so and names the stdlib command. Because of
+  this the two outputs are identical except for the version lines.
 
 `--cwd` defaults to the current directory. `--json` emits the same report
 with its own `report_version` field.
@@ -861,7 +934,7 @@ settings` is a long-lived public command; Sam's decision S5.
 
 | Who | What changes |
 | --- | --- |
-| 8.5.7 user, no files | Guard stays the seatbelt. Keeps, now without nexus ids: the search-scope row, the four brief questions, the dispatch sentence, the T1 nudge for built-in agents. Loses: the SubagentStart Git row, which 8.5.7 shows to every user (`subagent_start.py:155-156` at v8.5.7, record 38) and which now appears only with `strict` (ruling 3); and telemetry (it stops unless they set `telemetry: true`; it only ever went to their own engine). Auto-approve still approves every allowlisted tool with no prompt (ruling 4; the D2 prompt never shipped), and a user's own `ask` or `deny` rule for a conexus tool now takes effect where 8.5.7 overrode it (Decision 9). The compaction count is measured against their default branch instead of `origin/develop`. |
+| 8.5.7 user, no files | Guard stays the seatbelt. Keeps, now without nexus ids: the search-scope row, the four brief questions, the dispatch sentence, the T1 nudge for built-in agents. Loses: the SubagentStart Git row, which 8.5.7 shows to every user (`subagent_start.py:155-156` at v8.5.7, record 38) and which now appears only with `strict` (ruling 3); and telemetry (it stops unless they set `telemetry: true`; it only ever went to their own engine). Auto-approve still approves every allowlisted tool with no prompt (ruling 4; the D2 prompt never shipped), and a user's own `ask` rule for a conexus tool now prompts where 8.5.7's PermissionRequest answer overrode it (Decision 9); a `deny` rule already held, since a PermissionRequest hook "can't approve what a deny rule refuses" (Research 6). The compaction count is measured against their default branch instead of `origin/develop`. |
 | Sam | The flag file has no effect from this release. To keep today's behaviour outside nexus he writes `conexus.json` with `subagent_git: strict`, `telemetry: true` and his `remote_test_hosts`, on each machine where he wants them. Deleting `maintainer-profile` is his to do; `show` reports it as retired. |
 | nexus checkout | `.nexus/project.json` sets `subagent_git: strict`, `preflight`, `ci_wait`, `credential_helper`, `integration_branch: develop` and the local-and-cloud brief question. `.nexus/dev-process.json` is deleted. The 8.5.7 helper does read it (`_audience.py:46-48` at v8.5.7, record 38), but it also reads the Phase 1 marker, which nexus keeps, so an 8.5.7 plugin still gives nexus the full guard. |
 | Old plugin (8.5.7) with a new nexus checkout | 8.5.7 reads the Phase 1 marker `scripts/agent-worktree-preflight.sh`, which stays (it is nexus's preflight), so nexus keeps the full guard. A user repository's new `project.json` is ignored by the old plugin. |
@@ -938,13 +1011,14 @@ them. Under that model:
   record 31). Without the `HEAD` read, its next Bash call would run under the
   seatbelt and could commit. A commit is exactly what the strict guard
   denies, so the `HEAD` copy cannot be changed from inside the protected
-  case. For the tightening keys the cost is one `git show
-  HEAD:.nexus/project.json` (two-second timeout), taken only when the working
-  tree and the user file give the looser value and the decision depends on
-  it (for `subagent_git`, when the strict scan would have denied the
-  command); a timeout reads strict. A maintainer's own edit that lowers a
-  setting, or changes a text key, takes effect after it is committed, and
-  `show` says so. Sam's decision S3.
+  case. For the tightening keys the `git show HEAD:.nexus/project.json`
+  (two-second timeout) runs only when the working tree and the user file give
+  the looser value and the decision depends on it (for `subagent_git`, when
+  the strict scan would have denied the command); a timeout reads strict.
+  For the text keys it runs whenever a hook is about to print one, which is
+  routine, not rare (Decision 1, "HEAD-read cost"). A maintainer's own edit
+  that lowers a setting, or changes a text key, takes effect after it is
+  committed, and `show` says so. Sam's decision S3.
 - **The user file** has no committed copy. Under the same model it relies on
   Claude Code's prompt for a write outside the project directory in the
   default permission mode, which is assumed and not tested (record 23). An
@@ -963,35 +1037,67 @@ them. Under that model:
   only tighten.
 - **The telemetry senders are pinned.** When `telemetry` is on, the routing
   sender (`routing/_lib.py`) and the dispatch-record child
-  (`agent_dispatch_record.py`) resolve the engine's address and token only
-  from the service lease and `config.yml` in the config directory under the
-  OS account home. They read no `NX_SERVICE_URL`, `NX_SERVICE_HOST`,
-  `NX_SERVICE_PORT`, `NX_SERVICE_TOKEN`, `NEXUS_CONFIG_DIR` or
-  `NX_CONFIG_DIR`, all of which a repository can set (records 27 and 34). A
-  test sets each of those variables to a decoy and asserts no request goes to
-  it; the lint (Decision 11) fails on an environment read in any module that
-  sends telemetry. The cost is that a sandbox session which isolates itself
-  with `NEXUS_CONFIG_DIR` still sends its events, when telemetry is on, to
-  the engine of the account's own config directory (inferred, not tested).
+  (`agent_dispatch_record.py`) both call one purpose-built resolver,
+  `telemetry_endpoint()` in `_audience.py` (stdlib, byte-copied, so both
+  sides run the same code). It returns the engine's base URL and token, or
+  nothing, from the service lease and `config.yml` in
+  `<account home>/.config/nexus`, the account home taken from the OS account
+  database as for the user file. It does not use `Path.home()`, which follows
+  `HOME` (record 42), and reads no `NX_SERVICE_URL`, `NX_SERVICE_HOST`,
+  `NX_SERVICE_PORT`, `NX_SERVICE_TOKEN`, `NEXUS_CONFIG_DIR`, `NX_CONFIG_DIR`,
+  `HOME`, `USERPROFILE` or `XDG_CONFIG_HOME`, all of which a repository can
+  set (records 27, 34 and 42). The dispatch child stops using the shared
+  `nexus.db.service_endpoint.resolve_service_endpoint` (record 42). The
+  request goes through an opener built with an empty proxy table
+  (`urllib.request.ProxyHandler({})`), because the default opener honours
+  `http_proxy` and `https_proxy` from the environment (record 42). A test sets
+  each of those variables, and `http_proxy`, `https_proxy` and their
+  upper-case forms, to a decoy and asserts no request reaches a decoy. The
+  lint (Decision 11) is worded over names, not over every environment read:
+  in a telemetry-sending module it fails on a read of an endpoint, token,
+  home, config-directory or proxy variable, or a call to any resolver but
+  `telemetry_endpoint()`; other reads, such as `NX_DISPATCH_COUNTER` (the
+  dispatch child's off switch) and `NX_DROPPED_WRITES_LOG_PATH` (a log
+  path), stay (record 42). The cost is that a sandbox session which isolates
+  itself with `NEXUS_CONFIG_DIR` still sends its events, when telemetry is
+  on, to the engine of the account's own config directory (inferred, not
+  tested).
 - **The auto-approve hook answers on PreToolUse only.** It registers no
   PermissionRequest answer for any tool on its allowlist (the
   `mcp__plugin_conexus_.*` matcher, not only the seven destructive tools).
   The plugin removes the PermissionRequest registration from
-  `conexus/hooks/hooks.json`, and the CLI's `auto_approve` returns no answer
-  when the event is PermissionRequest, so an older plugin that still
-  registers it, and an older CLI under a newer plugin, each lose the
-  override as soon as the other side updates (record 36). The evidence is two
-  spikes. A PermissionRequest allow overrides a user's `ask` rule (record
-  26), which is the defect in every shipped release. A PreToolUse allow alone
-  still approves a tool that has no rule, in default mode, in `acceptEdits`
-  and for a subagent, and it leaves an `ask` rule prompting and a `deny`
-  rule denying (record 33). The PermissionRequest answer was added in April
-  2026 when PreToolUse hooks did not reach subagent calls (RDR-035); that
-  limitation is gone, and the PreToolUse answer added in August 2026 covers
-  auto mode (record 33). No reader of Claude Code's permission files is
-  needed, so none of the sources a hook cannot read (`--settings`,
-  server-managed settings, MDM profiles) matter. The MCP-tool and auto-mode
-  cases are still to be spiked with the real plugin (Critical Assumptions).
+  `conexus/hooks/hooks.json`, and the CLI's `auto_approve` answers only when
+  the event is exactly `PreToolUse`: a PermissionRequest payload, and a
+  payload with no event (whose default today is the PermissionRequest
+  answer, `auto_approve.py:157`, record 43), get no answer. An older plugin
+  that still registers PermissionRequest, and an older CLI under a newer
+  plugin, each lose the override as soon as the other side updates (record
+  36). The evidence is two spikes and one in-tree scenario. A
+  PermissionRequest allow overrides an `ask` rule (record 26), the defect in
+  every shipped release. A PreToolUse allow alone still approves a tool that
+  has no rule, in default mode, in `acceptEdits` and for a subagent, and it
+  leaves a project-scope `ask` rule prompting and a `deny` rule denying
+  (record 33; a user-scope `ask` rule was not tested). In auto mode the
+  PreToolUse decision governs and PermissionRequest is never consulted
+  (`tests/cc-validation/scenarios/28_pretooluse_governs_auto_mode.sh`,
+  verified live at Claude Code 2.1.251, record 43), so removing the
+  PermissionRequest answer changes nothing there; that scenario has not been
+  re-run at 2.1.332. No reader of Claude Code's permission files is needed,
+  so none of the sources a hook cannot read (`--settings`, server-managed
+  settings, MDM profiles) matter.
+
+  The sources give three reasons for the pair, none of them the subagent
+  limitation the round-1 text named (that link was inferred, record 43):
+  convenience ("No more manual permission prompts", commit 240731431b), the
+  two events firing in different permission modes (`conexus/README.md:362`),
+  and a hedge against Claude Code versions in which an allow rule pre-empts a
+  PermissionRequest hook (scenario 07, "stays as a hedge whichever way this
+  lands"). This RDR overrides the hedge on purpose. The hedge guards against
+  a prompt the user did not want, which is the safe failure; its cost is a
+  silent override of a rule the user wrote, which is a loosening. Scenarios
+  07 and 28, plus a new one that runs a user-scope and a project-scope `ask`
+  rule against the PreToolUse-only answer, are re-run at every Claude Code pin
+  bump, which is where a version flip shows.
 
 Loosenings that remain, and why each is acceptable:
 
@@ -1009,6 +1115,24 @@ Loosenings that remain, and why each is acceptable:
   rules do the same job for a user and for a project, for any tool, in the
   grammar users already know. A plugin key beside them would be a second
   vocabulary for one decision, and the two would drift.
+- **Endpoint resolution outside telemetry** (invariant part 2's named
+  exceptions, record 41). The mailbox drain (`conexus/hooks/scripts/mailbox_drain.py`
+  through `_endpoint_resolve.resolve_base_url`, and `src/nexus/hooks/mailbox_drain.py`
+  through its own resolver), the T2 prefix scan (`t2_prefix_scan.py`, through
+  the shared `nexus.db.service_endpoint` resolver), the hooks that run `nx`
+  children with the session's environment (`compact_checkpoint.py`,
+  `version_lockstep_hook.py`, `version_lockstep_action.py`,
+  `subagent_start.py`), and, outside the hooks, the MCP server all take
+  `NX_SERVICE_URL`, `NX_SERVICE_HOST`, `NX_SERVICE_PORT` and
+  `NX_SERVICE_TOKEN` from the environment first, as nx does everywhere.
+  `nx_setup_notice.py` resolves but sends nothing. The risk: a repository
+  whose `.claude/settings.json` sets `NX_SERVICE_URL` sends that session's
+  nx traffic to its own host; if it sets the URL and not the token, the
+  user's saved or lease token goes with the requests; and a forged mailbox
+  server could hand the drain an ask-answer frame. The bound: a project's
+  `env` applies only once the user trusts the folder (record 45), which is
+  also when the user accepts the repository's hooks. Sam's decision S7
+  chooses between keeping these as exceptions and pinning them.
 - **`NX_PROCEDURES_REPO_ROOT=1`** in a project's `.claude/settings.json`
   `env` turns on that repository's own `.nexus/procedures` (RDR-242 S5,
   Sam's ruling of 2026-11-08, record 40). It is a switch a repository
@@ -1047,8 +1171,10 @@ pending-release ledger, the relay template, the orchestration skill and its
 reference, the golden replay worker and test, and two guard test files. The
 gate critique counted 14; the difference is not resolved (record 35). The
 substantive conflict is the golden replay: at 86a5fa0ff1 it is built on
-`flagged_home`, `mark_nexus` and `maintainer()` (record 35), which this RDR's
-lint outlaws. Rebasing therefore includes re-expressing the golden replay in
+`flagged_home`, `mark_nexus` and `maintainer()` (record 35). `maintainer()`
+leaves the helper in this RDR, so the replay cannot run as written (the lint
+itself scans the plugin and `src/nexus/hooks/`, not `tests/`; the harness's
+`flagged_home` goes with the posture change). Rebasing therefore includes re-expressing the golden replay in
 the new postures (project-strict for the nexus checkout, plain for a user's
 repository) so that it still proves the strict path did not move. The
 prerequisite is open: the fix is not yet on `develop` (record 35).
@@ -1081,16 +1207,25 @@ the registry key on it.
   in P0 and P2, asserts that plain output carries no nexus lexicon (bead id,
   RDR id, owner or peer name, lab host, `develop/main`, `Hellblazer/nexus`),
   that each `SETTING:<key>` text appears exactly when its key is on, and that
-  the only denies are those the posture expects. "orchestrator" leaves the
-  forbidden lexicon as process vocabulary. One named exception remains until
-  Sam answers S6: the ask-answer frame in `mailbox_drain.py` keeps "Sam" and
-  `<<<sam-words`, so the leg exempts that frame by name and the allowlist
-  carries one entry for it.
+  the only denies are those the posture expects, and that each settings text
+  appears only after its Provenance label (Decision 2). "orchestrator"
+  leaves the forbidden lexicon as process vocabulary.
+- **The ask-answer frame exception.** Until Sam answers S6 the frame in
+  `mailbox_drain.py` keeps "Sam" and `<<<sam-words`. It is not expressed in
+  the behaviour leg's allowlist, which accepts only manifest `live: false`
+  rows with `until: phase-N` or `D<n>` and fails an entry that matches
+  nothing (record 44), and it needs no entry there: the leg does not drive an
+  ask answer (record 44). The exception already exists as a named exemption
+  in `tests/test_user_wording_lexicon.py:283`, `_PINNED_FRAME_LITERALS`, whose
+  non-vacuity assert (`:362`) fails once the frame no longer carries the
+  words. S6's change empties that tuple; nothing in the leg changes for it.
 - **The boundary of the lexicon rule.** It covers everything the plugin
-  prints or injects and the plugin's agent, skill, command and resource
-  markdown. Source comments and docstrings may cite records, rulings and
-  people as provenance, because they are not shown to users or models;
-  identifiers that encode the old model are renamed (Decision 12).
+  prints or injects, including the class names it writes to `hook.log`,
+  which a user reads, and the plugin's agent, skill, command and resource
+  markdown. Identifiers in plugin source that encode the old model are
+  renamed too, because the source ships to users (Decision 12). Source
+  comments and docstrings may still cite records, rulings and people as
+  provenance: they explain history and are not printed to users or models.
 - **The manifest** (`conexus/hooks/audience.yaml`) uses three audiences:
   `EVERY-USER` (no gate, or a gate on the user's own content such as
   `.beads/`), `SETTING:<key>` (fires only when that key is set), and
@@ -1105,11 +1240,16 @@ the registry key on it.
   `SETTINGS` that no row and no reader uses; any `maintainer`,
   `account_flag` or `maintainer-profile` symbol in the plugin or
   `src/nexus/hooks/`; an `os.environ` read in `_audience.py` other than
-  `CLAUDE_PROJECT_DIR`; an endpoint or config-directory environment read
-  (`NX_SERVICE_*`, `NEXUS_CONFIG_DIR`, `NX_CONFIG_DIR`) in any module that
-  sends telemetry, found by tracing every caller of the two telemetry entry
-  points (`log_routing_event`, `record_dispatch`) to the module that opens
-  the connection (Decision 9); a PermissionRequest registration in
+  `CLAUDE_PROJECT_DIR` (the account home comes from the OS database, never
+  `HOME`); in any module that sends telemetry, found by tracing every caller
+  of the two telemetry entry points (`log_routing_event`, `record_dispatch`)
+  to the module that opens the connection, a read of a variable by name that
+  names an endpoint, token, home, config directory or proxy (`NX_SERVICE_*`,
+  `NEXUS_CONFIG_DIR`, `NX_CONFIG_DIR`, `HOME`, `USERPROFILE`,
+  `XDG_CONFIG_HOME`, `http_proxy`, `https_proxy` and their upper-case
+  forms), a `Path.home()` call, a default `urlopen` opener, or a call to a
+  resolver other than `telemetry_endpoint()`, while other reads
+  (`NX_DISPATCH_COUNTER`, `NX_DROPPED_WRITES_LOG_PATH`) pass (Decision 9); a PermissionRequest registration in
   `hooks.json` for the conexus matcher; a JSON Schema file or `docs/settings.md` table that
   disagrees with `SETTINGS`; and the existing guarded-import and wrapper
   rules, with each reader's failure value checked against the table.
@@ -1261,9 +1401,11 @@ outside Claude Code.
 
 **Cons**:
 
-- Bash stood in for an MCP tool, and auto mode was not run; both are Stage 1
-  spikes. A version of Claude Code in which PreToolUse does not reach
-  subagent calls (RDR-035's era) would show prompts, the safe direction.
+- Bash stood in for an MCP tool, and only a project-scope `ask` rule was
+  tried; both are the early release's spike. Auto mode rests on scenario 28,
+  verified at Claude Code 2.1.251 (record 43). It overrides scenario 07's
+  hedge; a Claude Code version that stops honouring the PreToolUse answer
+  would show prompts, the safe direction.
 
 **Reason chosen**: It removes the cause instead of compensating for it.
 
@@ -1307,19 +1449,31 @@ and the spike shows it is enough.
   machine, the same as anyone's.
 - Two public contracts are created (two files, one command) that must be
   kept compatible indefinitely.
-- A project maintainer's edit that lowers `subagent_git` waits for a commit.
+- A project maintainer's edit that lowers `subagent_git`, or changes any text
+  key (`preflight`, `ci_wait`, `credential_helper`, `integration_branch`,
+  `brief_questions`), waits for a commit (S3).
+- A git process becomes routine on four hook paths (Decision 1, "HEAD-read
+  cost").
+- Repository-set service endpoints still reach the mailbox drain, the T2
+  prefix scan, nx children and the MCP server unless S7 pins them.
 - Telemetry stops for users who never asked for it; `nx telemetry` reports
   have nothing to read on those installs.
 
 ### Risks and Mitigations
 
 - **Risk**: A PreToolUse-only allow does not approve a conexus MCP tool in
-  some mode (auto mode, or a Claude Code version where PreToolUse does not
-  reach subagent calls, as RDR-035 once recorded), so users meet prompts
-  they did not meet before.
-  **Mitigation**: The Stage 1 spike with the real plugin in default,
-  `acceptEdits` and auto mode, for a main session and a subagent. The failure
-  is a prompt, not a silent approval, so it fails in the safe direction.
+  some mode or Claude Code version (a version flip is what cc-validation
+  scenario 07 watches for), so users meet prompts they did not meet before.
+  **Mitigation**: The early release's own spike with the real plugin in
+  default, `acceptEdits` and auto mode, for a main session and a subagent
+  ("What ships when"), and scenarios 07, 28 and the new `ask`-rule scenario
+  at every Claude Code pin bump. The failure is a prompt, not a silent
+  approval, so it fails in the safe direction.
+- **Risk**: A repository the user trusts sets `NX_SERVICE_URL` and sends nx's
+  traffic in that session, with the user's token, to its own host (Decision
+  9, named exceptions).
+  **Mitigation**: Folder trust gates project env (record 45); S7 decides
+  whether to pin the remaining resolvers.
 - **Risk**: A malformed project file in a stranger's repository gives a user
   the full guard unexpectedly.
   **Mitigation**: The session-start message and the deny text both name the
@@ -1358,7 +1512,7 @@ and the spike shows it is enough.
 
 ### Prerequisites
 
-- [ ] Sam's answers to S1-S6 (below).
+- [ ] Sam's answers to S1-S7 (below).
 - [ ] nexus-5y47c on `develop` (Decision 10); open (record 35).
 - [x] Stage 0 spikes recorded (records 26 to 33, and 37).
 
@@ -1366,10 +1520,21 @@ This RDR's implementation steps are called *stages* so they are not confused
 with the portability plan's Phases 1 to 4 (Phase 1 shipped in 8.5.7, Phase 2
 is on `develop`, Phase 3 is the rework branch). What ships when:
 
-- The auto-approve fix (Decision 9) may ship ahead of everything else: its
-  plugin half (the `hooks.json` registration) can go in a plugin-only
-  release, and its CLI half (`auto_approve` ignoring PermissionRequest) ships
-  with the CLI. Either closes the shipped defect alone (record 36). S4.
+- The auto-approve fix (Decision 9) may ship ahead of everything else, as
+  its own release with its own gate. Its plugin half (the `hooks.json`
+  registration) goes in a plugin-only fast-lane release, built in its own
+  release worktree off the last release tag as the `release` skill's
+  plugin-only lane describes (`.claude/rules/releases-and-engine.md`); its
+  CLI half (`auto_approve` answering only `PreToolUse`, the absent-event
+  default included) ships with the next client release. Either half closes
+  the shipped defect alone (record 36). **Ship when**, for that early
+  release: with the real plugin loaded in a sandboxed session (its own
+  Claude Code config directory, never Sam's `~/.claude`), a harmless
+  conexus MCP tool with no rule runs with no prompt, the same tool prompts
+  under a user-scope `ask` rule and under a project-scope one, and is
+  denied under a `deny` rule, in default, `acceptEdits` and auto mode, for a
+  main session and a subagent; and the Stage 1 tests-first items for the two
+  events (below) pass. Sam cuts it. S4.
 - Stages 1 to 3 ship together, with the portability plan's Phases 2 and 3, in
   the next client release (ruling 8).
 - Stage 4 ships in the release that `LEGACY_ACCEPTED_UNTIL` names.
@@ -1383,7 +1548,8 @@ the same subagent is denied `git commit` in the primary and allowed it in a
 linked worktree; after misspelling the key, the next session start shows a
 user-visible message naming the file and suggesting `subagent_git`; and
 `python3 <plugin root>/hooks/scripts/_audience.py show` reports each state.
-The same run on a P2 machine with `nx settings show` gives identical output.
+The same run on a P2 machine with `nx settings show` gives the same output
+except for the version lines (Decision 5).
 
 ### Stage 0: Measure (no release), done 2026-11-25 and 2026-11-26
 
@@ -1402,9 +1568,22 @@ On the portability plan's Phase 3 branch, rebased onto nexus-5y47c.
 
 1. Tests first (Decision 11): the corpus rows for the failure table, the
    precedence matrix, the `HEAD` reads and their case table, the
-   session-root and worktree copies, the legacy window, auto-approve's
-   silence on PermissionRequest, the telemetry decoy test, and the lint
-   rules.
+   session-root and worktree copies, the legacy window, the telemetry decoy
+   test (endpoint, token, home, config-directory and proxy variables), the
+   Provenance label check, the byte-budget test at every cap, and the lint
+   rules. For the two auto-approve events, every file that asserts or
+   documents both is changed first (record 43):
+   `tests/hooks/test_permission_request_hooks.py` (its PermissionRequest
+   cases at `:259` and `:272`, and the absent-event default at `:63`, become
+   "no answer"); `tests/test_plugin_audience_lint.py:211-213`
+   (`test_the_same_argv_under_two_events_needs_two_entries` becomes a test
+   that the conexus matcher has a PreToolUse entry and no PermissionRequest
+   entry, which is the new lint rule's own assertion, so the two cannot
+   disagree); `tests/_audience_manifest.py:9-10` (the registration count
+   drops by one); `conexus/hooks/audience.yaml:297` (the PermissionRequest
+   entry is removed); and `conexus/README.md:362-363` and `:513` (one row,
+   no "paired" clause). The `sn` plugin's own pair is untouched (Out of
+   Scope).
 2. `SETTINGS`, the readers, the problem list, the file checks, the `HEAD`
    read, the session-root and payload-checkout copies, `integration_branch`,
    `remote_test_hosts` and the `show` entry point in `_audience.py`; byte
@@ -1419,13 +1598,15 @@ On the portability plan's Phase 3 branch, rebased onto nexus-5y47c.
    and identifier renames (Decision 12); the provenance wording for project
    texts (Decision 2); the orchestration-skill line on worktree base commits
    (Decision 8).
-4. Spikes left open by Stage 0: auto-approve with the real plugin and a
-   harmless conexus MCP tool, in default, `acceptEdits` and auto mode, for a
-   main session and a subagent, with and without a user `ask` rule; the
-   plugin-hook form of the SessionStart `systemMessage` on `startup`,
-   `resume` and `clear`; `CLAUDE_PROJECT_DIR` in the nx-side hooks; the
-   reader's cost on native Windows and on the `HEAD` path. Desktop's display
-   of `systemMessage` is a hand check by Sam.
+4. Spikes left open by Stage 0 (the auto-approve spike belongs to the early
+   release, "What ships when", and is not repeated here): the plugin-hook
+   form of the SessionStart `systemMessage` on `startup`, `resume` and
+   `clear`; `CLAUDE_PROJECT_DIR` in the nx-side hooks; the reader's cost on
+   native Windows; and the `HEAD` read's cost on each of its four paths, on
+   the laptop and on native Windows. Desktop's display of `systemMessage` is
+   a hand check by Sam. A new cc-validation scenario runs a user-scope and a
+   project-scope `ask` rule against the PreToolUse-only answer, beside 07
+   and 28.
 5. The SessionStart problem notice (plugin-side, stdlib, checking that the
    installed nx has `nx settings`) and the deny-text clause for an
    unreadable file.
@@ -1435,14 +1616,16 @@ On the portability plan's Phase 3 branch, rebased onto nexus-5y47c.
 
 **Ship when**: the reader and lint tests pass on both copies; the behaviour
 leg is green in plain, project-strict and user-strict, P0 and P2; the lint
-finds no `maintainer`, `account_flag` or `maintainer-profile` symbol and no
-environment read in a telemetry sender; the re-expressed golden replay is
-green over the recorded corpus; the Minimum Viable Validation passes on the
-laptop and on native Windows; the added hook time on native Windows is
-measured and under 5 ms per call (the laptop's is already measured, record
-32); with the real plugin loaded, a conexus tool with no rule runs with no
-prompt and the same tool under a user `ask` rule prompts, in default,
-`acceptEdits` and auto mode; the step 4 spikes are recorded.
+finds no `maintainer`, `account_flag` or `maintainer-profile` symbol, no
+endpoint, token, home, config-directory or proxy variable read in a
+telemetry sender, and no PermissionRequest entry for the conexus matcher;
+the re-expressed golden replay is green over the recorded corpus; the
+byte-budget test passes with every key at its cap; the Minimum Viable
+Validation passes on the laptop and on native Windows; the file reads add
+under 5 ms per call on native Windows (the laptop's are measured, record
+32); each `HEAD`-read path adds under 50 ms at the median on the laptop and
+on native Windows, or the per-session cache is adopted (Decision 1); the
+step 4 spikes are recorded.
 
 ### Stage 2: Un-gate and move nexus's words
 
@@ -1454,8 +1637,9 @@ prompt and the same tool under a user `ask` rule prompts, in default,
 3. The prose moves to nexus's `CLAUDE.md`, `.claude/rules/` and project
    skills (Sam's edits for `CLAUDE.md`).
 
-**Ship when**: the behaviour leg's allowlist holds only the ask-answer frame's
-entry, which S6 removes; a nexus session shows
+**Ship when**: the behaviour leg's allowlist is empty, and the only lexicon
+exemption anywhere is `_PINNED_FRAME_LITERALS` in
+`tests/test_user_wording_lexicon.py`, which S6 empties (Decision 11); a nexus session shows
 the full guard, the preflight row, the local-and-cloud question and the CI
 wait command, and a plain repository shows none of them; one review gate
 (code-review-expert and substantive-critic) passes on the rebased branch.
@@ -1535,7 +1719,12 @@ None.
   `systemMessage` with the suggestion, and no settings text from any other
   hook in that session.
 - **Scenario**: `nx settings show` and the stdlib `show` on the same
-  directory. **Verify**: identical output.
+  directory. **Verify**: the same output except for the version lines.
+- **Scenario**: `integration_branch` naming a branch `origin` does not have.
+  **Verify**: the default order is used and one problem is reported.
+- **Scenario**: settings texts from both files in one SubagentStart.
+  **Verify**: each text follows its own source's label; none carries the
+  other's.
 
 ## Validation
 
@@ -1548,10 +1737,12 @@ together. Done means the Stage 1 to 3 ship-when lines hold.
 
 ### Performance Expectations
 
-The reader adds a directory walk, at most two small file reads, and on one
-rare path a git call. On the laptop the warm cost is about 60 microseconds
-and the cold cost 1.2 ms (Research 10, record 32); native Windows and the
-`HEAD` path are measured in Stage 1 against the 5 ms bound.
+The reader adds a directory walk and at most two small file reads on every
+call, and one `git show` on the four paths that print a settings text or
+need the committed tightening value (Decision 1, "HEAD-read cost"). On the
+laptop the file reads cost about 60 microseconds warm and 1.2 ms cold
+(Research 10, record 32); native Windows is measured in Stage 1 against the
+5 ms bound, and each `HEAD`-read path against the 50 ms bound.
 
 ## Finalization Gate
 
@@ -1571,8 +1762,9 @@ the design.
 
 Five assumptions remain (Critical Assumptions), each with a Stage 1 spike,
 measurement or hand check. The one the direction leans on is that a
-PreToolUse-only allow behaves for a conexus MCP tool and in auto mode as it
-did for Bash (record 33); its failure mode is an unexpected prompt, the safe
+PreToolUse-only allow behaves for a conexus MCP tool and under a user-scope
+`ask` rule as it did for Bash under a project-scope rule (record 33; auto
+mode rests on scenario 28, record 43); its failure mode is an unexpected prompt, the safe
 direction. The worktree base commit no longer matters to the design
 (Decision 1). Three
 minor assumptions are acknowledged and carry no decision.
@@ -1581,9 +1773,9 @@ minor assumptions are acknowledged and carry no decision.
 
 | API Call | Library | Verification |
 | --- | --- | --- |
-| PreToolUse `permissionDecision: allow` vs `permissions.ask` | Claude Code | Docs Only (stated) |
+| PreToolUse `permissionDecision: allow` vs `permissions.ask` | Claude Code | Docs (stated), and spike, record 33 (project-scope `ask`; user scope untested) |
 | PermissionRequest `allow` vs `permissions.ask` | Claude Code | Spike, record 26 (the allow wins) |
-| Project `env` reaching plugin command hooks | Claude Code | Spike, record 27 |
+| PreToolUse-only allow for a conexus MCP tool, and in auto mode | Claude Code | Spike, record 33 (Bash, default and `acceptEdits`, project-scope `ask`); scenario 28 for auto mode at 2.1.251 (record 43); MCP tool and user-scope `ask` in the early release's spike |
 | Settings a worktree subagent runs under | Claude Code | Spike, record 28 (the main session's) |
 | Hook payload `cwd` in a worktree subagent | Claude Code | Spike, record 29 (the worktree); base commit unsettled |
 | `systemMessage` at SessionStart | Claude Code | Spike, record 30 (CLI, project hook, `startup`); plugin hook, `resume`, `clear` in Stage 1; Desktop by hand |
@@ -1640,21 +1832,29 @@ could move to a companion note once the gate has read it.
   most likely to ask for strict; the rework fell back to the seatbelt
   silently (Decision 4).
 - **S3. Should the project file's `HEAD` copy count, so a working-tree edit
-  can tighten at once but loosens only after a commit?** Recommended: yes.
-  Without it a subagent can edit the file and then commit in the shared
-  checkout (Decision 9).
+  can tighten at once but loosens only after a commit, and should the text
+  keys (`preflight`, `ci_wait`, `credential_helper`, `integration_branch`,
+  `brief_questions`) come from `HEAD` only, so an edit to them takes effect
+  only once committed?** Recommended: yes to both. Without the first a
+  subagent can edit the file and then commit in the shared checkout
+  (record 31); without the second any subagent can plant a text the plugin
+  shows to every later dispatch (record 40). The cost is a git process on
+  four hook paths, bounded in Decision 1.
 - **S4. Should the auto-approve hook answer only on PreToolUse, removing its
   PermissionRequest answer for every allowlisted conexus tool, with no plugin
   setting beside it?** Recommended: yes, and ship it ahead of the rest of
   this RDR, in both halves (the plugin's `hooks.json` and the CLI's
   `auto_approve`), because every shipped release silently overrides a
   user's `ask` rule through that answer (record 26). A spike shows the
-  PreToolUse answer alone still approves a tool that has no rule and leaves
-  `ask` and `deny` rules in force (record 33), so ruling 4 (auto-approve for
-  everyone) holds for every user who has written no such rule. Two things
-  to know: you may see prompts you do not see today if your own settings
-  hold `ask` rules for conexus tools, and the MCP-tool and auto-mode cases
-  are spiked in Stage 1 before release (Decision 9).
+  PreToolUse answer alone still approves a Bash command that has no rule
+  and leaves a project-scope `ask` rule and a `deny` rule in force (record
+  33), and scenario 28 showed the PreToolUse decision governs in auto mode
+  (record 43), so ruling 4 (auto-approve for everyone) holds for every user
+  who has written no such rule. It overrides the hedge scenario 07 keeps on
+  purpose (Decision 9). Two things to know: you may see prompts you do not
+  see today if your own settings hold `ask` rules for conexus tools, and the
+  early release ships only when its own spike passes with the real plugin,
+  a conexus MCP tool and a user-scope `ask` rule ("What ships when").
 - **S5. Is the inspection command named `nx settings` (`show`, `check`)?**
   Recommended: yes, cross-linked from `nx config --help` and `nx doctor`.
   The alternative is `nx config plugin show`, which hides it under nx's own
@@ -1664,6 +1864,36 @@ could move to a companion note once the gate has read it.
   separate small change after this release, so the frame and your
   instructions never disagree. Until then the frame keeps your name
   (Decision 12).
+- **S7. Should the hooks other than telemetry stop taking a service endpoint
+  and token from the environment?** A census (record 41) finds the mailbox
+  drain (both copies), the T2 prefix scan, the hooks that run `nx` children
+  and, outside the hooks, the MCP server all honour `NX_SERVICE_URL`,
+  `NX_SERVICE_HOST`, `NX_SERVICE_PORT` and `NX_SERVICE_TOKEN`, which a
+  repository's `.claude/settings.json` can set once you trust its folder
+  (record 45). Such a repository can send that session's nx traffic to its
+  own host, and with it your saved or lease token when it sets only the URL.
+  The options:
+  - (a) Keep them as named exceptions (Decision 9) and fix the root in its
+    own change: in nx's shared resolvers (`nexus.db.service_endpoint` and
+    the plugin's `_endpoint_resolve`), send a saved or lease token only to
+    the host it was saved or leased for, and an environment URL only with an
+    environment token. `NX_SERVICE_URL` keeps its meaning for nx's CLI, the
+    MCP server and the hooks, and the token can no longer be carried to a
+    host a repository names.
+  - (b) Pin every hook resolver in this RDR to the account's lease and
+    `config.yml`, as Decision 9 does for telemetry. `NX_SERVICE_URL` would
+    then still steer nx's CLI and the MCP server but not the hooks, so in a
+    session that sets it the hooks and the MCP server would talk to
+    different engines, and the MCP server and `nx` children would still
+    carry the token to the repository's host.
+
+  Recommended: (a). Option (b) changes behaviour in every session that uses
+  `NX_SERVICE_URL` on purpose (sandboxes, tests, a cloud user who exports
+  it; inferred, not counted) and still leaves the token exposed through the
+  MCP server; the token binding would close the disclosure for every
+  component at once (inferred: it is neither designed nor built). Either way
+  this is a security decision with a risk accepted until the fix lands, so
+  it is yours.
 
 Actions only Sam takes, no decision needed: write his own `conexus.json` on
 each machine where he wants strict, telemetry and remote hosts; delete
