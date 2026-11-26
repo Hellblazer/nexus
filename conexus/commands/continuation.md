@@ -14,7 +14,7 @@ Generates a handoff document under `/tmp/` that a future Claude Code session can
 
 Three steps. Run the session-retro audits, write the handoff file, then emit one line of chat. Nothing else.
 
-### Step 0: session-retro audits (RDR-184 — multi-agent sessions only; skip if zero Agent dispatches)
+### Step 0: session-retro audits (multi-agent sessions only; skip if zero Agent dispatches)
 
 Any tripped threshold files a mechanization bead (`bd create`) — never just a handoff note.
 
@@ -69,7 +69,7 @@ Example complete chat response:
 
 The user selects the third line (mouse drag or triple-click), copies (`cmd-C` or terminal-specific binding), `/clear`s, pastes, hits return. The next session sees `cat <path>` as its first user message, reads the handoff, resumes.
 
-Clipboard auto-prime was tried (pbcopy, launchctl asuser pbcopy, OSC 52 plain and DCS-wrapped) and abandoned: remote tmux over mosh, the canonical nexus-developer environment, doesn't reliably forward any of them to the user's local NSPasteboard. Plain text on its own line is the only universally portable affordance.
+Clipboard auto-prime was tried (pbcopy, launchctl asuser pbcopy, OSC 52 plain and DCS-wrapped) and abandoned: remote tmux over mosh, a common developer setup, doesn't reliably forward any of them to the user's local NSPasteboard. Plain text on its own line is the only universally portable affordance.
 
 ### Style rules for the handoff file (not the chat response)
 

@@ -32,7 +32,7 @@ mcp__plugin_conexus_nexus-catalog__link(from_tumbler="...", to_tumbler="...", li
 
 See SubagentStart hook output for full tool reference.
 
-### Retrieval preference (RDR-080)
+### Retrieval preference
 
 For multi-source or multi-step retrieval, prefer `nx_answer` over hand-rolled
 `search()` / `query()` chains.  It goes through the plan-match gate (saving
@@ -74,8 +74,8 @@ Skip the steps here that call conexus nexus tools when those tools are not avail
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
 
 - **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_conexus_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
-- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="architect-planner")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
-- **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="architect-planner")`. Omit `ttl` — a decision or finding is permanent unless there is a reason it should expire. The `agent` kwarg attributes this write to the architect-planner role so `nx tier-status` slices by agent (nexus-9clx).
+- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="architect-planner")`. The `agent` kwarg mirrors `memory_put`'s attribution — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
+- **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="architect-planner")`. Omit `ttl` — a decision or finding is permanent unless there is a reason it should expire. The `agent` kwarg attributes this write to the architect-planner role so `nx tier-status` slices by agent.
 
 **Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting — for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
 
@@ -265,7 +265,7 @@ Store using these naming conventions:
 
 - **vs strategic-planner**: Strategic-planner handles project management infrastructure. You focus on technical architecture and design patterns. Call strategic-planner when project needs management infrastructure setup.
 - **vs developer**: You design; developer executes. Your plans must have sufficient detail for developer to proceed autonomously.
-- **vs nx_plan_audit**: Always call `mcp__plugin_conexus_nexus__nx_plan_audit` before finalizing plans (RDR-080 — MCP tool, no agent spawn). Pass `round_number` (you count it; the tool is stateless) and your declared `budget_rounds`. Findings classified `DISCOVER-AT-IMPLEMENTATION` are recorded and carried, never re-planned; only `BLOCKS-PLANNING` holds a plan. From round 3 the tool returns `RESIDUALS-ONLY` and planning is over. Full contract: `${CLAUDE_PLUGIN_ROOT}/skills/plan-validation/SKILL.md` (nexus-ll7zm).
+- **vs nx_plan_audit**: Always call `mcp__plugin_conexus_nexus__nx_plan_audit` before finalizing plans (an MCP tool, no agent spawn). Pass `round_number` (you count it; the tool is stateless) and your declared `budget_rounds`. Findings classified `DISCOVER-AT-IMPLEMENTATION` are recorded and carried, never re-planned; only `BLOCKS-PLANNING` holds a plan. From round 3 the tool returns `RESIDUALS-ONLY` and planning is over. Full contract: `${CLAUDE_PLUGIN_ROOT}/skills/plan-validation/SKILL.md`.
 
 **Output Format:**
 Provide structured plans with:

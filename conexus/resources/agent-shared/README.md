@@ -23,7 +23,7 @@ This agent follows the [Shared Context Protocol](<plugin-root>/resources/agent-s
 ```
 
 This directory moved out of `agents/` to [`conexus/resources/agent-shared/`](https://github.com/Hellblazer/nexus/tree/main/conexus/resources/agent-shared) at
-nexus-cnzei.4 — as a subdirectory of `agents/`, it and its five reference
+an earlier release — as a subdirectory of `agents/`, it and its five reference
 documents were listed as dispatchable `conexus:_shared:*` entries alongside
 the real agents, with no way to invoke them meaningfully.
 

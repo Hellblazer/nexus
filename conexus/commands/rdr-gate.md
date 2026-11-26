@@ -14,7 +14,7 @@ $ARGUMENTS
 **Targeted load**: parse the **numeric ID** (and the `--skip-gaps` flag, the one
 override the preamble honours) from `$ARGUMENTS` and run, via the Bash tool,
 `nx rdr preamble rdr-gate -- <ID> [--skip-gaps]` with literal argv tokens. Never splice raw `$ARGUMENTS` into a shell-quoted
-line — free text with apostrophes/quotes breaks the quoting (nexus-ybvyo).
+line — free text with apostrophes/quotes breaks the quoting.
 
 ## Action
 

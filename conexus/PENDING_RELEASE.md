@@ -108,5 +108,16 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/design-to-code-trace/SKILL.md`: the Tier-aware discipline line names `answer_plan_search` and a retrieval plan, never an implementation plan, nexus-sby49.4.
 - `conexus/skills/document/SKILL.md`: the Tier-aware discipline line names `answer_plan_search` and a retrieval plan, never an implementation plan, nexus-sby49.4.
 - `conexus/skills/knowledge-tidying/SKILL.md`: the Tier-aware discipline line names `answer_plan_search` and a retrieval plan, never an implementation plan, nexus-sby49.4.
+- `conexus/commands/continuation.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/commands/create-plan.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/commands/implement.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/commands/rdr-accept.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/commands/rdr-audit.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/commands/rdr-gate.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/commands/research.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/resources/agent-shared/README.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/resources/rdr/TEMPLATE.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/resources/rdr_process/AUDIT-PROMPT.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
+- `conexus/resources/rdr_process/INCIDENT-TEMPLATE.md`: internal RDR and bead ids removed from the text a session loads, meaning kept, nexus-sby49.4.
 
 ## Deferred to the next client release

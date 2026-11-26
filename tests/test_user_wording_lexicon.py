@@ -257,9 +257,13 @@ def test_a_planted_id_fails_the_description_scan(tmp_path: Path) -> None:
     assert sorted(f.split(": ")[1] for f in found) == ["RDR-245", "Sam", "nexus-abcde"]
 
 
-#: Lexicon terms the dispatch-process skills use as ordinary vocabulary: `bd` under their `.beads/` gate, the orchestrator role
-#: and the mode phrase of the brief check. The skill files are scanned for ids, people and hosts, not for these.
-_SKILL_EXEMPT_TERMS = frozenset({"bd", "orchestrator", "local and cloud"})
+#: Lexicon terms the dispatch-process text uses as ordinary vocabulary, each with its reason. Skills, agent and command bodies
+#: and the shared resources are scanned for ids, people and hosts, not for these.
+_PROCESS_VOCABULARY: dict[str, str] = {
+    "bd": "the beads tracker command, named only under its `.beads/` gate (the text says what to do without one)",
+    "orchestrator": "the role that dispatches agents and reads their hand-backs, a process term",
+    "local and cloud": "the mode phrase of the brief check every dispatch answers",
+}
 
 #: Literals a user types or reads that the lexicon would flag: the `nx doctor` row label and a `--kind` value. Removed
 #: from a line before the scan; renaming either is a product change, not wording.
@@ -282,7 +286,7 @@ def _skill_hits(files: list[Path], root: Path, owned: dict[tuple[str, str], str]
                 continue
             for literal in _PRODUCT_LITERALS:
                 line = line.replace(literal, "")
-            found.extend(f"{rel}:{n}: {h}" for h in hits(line) if h.lower() not in _SKILL_EXEMPT_TERMS)
+            found.extend(f"{rel}:{n}: {h}" for h in hits(line) if h.lower() not in _PROCESS_VOCABULARY)
     return lines, found
 
 
@@ -291,6 +295,70 @@ def test_no_skill_file_names_an_internal_id_or_person() -> None:
     lines, found = _skill_hits(files, PLUGIN / "skills")
     assert len(files) >= 40 and lines >= 4000, f"the scan read {len(files)} files, {lines} lines"
     assert not found, "skill text loads into a user's session and names:\n" + "\n".join(found)
+
+
+def _agent_files() -> list[Path]:
+    return sorted((PLUGIN / "agents").glob("*.md"))
+
+
+def _command_files() -> list[Path]:
+    return sorted((PLUGIN / "commands").glob("*.md"))
+
+
+def _resource_files() -> list[Path]:
+    """Everything under ``conexus/resources`` (the shared relay and protocol files every subagent is pointed at, and the RDR
+    templates)."""
+    return sorted(p for p in (PLUGIN / "resources").rglob("*") if p.is_file())
+
+
+def test_no_agent_body_names_an_internal_id_or_person() -> None:
+    files = _agent_files()
+    lines, found = _skill_hits(files, PLUGIN)
+    assert len(files) == 10 and lines >= 3000, f"the scan read {len(files)} files, {lines} lines"
+    assert not found, "agent text loads into every dispatch and names:\n" + "\n".join(found)
+
+
+def test_no_command_body_names_an_internal_id_or_person() -> None:
+    files = _command_files()
+    lines, found = _skill_hits(files, PLUGIN)
+    assert len(files) >= 18 and lines >= 700, f"the scan read {len(files)} files, {lines} lines"
+    assert not found, "command text loads into a user's session and names:\n" + "\n".join(found)
+
+
+def test_no_shared_resource_names_an_internal_id_or_person() -> None:
+    files = _resource_files()
+    lines, found = _skill_hits(files, PLUGIN)
+    assert len(files) >= 12 and lines >= 1700, f"the scan read {len(files)} files, {lines} lines"
+    assert not found, "resource text is injected into every subagent and names:\n" + "\n".join(found)
+
+
+@pytest.mark.parametrize("surface", ["agents", "commands", "resources"])
+def test_a_planted_id_in_a_body_fails_each_added_scan(tmp_path: Path, surface: str) -> None:
+    """Each added surface reads a body line, not only a frontmatter description: the id sits on the last line of the file."""
+    (tmp_path / surface).mkdir()
+    f = tmp_path / surface / "x.md"
+    f.write_text("---\nname: x\ndescription: fine\n---\nuse bd under .beads/ for the orchestrator\nthe record (RDR-080) and nexus-9clx, ask Sam\n", encoding="utf-8")
+    lines, found = _skill_hits([f], tmp_path)
+    assert lines == 6
+    assert [h.split(": ")[1] for h in found] == ["RDR-080", "nexus-9clx", "Sam"]
+
+
+def test_the_scanned_surfaces_are_the_ones_the_plugin_ships() -> None:
+    """A new top-level directory of loadable text under conexus/ must be scanned or named here with its reason."""
+    scanned = {"agents", "commands", "skills", "resources"}
+    unread = {
+        "hooks": "its injected text is read by the behaviour leg, which drives the scripts",
+        "launch": "launcher code, no prose a session loads",
+        "plans": "retrieval-plan seed templates read by the plan loader, not text a session loads",
+        "daemon": "service unit templates",
+        "registry.yaml": "a machine table",
+        "mcp": "server launch configuration",
+        "evals": "plugin evaluation cases, run by the maintainer's harness, never loaded into a session",
+        "retrieval-agents.txt": "a registry file nothing reads (its own header says so)",
+    }
+    present = {p.name for p in PLUGIN.iterdir() if not p.name.startswith(".")}
+    extra = sorted(present - scanned - set(unread) - {"README.md", "CHANGELOG.md", "PENDING_RELEASE.md", "LICENSE", "docs"})
+    assert not extra, f"conexus/ holds {extra}: scan it in this file or name it in `unread` with the reason"
 
 
 def test_a_planted_id_fails_the_skill_scan(tmp_path: Path) -> None:

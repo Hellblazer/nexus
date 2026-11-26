@@ -64,7 +64,7 @@ This file documents common error handling patterns for agents.
 
   (Historical: this section described `database is locked` and SQLite WAL
   retry semantics. There is no SQLite — T1/T2/T3 are all Postgres behind the
-  engine, RDR-158 P4 — so that error cannot occur and its retry advice was
+  engine — so that error cannot occur and its retry advice was
   guidance for a condition that no longer exists.)
 
 **TTL expiry edge case (permanent entries)**:
@@ -72,8 +72,7 @@ This file documents common error handling patterns for agents.
   PERMANENT; the row is never swept. There is no `expires_at` field visible at the MCP/HTTP
   layer, no empty-string sentinel, and no SQL guard for a caller to write — this is a service
   behind `HttpMemoryStore`/`POST /v1/memory/put`, not a table an agent touches directly.
-- `ttl=0` and any negative `ttl` are REJECTED with a 400 by the engine (RDR-194 D5,
-  nexus-tk070.p6a) — there is no coercion of `0` to permanent, or to anything else.
+- `ttl=0` and any negative `ttl` are REJECTED with a 400 by the engine — there is no coercion of `0` to permanent, or to anything else.
 
 **Memory entry not found**:
 - Error: memory_get returns "Not found"
@@ -83,7 +82,7 @@ This file documents common error handling patterns for agents.
 **TTL format errors**:
 - Valid `ttl` values for `memory_put`: omit for permanent, or a positive integer number of
   days for a row meant to expire (extended on read: `effective_ttl = ttl * (1 + ln(access_count
-  + 1))`, nexus-473mx). `ttl=30` for every write is the retired default, not a convention to
+  + 1))`). `ttl=30` for every write is the retired default, not a convention to
   reproduce — pass an explicit TTL only when the content genuinely should expire.
 - `ttl<=0` (including `ttl=0`) is refused outright — pass no `ttl` at all instead.
 
@@ -91,8 +90,8 @@ This file documents common error handling patterns for agents.
 
 **TTL model (T3 has no `expires_at` column)**: `T3Database.put` computes expiry as
 `indexed_at + ttl_days`, so there is no stored expiry timestamp to guard in SQL. `ttl_days=0` is
-rejected outright (RDR-194 D5, nexus-tk070.p6b) — never coerced to permanent. (`HttpVectorClient.put`
-did the same until it was retired, nexus-nt76j.) `store_put`'s `ttl` parameter is a string (`"permanent"`, `"Nd"`, `"Nw"`), not the
+rejected outright — never coerced to permanent. (`HttpVectorClient.put`
+did the same until it was retired.) `store_put`'s `ttl` parameter is a string (`"permanent"`, `"Nd"`, `"Nw"`), not the
 integer-or-None shape `memory_put`/`answer_plan_save` use.
 
 **Engine (T3 store) connectivity failure**:
@@ -112,7 +111,7 @@ integer-or-None shape `memory_put`/`answer_plan_save` use.
 - Collection names use `__` as separator (NOT `::`).
 - Type the bare subject (`myproject`) to MCP / `nx` commands and let the catalog name the collection; never type a model token, a version or the `__` segments. `docs`, `code` and `rdr` collections (minted by `nx index repo`) render as `<content_type>__<owner>__<embedding_model>__v<n>`, e.g. `code__nexus-1-1__voyage-code-3__v1`; a NEW `knowledge` subject is labelled `c<id>` by the engine.
 - Collections that already exist keep their names and stay readable by their full name.
-- Invalid: `knowledge::myproject` (the RDR-103 name grammar uses `__`; colons are refused).
+- Invalid: `knowledge::myproject` (the collection name grammar uses `__`; colons are refused).
 
 **Duplicate document ID**:
 - Error: `Document ID already exists`
