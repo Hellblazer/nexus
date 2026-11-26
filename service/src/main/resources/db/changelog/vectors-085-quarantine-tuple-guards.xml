@@ -24,8 +24,8 @@
         row already holds the tuple being copied. When the WHERE skips the row, the INSERT affects no row, and the function raises 22023 naming the row and the
         origin, before it moves any chunk. A non-quarantine row with no live twin of the tuple is refreshed as before.
     A race (another registration of the tuple committing between the check and the statement) still ends in the index's own 23505: never a second live holder.
-    Where the index is absent (it waits for the re-own move, collections-001-2) the checks still refuse, because a second live holder is exactly
-    what the index exists to prevent.
+    Where the index is absent (it waits for the re-own move, collections-001-2) nothing raised, so the functions behave exactly as before: every
+    check begins with to_regclass('nexus.catalog_collections_live_tuple_uq') and falls through to the old statement when it is NULL.
 
     A changeset already applied is never edited: these are new CREATE OR REPLACE definitions of the last definers (vectors-077-87, -49, -56 and
     vectors-083-1, -2); the rollback of each restores that definition verbatim. Definitions only. DATA EFFECT: none; no row is read or written at
@@ -218,6 +218,7 @@ BEGIN
                                  WHERE s.tenant_id = cc0.tenant_id AND s.name = cc0.superseded_by),
                                cc0.collection_id) END
       WHERE cc0.lifecycle_state = 'quarantine'
+         OR to_regclass('nexus.catalog_collections_live_tuple_uq') IS NULL
          OR NOT EXISTS (SELECT 1 FROM nexus.catalog_collections h
                          WHERE h.tenant_id       = cc0.tenant_id
                            AND h.collection_id  <> cc0.collection_id
@@ -230,8 +231,9 @@ BEGIN
 
     -- nexus-p2m1x.28 (linda 2026-11-25): the refresh above copies the ORIGIN's tuple onto a row that bears the sibling's name. For a quarantine row
     -- that is the designed heal and the row is outside catalog_collections_live_tuple_uq. A row of any other lifecycle that bears the name
-    -- is inside the index, so the copy is skipped by the WHERE when another live row (the origin, as a rule) already holds that tuple, and
-    -- the call refuses here by name: nothing moved, no second live holder, never a bare 23505. A non-quarantine row with no live twin of the tuple is refreshed as before.
+    -- is inside the index, so, where the index is in force, the copy is skipped by the WHERE when another live row (the origin, as a rule) already holds that
+    -- tuple, and the call refuses here by name: nothing moved, no second live holder, never a bare 23505. A non-quarantine row with no live twin of the tuple,
+    -- and every row where the index does not exist yet (it waits for the re-own move), is refreshed as before.
     IF NOT FOUND THEN
         RAISE EXCEPTION
             'gc_quarantine_orphans: the row named % is not a quarantine collection and another live collection already holds the tuple of origin % that the quarantine sibling would copy onto it; nothing moved (the live tuple index allows one live holder of a tuple)',
@@ -797,6 +799,7 @@ BEGIN
                                  WHERE s.tenant_id = cc0.tenant_id AND s.name = cc0.superseded_by),
                                cc0.collection_id) END
       WHERE cc0.lifecycle_state = 'quarantine'
+         OR to_regclass('nexus.catalog_collections_live_tuple_uq') IS NULL
          OR NOT EXISTS (SELECT 1 FROM nexus.catalog_collections h
                          WHERE h.tenant_id       = cc0.tenant_id
                            AND h.collection_id  <> cc0.collection_id
@@ -809,8 +812,9 @@ BEGIN
 
     -- nexus-p2m1x.28 (linda 2026-11-25): the refresh above copies the ORIGIN's tuple onto a row that bears the sibling's name. For a quarantine row
     -- that is the designed heal and the row is outside catalog_collections_live_tuple_uq. A row of any other lifecycle that bears the name
-    -- is inside the index, so the copy is skipped by the WHERE when another live row (the origin, as a rule) already holds that tuple, and
-    -- the call refuses here by name: nothing moved, no second live holder, never a bare 23505. A non-quarantine row with no live twin of the tuple is refreshed as before.
+    -- is inside the index, so, where the index is in force, the copy is skipped by the WHERE when another live row (the origin, as a rule) already holds that
+    -- tuple, and the call refuses here by name: nothing moved, no second live holder, never a bare 23505. A non-quarantine row with no live twin of the tuple,
+    -- and every row where the index does not exist yet (it waits for the re-own move), is refreshed as before.
     IF NOT FOUND THEN
         RAISE EXCEPTION
             'gc_quarantine_orphans_bounded: the row named % is not a quarantine collection and another live collection already holds the tuple of origin % that the quarantine sibling would copy onto it; nothing moved (the live tuple index allows one live holder of a tuple)',
@@ -1353,6 +1357,7 @@ BEGIN
                                  WHERE s.tenant_id = cc0.tenant_id AND s.name = cc0.superseded_by),
                                cc0.collection_id) END
       WHERE cc0.lifecycle_state = 'quarantine'
+         OR to_regclass('nexus.catalog_collections_live_tuple_uq') IS NULL
          OR NOT EXISTS (SELECT 1 FROM nexus.catalog_collections h
                          WHERE h.tenant_id       = cc0.tenant_id
                            AND h.collection_id  <> cc0.collection_id
@@ -1365,8 +1370,9 @@ BEGIN
 
     -- nexus-p2m1x.28 (linda 2026-11-25): the refresh above copies the ORIGIN's tuple onto a row that bears the sibling's name. For a quarantine row
     -- that is the designed heal and the row is outside catalog_collections_live_tuple_uq. A row of any other lifecycle that bears the name
-    -- is inside the index, so the copy is skipped by the WHERE when another live row (the origin, as a rule) already holds that tuple, and
-    -- the call refuses here by name: nothing moved, no second live holder, never a bare 23505. A non-quarantine row with no live twin of the tuple is refreshed as before.
+    -- is inside the index, so, where the index is in force, the copy is skipped by the WHERE when another live row (the origin, as a rule) already holds that
+    -- tuple, and the call refuses here by name: nothing moved, no second live holder, never a bare 23505. A non-quarantine row with no live twin of the tuple,
+    -- and every row where the index does not exist yet (it waits for the re-own move), is refreshed as before.
     IF NOT FOUND THEN
         RAISE EXCEPTION
             'reaper_quarantine_chunks: the row named % is not a quarantine collection and another live collection already holds the tuple of origin % that the quarantine sibling would copy onto it; nothing moved (the live tuple index allows one live holder of a tuple)',
@@ -1833,8 +1839,10 @@ BEGIN
     -- live holder of a tuple. Where no live row bears the origin's label (it was retired, or purged) and another live collection already holds the
     -- tuple, the INSERT below raised a bare 23505 from the tuple index (the name arbiter does not cover it). The origin is NOT minted then: the call
     -- refuses by name, before anything moves, and the quarantined chunks stay where they are (a restore into the collection that holds the tuple is
-    -- the operator's to name: it is a different label). A live row that bears the label is still left exactly as it is (DO NOTHING).
-    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_collections o
+    -- the operator's to name: it is a different label). A live row that bears the label is still left exactly as it is (DO NOTHING). Where the index does
+    -- not exist yet (it waits for the re-own move) nothing raised and the registration is as before.
+    IF to_regclass('nexus.catalog_collections_live_tuple_uq') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM nexus.catalog_collections o
                     WHERE o.tenant_id = p_tenant_id AND o.name = p_origin_collection AND o.superseded_by = '' AND o.superseded_by_id IS NULL) THEN
         SELECT h.name INTO v_p28_holder
           FROM nexus.catalog_collections h
@@ -2271,8 +2279,10 @@ BEGIN
     -- live holder of a tuple. Where no live row bears the origin's label (it was retired, or purged) and another live collection already holds the
     -- tuple, the INSERT below raised a bare 23505 from the tuple index (the name arbiter does not cover it). The origin is NOT minted then: the call
     -- refuses by name, before anything moves, and the quarantined chunks stay where they are (a restore into the collection that holds the tuple is
-    -- the operator's to name: it is a different label). A live row that bears the label is still left exactly as it is (DO NOTHING).
-    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_collections o
+    -- the operator's to name: it is a different label). A live row that bears the label is still left exactly as it is (DO NOTHING). Where the index does
+    -- not exist yet (it waits for the re-own move) nothing raised and the registration is as before.
+    IF to_regclass('nexus.catalog_collections_live_tuple_uq') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM nexus.catalog_collections o
                     WHERE o.tenant_id = p_tenant_id AND o.name = p_origin_collection AND o.superseded_by = '' AND o.superseded_by_id IS NULL) THEN
         SELECT h.name INTO v_p28_holder
           FROM nexus.catalog_collections h

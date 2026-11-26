@@ -61,10 +61,10 @@ aspects	document_highlights	service/src/main/java/dev/nexus/service/db/Collectio
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	349	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven	
 catalog	catalog_collections	nexus.catalog_documents_owner_to_collection [vectors-078-rdr229-p35b-readers-continue.xml:351]	290	update	sql_function	superseded_by	superseded_by_id	yes		sql	
 catalog	catalog_collections	nexus.gc_quarantine_orphans [vectors-085-quarantine-tuple-guards.xml:202]	45	insert	sql_function	superseded_by	superseded_by_id	yes		sql	
-catalog	catalog_collections	nexus.gc_quarantine_orphans_bounded [vectors-085-quarantine-tuple-guards.xml:781]	650	insert	sql_function	superseded_by	superseded_by_id	yes		sql	
-catalog	catalog_collections	nexus.gc_restore_rereferenced [vectors-085-quarantine-tuple-guards.xml:1858]	1716	insert	sql_function	superseded_by	superseded_by_id	yes		sql	
-catalog	catalog_collections	nexus.gc_restore_rereferenced_bounded [vectors-085-quarantine-tuple-guards.xml:2296]	2143	insert	sql_function	superseded_by	superseded_by_id	yes		sql	
-catalog	catalog_collections	nexus.reaper_quarantine_chunks [vectors-085-quarantine-tuple-guards.xml:1337]	1201	insert	sql_function	superseded_by	superseded_by_id	yes		sql	
+catalog	catalog_collections	nexus.gc_quarantine_orphans_bounded [vectors-085-quarantine-tuple-guards.xml:783]	652	insert	sql_function	superseded_by	superseded_by_id	yes		sql	
+catalog	catalog_collections	nexus.gc_restore_rereferenced [vectors-085-quarantine-tuple-guards.xml:1866]	1722	insert	sql_function	superseded_by	superseded_by_id	yes		sql	
+catalog	catalog_collections	nexus.gc_restore_rereferenced_bounded [vectors-085-quarantine-tuple-guards.xml:2306]	2151	insert	sql_function	superseded_by	superseded_by_id	yes		sql	
+catalog	catalog_collections	nexus.reaper_quarantine_chunks [vectors-085-quarantine-tuple-guards.xml:1341]	1205	insert	sql_function	superseded_by	superseded_by_id	yes		sql	
 catalog	catalog_collections	rdr229-reown-repo-stems-from-curator [vectors-067-reown-repo-stems-register.xml:153]	150	other	data_move	-	superseded_by_id	yes	handled: the template is a data-modifying WITH, not an UPDATE ... SET; it selects only live registry rows (c.superseded_by = ''), whose superseded_by_id is NULL, so the CHECK holds for every row version it writes (vectors-067)	move	
 catalog	catalog_collections	rdr229-stamp-catalog_collections [vectors-070-collection-id-stamp-moves.xml:84]	81	update	data_move	-	superseded_by_id	yes	sets superseded_by_id	move	
 catalog	catalog_collections	repair-catalog-collection-model-version [vectors-064-register-model-version-repair-move.xml:98]	95	update	data_move	-	superseded_by_id	yes	handled: D2's repair UPDATEs model_version of registry rows, tombstones included; vectors-068-19 adds the superseded_by_id CHECK only while no tombstone with a blank model_version and no id remains (its CONTINUE precondition), so the CHECK is absent while this move is open	move	
@@ -156,13 +156,13 @@ catalog	chunk_orphaned_at	nexus.stamp_chunks_on_manifest_update [vectors-077-rdr
 catalog	chunk_orphaned_at	rdr229-stamp-chunk_orphaned_at [vectors-070-collection-id-stamp-moves.xml:254]	251	update	data_move	-	collection_id	yes	sets collection_id	move	
 catalog	chunk_orphaned_at	service/src/main/java/dev/nexus/service/db/CatalogIdStamps.java	118	update	jooq	-	collection_id	yes		unproven	repairCascadedIds
 catalog	chunk_orphaned_at	service/src/main/java/dev/nexus/service/db/CatalogIdStamps.java	144	update	jooq	collection	collection_id	yes		unproven	repairCascadedIdsFrom
-chunks	chunks	nexus.gc_quarantine_orphans [vectors-085-quarantine-tuple-guards.xml:250]	45	insert	sql_function	collection	collection_id	yes		sql	
-chunks	chunks	nexus.gc_quarantine_orphans_bounded [vectors-085-quarantine-tuple-guards.xml:830]	650	insert	sql_function	collection	collection_id	yes		sql	
+chunks	chunks	nexus.gc_quarantine_orphans [vectors-085-quarantine-tuple-guards.xml:252]	45	insert	sql_function	collection	collection_id	yes		sql	
+chunks	chunks	nexus.gc_quarantine_orphans_bounded [vectors-085-quarantine-tuple-guards.xml:834]	652	insert	sql_function	collection	collection_id	yes		sql	
 chunks	chunks	nexus.gc_quarantine_orphans_floored [vectors-077-rdr229-p35b-readers-both.xml:4070]	3922	update	sql_function	collection	collection_id	yes		sql	
-chunks	chunks	nexus.gc_restore_rereferenced [vectors-085-quarantine-tuple-guards.xml:1879]	1716	insert	sql_function	collection	collection_id	yes		sql	
-chunks	chunks	nexus.gc_restore_rereferenced_bounded [vectors-085-quarantine-tuple-guards.xml:2317]	2143	insert	sql_function	collection	collection_id	yes		sql	
+chunks	chunks	nexus.gc_restore_rereferenced [vectors-085-quarantine-tuple-guards.xml:1887]	1722	insert	sql_function	collection	collection_id	yes		sql	
+chunks	chunks	nexus.gc_restore_rereferenced_bounded [vectors-085-quarantine-tuple-guards.xml:2327]	2151	insert	sql_function	collection	collection_id	yes		sql	
 chunks	chunks	nexus.quarantine_restore_chunks [vectors-083-restore-by-origin-id.xml:1131]	879	insert	sql_function	collection	collection_id	yes		sql	
-chunks	chunks	nexus.reaper_quarantine_chunks [vectors-085-quarantine-tuple-guards.xml:1397]	1201	insert	sql_function	collection	collection_id	yes		sql	
+chunks	chunks	nexus.reaper_quarantine_chunks [vectors-085-quarantine-tuple-guards.xml:1403]	1205	insert	sql_function	collection	collection_id	yes		sql	
 chunks	chunks	rdr229-quarantine-origin-id [vectors-082-quarantine-origin-id-backfill.xml:56]	53	update	data_move	-	collection_id	yes	sets collection_id	move	
 chunks	chunks	rdr229-stamp-chunks [vectors-070-collection-id-stamp-moves.xml:350]	347	update	data_move	-	collection_id	yes	sets collection_id	move	
 chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	6826	insert	helper	collection	collection_id	yes	ch.table() helper	require	upsertManifestChunkVectors
@@ -180,16 +180,16 @@ ops	chash_remap	rdr229-stamp-chash_remap [vectors-070-collection-id-stamp-moves.
 ops	chash_remap	service/src/main/java/dev/nexus/service/db/RemapRepository.java	176	insert	jooq	source_collection,target_collection	source_collection_id,target_collection_id	yes		require	recordBatch
 ops	gc_audit	nexus.gc_expire_quarantine [vectors-083-restore-by-origin-id.xml:2209]	2115	insert	sql_function	collection	collection_id	no		sql	
 ops	gc_audit	nexus.gc_expire_quarantine_bounded [vectors-083-restore-by-origin-id.xml:2512]	2346	insert	sql_function	collection	collection_id	no		sql	
-ops	gc_audit	nexus.gc_quarantine_orphans [vectors-085-quarantine-tuple-guards.xml:333]	45	insert	sql_function	collection	collection_id	no		sql	
-ops	gc_audit	nexus.gc_quarantine_orphans_bounded [vectors-085-quarantine-tuple-guards.xml:913]	650	insert	sql_function	collection	collection_id	no		sql	
+ops	gc_audit	nexus.gc_quarantine_orphans [vectors-085-quarantine-tuple-guards.xml:335]	45	insert	sql_function	collection	collection_id	no		sql	
+ops	gc_audit	nexus.gc_quarantine_orphans_bounded [vectors-085-quarantine-tuple-guards.xml:917]	652	insert	sql_function	collection	collection_id	no		sql	
 ops	gc_audit	nexus.gc_quarantine_orphans_floored [vectors-077-rdr229-p35b-readers-both.xml:4020]	3922	insert	sql_function	collection	collection_id	no		sql	
-ops	gc_audit	nexus.gc_restore_rereferenced [vectors-085-quarantine-tuple-guards.xml:1920]	1716	insert	sql_function	collection	collection_id	no		sql	
-ops	gc_audit	nexus.gc_restore_rereferenced_bounded [vectors-085-quarantine-tuple-guards.xml:2367]	2143	insert	sql_function	collection	collection_id	no		sql	
+ops	gc_audit	nexus.gc_restore_rereferenced [vectors-085-quarantine-tuple-guards.xml:1928]	1722	insert	sql_function	collection	collection_id	no		sql	
+ops	gc_audit	nexus.gc_restore_rereferenced_bounded [vectors-085-quarantine-tuple-guards.xml:2377]	2151	insert	sql_function	collection	collection_id	no		sql	
 ops	gc_audit	nexus.purge_trash [vectors-077-rdr229-p35b-readers-both.xml:8871]	8776	insert	sql_function	collection	collection_id	no		sql	
 ops	gc_audit	nexus.quarantine_restore_chunks [vectors-083-restore-by-origin-id.xml:1241]	879	insert	sql_function	collection	collection_id	no		sql	
 ops	gc_audit	nexus.reaper_expire_client_quarantine [vectors-083-restore-by-origin-id.xml:2879]	2728	insert	sql_function	collection	collection_id	no		sql	
 ops	gc_audit	nexus.reaper_expire_quarantine [vectors-077-rdr229-p35b-readers-both.xml:6351]	6261	insert	sql_function	collection	collection_id	no		sql	
-ops	gc_audit	nexus.reaper_quarantine_chunks [vectors-085-quarantine-tuple-guards.xml:1445]	1201	insert	sql_function	collection	collection_id	no		sql	
+ops	gc_audit	nexus.reaper_quarantine_chunks [vectors-085-quarantine-tuple-guards.xml:1451]	1205	insert	sql_function	collection	collection_id	no		sql	
 ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11769	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history	
 ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12244	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history	
 ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	15087	insert	jooq	collection	collection_id	no		history	

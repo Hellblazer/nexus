@@ -12,8 +12,11 @@ import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -48,6 +51,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *       a retired row (its label has no live row) while its successor holds the tuple raised 23505 at that INSERT.</li>
  * </ul>
  */
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class QuarantineTupleGuardIntegrationTest {
 
@@ -241,6 +245,29 @@ class QuarantineTupleGuardIntegrationTest {
             .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")).and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine"))
             .and(CATALOG_COLLECTIONS.OWNER_ID.eq(owner(tag)))))
             .as("one live holder of the tuple, the successor").isEqualTo(1);
+    }
+
+    /**
+     * Where the index does not exist yet (it waits for the re-own move) nothing raised, so nothing is refused: the refresh copies the origin's tuple
+     * onto the row as before. Runs last and leaves the index dropped, because the duplicate it makes is the state the index is waiting to be built over.
+     */
+    @ParameterizedTest(name = "{0}: no live tuple index, refreshed as before")
+    @EnumSource(Move.class)
+    @Order(Integer.MAX_VALUE)
+    void aMove_withoutTheIndex_refreshesANonQuarantineRowAsBefore(Move fn) {
+        CollectionMintSupport.dropIndex(ctx);
+        assertThat(CollectionMintSupport.indexPresent(ctx)).as("non-vacuity: the index is gone").isFalse();
+        String tag = "mx" + fn.ordinal() + "-" + seq.incrementAndGet();
+        String origin = "docs__" + owner(tag) + "__" + BGE + "__v1";
+        String sibling = "quarantine-" + origin;
+        long originId = insertRow(origin, owner(tag), "live", null, null);
+        long squatterId = insertRow(sibling, owner(tag) + "-other", "live", null, null);
+        byte[] hash = chunk(origin, originId, "orphan", "{}", 90);
+
+        callMove(fn, origin, sibling);
+
+        assertThat(tupleOf(squatterId).value2()).as("the old statement ran: the row took the origin's owner").isEqualTo(owner(tag));
+        assertThat(chunkIn(squatterId, hash)).isTrue();
     }
 
     @Test
