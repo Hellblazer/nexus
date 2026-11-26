@@ -2535,6 +2535,15 @@
     <include file="db/changelog/vectors-084-rdr229-ann-query-by-id.xml"/>
 
     <!--
+        Bead nexus-p2m1x.28 (RDR-229 P3.8): gc_restore_rereferenced, gc_restore_rereferenced_bounded, gc_quarantine_orphans,
+        gc_quarantine_orphans_bounded and reaper_quarantine_chunks no longer raise a bare 23505 from catalog_collections_live_tuple_uq when
+        another live collection holds the tuple they would register or refresh: they refuse by name (22023) before anything moves. Definitions
+        only. DATA EFFECT: none. After vectors-084 (vectors-077 and vectors-083 are the last definers of the five), before the grants-nexus-svc.xml
+        runAlways block. See the included file's header.
+    -->
+    <include file="db/changelog/vectors-085-quarantine-tuple-guards.xml"/>
+
+    <!--
         Bead nexus-p2m1x.21 (RDR-229 P3.3c; Sam's ruling, T2 nexus/sam-ruling-validate-bounds-lock-wait-only-2026-11-23): vectors-081-1 sets
         statement_timeout_ms 2147483647 (no statement bound, a 5 s lock wait) on the registered stamp moves and P3.3a id-twin validation moves
         that are not complete, whose on_completes are VALIDATE CONSTRAINT and block no writer. DATA EFFECT: at most 23 rows of nexus.data_moves;

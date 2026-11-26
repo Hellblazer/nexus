@@ -33,6 +33,19 @@ final class RegistryRowLocks {
      * @return the rows found, in {@code collection_id} order
      */
     static List<CollectionRow> keyShareIfPresent(DSLContext ctx, String tenant, Collection<Long> ids, Collection<String> labels) {
+        return lockIfPresent(ctx, tenant, ids, labels, false);
+    }
+
+    /**
+     * The rows of {@code ids}, {@code FOR UPDATE}, in {@code collection_id} order, tolerant as {@link #keyShareIfPresent}: a collection delete takes a
+     * quarantine sibling it will remove rows from this way (nexus-p2m1x.23 residual (b)). Two deletes whose origins share a sibling then serialise on
+     * the sibling's row, taken before either origin's, instead of both key-sharing it and meeting again in the sibling's registry delete.
+     */
+    static List<CollectionRow> forUpdateIfPresent(DSLContext ctx, String tenant, Collection<Long> ids) {
+        return lockIfPresent(ctx, tenant, ids, List.of(), true);
+    }
+
+    private static List<CollectionRow> lockIfPresent(DSLContext ctx, String tenant, Collection<Long> ids, Collection<String> labels, boolean forUpdate) {
         List<Long> idList = new ArrayList<>();
         for (Long id : ids) {
             if (id != null && !idList.contains(id)) idList.add(id);
@@ -47,13 +60,13 @@ final class RegistryRowLocks {
         Condition match = DSL.falseCondition();
         if (!idList.isEmpty()) match = match.or(CATALOG_COLLECTIONS.COLLECTION_ID.in(idList));
         if (!labelList.isEmpty()) match = match.or(CATALOG_COLLECTIONS.NAME.in(labelList));
-        List<CollectionRow> rows = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
+        var ordered = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
                 CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.SUPERSEDED_BY)
             .from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(match))
-            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID)
-            .forKeyShare().of(CATALOG_COLLECTIONS)
+            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID);
+        List<CollectionRow> rows = (forUpdate ? ordered.forUpdate().of(CATALOG_COLLECTIONS) : ordered.forKeyShare().of(CATALOG_COLLECTIONS))
             .fetch(r -> new CollectionRow(r.get(CATALOG_COLLECTIONS.CONTENT_TYPE), r.get(CATALOG_COLLECTIONS.OWNER_ID),
                 r.get(CATALOG_COLLECTIONS.EMBEDDING_MODEL),
                 // the dimension is not read by anything that holds one of these rows; a NULL is 0, never a guess

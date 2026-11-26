@@ -1,0 +1,2614 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-p2m1x.28 (RDR-229 P3.8; linda's comment of 2026-11-25 on the bead, census T3 analysis-deep-live-tuple-index-23505-census-2026-11-25):
+    the five SQL functions that write a registry row of a collection from another collection's tuple no longer raise a bare 23505 from the partial
+    UNIQUE index catalog_collections_live_tuple_uq (collections-001-2) when another live collection already holds the tuple.
+
+    THE PROBLEM. Production 0.1.203 enforces the index, which allows ONE live (superseded_by = '' and not quarantine) holder of a tuple
+    (tenant_id, content_type, owner_id, embedding_model, model_version). A census of the engine's writes found every route-reachable one guarded
+    (a 23505 there answers 409), and two function families that are reachable by direct SQL only:
+      - nexus.gc_restore_rereferenced and gc_restore_rereferenced_bounded register a first-ever ORIGIN 'live' with the quarantine sibling's tuple,
+        and their only arbiter is the name (ON CONFLICT (tenant_id, name) WHERE superseded_by = '' ... DO NOTHING). Where the origin's label has no
+        live row (it was renamed away or purged) and a live row holds the tuple, the INSERT raised 23505 from the tuple index. (The route cannot reach
+        it: PgVectorRepository.restoreRereferenced reads the origin's row first and refuses an unregistered origin.)
+      - nexus.gc_quarantine_orphans, gc_quarantine_orphans_bounded and reaper_quarantine_chunks refresh the quarantine sibling's row with
+        ON CONFLICT (tenant_id, name) ... DO UPDATE SET content_type, owner_id, embedding_model, model_version, dimension = EXCLUDED.*, which copies the
+        ORIGIN's tuple onto whatever live row bears the sibling's name. For a quarantine row that is the designed heal and it is outside the index. For a
+        row of another lifecycle the copy lands inside the index and, the origin being live with that tuple, raised 23505.
+
+    THE FIX (the smallest that never creates a second live holder and never loses the origin).
+      - The restores: before the INSERT, when no live row bears the origin's label, look up a live non-quarantine holder of the sibling's tuple. When
+        there is one the call raises 22023 (invalid_parameter_value) naming the origin and the holder, BEFORE anything moves: the quarantined chunks stay
+        where they are, nothing is registered. A live row that bears the label is left exactly as it is (DO NOTHING), as before.
+      - The sibling refresh: the DO UPDATE takes a WHERE: a quarantine row is refreshed as before; any other row is refreshed only when no OTHER live
+        row already holds the tuple being copied. When the WHERE skips the row, the INSERT affects no row, and the function raises 22023 naming the row and the
+        origin, before it moves any chunk. A non-quarantine row with no live twin of the tuple is refreshed as before.
+    A race (another registration of the tuple committing between the check and the statement) still ends in the index's own 23505: never a second live holder.
+    Where the index is absent (it waits for the re-own move, collections-001-2) the checks still refuse, because a second live holder is exactly
+    what the index exists to prevent.
+
+    A changeset already applied is never edited: these are new CREATE OR REPLACE definitions of the last definers (vectors-077-87, -49, -56 and
+    vectors-083-1, -2); the rollback of each restores that definition verbatim. Definitions only. DATA EFFECT: none; no row is read or written at
+    migration time. The number is vectors-085 (next free in linda's allotment, T2 nexus/rdr229-phase3-changeset-numbers). After vectors-084, before the
+    grants-nexus-svc.xml runAlways block. Plain changesets (the chunk family takes no CONTINUE wait, RDR-246 lines 902-906).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-085-1" author="nexus-p2m1x.28">
+        <comment>RDR-229 P3.8 (nexus-p2m1x.28): nexus.gc_quarantine_orphans: the quarantine sibling refresh (ON CONFLICT DO UPDATE) no longer raises a bare 23505 from catalog_collections_live_tuple_uq; it refuses by name (22023) and writes nothing, or, for a quarantine row, is as before. Replaces the definition in vectors-077-87 of vectors-077-rdr229-p35b-readers-both.xml, the last definer; signature, attributes and grants are kept; nothing else in the body changes. DATA EFFECT: none, a function definition only. Rollback restores that definition.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+
+CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans(dim integer, p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_sample_limit integer)
+ RETURNS TABLE(moved bigint, sample jsonb)
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_p35b_con text;  -- the constraint of a unique_violation, for the retry on the id twin
+    v_moved                   bigint;
+    v_sample                  jsonb;
+    v_collision_count         bigint;
+    v_collision_sample        text[];
+    v_sample_limit            int;
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+    v_origin_id               bigint;
+    v_quarantine_id           bigint;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    -- nexus-0uuit/sybbh crit-fix critique 2026-08-19 (code-review-expert):
+    -- p_sample_limit is caller-supplied over HTTP (VectorHandler's
+    -- handleGcQuarantineOrphans, optInt default 20) and unlike purge_trash /
+    -- gc_expire_quarantine (both hard-capped in-function), this function
+    -- previously trusted it unbounded -- a caller passing a large
+    -- sample_limit could insert a gc_audit row with an unbounded chashes
+    -- array. VectorHandler now clamps server-side too, but this is defense
+    -- in depth: the SAME GC_AUDIT_MAX_CHASHES cap (5000, CatalogRepository.
+    -- java) enforced here independently of the HTTP layer. Carried forward
+    -- from catalog-033-2 into this changeset's body (nexus-uxd2a; see this
+    -- changeset's own comment above).
+    v_sample_limit := LEAST(GREATEST(COALESCE(p_sample_limit, 20), 0), 5000);
+
+    -- nexus-sa731: EXCLUSIVE half of the RDR-191 sweep gate (unchanged from
+    -- catalog-028-1 — see that changeset's comment for the full derivation).
+    PERFORM set_config('lock_timeout', '2000', true);
+    PERFORM set_config('statement_timeout', '5000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            RAISE EXCEPTION
+                'gc_quarantine_orphans: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer is holding it; retry',
+                p_tenant_id, p_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- RDR-192 Step 8 (nexus-wbfpw.16): the candidate set is reapable(c), nexus.chunk_is_reapable
+    -- (vectors-021): no own-collection manifest row in any owner state, last_written_at past the
+    -- grace (default 30 days), not a quarantine sibling. It is chosen ONCE here and every later
+    -- statement reads this one set, so a condition that lapses between the copy INSERT and the
+    -- DELETE cannot delete a chunk that was not copied. The DELETE re-checks the predicate on its
+    -- target row, so a client write that refreshes last_written_at after this point wins at the
+    -- READ COMMITTED recheck and the chunk stays.
+    -- RDR-229 P3.5b: the origin's registry id, resolved once from the label the caller passes (label-kept registry read).
+    -- A chunk row is the origin's when it carries that id, or carries none and names the label.
+    SELECT cc.collection_id INTO v_origin_id
+      FROM nexus.catalog_collections cc
+     WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection;
+
+    CREATE TEMP TABLE IF NOT EXISTS _wbfpw16_victim(chash bytea PRIMARY KEY) ON COMMIT DROP;
+    DELETE FROM _wbfpw16_victim;
+    INSERT INTO _wbfpw16_victim(chash)
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL));
+
+    IF NOT EXISTS (SELECT 1 FROM _wbfpw16_victim) THEN
+        RETURN QUERY SELECT 0::bigint, NULL::jsonb;
+        RETURN;
+    END IF;
+
+    -- N7-STYLE cross-dim collision guard (Critical-1 fix, T2 [22454]): the
+    -- unified PK (tenant_id, collection, chash) cannot hold two different-
+    -- dim rows. Detect, BEFORE any row moves, any orphan whose chash
+    -- already exists at p_quarantine_collection under a DIFFERENT
+    -- populated embedding_<dim> column than the orphan's own -- the blind
+    -- ON CONFLICT ... DO UPDATE ... EXCLUDED below would otherwise
+    -- silently overwrite (destroy) one of the two chunks' text/embedding.
+    -- RAISE aborts only THIS (tenant, collection) sweep call -- an ongoing
+    -- GC cycle, not vectors-004's one-time migration, so the bounded
+    -- blast radius is one collection's pass, retried next cycle, not the
+    -- whole batch.
+    SELECT cc.collection_id INTO v_quarantine_id
+      FROM nexus.catalog_collections cc
+     WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection;
+
+    WITH orphan AS (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim
+          FROM nexus.chunks c
+          JOIN _wbfpw16_victim v ON v.chash = c.chash
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+    ),
+    collision AS (
+        SELECT o.chash, o.src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM orphan o
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND (e.collection_id = v_quarantine_id OR (e.collection_id IS NULL AND e.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+           AND e.chash      = o.chash
+    )
+    SELECT count(*),
+           COALESCE(array_agg(encode(chash, 'hex') ORDER BY chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM collision
+     WHERE src_dim IS DISTINCT FROM existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: % cross-dim (tenant_id, collection, chash) collision(s) at quarantine target % for tenant=%, origin collection=% -- the unified PK cannot hold two different-dim rows for the same chash (mirrors vectors-004''s N7 guard, T2 22454). Sample chashes: %. Refusing to overwrite; verify the quarantine-collection naming keeps distinct dims/collections separated before retrying.',
+            v_collision_count, p_quarantine_collection, p_tenant_id, p_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- Registration MUST precede the copy INSERT below (FK on collection).
+    -- RDR-204 nexus-uxd2a (hygiene-005-1): NO ENGINE PATH DERIVES A
+    -- COLLECTION'S ATTRIBUTES FROM ITS NAME (coordinator nexus-71
+    -- decision -- see this changelog file's own header). The PRIOR body
+    -- (hygiene-002-2) parsed p_quarantine_collection's OWN name via
+    -- string_to_array(name, '__') -- for the real production shape
+    -- "quarantine-<ct>__owner__model__vN" that split v_seg[1] to the
+    -- LITERAL FIRST SEGMENT, "quarantine-<ct>" WITH THE PREFIX STILL
+    -- ATTACHED (the migration-time walk's regex-based branch B, by
+    -- contrast, has always captured the base type via a capture group that
+    -- excludes the prefix) -- shipped as a live defect (nexus-uxd2a: a real
+    -- row landed with content_type = 'quarantine-code', outside the CCE
+    -- profile vocabulary). p_collection (the ORIGIN) is ALWAYS already
+    -- registered by this point -- every caller resolves dim from it before
+    -- ever reaching this function (PgVectorRepository.quarantineOrphans) --
+    -- so its own row is the one true source for the quarantine sibling's
+    -- attributes. An unregistered origin is now a fail-loud precondition,
+    -- never a silent 'unknown' stub.
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: origin collection % is not registered for tenant % -- attributes for the quarantine sibling are copied from the origin row, never parsed from the quarantine sibling name (RDR-204 nexus-uxd2a); register the origin before quarantining orphans',
+            p_collection, p_tenant_id;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections AS cc0
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_quarantine_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'quarantine'
+    )
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO UPDATE
+      SET content_type    = EXCLUDED.content_type,
+          owner_id        = EXCLUDED.owner_id,
+          embedding_model = EXCLUDED.embedding_model,
+          model_version   = EXCLUDED.model_version,
+          dimension       = EXCLUDED.dimension,
+          superseded_by_id = CASE WHEN cc0.superseded_by = '' THEN NULL
+                 ELSE COALESCE(cc0.superseded_by_id,
+                               (SELECT s.collection_id FROM nexus.catalog_collections s
+                                 WHERE s.tenant_id = cc0.tenant_id AND s.name = cc0.superseded_by),
+                               cc0.collection_id) END
+      WHERE cc0.lifecycle_state = 'quarantine'
+         OR NOT EXISTS (SELECT 1 FROM nexus.catalog_collections h
+                         WHERE h.tenant_id       = cc0.tenant_id
+                           AND h.collection_id  <> cc0.collection_id
+                           AND h.superseded_by   = ''
+                           AND h.lifecycle_state <> 'quarantine'
+                           AND h.content_type    = EXCLUDED.content_type
+                           AND h.owner_id        = EXCLUDED.owner_id
+                           AND h.embedding_model = EXCLUDED.embedding_model
+                           AND h.model_version   = EXCLUDED.model_version);
+
+    -- nexus-p2m1x.28 (linda 2026-11-25): the refresh above copies the ORIGIN's tuple onto a row that bears the sibling's name. For a quarantine row
+    -- that is the designed heal and the row is outside catalog_collections_live_tuple_uq. A row of any other lifecycle that bears the name
+    -- is inside the index, so the copy is skipped by the WHERE when another live row (the origin, as a rule) already holds that tuple, and
+    -- the call refuses here by name: nothing moved, no second live holder, never a bare 23505. A non-quarantine row with no live twin of the tuple is refreshed as before.
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: the row named % is not a quarantine collection and another live collection already holds the tuple of origin % that the quarantine sibling would copy onto it; nothing moved (the live tuple index allows one live holder of a tuple)',
+            p_quarantine_collection, p_collection
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- two unique keys on nexus.chunks until P4.1 (the name primary key and P3.3b's id twin on (tenant_id, collection_id, chash, embedding_model)): the ON CONFLICT
+    -- arbiter absorbs a race on itself only, so a racing writer's row trips the twin as a plain 23505. Retry once when the
+    -- 23505 is that twin (a unique index whose partition root is nexus.chunks, on the id key's columns); the retry sees the committed row on the arbiter. Any other 23505, or a second one, is raised (linda 2026-11-22).
+    FOR v_p35b_try IN 1 .. 2 LOOP
+        BEGIN
+            -- RDR-225: the row carries its own embedding_model (the quarantine sibling is registered under the
+        -- origin's model just above, so the model is the same and the composite collection foreign key holds),
+        -- and the arbiter is the four-column primary key of the partitioned table.
+        INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                                   embedding_384, embedding_768, embedding_1024, metadata,
+                                   embedding_model, collection_id)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text,
+               c.embedding_384, c.embedding_768, c.embedding_1024,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+                 || jsonb_strip_nulls(jsonb_build_object('origin_collection_id',
+                     (SELECT oc.collection_id FROM nexus.catalog_collections oc
+                       WHERE oc.tenant_id = p_tenant_id AND oc.name = p_collection))),
+               c.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection)
+          FROM nexus.chunks c
+          JOIN _wbfpw16_victim v ON v.chash = c.chash
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+        ON CONFLICT (tenant_id, collection, chash, embedding_model) DO UPDATE
+          SET chunk_text     = EXCLUDED.chunk_text,
+              embedding_384  = EXCLUDED.embedding_384,
+              embedding_768  = EXCLUDED.embedding_768,
+              embedding_1024 = EXCLUDED.embedding_1024,
+              metadata       = EXCLUDED.metadata,
+              collection_id  = EXCLUDED.collection_id;
+            EXIT;
+        EXCEPTION WHEN unique_violation THEN
+            GET STACKED DIAGNOSTICS v_p35b_con = CONSTRAINT_NAME;
+            IF v_p35b_try = 2 OR NOT EXISTS (
+                    SELECT 1
+                      FROM pg_catalog.pg_class ic
+                      JOIN pg_catalog.pg_namespace ns ON ns.oid = ic.relnamespace
+                      JOIN pg_catalog.pg_index ix ON ix.indexrelid = ic.oid
+                     WHERE ns.nspname = 'nexus' AND ic.relname = v_p35b_con AND ix.indisunique
+                       AND coalesce(pg_catalog.pg_partition_root(ix.indrelid), ix.indrelid) = 'nexus.chunks'::regclass
+                       AND (SELECT pg_catalog.array_agg(a.attname::text ORDER BY a.attname)
+                              FROM pg_catalog.pg_attribute a
+                             WHERE a.attrelid = ix.indrelid AND a.attnum = ANY (ix.indkey))
+                           = ARRAY['chash', 'collection_id', 'embedding_model', 'tenant_id']) THEN
+                RAISE;
+            END IF;
+        END;
+    END LOOP;
+
+    WITH del AS (
+        DELETE FROM nexus.chunks c
+         USING _wbfpw16_victim v
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+           AND c.chash = v.chash
+           AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL))
+        RETURNING c.tenant_id, c.collection, c.collection_id, c.chash, c.embedding_model,
+                  left(c.chunk_text, 80) AS text_prefix
+    ),
+    counted AS (SELECT count(*) AS n FROM del),
+    sampled AS (
+        SELECT jsonb_agg(jsonb_build_object('chash', encode(lim.chash, 'hex'), 'title', lim.title,
+                                            'text_prefix', lim.text_prefix)) AS s
+          FROM (SELECT d.chash, d.text_prefix,
+                       (SELECT od.title
+                          FROM nexus.catalog_document_chunks oc
+                          JOIN nexus.catalog_documents od
+                            ON od.tenant_id = oc.tenant_id AND od.tumbler = oc.doc_id
+                         WHERE oc.tenant_id = d.tenant_id
+                           AND oc.chash = d.chash
+                           AND oc.embedding_model = d.embedding_model
+                           AND od.deleted_at IS NULL
+                         ORDER BY COALESCE((oc.collection_id = d.collection_id OR ((oc.collection_id IS NULL OR d.collection_id IS NULL) AND oc.collection = d.collection AND oc.collection <> '')), false) DESC, oc.doc_id
+                         LIMIT 1) AS title
+                  FROM del d
+                 LIMIT v_sample_limit) lim
+    )
+    SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+    -- nexus-sybbh: audit the move IN THE SAME TRANSACTION as the DELETE
+    -- above. `chashes` here is deliberately the v_sample_limit-capped
+    -- sample the function already computes (extracting just the chash
+    -- field) -- chash_count still carries the exact full v_moved count
+    -- regardless of sample size. `chashes_truncated`/`chashes_stored` are
+    -- set (same convention as purge_trash / gc_expire_quarantine) only
+    -- when the CALLER's requested p_sample_limit itself exceeded
+    -- GC_AUDIT_MAX_CHASHES and had to be clamped -- distinct from
+    -- `chashes_is_sample`, which is always true here by design (the sample
+    -- is intentionally partial even when p_sample_limit is well within
+    -- bounds). Carried forward from catalog-033-2 into this changeset's
+    -- body (nexus-uxd2a; catalog-033-2's original comment, adapted).
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, collection_id, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_quarantine_orphans', p_collection, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection), 'engine', false, v_moved,
+        COALESCE(
+            (SELECT jsonb_agg(elem->>'chash') FROM jsonb_array_elements(COALESCE(v_sample, '[]'::jsonb)) elem),
+            '[]'::jsonb),
+        jsonb_build_object(
+            'quarantine_collection', p_quarantine_collection,
+            'sample_limit', v_sample_limit,
+            'chashes_is_sample', true)
+            || CASE WHEN COALESCE(p_sample_limit, 20) > 5000
+                    THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+                    ELSE '{}'::jsonb END
+    );
+
+    RETURN QUERY SELECT v_moved, v_sample;
+END;
+$function$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+
+CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans(dim integer, p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_sample_limit integer)
+ RETURNS TABLE(moved bigint, sample jsonb)
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_p35b_con text;  -- the constraint of a unique_violation, for the retry on the id twin
+    v_moved                   bigint;
+    v_sample                  jsonb;
+    v_collision_count         bigint;
+    v_collision_sample        text[];
+    v_sample_limit            int;
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+    v_origin_id               bigint;
+    v_quarantine_id           bigint;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    -- nexus-0uuit/sybbh crit-fix critique 2026-08-19 (code-review-expert):
+    -- p_sample_limit is caller-supplied over HTTP (VectorHandler's
+    -- handleGcQuarantineOrphans, optInt default 20) and unlike purge_trash /
+    -- gc_expire_quarantine (both hard-capped in-function), this function
+    -- previously trusted it unbounded -- a caller passing a large
+    -- sample_limit could insert a gc_audit row with an unbounded chashes
+    -- array. VectorHandler now clamps server-side too, but this is defense
+    -- in depth: the SAME GC_AUDIT_MAX_CHASHES cap (5000, CatalogRepository.
+    -- java) enforced here independently of the HTTP layer. Carried forward
+    -- from catalog-033-2 into this changeset's body (nexus-uxd2a; see this
+    -- changeset's own comment above).
+    v_sample_limit := LEAST(GREATEST(COALESCE(p_sample_limit, 20), 0), 5000);
+
+    -- nexus-sa731: EXCLUSIVE half of the RDR-191 sweep gate (unchanged from
+    -- catalog-028-1 — see that changeset's comment for the full derivation).
+    PERFORM set_config('lock_timeout', '2000', true);
+    PERFORM set_config('statement_timeout', '5000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            RAISE EXCEPTION
+                'gc_quarantine_orphans: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer is holding it; retry',
+                p_tenant_id, p_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- RDR-192 Step 8 (nexus-wbfpw.16): the candidate set is reapable(c), nexus.chunk_is_reapable
+    -- (vectors-021): no own-collection manifest row in any owner state, last_written_at past the
+    -- grace (default 30 days), not a quarantine sibling. It is chosen ONCE here and every later
+    -- statement reads this one set, so a condition that lapses between the copy INSERT and the
+    -- DELETE cannot delete a chunk that was not copied. The DELETE re-checks the predicate on its
+    -- target row, so a client write that refreshes last_written_at after this point wins at the
+    -- READ COMMITTED recheck and the chunk stays.
+    -- RDR-229 P3.5b: the origin's registry id, resolved once from the label the caller passes (label-kept registry read).
+    -- A chunk row is the origin's when it carries that id, or carries none and names the label.
+    SELECT cc.collection_id INTO v_origin_id
+      FROM nexus.catalog_collections cc
+     WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection;
+
+    CREATE TEMP TABLE IF NOT EXISTS _wbfpw16_victim(chash bytea PRIMARY KEY) ON COMMIT DROP;
+    DELETE FROM _wbfpw16_victim;
+    INSERT INTO _wbfpw16_victim(chash)
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL));
+
+    IF NOT EXISTS (SELECT 1 FROM _wbfpw16_victim) THEN
+        RETURN QUERY SELECT 0::bigint, NULL::jsonb;
+        RETURN;
+    END IF;
+
+    -- N7-STYLE cross-dim collision guard (Critical-1 fix, T2 [22454]): the
+    -- unified PK (tenant_id, collection, chash) cannot hold two different-
+    -- dim rows. Detect, BEFORE any row moves, any orphan whose chash
+    -- already exists at p_quarantine_collection under a DIFFERENT
+    -- populated embedding_<dim> column than the orphan's own -- the blind
+    -- ON CONFLICT ... DO UPDATE ... EXCLUDED below would otherwise
+    -- silently overwrite (destroy) one of the two chunks' text/embedding.
+    -- RAISE aborts only THIS (tenant, collection) sweep call -- an ongoing
+    -- GC cycle, not vectors-004's one-time migration, so the bounded
+    -- blast radius is one collection's pass, retried next cycle, not the
+    -- whole batch.
+    SELECT cc.collection_id INTO v_quarantine_id
+      FROM nexus.catalog_collections cc
+     WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection;
+
+    WITH orphan AS (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim
+          FROM nexus.chunks c
+          JOIN _wbfpw16_victim v ON v.chash = c.chash
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+    ),
+    collision AS (
+        SELECT o.chash, o.src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM orphan o
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND (e.collection_id = v_quarantine_id OR (e.collection_id IS NULL AND e.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+           AND e.chash      = o.chash
+    )
+    SELECT count(*),
+           COALESCE(array_agg(encode(chash, 'hex') ORDER BY chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM collision
+     WHERE src_dim IS DISTINCT FROM existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: % cross-dim (tenant_id, collection, chash) collision(s) at quarantine target % for tenant=%, origin collection=% -- the unified PK cannot hold two different-dim rows for the same chash (mirrors vectors-004''s N7 guard, T2 22454). Sample chashes: %. Refusing to overwrite; verify the quarantine-collection naming keeps distinct dims/collections separated before retrying.',
+            v_collision_count, p_quarantine_collection, p_tenant_id, p_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- Registration MUST precede the copy INSERT below (FK on collection).
+    -- RDR-204 nexus-uxd2a (hygiene-005-1): NO ENGINE PATH DERIVES A
+    -- COLLECTION'S ATTRIBUTES FROM ITS NAME (coordinator nexus-71
+    -- decision -- see this changelog file's own header). The PRIOR body
+    -- (hygiene-002-2) parsed p_quarantine_collection's OWN name via
+    -- string_to_array(name, '__') -- for the real production shape
+    -- "quarantine-<ct>__owner__model__vN" that split v_seg[1] to the
+    -- LITERAL FIRST SEGMENT, "quarantine-<ct>" WITH THE PREFIX STILL
+    -- ATTACHED (the migration-time walk's regex-based branch B, by
+    -- contrast, has always captured the base type via a capture group that
+    -- excludes the prefix) -- shipped as a live defect (nexus-uxd2a: a real
+    -- row landed with content_type = 'quarantine-code', outside the CCE
+    -- profile vocabulary). p_collection (the ORIGIN) is ALWAYS already
+    -- registered by this point -- every caller resolves dim from it before
+    -- ever reaching this function (PgVectorRepository.quarantineOrphans) --
+    -- so its own row is the one true source for the quarantine sibling's
+    -- attributes. An unregistered origin is now a fail-loud precondition,
+    -- never a silent 'unknown' stub.
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans: origin collection % is not registered for tenant % -- attributes for the quarantine sibling are copied from the origin row, never parsed from the quarantine sibling name (RDR-204 nexus-uxd2a); register the origin before quarantining orphans',
+            p_collection, p_tenant_id;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections AS cc0
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_quarantine_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'quarantine'
+    )
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO UPDATE
+      SET content_type    = EXCLUDED.content_type,
+          owner_id        = EXCLUDED.owner_id,
+          embedding_model = EXCLUDED.embedding_model,
+          model_version   = EXCLUDED.model_version,
+          dimension       = EXCLUDED.dimension,
+          superseded_by_id = CASE WHEN cc0.superseded_by = '' THEN NULL
+                 ELSE COALESCE(cc0.superseded_by_id,
+                               (SELECT s.collection_id FROM nexus.catalog_collections s
+                                 WHERE s.tenant_id = cc0.tenant_id AND s.name = cc0.superseded_by),
+                               cc0.collection_id) END;
+
+    -- two unique keys on nexus.chunks until P4.1 (the name primary key and P3.3b's id twin on (tenant_id, collection_id, chash, embedding_model)): the ON CONFLICT
+    -- arbiter absorbs a race on itself only, so a racing writer's row trips the twin as a plain 23505. Retry once when the
+    -- 23505 is that twin (a unique index whose partition root is nexus.chunks, on the id key's columns); the retry sees the committed row on the arbiter. Any other 23505, or a second one, is raised (linda 2026-11-22).
+    FOR v_p35b_try IN 1 .. 2 LOOP
+        BEGIN
+            -- RDR-225: the row carries its own embedding_model (the quarantine sibling is registered under the
+        -- origin's model just above, so the model is the same and the composite collection foreign key holds),
+        -- and the arbiter is the four-column primary key of the partitioned table.
+        INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                                   embedding_384, embedding_768, embedding_1024, metadata,
+                                   embedding_model, collection_id)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text,
+               c.embedding_384, c.embedding_768, c.embedding_1024,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+                 || jsonb_strip_nulls(jsonb_build_object('origin_collection_id',
+                     (SELECT oc.collection_id FROM nexus.catalog_collections oc
+                       WHERE oc.tenant_id = p_tenant_id AND oc.name = p_collection))),
+               c.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection)
+          FROM nexus.chunks c
+          JOIN _wbfpw16_victim v ON v.chash = c.chash
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+        ON CONFLICT (tenant_id, collection, chash, embedding_model) DO UPDATE
+          SET chunk_text     = EXCLUDED.chunk_text,
+              embedding_384  = EXCLUDED.embedding_384,
+              embedding_768  = EXCLUDED.embedding_768,
+              embedding_1024 = EXCLUDED.embedding_1024,
+              metadata       = EXCLUDED.metadata,
+              collection_id  = EXCLUDED.collection_id;
+            EXIT;
+        EXCEPTION WHEN unique_violation THEN
+            GET STACKED DIAGNOSTICS v_p35b_con = CONSTRAINT_NAME;
+            IF v_p35b_try = 2 OR NOT EXISTS (
+                    SELECT 1
+                      FROM pg_catalog.pg_class ic
+                      JOIN pg_catalog.pg_namespace ns ON ns.oid = ic.relnamespace
+                      JOIN pg_catalog.pg_index ix ON ix.indexrelid = ic.oid
+                     WHERE ns.nspname = 'nexus' AND ic.relname = v_p35b_con AND ix.indisunique
+                       AND coalesce(pg_catalog.pg_partition_root(ix.indrelid), ix.indrelid) = 'nexus.chunks'::regclass
+                       AND (SELECT pg_catalog.array_agg(a.attname::text ORDER BY a.attname)
+                              FROM pg_catalog.pg_attribute a
+                             WHERE a.attrelid = ix.indrelid AND a.attnum = ANY (ix.indkey))
+                           = ARRAY['chash', 'collection_id', 'embedding_model', 'tenant_id']) THEN
+                RAISE;
+            END IF;
+        END;
+    END LOOP;
+
+    WITH del AS (
+        DELETE FROM nexus.chunks c
+         USING _wbfpw16_victim v
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+           AND c.chash = v.chash
+           AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL))
+        RETURNING c.tenant_id, c.collection, c.collection_id, c.chash, c.embedding_model,
+                  left(c.chunk_text, 80) AS text_prefix
+    ),
+    counted AS (SELECT count(*) AS n FROM del),
+    sampled AS (
+        SELECT jsonb_agg(jsonb_build_object('chash', encode(lim.chash, 'hex'), 'title', lim.title,
+                                            'text_prefix', lim.text_prefix)) AS s
+          FROM (SELECT d.chash, d.text_prefix,
+                       (SELECT od.title
+                          FROM nexus.catalog_document_chunks oc
+                          JOIN nexus.catalog_documents od
+                            ON od.tenant_id = oc.tenant_id AND od.tumbler = oc.doc_id
+                         WHERE oc.tenant_id = d.tenant_id
+                           AND oc.chash = d.chash
+                           AND oc.embedding_model = d.embedding_model
+                           AND od.deleted_at IS NULL
+                         ORDER BY COALESCE((oc.collection_id = d.collection_id OR ((oc.collection_id IS NULL OR d.collection_id IS NULL) AND oc.collection = d.collection AND oc.collection <> '')), false) DESC, oc.doc_id
+                         LIMIT 1) AS title
+                  FROM del d
+                 LIMIT v_sample_limit) lim
+    )
+    SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+    -- nexus-sybbh: audit the move IN THE SAME TRANSACTION as the DELETE
+    -- above. `chashes` here is deliberately the v_sample_limit-capped
+    -- sample the function already computes (extracting just the chash
+    -- field) -- chash_count still carries the exact full v_moved count
+    -- regardless of sample size. `chashes_truncated`/`chashes_stored` are
+    -- set (same convention as purge_trash / gc_expire_quarantine) only
+    -- when the CALLER's requested p_sample_limit itself exceeded
+    -- GC_AUDIT_MAX_CHASHES and had to be clamped -- distinct from
+    -- `chashes_is_sample`, which is always true here by design (the sample
+    -- is intentionally partial even when p_sample_limit is well within
+    -- bounds). Carried forward from catalog-033-2 into this changeset's
+    -- body (nexus-uxd2a; catalog-033-2's original comment, adapted).
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, collection_id, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_quarantine_orphans', p_collection, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection), 'engine', false, v_moved,
+        COALESCE(
+            (SELECT jsonb_agg(elem->>'chash') FROM jsonb_array_elements(COALESCE(v_sample, '[]'::jsonb)) elem),
+            '[]'::jsonb),
+        jsonb_build_object(
+            'quarantine_collection', p_quarantine_collection,
+            'sample_limit', v_sample_limit,
+            'chashes_is_sample', true)
+            || CASE WHEN COALESCE(p_sample_limit, 20) > 5000
+                    THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+                    ELSE '{}'::jsonb END
+    );
+
+    RETURN QUERY SELECT v_moved, v_sample;
+END;
+$function$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-085-2" author="nexus-p2m1x.28">
+        <comment>RDR-229 P3.8 (nexus-p2m1x.28): nexus.gc_quarantine_orphans_bounded: the quarantine sibling refresh (ON CONFLICT DO UPDATE) no longer raises a bare 23505 from catalog_collections_live_tuple_uq; it refuses by name (22023) and writes nothing, or, for a quarantine row, is as before. Replaces the definition in vectors-077-49 of vectors-077-rdr229-p35b-readers-both.xml, the last definer; signature, attributes and grants are kept; nothing else in the body changes. DATA EFFECT: none, a function definition only. Rollback restores that definition.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+
+CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans_bounded(dim integer, p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_sample_limit integer, p_row_limit integer)
+ RETURNS TABLE(moved bigint, sample jsonb, remaining bigint)
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_p35b_con text;  -- the constraint of a unique_violation, for the retry on the id twin
+    v_origin_id bigint;
+    v_quar_id bigint;
+    v_moved            bigint;
+    v_sample           jsonb;
+    v_remaining        bigint;
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+    v_collision_count  bigint;
+    v_collision_sample text[];
+    v_sample_limit     int;
+    v_row_limit        int;
+BEGIN
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection;
+    SELECT cc.collection_id INTO v_quar_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection;
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    -- A non-positive bound is a caller error, not "unbounded". The whole point
+    -- of this function is the bound; silently removing it would hand back the
+    -- 58-second transaction this exists to prevent.
+    IF COALESCE(p_row_limit, 0) <= 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: p_row_limit must be positive, got %. Use nexus.gc_quarantine_orphans for the unbounded sweep.',
+            p_row_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    v_sample_limit := LEAST(GREATEST(COALESCE(p_sample_limit, 20), 0), 5000);
+    v_row_limit    := LEAST(p_row_limit, 100000);
+
+    PERFORM set_config('lock_timeout', '2000', true);
+    PERFORM set_config('statement_timeout', '25000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            -- nexus-a6mon requirement 4: name the caller's OWN in-flight call as
+            -- a possibility. The unbounded form advised "retry", which cannot
+            -- succeed while the holder IS the caller's previous, still-committing
+            -- call -- the exact state a cut-then-resubmit loop produces.
+            RAISE EXCEPTION
+                'gc_quarantine_orphans_bounded: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer holds it, OR your own previous bounded call is still committing after the edge cut you. Poll pg_stat_activity for an active sweep on this collection before retrying; a fixed sleep builds a lock convoy.',
+                p_tenant_id, p_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- THE VICTIM SET, chosen ONCE and ordered for deterministic progress.
+    -- RDR-192 Step 8 (nexus-wbfpw.16): a candidate is reapable(c), nexus.chunk_is_reapable
+    -- (vectors-021): no own-collection manifest row in any owner state, last_written_at past
+    -- the grace (default 30 days), not a quarantine sibling. The DELETE below re-checks it on
+    -- the target row, so a refresh that lands after the victim set was chosen wins at the
+    -- READ COMMITTED recheck and the chunk stays.
+    CREATE TEMP TABLE IF NOT EXISTS _a6mon_victim(chash bytea PRIMARY KEY) ON COMMIT DROP;
+    DELETE FROM _a6mon_victim;
+    INSERT INTO _a6mon_victim(chash)
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL))
+     ORDER BY c.chash
+     LIMIT v_row_limit;
+
+    IF NOT EXISTS (SELECT 1 FROM _a6mon_victim) THEN
+        RETURN QUERY SELECT 0::bigint, NULL::jsonb, 0::bigint;
+        RETURN;
+    END IF;
+
+    -- Cross-dim collision guard, same contract as the unbounded form
+    -- (vectors-004's N7 guard, T2 22454) but scoped to this batch.
+    SELECT count(*),
+           COALESCE(array_agg(encode(x.chash, 'hex') ORDER BY x.chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM nexus.chunks c
+          JOIN _a6mon_victim v ON v.chash = c.chash
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND (e.collection_id = v_quar_id OR (e.collection_id IS NULL AND e.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+           AND e.chash      = c.chash
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+      ) x
+     WHERE x.src_dim IS DISTINCT FROM x.existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: % cross-dim (tenant_id, collection, chash) collision(s) at quarantine target % for tenant=%, origin collection=%. Sample chashes: %. Refusing to overwrite.',
+            v_collision_count, p_quarantine_collection, p_tenant_id, p_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- nexus-0rxvg: the quarantine sibling's attributes are copied from the
+    -- ORIGIN's registered row, never parsed from the sibling's own name. The
+    -- catalog-037-1 body split p_quarantine_collection on '__', so for the
+    -- production shape quarantine-<ct>__owner__model__vN the first segment
+    -- carried the prefix and the sibling registered with content_type
+    -- 'quarantine-<ct>' and no dimension -- the defect hygiene-005-1 retired
+    -- in the unbounded twin. PgVectorRepository.quarantineOrphansBounded
+    -- resolves dim from the origin before reaching this function, so an
+    -- unregistered origin is a fail-loud precondition here, as there.
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: origin collection % is not registered for tenant % -- attributes for the quarantine sibling are copied from the origin row, never parsed from the quarantine sibling name (nexus-0rxvg, as hygiene-005-1); register the origin before quarantining orphans',
+            p_collection, p_tenant_id;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections AS cc0
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_quarantine_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'quarantine'
+    )
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO UPDATE
+      SET content_type    = EXCLUDED.content_type,
+          owner_id        = EXCLUDED.owner_id,
+          embedding_model = EXCLUDED.embedding_model,
+          model_version   = EXCLUDED.model_version,
+          dimension       = EXCLUDED.dimension,
+          superseded_by_id = CASE WHEN cc0.superseded_by = '' THEN NULL
+                 ELSE COALESCE(cc0.superseded_by_id,
+                               (SELECT s.collection_id FROM nexus.catalog_collections s
+                                 WHERE s.tenant_id = cc0.tenant_id AND s.name = cc0.superseded_by),
+                               cc0.collection_id) END
+      WHERE cc0.lifecycle_state = 'quarantine'
+         OR NOT EXISTS (SELECT 1 FROM nexus.catalog_collections h
+                         WHERE h.tenant_id       = cc0.tenant_id
+                           AND h.collection_id  <> cc0.collection_id
+                           AND h.superseded_by   = ''
+                           AND h.lifecycle_state <> 'quarantine'
+                           AND h.content_type    = EXCLUDED.content_type
+                           AND h.owner_id        = EXCLUDED.owner_id
+                           AND h.embedding_model = EXCLUDED.embedding_model
+                           AND h.model_version   = EXCLUDED.model_version);
+
+    -- nexus-p2m1x.28 (linda 2026-11-25): the refresh above copies the ORIGIN's tuple onto a row that bears the sibling's name. For a quarantine row
+    -- that is the designed heal and the row is outside catalog_collections_live_tuple_uq. A row of any other lifecycle that bears the name
+    -- is inside the index, so the copy is skipped by the WHERE when another live row (the origin, as a rule) already holds that tuple, and
+    -- the call refuses here by name: nothing moved, no second live holder, never a bare 23505. A non-quarantine row with no live twin of the tuple is refreshed as before.
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: the row named % is not a quarantine collection and another live collection already holds the tuple of origin % that the quarantine sibling would copy onto it; nothing moved (the live tuple index allows one live holder of a tuple)',
+            p_quarantine_collection, p_collection
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- two unique keys on nexus.chunks until P4.1 (the name primary key and P3.3b's id twin on (tenant_id, collection_id, chash, embedding_model)): the ON CONFLICT
+    -- arbiter absorbs a race on itself only, so a racing writer's row trips the twin as a plain 23505. Retry once when the
+    -- 23505 is that twin (a unique index whose partition root is nexus.chunks, on the id key's columns); the retry sees the committed row on the arbiter. Any other 23505, or a second one, is raised (linda 2026-11-22).
+    FOR v_p35b_try IN 1 .. 2 LOOP
+        BEGIN
+            -- created_at CARRIED THROUGH (nexus-a6mon's second finding): the unbounded
+        -- form omits it, so the default restamps every moved row to quarantine time
+        -- and the collection's generation history is destroyed.
+        -- RDR-225: embedding_model rides with the row; the arbiter is the four-column primary key.
+        INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                                   embedding_384, embedding_768, embedding_1024,
+                                   metadata, created_at, embedding_model, collection_id)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text,
+               c.embedding_384, c.embedding_768, c.embedding_1024,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+                 || jsonb_strip_nulls(jsonb_build_object('origin_collection_id',
+                     (SELECT oc.collection_id FROM nexus.catalog_collections oc
+                       WHERE oc.tenant_id = p_tenant_id AND oc.name = p_collection))),
+               c.created_at, c.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection)
+          FROM nexus.chunks c
+          JOIN _a6mon_victim v ON v.chash = c.chash
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+        ON CONFLICT (tenant_id, collection, chash, embedding_model) DO UPDATE
+          SET chunk_text     = EXCLUDED.chunk_text,
+              embedding_384  = EXCLUDED.embedding_384,
+              embedding_768  = EXCLUDED.embedding_768,
+              embedding_1024 = EXCLUDED.embedding_1024,
+              metadata       = EXCLUDED.metadata,
+              created_at     = EXCLUDED.created_at,
+              collection_id  = EXCLUDED.collection_id;
+            EXIT;
+        EXCEPTION WHEN unique_violation THEN
+            GET STACKED DIAGNOSTICS v_p35b_con = CONSTRAINT_NAME;
+            IF v_p35b_try = 2 OR NOT EXISTS (
+                    SELECT 1
+                      FROM pg_catalog.pg_class ic
+                      JOIN pg_catalog.pg_namespace ns ON ns.oid = ic.relnamespace
+                      JOIN pg_catalog.pg_index ix ON ix.indexrelid = ic.oid
+                     WHERE ns.nspname = 'nexus' AND ic.relname = v_p35b_con AND ix.indisunique
+                       AND coalesce(pg_catalog.pg_partition_root(ix.indrelid), ix.indrelid) = 'nexus.chunks'::regclass
+                       AND (SELECT pg_catalog.array_agg(a.attname::text ORDER BY a.attname)
+                              FROM pg_catalog.pg_attribute a
+                             WHERE a.attrelid = ix.indrelid AND a.attnum = ANY (ix.indkey))
+                           = ARRAY['chash', 'collection_id', 'embedding_model', 'tenant_id']) THEN
+                RAISE;
+            END IF;
+        END;
+    END LOOP;
+
+    WITH del AS (
+        DELETE FROM nexus.chunks c
+         USING _a6mon_victim v
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+           AND c.chash = v.chash
+           AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL))
+        RETURNING c.tenant_id, c.collection, c.chash, c.embedding_model,
+                  left(c.chunk_text, 80) AS text_prefix
+    ),
+    counted AS (SELECT count(*) AS n FROM del),
+    sampled AS (
+        SELECT jsonb_agg(jsonb_build_object('chash', encode(lim.chash, 'hex'), 'title', lim.title,
+                                            'text_prefix', lim.text_prefix)) AS s
+          FROM (SELECT d.chash, d.text_prefix,
+                       (SELECT od.title
+                          FROM nexus.catalog_document_chunks oc
+                          JOIN nexus.catalog_documents od
+                            ON od.tenant_id = oc.tenant_id AND od.tumbler = oc.doc_id
+                         WHERE oc.tenant_id = d.tenant_id
+                           AND oc.chash = d.chash
+                           AND oc.embedding_model = d.embedding_model
+                           AND od.deleted_at IS NULL
+                         ORDER BY COALESCE((oc.collection_id = v_origin_id OR (oc.collection_id IS NULL AND oc.collection = p_collection AND p_collection <> '')), false) DESC, oc.doc_id
+                         LIMIT 1) AS title
+                  FROM del d
+                 LIMIT v_sample_limit) lim
+    )
+    SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+    -- What is LEFT after this commit, so the caller has a terminator it does not
+    -- have to invent from a stalling count.
+    SELECT count(*) INTO v_remaining
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL));
+
+    -- nexus-a6mon requirement 5: instrument it. The unbounded form logged only
+    -- the edge's 499 -- no completion line, no timing, nothing between the cut
+    -- and the eventual commit.
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, collection_id, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_quarantine_orphans_bounded', p_collection, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection), 'engine', false, v_moved,
+        COALESCE(
+            (SELECT jsonb_agg(elem->>'chash') FROM jsonb_array_elements(COALESCE(v_sample, '[]'::jsonb)) elem),
+            '[]'::jsonb),
+        jsonb_build_object(
+            'quarantine_collection', p_quarantine_collection,
+            'sample_limit', v_sample_limit,
+            'row_limit', v_row_limit,
+            'remaining_after', v_remaining,
+            'chashes_is_sample', true));
+
+    RETURN QUERY SELECT v_moved, v_sample, v_remaining;
+END;
+$function$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+
+CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans_bounded(dim integer, p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_sample_limit integer, p_row_limit integer)
+ RETURNS TABLE(moved bigint, sample jsonb, remaining bigint)
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_p35b_con text;  -- the constraint of a unique_violation, for the retry on the id twin
+    v_origin_id bigint;
+    v_quar_id bigint;
+    v_moved            bigint;
+    v_sample           jsonb;
+    v_remaining        bigint;
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+    v_collision_count  bigint;
+    v_collision_sample text[];
+    v_sample_limit     int;
+    v_row_limit        int;
+BEGIN
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection;
+    SELECT cc.collection_id INTO v_quar_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection;
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    -- A non-positive bound is a caller error, not "unbounded". The whole point
+    -- of this function is the bound; silently removing it would hand back the
+    -- 58-second transaction this exists to prevent.
+    IF COALESCE(p_row_limit, 0) <= 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: p_row_limit must be positive, got %. Use nexus.gc_quarantine_orphans for the unbounded sweep.',
+            p_row_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    v_sample_limit := LEAST(GREATEST(COALESCE(p_sample_limit, 20), 0), 5000);
+    v_row_limit    := LEAST(p_row_limit, 100000);
+
+    PERFORM set_config('lock_timeout', '2000', true);
+    PERFORM set_config('statement_timeout', '25000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            -- nexus-a6mon requirement 4: name the caller's OWN in-flight call as
+            -- a possibility. The unbounded form advised "retry", which cannot
+            -- succeed while the holder IS the caller's previous, still-committing
+            -- call -- the exact state a cut-then-resubmit loop produces.
+            RAISE EXCEPTION
+                'gc_quarantine_orphans_bounded: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer holds it, OR your own previous bounded call is still committing after the edge cut you. Poll pg_stat_activity for an active sweep on this collection before retrying; a fixed sleep builds a lock convoy.',
+                p_tenant_id, p_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- THE VICTIM SET, chosen ONCE and ordered for deterministic progress.
+    -- RDR-192 Step 8 (nexus-wbfpw.16): a candidate is reapable(c), nexus.chunk_is_reapable
+    -- (vectors-021): no own-collection manifest row in any owner state, last_written_at past
+    -- the grace (default 30 days), not a quarantine sibling. The DELETE below re-checks it on
+    -- the target row, so a refresh that lands after the victim set was chosen wins at the
+    -- READ COMMITTED recheck and the chunk stays.
+    CREATE TEMP TABLE IF NOT EXISTS _a6mon_victim(chash bytea PRIMARY KEY) ON COMMIT DROP;
+    DELETE FROM _a6mon_victim;
+    INSERT INTO _a6mon_victim(chash)
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL))
+     ORDER BY c.chash
+     LIMIT v_row_limit;
+
+    IF NOT EXISTS (SELECT 1 FROM _a6mon_victim) THEN
+        RETURN QUERY SELECT 0::bigint, NULL::jsonb, 0::bigint;
+        RETURN;
+    END IF;
+
+    -- Cross-dim collision guard, same contract as the unbounded form
+    -- (vectors-004's N7 guard, T2 22454) but scoped to this batch.
+    SELECT count(*),
+           COALESCE(array_agg(encode(x.chash, 'hex') ORDER BY x.chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM nexus.chunks c
+          JOIN _a6mon_victim v ON v.chash = c.chash
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND (e.collection_id = v_quar_id OR (e.collection_id IS NULL AND e.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+           AND e.chash      = c.chash
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+      ) x
+     WHERE x.src_dim IS DISTINCT FROM x.existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: % cross-dim (tenant_id, collection, chash) collision(s) at quarantine target % for tenant=%, origin collection=%. Sample chashes: %. Refusing to overwrite.',
+            v_collision_count, p_quarantine_collection, p_tenant_id, p_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- nexus-0rxvg: the quarantine sibling's attributes are copied from the
+    -- ORIGIN's registered row, never parsed from the sibling's own name. The
+    -- catalog-037-1 body split p_quarantine_collection on '__', so for the
+    -- production shape quarantine-<ct>__owner__model__vN the first segment
+    -- carried the prefix and the sibling registered with content_type
+    -- 'quarantine-<ct>' and no dimension -- the defect hygiene-005-1 retired
+    -- in the unbounded twin. PgVectorRepository.quarantineOrphansBounded
+    -- resolves dim from the origin before reaching this function, so an
+    -- unregistered origin is a fail-loud precondition here, as there.
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: origin collection % is not registered for tenant % -- attributes for the quarantine sibling are copied from the origin row, never parsed from the quarantine sibling name (nexus-0rxvg, as hygiene-005-1); register the origin before quarantining orphans',
+            p_collection, p_tenant_id;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections AS cc0
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_quarantine_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'quarantine'
+    )
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO UPDATE
+      SET content_type    = EXCLUDED.content_type,
+          owner_id        = EXCLUDED.owner_id,
+          embedding_model = EXCLUDED.embedding_model,
+          model_version   = EXCLUDED.model_version,
+          dimension       = EXCLUDED.dimension,
+          superseded_by_id = CASE WHEN cc0.superseded_by = '' THEN NULL
+                 ELSE COALESCE(cc0.superseded_by_id,
+                               (SELECT s.collection_id FROM nexus.catalog_collections s
+                                 WHERE s.tenant_id = cc0.tenant_id AND s.name = cc0.superseded_by),
+                               cc0.collection_id) END;
+
+    -- two unique keys on nexus.chunks until P4.1 (the name primary key and P3.3b's id twin on (tenant_id, collection_id, chash, embedding_model)): the ON CONFLICT
+    -- arbiter absorbs a race on itself only, so a racing writer's row trips the twin as a plain 23505. Retry once when the
+    -- 23505 is that twin (a unique index whose partition root is nexus.chunks, on the id key's columns); the retry sees the committed row on the arbiter. Any other 23505, or a second one, is raised (linda 2026-11-22).
+    FOR v_p35b_try IN 1 .. 2 LOOP
+        BEGIN
+            -- created_at CARRIED THROUGH (nexus-a6mon's second finding): the unbounded
+        -- form omits it, so the default restamps every moved row to quarantine time
+        -- and the collection's generation history is destroyed.
+        -- RDR-225: embedding_model rides with the row; the arbiter is the four-column primary key.
+        INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                                   embedding_384, embedding_768, embedding_1024,
+                                   metadata, created_at, embedding_model, collection_id)
+        SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text,
+               c.embedding_384, c.embedding_768, c.embedding_1024,
+               COALESCE(c.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection)
+                 || jsonb_strip_nulls(jsonb_build_object('origin_collection_id',
+                     (SELECT oc.collection_id FROM nexus.catalog_collections oc
+                       WHERE oc.tenant_id = p_tenant_id AND oc.name = p_collection))),
+               c.created_at, c.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection)
+          FROM nexus.chunks c
+          JOIN _a6mon_victim v ON v.chash = c.chash
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+        ON CONFLICT (tenant_id, collection, chash, embedding_model) DO UPDATE
+          SET chunk_text     = EXCLUDED.chunk_text,
+              embedding_384  = EXCLUDED.embedding_384,
+              embedding_768  = EXCLUDED.embedding_768,
+              embedding_1024 = EXCLUDED.embedding_1024,
+              metadata       = EXCLUDED.metadata,
+              created_at     = EXCLUDED.created_at,
+              collection_id  = EXCLUDED.collection_id;
+            EXIT;
+        EXCEPTION WHEN unique_violation THEN
+            GET STACKED DIAGNOSTICS v_p35b_con = CONSTRAINT_NAME;
+            IF v_p35b_try = 2 OR NOT EXISTS (
+                    SELECT 1
+                      FROM pg_catalog.pg_class ic
+                      JOIN pg_catalog.pg_namespace ns ON ns.oid = ic.relnamespace
+                      JOIN pg_catalog.pg_index ix ON ix.indexrelid = ic.oid
+                     WHERE ns.nspname = 'nexus' AND ic.relname = v_p35b_con AND ix.indisunique
+                       AND coalesce(pg_catalog.pg_partition_root(ix.indrelid), ix.indrelid) = 'nexus.chunks'::regclass
+                       AND (SELECT pg_catalog.array_agg(a.attname::text ORDER BY a.attname)
+                              FROM pg_catalog.pg_attribute a
+                             WHERE a.attrelid = ix.indrelid AND a.attnum = ANY (ix.indkey))
+                           = ARRAY['chash', 'collection_id', 'embedding_model', 'tenant_id']) THEN
+                RAISE;
+            END IF;
+        END;
+    END LOOP;
+
+    WITH del AS (
+        DELETE FROM nexus.chunks c
+         USING _a6mon_victim v
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+           AND c.chash = v.chash
+           AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL))
+        RETURNING c.tenant_id, c.collection, c.chash, c.embedding_model,
+                  left(c.chunk_text, 80) AS text_prefix
+    ),
+    counted AS (SELECT count(*) AS n FROM del),
+    sampled AS (
+        SELECT jsonb_agg(jsonb_build_object('chash', encode(lim.chash, 'hex'), 'title', lim.title,
+                                            'text_prefix', lim.text_prefix)) AS s
+          FROM (SELECT d.chash, d.text_prefix,
+                       (SELECT od.title
+                          FROM nexus.catalog_document_chunks oc
+                          JOIN nexus.catalog_documents od
+                            ON od.tenant_id = oc.tenant_id AND od.tumbler = oc.doc_id
+                         WHERE oc.tenant_id = d.tenant_id
+                           AND oc.chash = d.chash
+                           AND oc.embedding_model = d.embedding_model
+                           AND od.deleted_at IS NULL
+                         ORDER BY COALESCE((oc.collection_id = v_origin_id OR (oc.collection_id IS NULL AND oc.collection = p_collection AND p_collection <> '')), false) DESC, oc.doc_id
+                         LIMIT 1) AS title
+                  FROM del d
+                 LIMIT v_sample_limit) lim
+    )
+    SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+    -- What is LEFT after this commit, so the caller has a terminator it does not
+    -- have to invent from a stalling count.
+    SELECT count(*) INTO v_remaining
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL));
+
+    -- nexus-a6mon requirement 5: instrument it. The unbounded form logged only
+    -- the edge's 499 -- no completion line, no timing, nothing between the cut
+    -- and the eventual commit.
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, collection_id, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_quarantine_orphans_bounded', p_collection, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection), 'engine', false, v_moved,
+        COALESCE(
+            (SELECT jsonb_agg(elem->>'chash') FROM jsonb_array_elements(COALESCE(v_sample, '[]'::jsonb)) elem),
+            '[]'::jsonb),
+        jsonb_build_object(
+            'quarantine_collection', p_quarantine_collection,
+            'sample_limit', v_sample_limit,
+            'row_limit', v_row_limit,
+            'remaining_after', v_remaining,
+            'chashes_is_sample', true));
+
+    RETURN QUERY SELECT v_moved, v_sample, v_remaining;
+END;
+$function$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-085-3" author="nexus-p2m1x.28">
+        <comment>RDR-229 P3.8 (nexus-p2m1x.28): nexus.reaper_quarantine_chunks: the quarantine sibling refresh (ON CONFLICT DO UPDATE) no longer raises a bare 23505 from catalog_collections_live_tuple_uq; it refuses by name (22023) and writes nothing, or, for a quarantine row, is as before. Replaces the definition in vectors-077-56 of vectors-077-rdr229-p35b-readers-both.xml, the last definer; signature, attributes and grants are kept; nothing else in the body changes. DATA EFFECT: none, a function definition only. Rollback restores that definition.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+
+CREATE OR REPLACE FUNCTION nexus.reaper_quarantine_chunks(p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_row_limit integer, p_grace interval, p_floor_fraction double precision, p_floor_min_chunks integer, p_dry_run boolean)
+ RETURNS TABLE(moved bigint, reapable_count bigint, total_count bigint, refused boolean, remaining bigint)
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_p35b_con text;  -- the constraint of a unique_violation, for the retry on the id twin
+    v_origin_id bigint;
+    v_quar_id bigint;
+    v_moved                   bigint;
+    v_chashes                 jsonb;
+    v_reapable                bigint;
+    v_total                   bigint;
+    v_row_limit               int;
+    v_collision_count         bigint;
+    v_collision_sample        text[];
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+BEGIN
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection;
+    SELECT cc.collection_id INTO v_quar_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection;
+    IF COALESCE(p_row_limit, 0) <= 0 THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: p_row_limit must be positive, got %', p_row_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_floor_fraction IS NULL OR p_floor_fraction < 0 OR p_floor_fraction > 1
+       OR p_floor_min_chunks IS NULL OR p_floor_min_chunks < 0 THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: the floor must be a fraction in [0, 1] and a non-negative minimum, got % / %',
+            p_floor_fraction, p_floor_min_chunks
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    v_row_limit := LEAST(p_row_limit, 5000);
+
+    IF p_dry_run THEN
+        SELECT count(*),
+               count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                     p_tenant_id, p_collection, c.chash, c.last_written_at, p_grace)))
+          INTO v_total, v_reapable
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''));
+        RETURN QUERY SELECT 0::bigint, v_reapable, v_total, false, v_reapable;
+        RETURN;
+    END IF;
+
+    PERFORM set_config('lock_timeout', '2000', true);
+    PERFORM set_config('statement_timeout', '25000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            RAISE EXCEPTION
+                'reaper_quarantine_chunks: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer holds it; the reaper skips this collection until its next pass',
+                p_tenant_id, p_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- Counted again UNDER the gate: the dry run's snapshot may be a pass old, and the floor must be judged
+    -- on what is true while no manifest writer can move the ground.
+    SELECT count(*),
+           count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, p_grace)))
+      INTO v_total, v_reapable
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''));
+
+    IF v_reapable = 0 THEN
+        RETURN QUERY SELECT 0::bigint, 0::bigint, v_total, false, 0::bigint;
+        RETURN;
+    END IF;
+
+    -- The floor on the move (see the header). Same shape as gc_expire_quarantine's: at least the minimum, and
+    -- strictly more than the fraction.
+    IF v_reapable >= p_floor_min_chunks AND v_reapable::float8 / v_total::float8 > p_floor_fraction THEN
+        RETURN QUERY SELECT 0::bigint, v_reapable, v_total, true, v_reapable;
+        RETURN;
+    END IF;
+
+    -- THE VICTIM SET, chosen once and ordered for deterministic progress.
+    CREATE TEMP TABLE IF NOT EXISTS _x9_victim(chash bytea PRIMARY KEY) ON COMMIT DROP;
+    DELETE FROM _x9_victim;
+    INSERT INTO _x9_victim(chash)
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, p_grace))
+     ORDER BY c.chash
+     LIMIT v_row_limit;
+
+    -- Cross-dim collision guard (vectors-004's N7 guard): the unified PK cannot hold two different-dim rows.
+    SELECT count(*),
+           COALESCE(array_agg(encode(x.chash, 'hex') ORDER BY x.chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM nexus.chunks c
+          JOIN _x9_victim v ON v.chash = c.chash
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND (e.collection_id = v_quar_id OR (e.collection_id IS NULL AND e.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+           AND e.chash      = c.chash
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+      ) x
+     WHERE x.src_dim IS DISTINCT FROM x.existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: % cross-dim (tenant_id, collection, chash) collision(s) at quarantine target % for tenant=%, origin collection=%. Sample chashes: %. Refusing to overwrite.',
+            v_collision_count, p_quarantine_collection, p_tenant_id, p_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- The sibling's attributes come from the ORIGIN's registered row, never from a name (RDR-204,
+    -- hygiene-005-1). An unregistered origin is a fail-loud precondition.
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: origin collection % is not registered for tenant % -- attributes for the quarantine sibling are copied from the origin row, never parsed from a name; register the origin before quarantining chunks',
+            p_collection, p_tenant_id;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections AS cc0
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_quarantine_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'quarantine'
+    )
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO UPDATE
+      SET content_type    = EXCLUDED.content_type,
+          owner_id        = EXCLUDED.owner_id,
+          embedding_model = EXCLUDED.embedding_model,
+          model_version   = EXCLUDED.model_version,
+          dimension       = EXCLUDED.dimension,
+          superseded_by_id = CASE WHEN cc0.superseded_by = '' THEN NULL
+                 ELSE COALESCE(cc0.superseded_by_id,
+                               (SELECT s.collection_id FROM nexus.catalog_collections s
+                                 WHERE s.tenant_id = cc0.tenant_id AND s.name = cc0.superseded_by),
+                               cc0.collection_id) END
+      WHERE cc0.lifecycle_state = 'quarantine'
+         OR NOT EXISTS (SELECT 1 FROM nexus.catalog_collections h
+                         WHERE h.tenant_id       = cc0.tenant_id
+                           AND h.collection_id  <> cc0.collection_id
+                           AND h.superseded_by   = ''
+                           AND h.lifecycle_state <> 'quarantine'
+                           AND h.content_type    = EXCLUDED.content_type
+                           AND h.owner_id        = EXCLUDED.owner_id
+                           AND h.embedding_model = EXCLUDED.embedding_model
+                           AND h.model_version   = EXCLUDED.model_version);
+
+    -- nexus-p2m1x.28 (linda 2026-11-25): the refresh above copies the ORIGIN's tuple onto a row that bears the sibling's name. For a quarantine row
+    -- that is the designed heal and the row is outside catalog_collections_live_tuple_uq. A row of any other lifecycle that bears the name
+    -- is inside the index, so the copy is skipped by the WHERE when another live row (the origin, as a rule) already holds that tuple, and
+    -- the call refuses here by name: nothing moved, no second live holder, never a bare 23505. A non-quarantine row with no live twin of the tuple is refreshed as before.
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: the row named % is not a quarantine collection and another live collection already holds the tuple of origin % that the quarantine sibling would copy onto it; nothing moved (the live tuple index allows one live holder of a tuple)',
+            p_quarantine_collection, p_collection
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- two unique keys on nexus.chunks until P4.1 (the name primary key and P3.3b's id twin on (tenant_id, collection_id, chash, embedding_model)): the ON CONFLICT
+    -- arbiter absorbs a race on itself only, so a racing writer's row trips the twin as a plain 23505. Retry once when the
+    -- 23505 is that twin (a unique index whose partition root is nexus.chunks, on the id key's columns); the retry sees the committed row on the arbiter. Any other 23505, or a second one, is raised (linda 2026-11-22).
+    FOR v_p35b_try IN 1 .. 2 LOOP
+        BEGIN
+            -- The move: DELETE with the predicate in its own WHERE, copy through RETURNING, one statement. A chunk a
+        -- client refreshed after the victim set was chosen fails the recheck, is not deleted, and is not copied.
+        WITH del AS (
+            DELETE FROM nexus.chunks c
+             USING _x9_victim v
+             WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+               AND c.chash = v.chash
+               AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                     p_tenant_id, p_collection, c.chash, c.last_written_at, p_grace))
+            RETURNING c.chash, c.chunk_text, c.embedding_384, c.embedding_768, c.embedding_1024,
+                      c.metadata, c.created_at, c.embedding_model
+        ),
+        copied AS (
+            -- RDR-225: the moved row keeps its embedding_model (the quarantine sibling is registered under the
+            -- origin's model above); the arbiter is the four-column primary key.
+            INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                                       embedding_384, embedding_768, embedding_1024,
+                                       metadata, created_at, embedding_model, collection_id)
+            SELECT p_tenant_id, p_quarantine_collection, d.chash, d.chunk_text,
+                   d.embedding_384, d.embedding_768, d.embedding_1024,
+                   COALESCE(d.metadata, '{}'::jsonb)
+                     || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                            'origin_collection', p_collection,
+                                            'quarantined_by', 'engine-reaper',
+                                            'reaper_quarantined_at', p_quarantined_at)
+                     || jsonb_strip_nulls(jsonb_build_object('origin_collection_id',
+                     (SELECT oc.collection_id FROM nexus.catalog_collections oc
+                       WHERE oc.tenant_id = p_tenant_id AND oc.name = p_collection))),
+                   d.created_at, d.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection)
+              FROM del d
+            ON CONFLICT (tenant_id, collection, chash, embedding_model) DO UPDATE
+              SET chunk_text     = EXCLUDED.chunk_text,
+                  embedding_384  = EXCLUDED.embedding_384,
+                  embedding_768  = EXCLUDED.embedding_768,
+                  embedding_1024 = EXCLUDED.embedding_1024,
+                  metadata       = EXCLUDED.metadata,
+                  created_at     = EXCLUDED.created_at,
+                  collection_id  = EXCLUDED.collection_id
+            RETURNING 1
+        )
+        SELECT count(*), COALESCE(jsonb_agg(encode(d.chash, 'hex')), '[]'::jsonb)
+          INTO v_moved, v_chashes
+          FROM del d;
+            EXIT;
+        EXCEPTION WHEN unique_violation THEN
+            GET STACKED DIAGNOSTICS v_p35b_con = CONSTRAINT_NAME;
+            IF v_p35b_try = 2 OR NOT EXISTS (
+                    SELECT 1
+                      FROM pg_catalog.pg_class ic
+                      JOIN pg_catalog.pg_namespace ns ON ns.oid = ic.relnamespace
+                      JOIN pg_catalog.pg_index ix ON ix.indexrelid = ic.oid
+                     WHERE ns.nspname = 'nexus' AND ic.relname = v_p35b_con AND ix.indisunique
+                       AND coalesce(pg_catalog.pg_partition_root(ix.indrelid), ix.indrelid) = 'nexus.chunks'::regclass
+                       AND (SELECT pg_catalog.array_agg(a.attname::text ORDER BY a.attname)
+                              FROM pg_catalog.pg_attribute a
+                             WHERE a.attrelid = ix.indrelid AND a.attnum = ANY (ix.indkey))
+                           = ARRAY['chash', 'collection_id', 'embedding_model', 'tenant_id']) THEN
+                RAISE;
+            END IF;
+        END;
+    END LOOP;
+
+    IF v_moved > 0 THEN
+        INSERT INTO nexus.gc_audit
+            (tenant_id, operation, collection, collection_id, actor, dry_run, chash_count, chashes, details)
+        VALUES (
+            p_tenant_id, 'reaper_quarantine', p_collection, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection), 'engine-reaper', false, v_moved, v_chashes,
+            jsonb_build_object(
+                'quarantine_collection', p_quarantine_collection,
+                'row_limit', v_row_limit,
+                'grace', COALESCE(p_grace::text, 'default'),
+                'floor_fraction', p_floor_fraction,
+                'floor_min_chunks', p_floor_min_chunks,
+                'reapable_before', v_reapable,
+                'total_before', v_total,
+                'remaining_after', GREATEST(v_reapable - v_moved, 0)));
+    END IF;
+
+    RETURN QUERY SELECT v_moved, v_reapable, v_total, false, GREATEST(v_reapable - v_moved, 0);
+END;
+$function$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+
+CREATE OR REPLACE FUNCTION nexus.reaper_quarantine_chunks(p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_row_limit integer, p_grace interval, p_floor_fraction double precision, p_floor_min_chunks integer, p_dry_run boolean)
+ RETURNS TABLE(moved bigint, reapable_count bigint, total_count bigint, refused boolean, remaining bigint)
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_p35b_con text;  -- the constraint of a unique_violation, for the retry on the id twin
+    v_origin_id bigint;
+    v_quar_id bigint;
+    v_moved                   bigint;
+    v_chashes                 jsonb;
+    v_reapable                bigint;
+    v_total                   bigint;
+    v_row_limit               int;
+    v_collision_count         bigint;
+    v_collision_sample        text[];
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+BEGIN
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection;
+    SELECT cc.collection_id INTO v_quar_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection;
+    IF COALESCE(p_row_limit, 0) <= 0 THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: p_row_limit must be positive, got %', p_row_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_floor_fraction IS NULL OR p_floor_fraction < 0 OR p_floor_fraction > 1
+       OR p_floor_min_chunks IS NULL OR p_floor_min_chunks < 0 THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: the floor must be a fraction in [0, 1] and a non-negative minimum, got % / %',
+            p_floor_fraction, p_floor_min_chunks
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    v_row_limit := LEAST(p_row_limit, 5000);
+
+    IF p_dry_run THEN
+        SELECT count(*),
+               count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                     p_tenant_id, p_collection, c.chash, c.last_written_at, p_grace)))
+          INTO v_total, v_reapable
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''));
+        RETURN QUERY SELECT 0::bigint, v_reapable, v_total, false, v_reapable;
+        RETURN;
+    END IF;
+
+    PERFORM set_config('lock_timeout', '2000', true);
+    PERFORM set_config('statement_timeout', '25000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            RAISE EXCEPTION
+                'reaper_quarantine_chunks: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer holds it; the reaper skips this collection until its next pass',
+                p_tenant_id, p_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- Counted again UNDER the gate: the dry run's snapshot may be a pass old, and the floor must be judged
+    -- on what is true while no manifest writer can move the ground.
+    SELECT count(*),
+           count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, p_grace)))
+      INTO v_total, v_reapable
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''));
+
+    IF v_reapable = 0 THEN
+        RETURN QUERY SELECT 0::bigint, 0::bigint, v_total, false, 0::bigint;
+        RETURN;
+    END IF;
+
+    -- The floor on the move (see the header). Same shape as gc_expire_quarantine's: at least the minimum, and
+    -- strictly more than the fraction.
+    IF v_reapable >= p_floor_min_chunks AND v_reapable::float8 / v_total::float8 > p_floor_fraction THEN
+        RETURN QUERY SELECT 0::bigint, v_reapable, v_total, true, v_reapable;
+        RETURN;
+    END IF;
+
+    -- THE VICTIM SET, chosen once and ordered for deterministic progress.
+    CREATE TEMP TABLE IF NOT EXISTS _x9_victim(chash bytea PRIMARY KEY) ON COMMIT DROP;
+    DELETE FROM _x9_victim;
+    INSERT INTO _x9_victim(chash)
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, p_grace))
+     ORDER BY c.chash
+     LIMIT v_row_limit;
+
+    -- Cross-dim collision guard (vectors-004's N7 guard): the unified PK cannot hold two different-dim rows.
+    SELECT count(*),
+           COALESCE(array_agg(encode(x.chash, 'hex') ORDER BY x.chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM nexus.chunks c
+          JOIN _x9_victim v ON v.chash = c.chash
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND (e.collection_id = v_quar_id OR (e.collection_id IS NULL AND e.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+           AND e.chash      = c.chash
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+      ) x
+     WHERE x.src_dim IS DISTINCT FROM x.existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: % cross-dim (tenant_id, collection, chash) collision(s) at quarantine target % for tenant=%, origin collection=%. Sample chashes: %. Refusing to overwrite.',
+            v_collision_count, p_quarantine_collection, p_tenant_id, p_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- The sibling's attributes come from the ORIGIN's registered row, never from a name (RDR-204,
+    -- hygiene-005-1). An unregistered origin is a fail-loud precondition.
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: origin collection % is not registered for tenant % -- attributes for the quarantine sibling are copied from the origin row, never parsed from a name; register the origin before quarantining chunks',
+            p_collection, p_tenant_id;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections AS cc0
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_quarantine_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'quarantine'
+    )
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO UPDATE
+      SET content_type    = EXCLUDED.content_type,
+          owner_id        = EXCLUDED.owner_id,
+          embedding_model = EXCLUDED.embedding_model,
+          model_version   = EXCLUDED.model_version,
+          dimension       = EXCLUDED.dimension,
+          superseded_by_id = CASE WHEN cc0.superseded_by = '' THEN NULL
+                 ELSE COALESCE(cc0.superseded_by_id,
+                               (SELECT s.collection_id FROM nexus.catalog_collections s
+                                 WHERE s.tenant_id = cc0.tenant_id AND s.name = cc0.superseded_by),
+                               cc0.collection_id) END;
+
+    -- two unique keys on nexus.chunks until P4.1 (the name primary key and P3.3b's id twin on (tenant_id, collection_id, chash, embedding_model)): the ON CONFLICT
+    -- arbiter absorbs a race on itself only, so a racing writer's row trips the twin as a plain 23505. Retry once when the
+    -- 23505 is that twin (a unique index whose partition root is nexus.chunks, on the id key's columns); the retry sees the committed row on the arbiter. Any other 23505, or a second one, is raised (linda 2026-11-22).
+    FOR v_p35b_try IN 1 .. 2 LOOP
+        BEGIN
+            -- The move: DELETE with the predicate in its own WHERE, copy through RETURNING, one statement. A chunk a
+        -- client refreshed after the victim set was chosen fails the recheck, is not deleted, and is not copied.
+        WITH del AS (
+            DELETE FROM nexus.chunks c
+             USING _x9_victim v
+             WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
+               AND c.chash = v.chash
+               AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                     p_tenant_id, p_collection, c.chash, c.last_written_at, p_grace))
+            RETURNING c.chash, c.chunk_text, c.embedding_384, c.embedding_768, c.embedding_1024,
+                      c.metadata, c.created_at, c.embedding_model
+        ),
+        copied AS (
+            -- RDR-225: the moved row keeps its embedding_model (the quarantine sibling is registered under the
+            -- origin's model above); the arbiter is the four-column primary key.
+            INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                                       embedding_384, embedding_768, embedding_1024,
+                                       metadata, created_at, embedding_model, collection_id)
+            SELECT p_tenant_id, p_quarantine_collection, d.chash, d.chunk_text,
+                   d.embedding_384, d.embedding_768, d.embedding_1024,
+                   COALESCE(d.metadata, '{}'::jsonb)
+                     || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                            'origin_collection', p_collection,
+                                            'quarantined_by', 'engine-reaper',
+                                            'reaper_quarantined_at', p_quarantined_at)
+                     || jsonb_strip_nulls(jsonb_build_object('origin_collection_id',
+                     (SELECT oc.collection_id FROM nexus.catalog_collections oc
+                       WHERE oc.tenant_id = p_tenant_id AND oc.name = p_collection))),
+                   d.created_at, d.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection)
+              FROM del d
+            ON CONFLICT (tenant_id, collection, chash, embedding_model) DO UPDATE
+              SET chunk_text     = EXCLUDED.chunk_text,
+                  embedding_384  = EXCLUDED.embedding_384,
+                  embedding_768  = EXCLUDED.embedding_768,
+                  embedding_1024 = EXCLUDED.embedding_1024,
+                  metadata       = EXCLUDED.metadata,
+                  created_at     = EXCLUDED.created_at,
+                  collection_id  = EXCLUDED.collection_id
+            RETURNING 1
+        )
+        SELECT count(*), COALESCE(jsonb_agg(encode(d.chash, 'hex')), '[]'::jsonb)
+          INTO v_moved, v_chashes
+          FROM del d;
+            EXIT;
+        EXCEPTION WHEN unique_violation THEN
+            GET STACKED DIAGNOSTICS v_p35b_con = CONSTRAINT_NAME;
+            IF v_p35b_try = 2 OR NOT EXISTS (
+                    SELECT 1
+                      FROM pg_catalog.pg_class ic
+                      JOIN pg_catalog.pg_namespace ns ON ns.oid = ic.relnamespace
+                      JOIN pg_catalog.pg_index ix ON ix.indexrelid = ic.oid
+                     WHERE ns.nspname = 'nexus' AND ic.relname = v_p35b_con AND ix.indisunique
+                       AND coalesce(pg_catalog.pg_partition_root(ix.indrelid), ix.indrelid) = 'nexus.chunks'::regclass
+                       AND (SELECT pg_catalog.array_agg(a.attname::text ORDER BY a.attname)
+                              FROM pg_catalog.pg_attribute a
+                             WHERE a.attrelid = ix.indrelid AND a.attnum = ANY (ix.indkey))
+                           = ARRAY['chash', 'collection_id', 'embedding_model', 'tenant_id']) THEN
+                RAISE;
+            END IF;
+        END;
+    END LOOP;
+
+    IF v_moved > 0 THEN
+        INSERT INTO nexus.gc_audit
+            (tenant_id, operation, collection, collection_id, actor, dry_run, chash_count, chashes, details)
+        VALUES (
+            p_tenant_id, 'reaper_quarantine', p_collection, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection), 'engine-reaper', false, v_moved, v_chashes,
+            jsonb_build_object(
+                'quarantine_collection', p_quarantine_collection,
+                'row_limit', v_row_limit,
+                'grace', COALESCE(p_grace::text, 'default'),
+                'floor_fraction', p_floor_fraction,
+                'floor_min_chunks', p_floor_min_chunks,
+                'reapable_before', v_reapable,
+                'total_before', v_total,
+                'remaining_after', GREATEST(v_reapable - v_moved, 0)));
+    END IF;
+
+    RETURN QUERY SELECT v_moved, v_reapable, v_total, false, GREATEST(v_reapable - v_moved, 0);
+END;
+$function$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-085-4" author="nexus-p2m1x.28">
+        <comment>RDR-229 P3.8 (nexus-p2m1x.28): nexus.gc_restore_rereferenced: the first-ever origin registration no longer raises a bare 23505 from catalog_collections_live_tuple_uq; it refuses by name (22023) and writes nothing, or, for a quarantine row, is as before. Replaces the definition in vectors-083-1 of vectors-083-restore-by-origin-id.xml, the last definer; signature, attributes and grants are kept; nothing else in the body changes. DATA EFFECT: none, a function definition only. Rollback restores that definition.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+
+CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced(dim integer, p_tenant_id text, p_quarantine_collection text, p_origin_collection text)
+ RETURNS bigint
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_p28_holder text;  -- nexus-p2m1x.28: the live holder of the tuple a first-ever origin would take
+    v_origin_id bigint;
+    v_quar_id bigint;
+    -- RDR-229 P3.7 (vectors-083): read once, at the top of the call; from gate 3 a quarantined chunk is the origin's by the origin's id
+    v_latched boolean := EXISTS (SELECT 1 FROM nexus.rdr229_gate_latch WHERE gate = 'gate3');
+    v_chashes                 bytea[];
+    v_restored                bigint := 0;
+    v_row_count               bigint := 0;
+    v_collision_count         bigint;
+    v_collision_sample        text[];
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+BEGIN
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection;
+    SELECT cc.collection_id INTO v_quar_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection;
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    SELECT array_agg(c.chash) INTO v_chashes
+      FROM nexus.chunks c
+     WHERE c.tenant_id  = p_tenant_id
+       AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+       AND CASE WHEN v_latched THEN c.metadata->'origin_collection_id' = to_jsonb(v_origin_id)
+            ELSE COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection END
+       AND EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND (m.collection_id = v_origin_id OR (m.collection_id IS NULL AND m.collection = p_origin_collection AND p_origin_collection <> ''))
+                AND m.chash      = c.chash
+           );
+
+    IF v_chashes IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    -- N7-STYLE cross-dim collision guard (Critical-1 fix, T2 [22454]):
+    -- same reasoning as gc_quarantine_orphans's guard -- detect, BEFORE
+    -- any row moves, any restore candidate whose chash already exists at
+    -- p_origin_collection under a DIFFERENT populated embedding_<dim>
+    -- column than the candidate's own.
+    WITH candidate AS (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+           AND c.chash = ANY(v_chashes)
+    ),
+    collision AS (
+        SELECT cand.chash, cand.src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM candidate cand
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND (e.collection_id = v_origin_id OR (e.collection_id IS NULL AND e.collection = p_origin_collection AND p_origin_collection <> ''))
+           AND e.chash      = cand.chash
+    )
+    SELECT count(*),
+           COALESCE(array_agg(encode(chash, 'hex') ORDER BY chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM collision
+     WHERE src_dim IS DISTINCT FROM existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: % cross-dim (tenant_id, collection, chash) collision(s) at restore target % for tenant=%, quarantine collection=% -- the unified PK cannot hold two different-dim rows for the same chash (mirrors vectors-004''s N7 guard, T2 22454). Sample chashes: %. Refusing to overwrite; verify the origin-collection naming keeps distinct dims/collections separated before retrying.',
+            v_collision_count, p_origin_collection, p_tenant_id, p_quarantine_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- RDR-204 nexus-uxd2a (hygiene-005-2): NO ENGINE PATH DERIVES A
+    -- COLLECTION'S ATTRIBUTES FROM ITS NAME (coordinator nexus-71 decision,
+    -- same as gc_quarantine_orphans above). p_origin_collection's own name
+    -- usually parsed correctly here (it never carries the quarantine-
+    -- prefix), but deriving from a name is still fragile by construction --
+    -- an origin name outside the four name-shape branches (hygiene-004's
+    -- underscored-owner class, a two-segment grandfathered name, or
+    -- anything unparseable) silently fell to the 'unknown' stub with no
+    -- dimension ever recorded. This self-registration is a DELIBERATE
+    -- CARVE-OUT (PgVectorRepository.restoreRereferenced's own javadoc,
+    -- RDR-204 Phase 2 nexus-ft04v.16): a genuinely first-ever origin
+    -- collection is still minted here, from real, known attributes -- now
+    -- copied from the QUARANTINE collection's own row rather than parsed
+    -- from either name, since p_quarantine_collection is REQUIRED to
+    -- already be registered (PgVectorRepository.restoreRereferenced
+    -- resolves dim from it before ever reaching this function) and both
+    -- collections share the same embedding space by construction (restore
+    -- only ever moves a chunk between the two). An existing origin row is
+    -- left exactly as it is (ON CONFLICT DO NOTHING) -- only a genuinely
+    -- first-ever origin is minted from the quarantine row's attributes.
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_quarantine_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: quarantine collection % is not registered for tenant % -- attributes for a first-ever origin registration are copied from the quarantine row, never parsed from either name (RDR-204 nexus-uxd2a)',
+            p_quarantine_collection, p_tenant_id;
+    END IF;
+
+    -- nexus-p2m1x.28 (linda 2026-11-25): a first-ever origin is minted LIVE with the sibling's tuple, and catalog_collections_live_tuple_uq allows one
+    -- live holder of a tuple. Where no live row bears the origin's label (it was retired, or purged) and another live collection already holds the
+    -- tuple, the INSERT below raised a bare 23505 from the tuple index (the name arbiter does not cover it). The origin is NOT minted then: the call
+    -- refuses by name, before anything moves, and the quarantined chunks stay where they are (a restore into the collection that holds the tuple is
+    -- the operator's to name: it is a different label). A live row that bears the label is still left exactly as it is (DO NOTHING).
+    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_collections o
+                    WHERE o.tenant_id = p_tenant_id AND o.name = p_origin_collection AND o.superseded_by = '' AND o.superseded_by_id IS NULL) THEN
+        SELECT h.name INTO v_p28_holder
+          FROM nexus.catalog_collections h
+         WHERE h.tenant_id       = p_tenant_id
+           AND h.superseded_by   = ''
+           AND h.lifecycle_state <> 'quarantine'
+           AND h.content_type    = v_origin_content_type
+           AND h.owner_id        = v_origin_owner_id
+           AND h.embedding_model = v_origin_embedding_model
+           AND h.model_version   = v_origin_model_version
+         ORDER BY h.collection_id
+         LIMIT 1;
+        IF FOUND THEN
+            RAISE EXCEPTION
+                'gc_restore_rereferenced: origin collection % has no live row, and the live collection % already holds the tuple its first-ever registration would take; nothing was restored (restore into %, or register the origin under a tuple of its own first)',
+                p_origin_collection, v_p28_holder, v_p28_holder
+                USING ERRCODE = 'invalid_parameter_value';
+        END IF;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_origin_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'live'
+    )
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO NOTHING;
+
+    -- The origin's id is read again now that it is registered: a first-ever origin had none when the body began, and a
+    -- racing registration (the DO NOTHING above) may have committed one since.
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection;
+
+    -- created_at CARRIED THROUGH (nexus-e8h5x review round 2, mirroring
+    -- catalog-037's fix for the opposite direction): the pre-fix INSERT
+    -- omitted it, so the default restamped every restored row to restore
+    -- time and destroyed the chunk's generation history across the
+    -- quarantine round trip.
+    -- RDR-225: embedding_model rides with the row (the chunk's own model, never the origin collection's: an
+    -- origin registered under another model refuses the row at the composite foreign key instead of filing a
+    -- vector under a model that did not embed it); the arbiter is the four-column primary key.
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                               embedding_384, embedding_768, embedding_1024,
+                               metadata, created_at, embedding_model, collection_id)
+    SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text,
+           c.embedding_384, c.embedding_768, c.embedding_1024,
+           -- RDR-236 (nexus-6pfgb.40): the restored row holds only the CHUNK keys of the key table. The four quarantine keys
+           -- (quarantined_at, origin_collection, quarantined_by, reaper_quarantined_at) are the physical row's, written by the
+           -- engine's two quarantine moves, and every other key is a document or position key whose home is the catalog.
+           -- Both are derived from the columns, so the Phase 4 equalities hold by construction.
+           jsonb_build_object('chunk_text_hash', encode(c.chash, 'hex'), 'embedding_model', c.embedding_model),
+           c.created_at, c.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection)
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+       AND c.chash = ANY(v_chashes)
+    -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1)
+    ON CONFLICT DO NOTHING;
+
+    -- nexus-brxnp fix round: rows genuinely inserted vs. rows skipped
+    -- because the origin already had a live row for that chash (the DO
+    -- NOTHING conflict) -- recorded below as `already_live` so a
+    -- production investigation can tell the two apart without re-deriving
+    -- it from chunk timestamps by hand (T2 nexus/debug-u6d93-brxnp).
+    GET DIAGNOSTICS v_row_count = ROW_COUNT;
+
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+       AND c.chash = ANY(v_chashes);
+
+    v_restored := array_length(v_chashes, 1);
+
+    -- nexus-gt03d: audit the restore IN THE SAME TRANSACTION as the DELETE
+    -- above -- this is the exact gap conexus-86/nexus-9la1f found: rows
+    -- leaving quarantine by restore had no forensic trail, unlike
+    -- gc_quarantine_orphans/sweep_superseded_chunks (catalog-033).
+    -- `chashes` here is v_chashes itself (no caller-supplied sample_limit
+    -- on this function, unlike gc_quarantine_orphans -- same shape as
+    -- gc_expire_quarantine's own audit above), truncated at
+    -- GC_AUDIT_MAX_CHASHES (5000, CatalogRepository.java) with
+    -- chash_count still carrying the exact full v_restored count
+    -- regardless of truncation. nexus-brxnp fix round: also
+    -- already_live = candidates that hit the DO NOTHING conflict.
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, collection_id, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_restore_rereferenced', p_quarantine_collection, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection), 'engine', false, v_restored,
+        COALESCE(
+            (SELECT jsonb_agg(encode(x, 'hex'))
+               FROM unnest(v_chashes[1:LEAST(COALESCE(array_length(v_chashes, 1), 0), 5000)]) x),
+            '[]'::jsonb),
+        jsonb_build_object('origin_collection', p_origin_collection, 'already_live', v_restored - v_row_count)
+            || CASE WHEN COALESCE(array_length(v_chashes, 1), 0) > 5000
+                    THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+                    ELSE '{}'::jsonb END
+    );
+
+    RETURN v_restored;
+END;
+$function$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+
+CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced(dim integer, p_tenant_id text, p_quarantine_collection text, p_origin_collection text)
+ RETURNS bigint
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_origin_id bigint;
+    v_quar_id bigint;
+    -- RDR-229 P3.7 (vectors-083): read once, at the top of the call; from gate 3 a quarantined chunk is the origin's by the origin's id
+    v_latched boolean := EXISTS (SELECT 1 FROM nexus.rdr229_gate_latch WHERE gate = 'gate3');
+    v_chashes                 bytea[];
+    v_restored                bigint := 0;
+    v_row_count               bigint := 0;
+    v_collision_count         bigint;
+    v_collision_sample        text[];
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+BEGIN
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection;
+    SELECT cc.collection_id INTO v_quar_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection;
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    SELECT array_agg(c.chash) INTO v_chashes
+      FROM nexus.chunks c
+     WHERE c.tenant_id  = p_tenant_id
+       AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+       AND CASE WHEN v_latched THEN c.metadata->'origin_collection_id' = to_jsonb(v_origin_id)
+            ELSE COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection END
+       AND EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND (m.collection_id = v_origin_id OR (m.collection_id IS NULL AND m.collection = p_origin_collection AND p_origin_collection <> ''))
+                AND m.chash      = c.chash
+           );
+
+    IF v_chashes IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    -- N7-STYLE cross-dim collision guard (Critical-1 fix, T2 [22454]):
+    -- same reasoning as gc_quarantine_orphans's guard -- detect, BEFORE
+    -- any row moves, any restore candidate whose chash already exists at
+    -- p_origin_collection under a DIFFERENT populated embedding_<dim>
+    -- column than the candidate's own.
+    WITH candidate AS (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+           AND c.chash = ANY(v_chashes)
+    ),
+    collision AS (
+        SELECT cand.chash, cand.src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM candidate cand
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND (e.collection_id = v_origin_id OR (e.collection_id IS NULL AND e.collection = p_origin_collection AND p_origin_collection <> ''))
+           AND e.chash      = cand.chash
+    )
+    SELECT count(*),
+           COALESCE(array_agg(encode(chash, 'hex') ORDER BY chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM collision
+     WHERE src_dim IS DISTINCT FROM existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: % cross-dim (tenant_id, collection, chash) collision(s) at restore target % for tenant=%, quarantine collection=% -- the unified PK cannot hold two different-dim rows for the same chash (mirrors vectors-004''s N7 guard, T2 22454). Sample chashes: %. Refusing to overwrite; verify the origin-collection naming keeps distinct dims/collections separated before retrying.',
+            v_collision_count, p_origin_collection, p_tenant_id, p_quarantine_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- RDR-204 nexus-uxd2a (hygiene-005-2): NO ENGINE PATH DERIVES A
+    -- COLLECTION'S ATTRIBUTES FROM ITS NAME (coordinator nexus-71 decision,
+    -- same as gc_quarantine_orphans above). p_origin_collection's own name
+    -- usually parsed correctly here (it never carries the quarantine-
+    -- prefix), but deriving from a name is still fragile by construction --
+    -- an origin name outside the four name-shape branches (hygiene-004's
+    -- underscored-owner class, a two-segment grandfathered name, or
+    -- anything unparseable) silently fell to the 'unknown' stub with no
+    -- dimension ever recorded. This self-registration is a DELIBERATE
+    -- CARVE-OUT (PgVectorRepository.restoreRereferenced's own javadoc,
+    -- RDR-204 Phase 2 nexus-ft04v.16): a genuinely first-ever origin
+    -- collection is still minted here, from real, known attributes -- now
+    -- copied from the QUARANTINE collection's own row rather than parsed
+    -- from either name, since p_quarantine_collection is REQUIRED to
+    -- already be registered (PgVectorRepository.restoreRereferenced
+    -- resolves dim from it before ever reaching this function) and both
+    -- collections share the same embedding space by construction (restore
+    -- only ever moves a chunk between the two). An existing origin row is
+    -- left exactly as it is (ON CONFLICT DO NOTHING) -- only a genuinely
+    -- first-ever origin is minted from the quarantine row's attributes.
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_quarantine_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: quarantine collection % is not registered for tenant % -- attributes for a first-ever origin registration are copied from the quarantine row, never parsed from either name (RDR-204 nexus-uxd2a)',
+            p_quarantine_collection, p_tenant_id;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_origin_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'live'
+    )
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO NOTHING;
+
+    -- The origin's id is read again now that it is registered: a first-ever origin had none when the body began, and a
+    -- racing registration (the DO NOTHING above) may have committed one since.
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection;
+
+    -- created_at CARRIED THROUGH (nexus-e8h5x review round 2, mirroring
+    -- catalog-037's fix for the opposite direction): the pre-fix INSERT
+    -- omitted it, so the default restamped every restored row to restore
+    -- time and destroyed the chunk's generation history across the
+    -- quarantine round trip.
+    -- RDR-225: embedding_model rides with the row (the chunk's own model, never the origin collection's: an
+    -- origin registered under another model refuses the row at the composite foreign key instead of filing a
+    -- vector under a model that did not embed it); the arbiter is the four-column primary key.
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                               embedding_384, embedding_768, embedding_1024,
+                               metadata, created_at, embedding_model, collection_id)
+    SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text,
+           c.embedding_384, c.embedding_768, c.embedding_1024,
+           -- RDR-236 (nexus-6pfgb.40): the restored row holds only the CHUNK keys of the key table. The four quarantine keys
+           -- (quarantined_at, origin_collection, quarantined_by, reaper_quarantined_at) are the physical row's, written by the
+           -- engine's two quarantine moves, and every other key is a document or position key whose home is the catalog.
+           -- Both are derived from the columns, so the Phase 4 equalities hold by construction.
+           jsonb_build_object('chunk_text_hash', encode(c.chash, 'hex'), 'embedding_model', c.embedding_model),
+           c.created_at, c.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection)
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+       AND c.chash = ANY(v_chashes)
+    -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1)
+    ON CONFLICT DO NOTHING;
+
+    -- nexus-brxnp fix round: rows genuinely inserted vs. rows skipped
+    -- because the origin already had a live row for that chash (the DO
+    -- NOTHING conflict) -- recorded below as `already_live` so a
+    -- production investigation can tell the two apart without re-deriving
+    -- it from chunk timestamps by hand (T2 nexus/debug-u6d93-brxnp).
+    GET DIAGNOSTICS v_row_count = ROW_COUNT;
+
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+       AND c.chash = ANY(v_chashes);
+
+    v_restored := array_length(v_chashes, 1);
+
+    -- nexus-gt03d: audit the restore IN THE SAME TRANSACTION as the DELETE
+    -- above -- this is the exact gap conexus-86/nexus-9la1f found: rows
+    -- leaving quarantine by restore had no forensic trail, unlike
+    -- gc_quarantine_orphans/sweep_superseded_chunks (catalog-033).
+    -- `chashes` here is v_chashes itself (no caller-supplied sample_limit
+    -- on this function, unlike gc_quarantine_orphans -- same shape as
+    -- gc_expire_quarantine's own audit above), truncated at
+    -- GC_AUDIT_MAX_CHASHES (5000, CatalogRepository.java) with
+    -- chash_count still carrying the exact full v_restored count
+    -- regardless of truncation. nexus-brxnp fix round: also
+    -- already_live = candidates that hit the DO NOTHING conflict.
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, collection_id, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_restore_rereferenced', p_quarantine_collection, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection), 'engine', false, v_restored,
+        COALESCE(
+            (SELECT jsonb_agg(encode(x, 'hex'))
+               FROM unnest(v_chashes[1:LEAST(COALESCE(array_length(v_chashes, 1), 0), 5000)]) x),
+            '[]'::jsonb),
+        jsonb_build_object('origin_collection', p_origin_collection, 'already_live', v_restored - v_row_count)
+            || CASE WHEN COALESCE(array_length(v_chashes, 1), 0) > 5000
+                    THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+                    ELSE '{}'::jsonb END
+    );
+
+    RETURN v_restored;
+END;
+$function$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-085-5" author="nexus-p2m1x.28">
+        <comment>RDR-229 P3.8 (nexus-p2m1x.28): nexus.gc_restore_rereferenced_bounded: the first-ever origin registration no longer raises a bare 23505 from catalog_collections_live_tuple_uq; it refuses by name (22023) and writes nothing, or, for a quarantine row, is as before. Replaces the definition in vectors-083-2 of vectors-083-restore-by-origin-id.xml, the last definer; signature, attributes and grants are kept; nothing else in the body changes. DATA EFFECT: none, a function definition only. Rollback restores that definition.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+
+CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced_bounded(dim integer, p_tenant_id text, p_quarantine_collection text, p_origin_collection text, p_row_limit integer)
+ RETURNS TABLE(restored bigint, remaining bigint)
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_p28_holder text;  -- nexus-p2m1x.28: the live holder of the tuple a first-ever origin would take
+    v_origin_id bigint;
+    v_quar_id bigint;
+    -- RDR-229 P3.7 (vectors-083): read once, at the top of the call; from gate 3 a quarantined chunk is the origin's by the origin's id
+    v_latched boolean := EXISTS (SELECT 1 FROM nexus.rdr229_gate_latch WHERE gate = 'gate3');
+    v_chashes                 bytea[];
+    v_restored                bigint := 0;
+    v_remaining               bigint := 0;
+    v_row_limit               int;
+    v_row_count               bigint := 0;
+    v_collision_count         bigint;
+    v_collision_sample        text[];
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+BEGIN
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection;
+    SELECT cc.collection_id INTO v_quar_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection;
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced_bounded: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    -- A non-positive bound is a caller error, not "unbounded". The whole
+    -- point of this function is the bound; silently removing it would hand
+    -- back the exact unbounded transaction this exists to prevent (mirrors
+    -- catalog-037's identical guard).
+    IF COALESCE(p_row_limit, 0) <= 0 THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced_bounded: p_row_limit must be positive, got %. Use nexus.gc_restore_rereferenced for the unbounded restore.',
+            p_row_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    v_row_limit := LEAST(p_row_limit, 100000);
+
+    -- THE VICTIM SET, chosen ONCE and ordered for deterministic progress
+    -- across calls (nexus-a6mon's requirement, mirrored here). Unlike
+    -- gc_quarantine_orphans's unbounded form, gc_restore_rereferenced
+    -- ALREADY keys its copy-INSERT and DELETE off one array selected once
+    -- (catalog-039-1's own shape) -- the only change needed to bound it is
+    -- this ORDER BY chash LIMIT on the initial selection.
+    SELECT array_agg(x.chash ORDER BY x.chash) INTO v_chashes
+      FROM (
+        SELECT c.chash
+          FROM nexus.chunks c
+         WHERE c.tenant_id  = p_tenant_id
+           AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+           AND CASE WHEN v_latched THEN c.metadata->'origin_collection_id' = to_jsonb(v_origin_id)
+            ELSE COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection END
+           AND EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND (m.collection_id = v_origin_id OR (m.collection_id IS NULL AND m.collection = p_origin_collection AND p_origin_collection <> ''))
+                    AND m.chash      = c.chash
+               )
+         ORDER BY c.chash
+         LIMIT v_row_limit
+      ) x;
+
+    IF v_chashes IS NULL THEN
+        RETURN QUERY SELECT 0::bigint, 0::bigint;
+        RETURN;
+    END IF;
+
+    -- N7-STYLE cross-dim collision guard (identical to catalog-039-1's,
+    -- scoped to this batch's v_chashes): detect, BEFORE any row moves, any
+    -- restore candidate whose chash already exists at p_origin_collection
+    -- under a DIFFERENT populated embedding_<dim> column than the
+    -- candidate's own.
+    WITH candidate AS (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+           AND c.chash = ANY(v_chashes)
+    ),
+    collision AS (
+        SELECT cand.chash, cand.src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM candidate cand
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND (e.collection_id = v_origin_id OR (e.collection_id IS NULL AND e.collection = p_origin_collection AND p_origin_collection <> ''))
+           AND e.chash      = cand.chash
+    )
+    SELECT count(*),
+           COALESCE(array_agg(encode(chash, 'hex') ORDER BY chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM collision
+     WHERE src_dim IS DISTINCT FROM existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced_bounded: % cross-dim (tenant_id, collection, chash) collision(s) at restore target % for tenant=%, quarantine collection=% -- the unified PK cannot hold two different-dim rows for the same chash (mirrors vectors-004''s N7 guard, T2 22454). Sample chashes: %. Refusing to overwrite; verify the origin-collection naming keeps distinct dims/collections separated before retrying.',
+            v_collision_count, p_origin_collection, p_tenant_id, p_quarantine_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- RDR-204 nexus-uxd2a self-registration (identical to catalog-039-1's):
+    -- a genuinely first-ever origin is minted from the quarantine row's own
+    -- attributes, never parsed from either name. An existing origin row is
+    -- left exactly as it is (ON CONFLICT DO NOTHING).
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_quarantine_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced_bounded: quarantine collection % is not registered for tenant % -- attributes for a first-ever origin registration are copied from the quarantine row, never parsed from either name (RDR-204 nexus-uxd2a)',
+            p_quarantine_collection, p_tenant_id;
+    END IF;
+
+    -- nexus-p2m1x.28 (linda 2026-11-25): a first-ever origin is minted LIVE with the sibling's tuple, and catalog_collections_live_tuple_uq allows one
+    -- live holder of a tuple. Where no live row bears the origin's label (it was retired, or purged) and another live collection already holds the
+    -- tuple, the INSERT below raised a bare 23505 from the tuple index (the name arbiter does not cover it). The origin is NOT minted then: the call
+    -- refuses by name, before anything moves, and the quarantined chunks stay where they are (a restore into the collection that holds the tuple is
+    -- the operator's to name: it is a different label). A live row that bears the label is still left exactly as it is (DO NOTHING).
+    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_collections o
+                    WHERE o.tenant_id = p_tenant_id AND o.name = p_origin_collection AND o.superseded_by = '' AND o.superseded_by_id IS NULL) THEN
+        SELECT h.name INTO v_p28_holder
+          FROM nexus.catalog_collections h
+         WHERE h.tenant_id       = p_tenant_id
+           AND h.superseded_by   = ''
+           AND h.lifecycle_state <> 'quarantine'
+           AND h.content_type    = v_origin_content_type
+           AND h.owner_id        = v_origin_owner_id
+           AND h.embedding_model = v_origin_embedding_model
+           AND h.model_version   = v_origin_model_version
+         ORDER BY h.collection_id
+         LIMIT 1;
+        IF FOUND THEN
+            RAISE EXCEPTION
+                'gc_restore_rereferenced_bounded: origin collection % has no live row, and the live collection % already holds the tuple its first-ever registration would take; nothing was restored (restore into %, or register the origin under a tuple of its own first)',
+                p_origin_collection, v_p28_holder, v_p28_holder
+                USING ERRCODE = 'invalid_parameter_value';
+        END IF;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_origin_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'live'
+    )
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO NOTHING;
+
+    -- The origin's id is read again now that it is registered: a first-ever origin had none when the body began, and a
+    -- racing registration (the DO NOTHING above) may have committed one since.
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection;
+
+    -- created_at CARRIED THROUGH (nexus-e8h5x, mirroring catalog-037's fix
+    -- for the opposite direction): the unbounded gc_restore_rereferenced's
+    -- INSERT omits it, so the default restamps every restored row to
+    -- restore time and the chunk's generation history through the
+    -- quarantine round trip is lost.
+    -- RDR-225: embedding_model rides with the row (the chunk's own model, never the origin collection's: an
+    -- origin registered under another model refuses the row at the composite foreign key instead of filing a
+    -- vector under a model that did not embed it); the arbiter is the four-column primary key.
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                               embedding_384, embedding_768, embedding_1024,
+                               metadata, created_at, embedding_model, collection_id)
+    SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text,
+           c.embedding_384, c.embedding_768, c.embedding_1024,
+           -- RDR-236 (nexus-6pfgb.40): the restored row holds only the CHUNK keys of the key table. The four quarantine keys
+           -- (quarantined_at, origin_collection, quarantined_by, reaper_quarantined_at) are the physical row's, written by the
+           -- engine's two quarantine moves, and every other key is a document or position key whose home is the catalog.
+           -- Both are derived from the columns, so the Phase 4 equalities hold by construction.
+           jsonb_build_object('chunk_text_hash', encode(c.chash, 'hex'), 'embedding_model', c.embedding_model),
+           c.created_at, c.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection)
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+       AND c.chash = ANY(v_chashes)
+    -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1)
+    ON CONFLICT DO NOTHING;
+
+    -- nexus-brxnp fix round: rows genuinely inserted vs. rows skipped
+    -- because the origin already had a live row for that chash (the DO
+    -- NOTHING conflict) -- recorded below as `already_live` so a
+    -- production investigation can tell the two apart without re-deriving
+    -- it from chunk timestamps by hand (T2 nexus/debug-u6d93-brxnp).
+    GET DIAGNOSTICS v_row_count = ROW_COUNT;
+
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+       AND c.chash = ANY(v_chashes);
+
+    v_restored := array_length(v_chashes, 1);
+
+    -- What is LEFT after this commit, so the caller has a terminator it does
+    -- not have to invent from a stalling count (mirrors catalog-037).
+    SELECT count(*) INTO v_remaining
+      FROM nexus.chunks c
+     WHERE c.tenant_id  = p_tenant_id
+       AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+       AND CASE WHEN v_latched THEN c.metadata->'origin_collection_id' = to_jsonb(v_origin_id)
+            ELSE COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection END
+       AND EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND (m.collection_id = v_origin_id OR (m.collection_id IS NULL AND m.collection = p_origin_collection AND p_origin_collection <> ''))
+                AND m.chash      = c.chash
+           );
+
+    -- One gc_audit row per batch, catalog-039-1's audit shape (chashes
+    -- truncated at GC_AUDIT_MAX_CHASHES = 5000, CatalogRepository.java),
+    -- plus row_limit/remaining_after in details, matching catalog-037's
+    -- bounded audit convention. nexus-brxnp fix round: also
+    -- already_live = candidates that hit the DO NOTHING conflict.
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, collection_id, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_restore_rereferenced_bounded', p_quarantine_collection, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection), 'engine', false, v_restored,
+        COALESCE(
+            (SELECT jsonb_agg(encode(x, 'hex'))
+               FROM unnest(v_chashes[1:LEAST(COALESCE(array_length(v_chashes, 1), 0), 5000)]) x),
+            '[]'::jsonb),
+        jsonb_build_object(
+            'origin_collection', p_origin_collection,
+            'row_limit', v_row_limit,
+            'remaining_after', v_remaining,
+            'already_live', v_restored - v_row_count)
+            || CASE WHEN COALESCE(array_length(v_chashes, 1), 0) > 5000
+                    THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+                    ELSE '{}'::jsonb END
+    );
+
+    RETURN QUERY SELECT v_restored, v_remaining;
+END;
+$function$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+
+CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced_bounded(dim integer, p_tenant_id text, p_quarantine_collection text, p_origin_collection text, p_row_limit integer)
+ RETURNS TABLE(restored bigint, remaining bigint)
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_origin_id bigint;
+    v_quar_id bigint;
+    -- RDR-229 P3.7 (vectors-083): read once, at the top of the call; from gate 3 a quarantined chunk is the origin's by the origin's id
+    v_latched boolean := EXISTS (SELECT 1 FROM nexus.rdr229_gate_latch WHERE gate = 'gate3');
+    v_chashes                 bytea[];
+    v_restored                bigint := 0;
+    v_remaining               bigint := 0;
+    v_row_limit               int;
+    v_row_count               bigint := 0;
+    v_collision_count         bigint;
+    v_collision_sample        text[];
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+BEGIN
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection;
+    SELECT cc.collection_id INTO v_quar_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection;
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced_bounded: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    -- A non-positive bound is a caller error, not "unbounded". The whole
+    -- point of this function is the bound; silently removing it would hand
+    -- back the exact unbounded transaction this exists to prevent (mirrors
+    -- catalog-037's identical guard).
+    IF COALESCE(p_row_limit, 0) <= 0 THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced_bounded: p_row_limit must be positive, got %. Use nexus.gc_restore_rereferenced for the unbounded restore.',
+            p_row_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    v_row_limit := LEAST(p_row_limit, 100000);
+
+    -- THE VICTIM SET, chosen ONCE and ordered for deterministic progress
+    -- across calls (nexus-a6mon's requirement, mirrored here). Unlike
+    -- gc_quarantine_orphans's unbounded form, gc_restore_rereferenced
+    -- ALREADY keys its copy-INSERT and DELETE off one array selected once
+    -- (catalog-039-1's own shape) -- the only change needed to bound it is
+    -- this ORDER BY chash LIMIT on the initial selection.
+    SELECT array_agg(x.chash ORDER BY x.chash) INTO v_chashes
+      FROM (
+        SELECT c.chash
+          FROM nexus.chunks c
+         WHERE c.tenant_id  = p_tenant_id
+           AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+           AND CASE WHEN v_latched THEN c.metadata->'origin_collection_id' = to_jsonb(v_origin_id)
+            ELSE COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection END
+           AND EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND (m.collection_id = v_origin_id OR (m.collection_id IS NULL AND m.collection = p_origin_collection AND p_origin_collection <> ''))
+                    AND m.chash      = c.chash
+               )
+         ORDER BY c.chash
+         LIMIT v_row_limit
+      ) x;
+
+    IF v_chashes IS NULL THEN
+        RETURN QUERY SELECT 0::bigint, 0::bigint;
+        RETURN;
+    END IF;
+
+    -- N7-STYLE cross-dim collision guard (identical to catalog-039-1's,
+    -- scoped to this batch's v_chashes): detect, BEFORE any row moves, any
+    -- restore candidate whose chash already exists at p_origin_collection
+    -- under a DIFFERENT populated embedding_<dim> column than the
+    -- candidate's own.
+    WITH candidate AS (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+           AND c.chash = ANY(v_chashes)
+    ),
+    collision AS (
+        SELECT cand.chash, cand.src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM candidate cand
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND (e.collection_id = v_origin_id OR (e.collection_id IS NULL AND e.collection = p_origin_collection AND p_origin_collection <> ''))
+           AND e.chash      = cand.chash
+    )
+    SELECT count(*),
+           COALESCE(array_agg(encode(chash, 'hex') ORDER BY chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM collision
+     WHERE src_dim IS DISTINCT FROM existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced_bounded: % cross-dim (tenant_id, collection, chash) collision(s) at restore target % for tenant=%, quarantine collection=% -- the unified PK cannot hold two different-dim rows for the same chash (mirrors vectors-004''s N7 guard, T2 22454). Sample chashes: %. Refusing to overwrite; verify the origin-collection naming keeps distinct dims/collections separated before retrying.',
+            v_collision_count, p_origin_collection, p_tenant_id, p_quarantine_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- RDR-204 nexus-uxd2a self-registration (identical to catalog-039-1's):
+    -- a genuinely first-ever origin is minted from the quarantine row's own
+    -- attributes, never parsed from either name. An existing origin row is
+    -- left exactly as it is (ON CONFLICT DO NOTHING).
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_quarantine_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced_bounded: quarantine collection % is not registered for tenant % -- attributes for a first-ever origin registration are copied from the quarantine row, never parsed from either name (RDR-204 nexus-uxd2a)',
+            p_quarantine_collection, p_tenant_id;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_origin_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'live'
+    )
+    ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL DO NOTHING;
+
+    -- The origin's id is read again now that it is registered: a first-ever origin had none when the body began, and a
+    -- racing registration (the DO NOTHING above) may have committed one since.
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection;
+
+    -- created_at CARRIED THROUGH (nexus-e8h5x, mirroring catalog-037's fix
+    -- for the opposite direction): the unbounded gc_restore_rereferenced's
+    -- INSERT omits it, so the default restamps every restored row to
+    -- restore time and the chunk's generation history through the
+    -- quarantine round trip is lost.
+    -- RDR-225: embedding_model rides with the row (the chunk's own model, never the origin collection's: an
+    -- origin registered under another model refuses the row at the composite foreign key instead of filing a
+    -- vector under a model that did not embed it); the arbiter is the four-column primary key.
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                               embedding_384, embedding_768, embedding_1024,
+                               metadata, created_at, embedding_model, collection_id)
+    SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text,
+           c.embedding_384, c.embedding_768, c.embedding_1024,
+           -- RDR-236 (nexus-6pfgb.40): the restored row holds only the CHUNK keys of the key table. The four quarantine keys
+           -- (quarantined_at, origin_collection, quarantined_by, reaper_quarantined_at) are the physical row's, written by the
+           -- engine's two quarantine moves, and every other key is a document or position key whose home is the catalog.
+           -- Both are derived from the columns, so the Phase 4 equalities hold by construction.
+           jsonb_build_object('chunk_text_hash', encode(c.chash, 'hex'), 'embedding_model', c.embedding_model),
+           c.created_at, c.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection)
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+       AND c.chash = ANY(v_chashes)
+    -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1)
+    ON CONFLICT DO NOTHING;
+
+    -- nexus-brxnp fix round: rows genuinely inserted vs. rows skipped
+    -- because the origin already had a live row for that chash (the DO
+    -- NOTHING conflict) -- recorded below as `already_live` so a
+    -- production investigation can tell the two apart without re-deriving
+    -- it from chunk timestamps by hand (T2 nexus/debug-u6d93-brxnp).
+    GET DIAGNOSTICS v_row_count = ROW_COUNT;
+
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+       AND c.chash = ANY(v_chashes);
+
+    v_restored := array_length(v_chashes, 1);
+
+    -- What is LEFT after this commit, so the caller has a terminator it does
+    -- not have to invent from a stalling count (mirrors catalog-037).
+    SELECT count(*) INTO v_remaining
+      FROM nexus.chunks c
+     WHERE c.tenant_id  = p_tenant_id
+       AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
+       AND CASE WHEN v_latched THEN c.metadata->'origin_collection_id' = to_jsonb(v_origin_id)
+            ELSE COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection END
+       AND EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND (m.collection_id = v_origin_id OR (m.collection_id IS NULL AND m.collection = p_origin_collection AND p_origin_collection <> ''))
+                AND m.chash      = c.chash
+           );
+
+    -- One gc_audit row per batch, catalog-039-1's audit shape (chashes
+    -- truncated at GC_AUDIT_MAX_CHASHES = 5000, CatalogRepository.java),
+    -- plus row_limit/remaining_after in details, matching catalog-037's
+    -- bounded audit convention. nexus-brxnp fix round: also
+    -- already_live = candidates that hit the DO NOTHING conflict.
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, collection_id, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_restore_rereferenced_bounded', p_quarantine_collection, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection), 'engine', false, v_restored,
+        COALESCE(
+            (SELECT jsonb_agg(encode(x, 'hex'))
+               FROM unnest(v_chashes[1:LEAST(COALESCE(array_length(v_chashes, 1), 0), 5000)]) x),
+            '[]'::jsonb),
+        jsonb_build_object(
+            'origin_collection', p_origin_collection,
+            'row_limit', v_row_limit,
+            'remaining_after', v_remaining,
+            'already_live', v_restored - v_row_count)
+            || CASE WHEN COALESCE(array_length(v_chashes, 1), 0) > 5000
+                    THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+                    ELSE '{}'::jsonb END
+    );
+
+    RETURN QUERY SELECT v_restored, v_remaining;
+END;
+$function$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

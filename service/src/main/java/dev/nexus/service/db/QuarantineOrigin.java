@@ -401,6 +401,7 @@ public final class QuarantineOrigin {
     static int retagRowsOf(DSLContext ctx, String tenant, String from, String to, Gate3 gate3, Long originIdKnown) {
         final boolean byId = CollectionKey.of(gate3).byId();
         Condition rows = rowsOf(tenant, from, to, gate3, originIdKnown);
+        keyShareSiblings(ctx, tenant, rows, byId);
         // RDR-229 P3.1 stage 2b (nexus-p2m1x.17): the tag names the origin by id as well as by name, so a reader can
         // follow a rename by id. A metadata key, not a column. The id is the registry's now, in this transaction (the
         // rename registers its target before the retag runs); a target with no registry row is tagged by name alone.
@@ -440,6 +441,37 @@ public final class QuarantineOrigin {
             total += hex.size();
         }
         return total;
+    }
+
+    /** Passes of read-lock-reread of {@link #keyShareSiblings}: a sibling that appears while the locks are taken is locked on the next pass. */
+    private static final int SIBLING_LOCK_PASSES = 3;
+
+    /**
+     * The registry rows of the quarantine collections that hold rows of the origin, {@code FOR KEY SHARE} in {@code collection_id} order, before the
+     * retag reads or writes any of their rows (nexus-p2m1x.27 residual, linda 2026-11-24). The origin's own row is held by the caller. Without it a
+     * sibling renamed or retired in the retag's window was read and written under a label or id the registry no longer gave it. A key share does not
+     * conflict with another key share (a second retag, a writer), only with the row's rename, retire or delete, which is what must wait.
+     *
+     * <p>The set is read, locked and read again (up to {@link #SIBLING_LOCK_PASSES}) so a sibling that appeared between the first read and the locks
+     * is locked too; one that is created after the last read is a new move into a collection that did not exist, not a row this retag meant to find.
+     * The locks come after the origin's, so a delete of the same origin that holds a sibling {@code FOR UPDATE} and waits for the origin cycles with
+     * the retag: PostgreSQL ends one with 40P01 and the caller's {@code DeadlockRetry} runs it again.
+     */
+    private static void keyShareSiblings(DSLContext ctx, String tenant, Condition rows, boolean byId) {
+        java.util.Set<Long> held = new java.util.HashSet<>();
+        for (int pass = 0; pass < SIBLING_LOCK_PASSES; pass++) {
+            List<Sibling> found = siblingsHolding(ctx, rows, byId);
+            List<Long> ids = byId
+                ? found.stream().map(Sibling::id).toList()
+                : found.isEmpty() ? List.<Long>of() : ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(found.stream().map(Sibling::label).toList()))
+                    .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID).fetch(CATALOG_COLLECTIONS.COLLECTION_ID);
+            List<Long> todo = ids.stream().filter(held::add).toList();
+            if (todo.isEmpty()) {
+                return;
+            }
+            RegistryRowLocks.keyShareIfPresent(ctx, tenant, todo, List.of());
+        }
     }
 
     /**
