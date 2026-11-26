@@ -120,10 +120,12 @@ accepted for a window and then removed; and the Phase 2 gating on `develop`
 
 Claude Code has project and user `settings.json`, permission rules,
 `CLAUDE.md`, and plugin `userConfig`. The design has to say why the plugin
-keeps its own files instead of using those, and it rests on two questions
-the docs do not settle: whether a worktree-isolated subagent reads the
-worktree's `.claude/settings.json`, and whether a permission `ask` rule
-survives the plugin's PermissionRequest auto-approve.
+keeps its own files instead of using those, and the docs left two questions
+open: which `.claude/settings.json` a worktree-isolated subagent runs under,
+and whether a permission `ask` rule survives the plugin's PermissionRequest
+auto-approve. The spikes answered both (Research 10). The second answer is a
+defect in every shipped release: the plugin's PermissionRequest allow
+silently overrides a user's `ask` rule for any conexus tool.
 
 #### Gap 8: A repository could use its file to weaken a protection
 
@@ -202,7 +204,7 @@ and the current Claude Code docs (Research 6).
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| Claude Code permissions and hooks | Docs (code.claude.com, fetched 2026-11-25) | Research 6. A PreToolUse allow does not bypass `ask` or `deny` rules; a PermissionRequest allow against an `ask` rule is not settled. |
+| Claude Code permissions and hooks | Docs (code.claude.com, fetched 2026-11-25) | Research 6 and 10. A PreToolUse allow does not bypass `ask` or `deny` rules (docs); a PermissionRequest allow does answer an `ask` rule's prompt (spike, record 26). |
 | Claude Code plugin `userConfig` | Docs | User or managed scope only; values exported to hooks as environment variables. |
 | Python `json`, `os`, `difflib` | Stdlib | Available in every interpreter the hooks run under. |
 
@@ -264,8 +266,9 @@ https://code.claude.com/docs/en/).**
   returns: a matching deny rule blocks the call, and a matching ask rule still
   prompts even when the hook returned "allow"." For PermissionRequest
   (`hooks.md`, "PermissionRequest decision control"): "The hook can't approve
-  what a deny rule refuses." Whether a PermissionRequest allow answers the
-  prompt an `ask` rule raised is not stated.
+  what a deny rule refuses." The docs do not say whether a PermissionRequest
+  allow answers the prompt an `ask` rule raised; the spike in Research 10
+  shows that it does.
 - *Plugin `userConfig`* (`plugins/manifest-reference.md`, "User
   configuration", "Where values are stored"): non-sensitive values live under
   `pluginConfigs` in the user's `settings.json`; the settings reference lists
@@ -279,7 +282,8 @@ https://code.claude.com/docs/en/).**
   reads the same settings files as the terminal.
 - *Project `.claude/settings.json`* (`settings.md`): read from the session's
   primary working directory. Its `env` applies to "every session and its
-  subprocesses", which by inference includes command hooks. A project cannot
+  subprocesses"; Research 10 shows that this includes a plugin's command
+  hooks. A project cannot
   disable one hook of a plugin, only the whole plugin (`enabledPlugins`) or
   all hooks.
 - *Worktree-isolated subagents* (`worktrees.md`, "Isolate subagents with
@@ -288,7 +292,7 @@ https://code.claude.com/docs/en/).**
   worktree. Which `settings.json` it reads is not stated. For a `--worktree`
   session, hook `cwd` is the worktree root and `CLAUDE_PROJECT_DIR` stays at
   the start directory (`worktrees.md`, "Hook paths don't follow the
-  worktree"); by inference a worktree subagent's hooks see the same split.
+  worktree"). Research 10 settles both questions for subagents.
 - *Plugin data directory* (`manifest-reference.md`, "Environment variables"):
   `CLAUDE_PLUGIN_DATA` is `~/.claude/plugins/data/<id>/`, kept across updates
   and deleted on uninstall unless `--keep-data`.
@@ -315,29 +319,96 @@ that fix matters more once strict is an option for everyone (Decision 10).
 **Research 9 (Verified by source reading, for the emitter only).**
 `systemMessage` is a top-level hook output field the nx hook runtime already
 emits (`src/nexus/_hook_runtime/_io.py:243-255`, used by
-`mcp_connect_check.py`). The code does not say the user sees it; that is an
-assumption below.
+`mcp_connect_check.py`). The code alone does not show that the user sees it;
+Research 10 does, for the CLI.
+
+**Research 10 (Verified by spike, Claude Code 2.1.332 on the laptop,
+2026-11-25; records `nexus_rdr/259-research-26` to `-32`).** Each spike ran
+`claude` in a throwaway repository with hooks that logged every payload; the
+records hold the commands and outputs.
+
+- *A PermissionRequest allow overrides a user's `ask` rule* (record 26). With
+  a project `permissions.ask` rule for a Bash command, a PermissionRequest
+  hook that printed `{"decision": {"behavior": "allow"}}` let the command run
+  with no prompt, in default mode and in `acceptEdits`, and interactively the
+  transcript said "Allowed by PermissionRequest hook". A PreToolUse allow
+  did not: PermissionRequest still fired and the call was refused, as the
+  docs say. The plugin's auto-approve prints that same PermissionRequest
+  answer for every tool its matcher `mcp__plugin_conexus_.*` covers
+  (`src/nexus/hooks/auto_approve.py:14-16, 157-165`), so in every shipped
+  release a user's `ask` rule for any conexus tool is answered silently. That
+  last step is an inference; `memory_delete` itself was not run, to keep off
+  live T2.
+- *Project env reaches a plugin's command hooks* (record 27). A value set in
+  a project's `.claude/settings.json` `env` appeared in the environment of
+  both a project hook and a `--plugin-dir` plugin's hooks.
+- *A worktree-isolated subagent runs under the main session's settings*
+  (record 28). The primary's uncommitted `.claude/settings.json` governed every
+  hook, including the subagent's own Bash call; the copy committed in the
+  worktree never ran.
+- *A worktree subagent's hooks see the worktree as `cwd`* (record 29), in both
+  the payload and the process, while `CLAUDE_PROJECT_DIR` stays at the primary
+  root. The worktree's base commit is not settled. In the spike, whose primary
+  sat on a branch with no upstream, the worktree was cut from origin's default
+  branch, not from the primary's `HEAD`. In nexus, halcyon's check on
+  2026-11-25 of the 11 isolation worktrees under `.claude/worktrees/agent-*`
+  found 8 with `HEAD` on `origin/develop` (the branch the primary tracks), none
+  on `origin/main` (which is `origin/HEAD`), and the rest with agent commits on
+  top. A likely reading is that the base is the primary's current branch or
+  its upstream when it has one, and origin's default branch otherwise; that is
+  inferred, not isolated.
+- *A SessionStart `systemMessage` is shown in the interactive CLI* (record 30):
+  under the banner, before any prompt, as "SessionStart:startup says: ...".
+  The hook was a project hook, not a plugin hook; only `startup` was tried.
+- *Under the seatbelt a subagent can edit `.nexus/project.json` and commit it*
+  (record 31). Run through the real scripts at develop 870bf29e70: no conexus
+  hook stopped the Edit, the Write, `git add` with `git commit`, or `git rm`
+  with `git commit`; the controls showed the seatbelt and the full guard
+  denying what they should. The git guard is registered for Bash only.
+- *The readers cost about 60 microseconds a call warm and 1.2 ms cold*
+  (record 32; Apple M4 Max, Python 3.13): `guard_mode` reading both files with
+  the cwd five directories down averaged 59.5 us, and a fresh interpreter that
+  imports `_audience` and calls two readers took 22.4 ms against 21.2 ms bare.
+  Native Windows and the `HEAD` read path were not measured.
 
 ### Critical Assumptions
 
-- [ ] A PermissionRequest hook's `allow` does not answer a prompt raised by
-  the user's `permissions.ask` rule. **Status**: Unverified. **Method**: Docs
-  only, and the docs are silent. Decision 9 does not depend on it: the
-  `confirm_tools` setting gives users a prompt either way. The spike in
-  Phase 0 decides what the docs page tells users.
-- [ ] A worktree-isolated subagent's hook payload carries the worktree as
-  `cwd`. **Status**: Unverified (inference from `worktrees.md`). **Method**:
-  Spike. If it carries the main root instead, the subagent reads the primary's
-  `project.json`, which is the same tracked content on the same commit; the
-  design holds, and the spike result goes into `docs/settings.md`.
-- [ ] A SessionStart command hook's `systemMessage` is shown to the user in
-  the CLI and in Desktop. **Status**: Unverified in both; the existing
-  `mcp_connect_check` use shows only that the field is written. **Method**:
-  Spike.
-- [ ] Reading two small JSON files and walking up to `.git` adds under 5 ms
-  to a hook call. **Status**: Unverified. **Method**: measure in Phase 1 on
-  the laptop and on Windows; the git guard already stats and shells to git on
-  many calls.
+What is still assumed after the spikes:
+
+- [ ] A SessionStart `systemMessage` from a *plugin* command hook is shown
+  to the user, in Desktop as well as the CLI, and on `resume` and `clear` as
+  well as `startup`. **Status**: Verified only for a project hook on
+  `startup` in the CLI (Research 10). **Method**: Spike in Phase 1 for the
+  plugin-hook form and the two sources; Desktop needs a hand check because it
+  cannot be driven from a session. If Desktop does not show it, `nx settings
+  check` and the deny-text clause (Decision 4) still tell the user.
+- [ ] Which commit an isolation worktree is cut from. **Status**: Unsettled
+  (Research 10: origin's default branch in the spike, the primary's tracked
+  branch in nexus). **Method**: Spike. The design no longer depends on it
+  (Decision 1, which copy is read).
+- [ ] The auto-approve hook can read the user's, the project's and the local
+  Claude Code settings files and match `ask` and `deny` rules for MCP tools
+  the way Claude Code does (Decision 9). **Status**: Unverified. **Method**:
+  Source search of the documented rule grammar and a spike per rule form in
+  Phase 1.
+- [ ] `CLAUDE_PROJECT_DIR` reaches the nx-side hooks (the MCP server's hook
+  tools), not only command hooks. **Status**: Documented for command hooks
+  only. **Method**: Spike in Phase 1; where it is absent the reader uses the
+  payload `cwd`, as today.
+- [ ] The reader stays well under 5 ms on native Windows, and the `HEAD`
+  read path stays within its two-second timeout. **Status**: Laptop measured
+  (Research 10); Windows and the `HEAD` path not. **Method**: measure in
+  Phase 1.
+
+Acknowledged minor assumptions, which nothing in the design rests on:
+
+- Plugin `userConfig` has no project scope (record 8). The design does not use
+  `userConfig`, so the answer changes no decision.
+- A subagent's write to the user's `conexus.json` raises a permission prompt
+  in the default mode (record 23). User-file tampering by an agent is outside
+  the threat model (Decision 9); the assumption only softens that risk.
+- Opening a FIFO for reading blocks (record 25). This is POSIX behaviour, and
+  the regular-file check makes the question moot; a test covers it.
 
 ## Proposed Solution
 
@@ -362,13 +433,35 @@ mapped to decisions in the table at the end of this section.
 
 #### Decision 1: The files and where they live
 
-**Project file: `.nexus/project.json`** at the checkout root, which is the
-first directory at or above the payload's `cwd` (then `CLAUDE_PROJECT_DIR`)
-that holds a `.git` entry (a directory, or the file a linked worktree or
-submodule has). A nested repository or submodule is its own project. A linked
-worktree reads its own copy, which is the tracked file on that worktree's
-branch. A `cwd` outside any repository has no project settings. Sam ruled the
-name (ruling 7). The file is tracked so it reaches every place the project's
+**Project file: `.nexus/project.json`** at a checkout root, the first
+directory at or above a starting path that holds a `.git` entry (a
+directory, or the file a linked worktree or submodule has). A nested
+repository or submodule is its own project. A path outside any repository
+has no project settings. Sam ruled the name (ruling 7).
+
+**Which copy is read.** A subagent in an isolation worktree works in a
+checkout whose commit can differ from the primary's: Claude Code cut the
+spike's worktree from origin's default branch and nexus's from the branch
+the primary tracks, and the rule is not settled (Research 10). So the design
+does not depend on the worktree's base:
+
+- The *session root* is the checkout at or above `CLAUDE_PROJECT_DIR`, which
+  stays at the primary for a worktree subagent (Research 10), or at or above
+  the payload `cwd` when that variable is absent or outside a repository.
+  The text and list keys (`preflight`, `ci_wait`, `credential_helper`,
+  `integration_branch`, `brief_questions`) come from the session root's
+  working-tree file, the copy the session's own user maintains.
+- The tightening keys (`subagent_git`, `advice_block`) are combined, tighter
+  wins, across the session root's working-tree file, the session root's file
+  at `HEAD` (for `subagent_git`, Decision 9), and the file in the checkout the
+  payload `cwd` sits in when that is a different checkout (a worktree, or an
+  unrelated repository a subagent works in). Any copy can add strictness;
+  only the session root's committed copy can remove it.
+
+The trusted copy is therefore the session root's committed file. A
+worktree's copy, on whatever commit Claude Code chose, can only add to it.
+
+The file is tracked so it reaches every place the project's
 sessions run: the primary, every worktree, a copy made for a remote test
 host, Desktop and `claude -p`. Cloud sessions are a weaker case: a
 repository's `.claude/settings.json` hooks and env are ignored there, and
@@ -380,8 +473,8 @@ settled by the docs; Research 6).
 home comes from the OS account database (`pwd` on POSIX, the
 `FOLDERID_Profile` known-folder API on Windows), never from `HOME`,
 `USERPROFILE`, `XDG_CONFIG_HOME` or `NEXUS_CONFIG_DIR`. The reason is
-Research 6: a project's `.claude/settings.json` can set environment
-variables for every subprocess, so any location chosen by an environment
+Research 6 and record 27: a project's `.claude/settings.json` sets
+environment variables that reach the plugin's hooks, so any location chosen by an environment
 variable is a location a repository can choose. On Windows the path is
 `%USERPROFILE%\.config\nexus\conexus.json`, the same directory nx already
 uses there. The file sits beside nx's `config.yml` so a user finds both in
@@ -397,9 +490,9 @@ Alternatives weighed for the user file:
 
 - *Plugin `userConfig`.* Discoverable (Claude Code shows a dialog at install),
   but rejected for four reasons. Its values reach hooks as environment
-  variables, and a project's `env` can set the same names, so if project env
-  reaches command hooks (assumed, not measured) a user-only key such as
-  `telemetry` could be turned on by a repository (Research 6). No project
+  variables, and a project's `env` reaches a plugin's command hooks (record
+  27), so a repository could set the same names and turn on a user-only key
+  such as `telemetry` (Research 10). No project
   scope is documented for it. It lives in `~/.claude/settings.json`, which is not read in
   cloud sessions and which nx (outside Claude Code) would have to parse to
   show the effective settings. And it couples the settings contract to a
@@ -443,7 +536,6 @@ hooks on a P0 machine cannot import `nexus.tables`.
 | `version` | integer, 1 or more | 1 | yes | yes | per file |
 | `subagent_git` | `"strict"` or `"seatbelt"` | `"seatbelt"` | yes | yes | strictest wins |
 | `advice_block` | list of advice row ids | `[]` | yes | yes | union |
-| `confirm_tools` | list of conexus MCP tool names | `[]` | yes | yes | union |
 | `brief_questions` | list of up to 8 strings, each one line of at most 300 characters | `[]` | yes | yes | append: project's, then user's, exact duplicates dropped |
 | `preflight` | one line, at most 200 characters | none | yes | no | project only |
 | `ci_wait` | one line, at most 200 characters; `<sha>` is the only placeholder | none | yes | no | project only |
@@ -466,8 +558,6 @@ What each key does:
   `hook_verb_by_hand`, `running_script_edit` at d6a0b258b0); `docs/settings.md`
   lists them from the table. A row id becomes a public contract: a renamed row
   keeps its old id as an accepted alias for two client releases.
-- `confirm_tools`: the listed tools are left to Claude Code's normal
-  permission prompt instead of being auto-approved (Decision 9).
 - `brief_questions`: added after the plugin's four generic implementer brief
   questions.
 - `preflight`: the SubagentStart worktree row tells a dispatched agent "Run
@@ -522,12 +612,12 @@ already controls its `CLAUDE.md`; the plugin never executes project text.
 Per key:
 
 - `subagent_git`: the order is `seatbelt` < `strict`. The effective value is
-  the strictest of the project's working-tree file, the project's file at
-  `HEAD` (Decision 8), the user file, and the default. A project's
-  `"seatbelt"` is valid and changes nothing; it cannot lower a user's
-  `strict`.
-- `advice_block` and `confirm_tools`: union. Adding a row or a tool tightens;
-  no file can remove an entry another file added.
+  the strictest of the project copies Decision 1 names (the session root's
+  working tree and `HEAD`, and the payload checkout's working tree), the
+  user file, and the default. A project's `"seatbelt"` is valid and changes
+  nothing; it cannot lower a user's `strict`.
+- `advice_block`: union over the same project copies and the user file.
+  Adding a row tightens; no file can remove an entry another file added.
 - `brief_questions`: append, generic questions first, then the project's,
   then the user's; capped at 8 added questions in total, extra ones reported
   and dropped.
@@ -673,27 +763,42 @@ moving the constant, is then a visible diff (developer item 21).
 The plugin keeps its own two files and puts nothing in Claude Code's
 settings. Each Claude Code layer keeps its own job:
 
-- **Permissions** (`permissions.allow`, `ask`, `deny` in user or project
-  `settings.json`) stay Claude Code's. The plugin's auto-approve cannot
-  override a user's `ask` or `deny` through PreToolUse (Research 6); the
-  PermissionRequest case is open and handled by Decision 9.
+- **Permissions** (`permissions.allow`, `ask`, `deny` in user, project and
+  local `settings.json`) stay Claude Code's, and they are the one place a
+  user or a project asks for a prompt. A PreToolUse allow cannot override
+  them (Research 6), but a PermissionRequest allow does override an `ask`
+  rule (Research 10, record 26), so the plugin's auto-approve must defer to
+  them itself (Decision 9).
 - **`CLAUDE.md` and `.claude/rules/`** carry a project's prose. nexus's own
   prose (the incident history, `develop` as the integration branch, the push
   script, the lab hosts, the CI board) belongs there, not in plugin text.
 - **Plugin `userConfig`** is not used (Decision 1).
 - **Project `.claude/settings.json`** is not used for plugin settings.
 
-The two open questions, bounded:
+The two questions the docs left open:
 
 - *Does a worktree-isolated subagent read the worktree's
-  `.claude/settings.json`?* The docs do not say (Research 6). It does not
-  matter here, because no plugin setting lives in `.claude/settings.json`;
-  the plugin reads `project.json` from the payload's `cwd`. The Phase 0 spike
-  records which `cwd` a worktree subagent's hook sees.
+  `.claude/settings.json`?* No: it runs under the main session's settings,
+  the primary's working copy (Research 10, record 28). No plugin setting
+  lives there, so this changes nothing in the reader, but it fixes where the
+  auto-approve hook looks for the project's permission rules: the session
+  root (`CLAUDE_PROJECT_DIR`), not the payload `cwd` (Decision 9). The
+  subagent's hooks do see the worktree as `cwd`, and the worktree's commit
+  can differ from the primary's (record 29 and halcyon's check of nexus's
+  worktrees), which is why Decision 1 reads the session root's copy of
+  `project.json` and lets a worktree's copy only add to it.
 - *Can plugin `userConfig` be set per project?* Not as far as the docs go:
   the only documented scope is user or managed, and the negative is inferred
-  from their silence, not stated or tested (Research 6). That is one of the reasons Decision 1 does
-  not use it.
+  from their silence, not stated or tested (Research 6). That is one of the
+  reasons Decision 1 does not use it.
+
+Orchestrator guidance follows from record 29 and goes into the plugin's
+orchestration skill: an isolation worktree may not start at the primary's
+`HEAD`, so a dispatch whose work depends on a particular commit names that
+commit in the brief and has the agent check it first, or the orchestrator
+creates the worktree itself (`git worktree add <path> <commit>`) and points
+the agent at it. nexus's preflight script with a required sha is one such
+check.
 
 #### Decision 9: Security
 
@@ -702,9 +807,11 @@ only tightening values from a project file) and by tests (Decision 11).
 Further measures:
 
 - **The project file is read at `HEAD` as well as in the working tree** for
-  `subagent_git`, and the stricter of the two applies. A subagent working in
-  the shared checkout can edit or delete the working-tree file; without this,
-  its next Bash call would run under the seatbelt and could commit. A commit
+  `subagent_git`, at the session root, and the stricter applies. A subagent
+  working in the shared checkout can edit or delete the working-tree file and
+  commit the change under the seatbelt; the spike showed no conexus hook
+  stops either step (Research 10, record 31). Without the `HEAD` read, its
+  next Bash call would run under the seatbelt and could commit. A commit
   is exactly what the strict guard denies, so the `HEAD` copy cannot be
   changed from inside the protected case. The cost is one `git show
   HEAD:.nexus/project.json` (two-second timeout), taken only when the
@@ -716,8 +823,31 @@ Further measures:
   executes `preflight`, `ci_wait` or any other project value; it shows it to
   the model, which a repository can already do through `CLAUDE.md`. Length
   limits keep the text inside the SubagentStart byte budgets.
-- **No setting is read from the environment.** The only environment value
-  the reader uses is `CLAUDE_PROJECT_DIR`, as a fallback for the `cwd`.
+- **No setting is read from the environment.** A project's `env` reaches the
+  plugin's hooks (record 27). The only environment value the reader uses is
+  `CLAUDE_PROJECT_DIR`, to find the session root (Decision 1); a project
+  that sets it can move only which project file is read, and that file can
+  only tighten.
+- **The auto-approve hook defers to the user's own permission rules.** Before
+  it answers allow, on PreToolUse or PermissionRequest, the hook reads the
+  `permissions.ask` and `permissions.deny` rules from the files Claude Code
+  reads for the session: the user's `.claude/settings.json` under the OS
+  account home, and also under `CLAUDE_CONFIG_DIR` when that is set (a union,
+  so an environment value can add a place rules come from, never remove
+  one); the project's `.claude/settings.json` and `.claude/settings.local.json`
+  at the session root, which is where a worktree subagent's rules come from
+  (record 28); and the platform's managed settings file where one exists. If
+  any `ask` or `deny` rule matches the tool, by exact name, by the server
+  prefix (`mcp__plugin_conexus_nexus`), or by a wildcard form Claude Code's
+  rule grammar allows, the hook gives no answer and Claude Code applies its
+  own rule. A file that exists but cannot be read or parsed makes the hook
+  give no answer for every tool, so the failure is a prompt, never a silent
+  approval. This holds for every tool the auto-approve matcher
+  (`mcp__plugin_conexus_.*`) covers, not only the seven destructive ones. The
+  evidence is the spike in record 26: without this rule a PermissionRequest
+  allow silently overrides a user's `ask` rule, which is true of every
+  shipped release. Reading the rules the way Claude Code does is still an
+  assumption (Critical Assumptions), tested per rule form in Phase 1.
 
 Loosenings that remain, and why each is acceptable:
 
@@ -725,18 +855,24 @@ Loosenings that remain, and why each is acceptable:
   (`memory_delete`, `plan_delete`, `answer_plan_delete`,
   `memory_consolidate`, `nx_tidy`, `tuple_in`, `mailbox_send`) are
   auto-approved for everyone. This is a product decision, not a setting, so
-  no repository controls it. A user gets a prompt back two ways: a
-  `permissions.ask` rule in their Claude Code settings, which a PreToolUse
-  allow cannot bypass (Research 6), and `confirm_tools`, which makes the
-  plugin's hook give no answer for those tools on both PreToolUse and
-  PermissionRequest, so Claude Code's own prompt appears whatever the
-  unsettled PermissionRequest precedence turns out to be. `confirm_tools` is
-  a tightening, so a project may set it too. Sam's decision S4.
+  no repository controls it. A user gets a prompt back with an `ask` rule in
+  their own Claude Code settings, and a project with one in its tracked
+  `.claude/settings.json`; the deferral rule above makes the plugin honour
+  both. Sam's decision S4.
+
+  The draft's `confirm_tools` setting is dropped. It existed because the
+  `ask` route was unproven; with the deferral rule, Claude Code's own rules
+  do the same job for a user and for a project, for any tool, in the
+  grammar users already know. A plugin key beside them would be a second
+  vocabulary for one decision, and the two would drift. A project-only
+  `confirm_tools` was also weighed and rejected: a project's tracked
+  `.claude/settings.json` already carries an `ask` rule, and is read in a
+  single-repository cloud session too (Research 6).
 - **Remote test hosts** move from the environment variable
   `NX_REMOTE_TEST_HOSTS` (removed earlier, D11) to the user file. A project
   cannot set them.
 - **`NX_STOP_WAKE_GUARD=0`** stays an environment kill switch, which a
-  project's `env` may be able to set. It turns off an advisory continuation,
+  project's `env` can set (record 27). It turns off an advisory continuation,
   not a deny, prompt or data flow, and scripted `claude -p` runs need it. It
   is outside the invariant by the invariant's own definition.
 - **`# routing-allow:`** escapes are unchanged: an agent may use one only on
@@ -744,9 +880,9 @@ Loosenings that remain, and why each is acceptable:
 
 Out of the threat model: an agent that deliberately edits the user's own
 `conexus.json` to escape the guard. The guard prevents accidents by
-cooperative agents, and we assume (not checked in the docs or tested) that
-writing outside the project directory raises Claude Code's own prompt in the
-default permission mode. This is recorded as a risk.
+cooperative agents, and we assume (record 23, an acknowledged minor
+assumption) that writing outside the project directory raises Claude Code's
+own prompt in the default permission mode. This is recorded as a risk.
 
 #### Decision 10: The subagent git guard fix (nexus-5y47c) and the merge order
 
@@ -850,9 +986,9 @@ distrust real answers, and `CLAUDE.md` edits are his. Sam's decision S6
 | --- | --- | --- |
 | 1 | `schema: 1` unchecked; `project.json` alone decides | Renamed `version`, checked (D2). Kept: `project.json` alone decides; a legacy marker beside it is reported (D7). |
 | 2 | Silent fallbacks everywhere | Overturned. Every problem is reported, at session start, in the affected deny, in the log and by `nx settings` (D4, D5). |
-| 3 | Strict if either says strict; `advice_block` union | Kept, extended to the `HEAD` copy (D3, D9). |
+| 3 | Strict if either says strict; `advice_block` union | Kept, extended to the `HEAD` copy and the payload checkout's copy (D1, D3, D9). |
 | 4 | Strings stripped, commands not validated | Kept that commands are not interpreted; added type, one-line, control-character and length limits (D2). |
-| 5 | Walk from `cwd`, then `CLAUDE_PROJECT_DIR`, to the first `.git` | Kept (D1). |
+| 5 | Walk from `cwd`, then `CLAUDE_PROJECT_DIR`, to the first `.git` | Changed: text keys come from the session root (`CLAUDE_PROJECT_DIR` first), and the tightening keys combine the session root's copies with the payload checkout's, because a worktree's commit can differ from the primary's (D1, Research 10). |
 | 6 | User file per-key defaults; OS account home | Kept for the home; overturned for `subagent_git`, which fails strict (D4, S2). |
 | 7 | One module, byte-copied, per-reader fallbacks | Kept; the fallbacks are checked against `SETTINGS` by the lint (D11). |
 | 8 | Both legacy markers read strict | Kept, with a tested removal (D7). |
@@ -867,7 +1003,7 @@ distrust real answers, and `CLAUDE.md` edits are his. Sam's decision S6
 | 17 | `remote-test-hosts` a separate file | Folded into `conexus.json`; old file read during the window (D2, D7). |
 | 18 | Manifest vocabulary; SETTING row must call its reader | Kept, with more lint rules (D11). |
 | 19 | Both strict fixtures block the same row; "orchestrator" leaves the lexicon | Rows made distinct; "orchestrator" kept as product vocabulary (D11). |
-| 20 | Seven tools auto-approved; an `ask` rule claimed as the users' route, unverified | PreToolUse half verified in the docs; PermissionRequest half unsettled, so `confirm_tools` added (D9, S4). |
+| 20 | Seven tools auto-approved; an `ask` rule claimed as the users' route, unverified | Refuted by the spike (record 26): the plugin's PermissionRequest allow overrides an `ask` rule. Auto-approve now defers to the user's and the project's `ask` and `deny` rules for every allowlisted tool, which makes the `ask` rule the route (D9, S4). |
 | 21 | No removal test for the window | Version-keyed test (D7). |
 | 22 | Strict deny text says "orchestrator" and "STRUCTURE-AGNOSTIC" | Term defined once; shouting removed (D10). |
 
@@ -875,7 +1011,8 @@ distrust real answers, and `CLAUDE.md` edits are his. Sam's decision S6
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| Settings reader | `conexus/hooks/scripts/_audience.py` and `src/nexus/hooks/_audience.py` | Extend the rework's readers: add `SETTINGS`, problems, `version`, `$` keys, the file checks, the `HEAD` read, `confirm_tools`, `integration_branch`, `remote_test_hosts`, the `show` entry point. |
+| Settings reader | `conexus/hooks/scripts/_audience.py` and `src/nexus/hooks/_audience.py` | Extend the rework's readers: add `SETTINGS`, problems, `version`, `$` keys, the file checks, the `HEAD` read, the session-root and payload-checkout copies, `integration_branch`, `remote_test_hosts`, the `show` entry point. |
+| Permission-rule deferral | `src/nexus/hooks/auto_approve.py` | Extend: read Claude Code's `ask` and `deny` rules and give no answer when one matches (Decision 9). |
 | Once-per-session notes | `_audience._note_once` | Reuse for problem fingerprints. |
 | User-visible notice | `systemMessage` in `src/nexus/_hook_runtime/_io.py` | Reuse the field from a plugin-side stdlib SessionStart script. |
 | Inspection | `src/nexus/commands/config_cmd.py` | New `settings_cmd.py` beside it; `config` stays nx's own config. |
@@ -965,18 +1102,20 @@ outside Claude Code.
 
 ### Risks and Mitigations
 
-- **Risk**: The PermissionRequest hook's allow answers a user's `ask` rule,
-  so the documented route to prompts does not work.
-  **Mitigation**: `confirm_tools` works regardless; Phase 0 spike decides what
-  the docs promise.
+- **Risk**: The auto-approve hook's reading of Claude Code's permission
+  rules misses a rule form Claude Code honours, so an `ask` rule is still
+  answered silently (the shipped defect, record 26, in a narrower form).
+  **Mitigation**: A spike per rule form in Phase 1 (exact name, server
+  prefix, wildcard; user, project, local and managed files), and a parse
+  failure gives no answer rather than an allow.
 - **Risk**: A malformed project file in a stranger's repository gives a user
   the full guard unexpectedly.
   **Mitigation**: The session-start message and the deny text both name the
   file and the reason; a linked worktree is still exempt.
 - **Risk**: A subagent edits the user's `conexus.json`.
-  **Mitigation**: Out of the threat model (Decision 9); Claude Code prompts
-  for writes outside the project in the default mode. Revisit if an incident
-  shows it.
+  **Mitigation**: Out of the threat model (Decision 9); we assume, without a
+  test, that Claude Code prompts for writes outside the project in the
+  default mode (record 23). Revisit if an incident shows it.
 - **Risk**: The settings report at session start becomes noise if a problem
   persists.
   **Mitigation**: Once per session start, only when a problem exists, and
@@ -1005,7 +1144,7 @@ outside Claude Code.
 
 - [ ] Sam's answers to S1-S6 (below).
 - [ ] nexus-5y47c on `develop` (Decision 10).
-- [ ] Phase 0 spikes recorded.
+- [x] Phase 0 spikes recorded (records 26 to 32).
 
 ### Minimum Viable Validation
 
@@ -1018,43 +1157,51 @@ user-visible message naming the file and suggesting `subagent_git`; and
 `python3 <plugin root>/hooks/scripts/_audience.py show` reports each state.
 The same run on a P2 machine with `nx settings show` gives identical output.
 
-### Phase 0: Measure (no release)
+### Phase 0: Measure (no release), done 2026-11-25
 
-1. Spike: a user `permissions.ask` rule for `mcp__plugin_conexus_nexus__memory_delete`,
-   with the plugin's PreToolUse and PermissionRequest auto-approve active, in
-   default and in `acceptEdits` mode. Record whether a prompt appears.
-2. Spike: a worktree-isolated subagent's Bash PreToolUse payload: record `cwd`
-   and `CLAUDE_PROJECT_DIR`.
-3. Spike: a SessionStart command hook's `systemMessage` in the CLI and in
-   Desktop: record whether the user sees it.
-4. Spike: whether a project `.claude/settings.json` `env` value reaches a
-   plugin command hook (the plan's unrecorded Phase 0 item).
-
-**Ship when**: all four results are recorded in T2 with the commands used,
-and `docs/settings.md` drafts match them.
+The four spikes ran and are recorded as `nexus_rdr/259-research-26` to `-32`
+(Research 10): the PermissionRequest-versus-`ask` precedence (refuted the
+draft's assumption), the worktree subagent's settings and `cwd` (settled;
+the worktree's base commit is not), `systemMessage` in the CLI (settled for a
+project hook on `startup`), and project env reaching plugin hooks
+(confirmed), plus the seatbelt bypass and the reader's cost. What they left
+open moves to Phase 1.
 
 ### Phase 1: The reader, the reporting and the inspection command
 
 On the Phase 3 branch, rebased onto nexus-5y47c.
 
 1. Tests first (Decision 11): the corpus rows for the failure table, the
-   precedence matrix, the `HEAD` union, the legacy window, and the lint rules.
+   precedence matrix, the `HEAD` union, the session-root and worktree copies,
+   the legacy window, the permission-rule deferral, and the lint rules.
 2. `SETTINGS`, the readers, the problem list, the file checks, the `HEAD`
-   read, `confirm_tools`, `integration_branch`, `remote_test_hosts` and the
-   `show` entry point in `_audience.py`; byte copy to `src/nexus/hooks/`.
-3. The guard gate swap and deny text (Decision 10); auto-approve honours
-   `confirm_tools`; compaction uses `integration_branch`; the Stop guard
-   change and identifier renames (Decision 12); the preflight wording.
-4. The SessionStart problem notice (plugin-side, stdlib) and the deny-text
+   read, the session-root and payload-checkout copies, `integration_branch`,
+   `remote_test_hosts` and the `show` entry point in `_audience.py`; byte
+   copy to `src/nexus/hooks/`.
+3. The guard gate swap and deny text (Decision 10); the auto-approve
+   deferral to Claude Code's `ask` and `deny` rules (Decision 9), which fixes
+   shipped behaviour and may ship ahead of the rest (S4); compaction uses
+   `integration_branch`; the Stop guard change and identifier renames
+   (Decision 12); the preflight wording; the orchestration-skill line on
+   worktree base commits (Decision 8).
+4. Spikes left open by Phase 0: the plugin-hook form of the SessionStart
+   `systemMessage` on `startup`, `resume` and `clear`; each permission-rule
+   form against the deferral; `CLAUDE_PROJECT_DIR` in the nx-side hooks; the
+   reader's cost on native Windows and on the `HEAD` path. Desktop's display
+   of `systemMessage` is a hand check by Sam.
+5. The SessionStart problem notice (plugin-side, stdlib) and the deny-text
    clause for an unreadable file.
-5. `nx settings show` and `check`; the `nx doctor` row.
-6. The JSON Schema files.
+6. `nx settings show` and `check`; the `nx doctor` row.
+7. The JSON Schema files.
 
 **Ship when**: the reader and lint tests pass on both copies; the behaviour
 leg is green in plain, project-strict and user-strict, P0 and P2; the lint
 finds no `maintainer`, `account_flag` or `maintainer-profile` symbol; the
 Minimum Viable Validation passes on the laptop and on native Windows; the
-added hook time is measured and under 5 ms per call.
+added hook time on native Windows is measured and under 5 ms per call (the
+laptop's is already measured, record 32); a user `ask` rule for a conexus
+tool, in each rule form, produces a prompt with the plugin loaded; the step 4
+spikes are recorded.
 
 ### Phase 2: Un-gate and move nexus's words
 
@@ -1118,8 +1265,15 @@ None.
   the hook returns promptly and reads strict.
 - **Scenario**: `telemetry: true` in a project file. **Verify**: no event is
   sent; a problem is reported.
-- **Scenario**: `confirm_tools: ["memory_delete"]`. **Verify**: the
-  auto-approve hook gives no decision for that tool on either event.
+- **Scenario**: a `permissions.ask` rule for a conexus tool in the user's,
+  the project's, the local and (where present) the managed settings file, in
+  each rule form (exact name, server prefix, wildcard). **Verify**: the
+  auto-approve hook gives no answer for that tool on either event, and a live
+  run shows Claude Code's prompt. The same with a `deny` rule. With an
+  unparsable settings file: no answer for every tool.
+- **Scenario**: a worktree subagent whose worktree commit carries a
+  `project.json` without `subagent_git`, while the primary's commit says
+  `strict`. **Verify**: strict, read from the session root.
 - **Scenario**: `advice_block` in both files with different rows. **Verify**:
   both rows deny.
 - **Scenario**: nexus checkout without `project.json` but with the Phase 1
@@ -1144,32 +1298,41 @@ together. Done means the Phase 1 to 3 ship-when lines hold.
 ### Performance Expectations
 
 The reader adds a directory walk, at most two small file reads, and on one
-rare path a git call. Phase 1 measures it; no target beyond the 5 ms bound
-is claimed.
+rare path a git call. On the laptop the warm cost is about 60 microseconds
+and the cold cost 1.2 ms (Research 10, record 32); native Windows and the
+`HEAD` path are measured in Phase 1 against the 5 ms bound.
 
 ## Finalization Gate
 
 ### Contradiction Check
 
 The rework failed a broken user file to the seatbelt; Decision 4 fails it
-strict. That is a deliberate change, put to Sam as S2. No other contradiction
-found between the research, the rulings and the design.
+strict. That is a deliberate change, put to Sam as S2. The draft's claim that
+a user's `ask` rule was a route back to a prompt was refuted by the spike
+(record 26); Decision 9 now makes the plugin defer to that rule, and the
+draft's `confirm_tools` is dropped. No other contradiction found between the
+research, the rulings and the design.
 
 ### Assumption Verification
 
-Four assumptions are unverified and each has a Phase 0 spike or a Phase 1
-measurement. None is load-bearing for the direction: `confirm_tools` removes
-the dependency on the PermissionRequest question, and the `cwd` question
-changes only which copy of the same tracked file is read.
+Five assumptions remain (Critical Assumptions), each with a Phase 1 spike,
+measurement or hand check. The one the direction leans on is that the
+auto-approve hook can read Claude Code's permission rules as Claude Code
+does; its failure mode is a missed rule, which the per-form spikes target.
+The worktree base commit no longer matters to the design (Decision 1). Three
+minor assumptions are acknowledged and carry no decision.
 
 #### API Verification
 
 | API Call | Library | Verification |
 | --- | --- | --- |
 | PreToolUse `permissionDecision: allow` vs `permissions.ask` | Claude Code | Docs Only (stated) |
-| PermissionRequest `allow` vs `permissions.ask` | Claude Code | Spike (Phase 0) |
-| Hook payload `cwd` in a worktree subagent | Claude Code | Spike (Phase 0) |
-| `systemMessage` at SessionStart | Claude Code | Spike (Phase 0), CLI and Desktop |
+| PermissionRequest `allow` vs `permissions.ask` | Claude Code | Spike, record 26 (the allow wins) |
+| Project `env` reaching plugin command hooks | Claude Code | Spike, record 27 |
+| Settings a worktree subagent runs under | Claude Code | Spike, record 28 (the main session's) |
+| Hook payload `cwd` in a worktree subagent | Claude Code | Spike, record 29 (the worktree); base commit unsettled |
+| `systemMessage` at SessionStart | Claude Code | Spike, record 30 (CLI, project hook, `startup`); plugin hook, `resume`, `clear` in Phase 1; Desktop by hand |
+| Permission-rule matching for MCP tools | Claude Code | Spike per rule form, Phase 1 |
 
 ### Scope Verification
 
@@ -1197,7 +1360,9 @@ could move to a companion note once the gate has read it.
 - A plugin `userConfig` front end to the user file.
 - Per-directory settings inside one repository (monorepo subprojects).
 - A per-user, per-project local file.
-- An organisation or managed-settings layer.
+- An organisation or managed-settings layer for conexus settings (the
+  auto-approve deferral reads Claude Code's managed permission rules, which
+  is a different thing).
 - nx's own behaviour settings, which stay in `config.yml` and `.nexus.yml`.
 - Configurable advice text, or new advice rows.
 - Phase 4 of the portability plan (moving agent text into SubagentStart).
@@ -1217,10 +1382,14 @@ could move to a companion note once the gate has read it.
   can tighten at once but loosens only after a commit?** Recommended: yes.
   Without it a subagent can edit the file and then commit in the shared
   checkout (Decision 9).
-- **S4. Add `confirm_tools`, a setting that hands chosen tools back to Claude
-  Code's prompt, settable by a user or a project?** Recommended: yes. It is
-  the only route back to a prompt for the seven auto-approved tools that does
-  not depend on an undocumented precedence (Decision 9).
+- **S4. Should the auto-approve hook stay silent for any conexus tool that
+  the user's or the project's Claude Code permissions give an `ask` or
+  `deny` rule, so Claude Code applies the rule, with no plugin setting
+  beside it?** Recommended: yes, and ship it ahead of the rest of this RDR,
+  because every shipped release silently overrides such a rule (Research 10,
+  record 26). It keeps ruling 4 (auto-approve for everyone) for every user
+  who has written no such rule. You may see prompts you do not see today if
+  your own settings hold `ask` rules for conexus tools (Decision 9).
 - **S5. Is the inspection command named `nx settings` (`show`, `check`)?**
   Recommended: yes, cross-linked from `nx config --help` and `nx doctor`.
   The alternative is `nx config plugin show`, which hides it under nx's own
@@ -1249,3 +1418,4 @@ each machine where he wants strict, telemetry and remote hosts; delete
 ## Revision History
 
 - 2026-11-25: drafted.
+- 2026-11-25: spikes recorded (records 26 to 32). Auto-approve defers to Claude Code's `ask` and `deny` rules, and `confirm_tools` is dropped; the project file is read from the session root, and a worktree's copy can only add; Critical Assumptions restated.
