@@ -129,7 +129,9 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: `Bash|Edit|Write|MultiEdit`.
 #: 22 -> 23 at RDR-253 Step 6 part 2: `compact_checkpoint.py end`, a SessionEnd group whose matcher is `clear` only (the
 #: resume pointer for a /clear in a session that never compacted).
-EXPECTED_CONEXUS_ENTRIES = 23
+#: 23 -> 24 at nexus-sby49.12 (RDR-259 Decision 4): `settings_notice.py`, the SessionStart settings problem notice, in a group whose
+#: matcher is `startup|resume|clear`.
+EXPECTED_CONEXUS_ENTRIES = 24
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -185,6 +187,7 @@ PLUGIN_RESIDENT_SCRIPTS = frozenset(
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/stop_wake_guard.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_setup_notice.py",
+        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/settings_notice.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/credential_print_guard.py",

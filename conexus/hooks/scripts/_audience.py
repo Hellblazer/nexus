@@ -869,6 +869,16 @@ def advice_blocked(payload: object, head: bool = False) -> "frozenset[str]":
         return frozenset()
 
 
+def settings_problems(payload: object, head: bool = True) -> "list[Problem]":
+    """Every problem the session's settings have, for the SessionStart notice (the list ``show`` and ``check`` print, minus the
+    remote-branch check). Reads ``HEAD`` by default, since a committed copy that cannot be read is a problem to report; a
+    repository with no settings file still starts no ``git`` process. An empty list on any error."""
+    try:
+        return list(read_settings(payload, head=head).problems)
+    except BaseException:  # noqa: BLE001 -- a notice must never fail the hook
+        return []
+
+
 def telemetry_enabled() -> bool:
     """The user's ``telemetry`` setting (default false). False on any error: it sends data, so it loosens."""
     try:

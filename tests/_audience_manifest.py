@@ -9,7 +9,7 @@ way the manifest and the code disagree, and the lint test and the behaviour leg 
 
 The checks, each a way a rule can reach the wrong audience unnoticed:
 
-* every ``hooks.json`` registration has an entry, keyed on event plus argv (23 registrations, 22 distinct argv: auto-approve
+* every ``hooks.json`` registration has an entry, keyed on event plus argv (24 registrations, 23 distinct argv: auto-approve
   is registered for PreToolUse and PermissionRequest with one argv), and an entry names a registration that exists;
 * every value is in its vocabulary, and an audience agrees with its gate (``SETTING:<key>`` <-> ``setting``, EVERY-USER <->
   none or a gate on the user's data);
@@ -55,6 +55,8 @@ PREDICATES: dict[str, str] = {
     "remote_test_hosts": "frozenset()",
     "note_hook_error": "void",
     "forced_strict_clause": "None",
+    "settings_problems": "[]",
+    "format_problem": "''",
 }
 #: The settings an audience ``SETTING:<key>`` may name, and the reader a module must call for each.
 SETTING_READERS: dict[str, tuple[str, ...]] = {

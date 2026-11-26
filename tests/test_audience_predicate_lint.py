@@ -49,6 +49,9 @@ SAFE_ANSWER: dict[str, object] = {
     "advice_blocked": "empty",
     "remote_test_hosts": "empty",
     "note_hook_error": None,
+    "forced_strict_clause": None,
+    "settings_problems": "emptylist",
+    "format_problem": "",
 }
 WRAPPERS = {"run_hook", "never_fail"}
 

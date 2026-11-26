@@ -100,18 +100,20 @@ def _require_uv() -> None:
 
 
 def test_the_walk_finds_the_launcher_entries() -> None:
-    """Non-vacuity: twenty-two entries launch through uv: six scripts, four through
+    """Non-vacuity: twenty-three entries launch through uv: six scripts, four through
     the shim (the fourth is the SubagentStop T1 nudge, nexus-mtheb.3) and seven
     through the launcher (RDR-228, nexus-sv2wx.8), and four through
     ``compact_checkpoint.py`` (nexus-3lqxv; the fourth is the SessionEnd ``end`` mode, RDR-253 Step 6); the sixth script is the Stop wake guard
     (nexus-4cgop). The twenty-first is ``destructive_action_advice.py`` (nexus-qo7ie.36), the
-    advise-mode PreToolUse guard on ``Bash|Edit|Write|MultiEdit``."""
+    advise-mode PreToolUse guard on ``Bash|Edit|Write|MultiEdit``. The twenty-third is the SessionStart
+    ``settings_notice.py`` (nexus-sby49.12, RDR-259)."""
     entries = _launcher_entries()
-    assert len(entries) == 22, [(e, _script(h)) for e, h in entries]
+    assert len(entries) == 23, [(e, _script(h)) for e, h in entries]
     assert sum(1 for _, h in entries if _script(h) == "nx_launch.py") == 7
     assert {_script(h) for _, h in entries} == {
         "nx_launch.py",
         "nx_setup_notice.py",
+        "settings_notice.py",
         "version_lockstep_hook.py",
         "nx_hook_shim.py",
         "subagent_git_write_requires_orchestrator.py",

@@ -31,7 +31,8 @@ by at most that much, and the tests below hold each and all of them together):
   and the memory-curation line (``nx memory curate`` is due).
 
 Not counted, and why: the fire-only notices (setup, preflight failure, mcp-connect timeout, version lockstep, RDR remedy and
-unchecked-fix lines, hygiene), which are zero on a healthy start; and the compaction checkpoint, a state snapshot that fires on
+unchecked-fix lines, hygiene, and the settings problem notice, which holds itself to its own bounds in
+``tests/hooks/test_settings_problem_notice.py``), which are zero on a healthy start; and the compaction checkpoint, a state snapshot that fires on
 ``compact`` only and is capped at 8,192 bytes by its own test. Per-event measurements are in the build record.
 """
 from __future__ import annotations
