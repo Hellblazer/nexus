@@ -167,11 +167,11 @@ def test_a_pipeline_that_carries_verb_text_into_a_command_is_refused():
     assert _kind("git show HEAD:f > out") == "read"
 
 
-def test_cd_sets_a_directory_only_along_an_and_run_or_a_guarded_exit():
+def test_cd_sets_a_directory_only_along_an_and_run():
     assert _kind("cd " + ROOT + " && git add -A") == "worktree"
     assert _kind("cd " + ROOT + " && git status && git add -A && git commit -m x") == "worktree"
-    assert _kind("cd " + ROOT + " || exit 1; git add -A; git commit -m x") == "worktree"
-    assert _kind("cd " + ROOT + " || exit 1\ngit add -A") == "worktree"
+    assert _kind("cd " + ROOT + " || exit 1; git add -A; git commit -m x") is None  # Sam's ruling: `&&` only
+    assert _kind("cd " + ROOT + " || exit 1\ngit add -A") is None
     assert _kind("cd " + ROOT + "; git add -A") is None
     assert _kind("cd " + ROOT + "\ngit add -A") is None
     assert _kind("cd " + ROOT + " || echo no; git add -A") is None
@@ -181,7 +181,8 @@ def test_cd_sets_a_directory_only_along_an_and_run_or_a_guarded_exit():
     assert _kind("cd " + ROOT + "/sub && git add -A") is None
     assert _kind("cd /elsewhere && git add -A") is None
     assert _kind("cd " + ROOT + " && cd /elsewhere && git add -A") is None
-    assert _kind("cd " + ROOT + " && (git add -A; git commit -m x)") == "worktree"
+    assert _kind("cd " + ROOT + " && (git add -A && git commit -m x)") == "worktree"
+    assert _kind("cd " + ROOT + " && (git add -A; git commit -m x)") is None
     assert _kind("cd " + ROOT + " && (cd /elsewhere; git add -A)") is None
     assert _kind("(cd " + ROOT + " && git add -A); git commit -m x") is None
 
@@ -247,7 +248,7 @@ def test_the_module_stays_pure():
         alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
     } | {node.module.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
     assert imported <= {"__future__", "os", "re", "tempfile", "typing"}, imported
-    assert _kind("git stash list | head -1; cd " + ROOT + " && git add -A") == "worktree"
+    assert _kind("git stash list | head -1 && cd " + ROOT + " && git add -A") == "worktree"
 
 
 
@@ -264,3 +265,156 @@ def test_a_verb_word_in_a_command_beside_a_git_word_elsewhere_is_left_to_the_old
     assert _kind("git status; rm -rf /tmp/scratch && mv a b") == "read"  # a verb as the command name is no argument
     # and a command with no git word at all never reached the admission
     assert _kind("uv run pytest -k commit") == "read"
+
+
+W_ADD = "git -C " + ROOT + " add -A"
+
+
+@pytest.mark.parametrize("before", [
+    # the proof of the worktree is read before these run: each can swap the path or the cwd first
+    "rm " + ROOT + "/.git && ln -s /prim/.git " + ROOT + "/.git",
+    "mv " + ROOT + " " + ROOT + ".old && ln -s /prim " + ROOT,
+    "ln -sfn /prim " + ROOT,
+    "export GIT''_DIR=/prim/.git",
+    'export GIT"_"DIR=/prim/.git',
+    'declare -x GI"T_DIR"=/prim/.git',
+    "export P''ATH=/tmp/evil:" + D + "PATH",
+    "read x < f",
+    "pushd /prim",
+    "popd",
+    "chdir /prim",
+    "builtin cd /prim",
+    "command cd /prim",
+    "exec cd /prim",
+    "eval cd /prim",
+    "touch /tmp/y",
+    "uv run pytest -q",
+    "make test",
+    "true || cd " + ROOT,
+])
+def test_a_write_admits_no_segment_that_can_change_what_the_proof_read(before):
+    assert _kind(before + " && " + W_ADD) is None
+    assert _kind("cd " + ROOT + " && " + before + " && git add -A") is None
+    assert _kind(W_ADD + " && " + before) is None
+
+
+def test_a_plain_assignment_and_an_inert_head_may_stand_beside_a_write():
+    assert _kind("W=" + ROOT + "; git -C " + D + "W add -A") == "worktree"
+    assert _kind("ls " + ROOT + " | head -3 && " + W_ADD) == "worktree"
+    assert _kind("cd " + ROOT + " && git status && git add -A") == "worktree"
+
+
+def test_a_file_write_beside_a_write_refuses():
+    assert _kind(W_ADD + " && cat f > " + ROOT + "/.git") is None
+    assert _kind(": > " + ROOT + "/.git && " + W_ADD) is None
+    assert _kind(W_ADD + " 2>&1 | tail -3") == "worktree"
+    assert _kind(W_ADD + " > /dev/null 2>&1") == "worktree"
+
+
+def test_a_directory_named_as_a_command_is_a_cd_in_zsh(tmp_path):
+    here = tmp_path / "prim"
+    here.mkdir()
+    hooks = _hooks()._replace(cwd=str(tmp_path))
+    assert A.analyze("cd " + ROOT + " && " + str(here) + " && git add -A", hooks) is None
+    assert A.analyze("cd " + ROOT + " && prim && git add -A", hooks) is None
+    assert A.analyze("git status && " + str(here) + " && echo add", hooks) is None
+    assert A.analyze("cd " + ROOT + " && git add -A", hooks) is not None
+
+
+@pytest.mark.parametrize("move", [
+    "git -C " + ROOT + " switch main",
+    "git -C " + ROOT + " switch --create main",
+    "git -C " + ROOT + " switch --create=main",
+    "git -C " + ROOT + " rebase --onto main feature-x main",
+    "git -C " + ROOT + " reset --soft abc1234",
+    "git -C " + ROOT + " merge --ff-only abc1234",
+    "git -C " + ROOT + " cherry-pick abc1234",
+])
+def test_a_push_beside_a_verb_that_moves_head_refuses(move):
+    push = "git -C " + ROOT + " push origin HEAD"
+    assert _kind(move + " && " + push) is None
+    assert _kind("cd " + ROOT + " && " + move.replace("git -C " + ROOT + " ", "git ") + " && git push origin HEAD") is None
+    assert _kind(push) == "push"
+
+
+def test_a_value_word_that_could_split_into_flags_refuses():
+    base = "git -C " + ROOT + " rebase --onto "
+    assert _kind(base + "main HEAD") == "worktree"
+    assert _kind(base + chr(34) + D + "X" + chr(34) + " HEAD") == "worktree"
+    assert _kind("X='main --exec true'; " + base + D + "X HEAD") is None
+    assert _kind(base + D + "(echo 'main --exec=true') HEAD") is None
+    assert _kind(base + D + "{X} HEAD") is None
+    assert _kind("git -C " + ROOT + " commit -m " + D + "MSG") is None
+    assert _kind("git -C " + ROOT + " commit -m " + chr(34) + D + "MSG" + chr(34)) == "worktree"
+
+
+@pytest.mark.parametrize("args", [
+    "ls-remote --upload-pack='git checkout f' .",
+    "ls-remote --exec='git stash' .",
+    "ls-remote --upload-pa='git stash' .",
+    "ls-remote --receive-pack='git add' .",
+    "ls-remote ext::git-add .",
+    "ls-remote --foo=add .",
+    "grep -nO'git checkout f' x",
+    "grep -O'git stash' x",
+    "grep --open-files-in-pager='git stash' x",
+    "grep --open-f='git stash' x",
+    "grep --o='git stash' x",
+    "grep -n add " + D + "X x",
+    "help -m checkout",
+    "help -w checkout",
+    "help --man checkout",
+    "help --web checkout",
+    "diff --outp=/tmp/add HEAD",
+    "log --outpu=/tmp/add",
+    "show --out=/tmp/add",
+])
+def test_a_read_only_subcommand_that_can_run_a_program_or_write_a_file_refuses(args):
+    assert _kind("git " + args) is None
+
+
+@pytest.mark.parametrize("args", [
+    "ls-remote --heads --tags origin",
+    "ls-remote --sort=refname --refs origin",
+    "ls-remote --exit-code -q origin main",
+    "grep -n commit -- docs",
+    "grep --only-matching -e push x",
+    "grep -ne checkout x",
+    "diff --output-indicator-new=+ HEAD",
+    "help -a",
+])
+def test_the_read_only_shapes_that_do_not_take_a_program_still_pass(args):
+    assert _kind("git " + args + " && echo commit") == "read"
+
+
+def test_fetch_depth_and_unshallow_are_admitted_only_into_a_scratch_repository(tmp_path):
+    box = tempfile.mkdtemp(prefix="nx-5y47c-box-")
+    try:
+        assert _kind("git fetch --depth=1 origin add") is None
+        assert _kind("git fetch --unshallow origin add") is None
+        assert _kind("git -C " + ROOT + " fetch --depth 1 origin add") is None
+        assert _kind("git fetch -q origin add") == "read"
+        assert _kind("git init -q " + box + "/r && git -C " + box + "/r fetch --depth=1 origin add") == "scratch"
+    finally:
+        shutil.rmtree(box, ignore_errors=True)
+
+
+def test_after_an_or_the_cd_context_is_not_set():
+    for pre in ("true", "ls", "git status", "cd /prim"):
+        assert _kind(pre + " || cd " + ROOT + " && git add -A") is None
+    assert _kind("cd " + ROOT + " && git add -A") == "worktree"
+
+
+def test_only_and_chains_carry_a_write_with_a_separator_the_ruling_names():
+    a = "git -C " + ROOT
+    assert _kind(a + " add -A && " + a + " commit -m x") == "worktree"
+    assert _kind(a + " add -A; " + a + " commit -m x") is None
+    assert _kind(a + " add -A\n" + a + " commit -m x") is None
+    assert _kind(a + " add -A || " + a + " commit -m x") is None
+    assert _kind(a + " add -A | cat") == "worktree"
+
+
+def test_a_file_write_downstream_of_verb_text_in_a_pipeline_refuses():
+    assert _kind("git log --grep=add | cat > /tmp/out") is None
+    assert _kind("git log --grep=add > /tmp/out") is None
+    assert _kind("git log --format=%h | cat > /tmp/out") == "read"

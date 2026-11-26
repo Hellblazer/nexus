@@ -71,7 +71,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/orchestration/reference.md`: a section, Git in an implementer brief (worktree root, the one shape, who pushes), nexus-5y47c.
 - `conexus/hooks/scripts/routing/README.md`: the git guard's freeze note records the one lift for the six nexus-5y47c fixes (Sam, 2026-11-25).
 - `conexus/hooks/audience.yaml`: the audience manifest, one entry per hook registration, module and injected constant; read by the lint and the behaviour leg, nexus-sby49.3; a module entry for `_git_admit.py`, nexus-5y47c.
-- `conexus/hooks/scripts/routing/registry.yaml`: each rule carries its `audience`, nexus-sby49.3.
+- `conexus/hooks/scripts/routing/registry.yaml`: each rule carries its `audience`, nexus-sby49.3; the git guard's rationale names the segment admission and its limits, nexus-5y47c.
 - `conexus/skills/writing-nx-skills/promotion.md`: the target table gains an Audience column, a hook target is live only with its audience.yaml entry and a behaviour-leg case, and the loss check lists over-reach, nexus-sby49.3.
 - `conexus/hooks/scripts/routing/destructive_action_advice.py`: the advice `Row` gains an `audience` field (every row EVERY-USER), nexus-sby49.3.
 

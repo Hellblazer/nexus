@@ -35,6 +35,17 @@ rest of its pipeline, and a segment of the last kind after the taint is refused.
 A variable bound earlier in the command is read back into later segments before
 they are scanned, so ``X='git checkout f'; sh -c "$X"`` denies.
 
+The proof of a worktree, of a scratch directory and of the branch a push names is read
+BEFORE the command runs, so a command that admits a write (a worktree chain, a push, a
+detached worktree, a scratch repository) may hold nothing else that could change the cwd, a
+path, the environment or HEAD first (nexus-5y47c review, 2026-11-25): beside its admitted git
+segments it may carry only a plain ``cd <literal>``, an inert text head or a plain
+assignment (never ``pushd``, ``builtin cd``, ``ln``, ``mv``, ``rm``, ``export``, ``read``, a
+bare directory path that zsh would ``cd`` to, a prefix assignment or a file write), a
+worktree chain or push is separated by ``&&`` or a pipe and never ``;``, ``||`` or a newline,
+and a push is refused beside a ``switch``, ``rebase``, ``reset``, ``merge``, ``cherry-pick``
+or ``revert``. A ``cd`` sets the context only when no ``||`` came earlier in its run.
+
 Fail mode: every refusal path returns ``None`` and the caller falls through. The
 module holds no state and never touches the filesystem except through the
 callables it is given (``Hooks``) and the two pure path checks below.
@@ -162,6 +173,7 @@ _UNQ_SAFE = frozenset(
 _GLOB = frozenset("*?[]")
 _SYSTEM_BINS = frozenset({"/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"})
 _PROTECTED_BRANCHES = frozenset({"develop", "main", "master"})
+_HEAD_MOVERS = frozenset({"switch", "rebase", "reset", "merge", "cherry-pick", "revert"})
 _BRANCH_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 _REMOTE_REF_PREFIX = "refs/heads/"
 
@@ -188,6 +200,8 @@ class Hooks(NamedTuple):
     has_verb_word: Callable[[str], bool]
     #: does the text hold ``git`` as a command word (the unchanged arming rule)?
     has_git_word: Callable[[str], bool]
+    #: the payload's cwd, so a bare head word that names a directory (zsh auto_cd) is seen as one
+    cwd: str = ""
 
 
 class _Refuse(Exception):
@@ -203,7 +217,7 @@ class _Subst(NamedTuple):
 class _RawWord(NamedTuple):
     #: ``(kind, text)``: ``u`` unquoted literal, ``s`` single-quoted, ``d`` double-quoted
     #: literal, ``v`` unquoted variable name, ``V`` quoted variable name, ``g`` glob char,
-    #: ``c`` a command substitution (text is a ``_Subst``).
+    #: ``c`` a command substitution (text is a ``_Subst``), ``C`` one inside double quotes.
     parts: tuple[tuple[str, Any], ...]
 
 
@@ -223,6 +237,9 @@ class _Word(NamedTuple):
     #: no unquoted ``~`` or ``^``: zsh reads them as expansion and glob syntax. A write shape
     #: takes only plain words, so `'HEAD~1'` is written quoted, as the deny text has always said.
     plain: bool = True
+    #: a literal, or built only of double-quoted variables and substitutions: it cannot split into
+    #: extra flags, which an unquoted ``$X`` or ``$(...)`` can (`--onto $X`).
+    safe_value: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +396,7 @@ def _lex_var(command: str, i: int, parts: list[tuple[str, Any]], kind: str, dept
         if depth >= _MAX_SUBST_DEPTH or command[i + 2:i + 3] == "(":
             raise _Refuse  # too deep, or `$((` arithmetic
         segs, end = _lex(command, i + 2, depth + 1, True)
-        parts.append(("c", _Subst(tuple(segs), command[i + 2:end - 1])))
+        parts.append(("c" if kind == "v" else "C", _Subst(tuple(segs), command[i + 2:end - 1])))
         return end
     if nxt == "{":
         m = _VAR_BRACE_RE.match(command, i + 1)
@@ -453,6 +470,7 @@ def _resolve(word: _RawWord, env: Env) -> _Word:
     out: list[str] = []
     lit = True
     plain = True
+    safe = True
     for idx, (kind, text) in enumerate(word.parts):
         if kind in ("u", "s", "d"):
             out.append(text)
@@ -462,26 +480,32 @@ def _resolve(word: _RawWord, env: Env) -> _Word:
                 lit = False
         elif kind == "g":
             out.append(text)
-            lit = False
-        elif kind == "c":
+            lit = safe = False
+        elif kind in ("c", "C"):
             out.append("$(" + text.raw + ")")
             lit = False
+            if kind == "c":
+                safe = False
         else:
             bound = env.get(text)
             if bound is None:
                 out.append("$" + text)
                 lit = False
+                if kind == "v":
+                    safe = False
                 continue
             tmpl, certain = bound
             out.append(tmpl)
             if not certain or "$" in tmpl:
                 lit = False
+                if kind == "v":
+                    safe = False
             elif kind == "v" and (not tmpl or re.search(r"[\s*?\[\]~]", tmpl)):
-                lit = False  # an unquoted expansion may split or glob
+                lit = safe = False  # an unquoted expansion may split or glob
     text_out = "".join(out)
     if len(text_out) > MAX_WORD:
         raise _Refuse
-    return _Word(text_out, lit, plain)
+    return _Word(text_out, lit, plain, safe)
 
 
 def _render_raw(raw: str, env: Env) -> str:
@@ -564,6 +588,8 @@ def _flags_ok(allowed: dict[str, bool], rest: list[_Word]) -> bool:
     for w in rest:
         if expect_value:
             expect_value = False
+            if not w.safe_value:
+                return False  # `--onto $X` could split into `main --exec true`
             continue
         if not w.lit:
             return False
@@ -589,6 +615,8 @@ def _split_positionals(
     expect_value = False
     for w in rest:
         if expect_value:
+            if not w.safe_value:
+                return None
             flags.append(w)
             expect_value = False
             continue
@@ -615,6 +643,7 @@ class _Res(NamedTuple):
     kind: str
     check: Check | None = None
     created: str | None = None
+    moves_head: bool = False  # a verb that can change which branch HEAD names, or where it points
 
 
 def _parse_git(words: list[_Word]) -> tuple[_Word | None, int] | None:
@@ -664,12 +693,50 @@ def _branch_read_only(args: list[_Word]) -> bool:
     return not expect_value
 
 
+_LS_REMOTE_FLAGS: dict[str, bool] = {
+    "--heads": False, "--tags": False, "--refs": False, "--quiet": False, "-q": False,
+    "--exit-code": False, "--get-url": False, "--symref": False, "--sort": True,
+}
+_HELP_FLAGS = frozenset({"-a", "--all", "-g", "--guides", "-c", "--config"})
+_OUTPUT_OK = frozenset({"--output-indicator-new", "--output-indicator-old", "--output-indicator-context"})
+
+
+def _before_double_dash(args: list[_Word]) -> list[_Word]:
+    for n, w in enumerate(args):
+        if w.lit and w.text == "--":
+            return args[:n]
+    return args
+
+
+def _ro_options_safe(sub: str, args: list[_Word]) -> bool:
+    """False for an option of a read-only subcommand that runs a program or writes a file.
+    git reads any unique prefix of a long option, so these are allowlists or prefix tests."""
+    opts = _before_double_dash(args)
+    if sub in ("grep", "ls-remote", "help") and not all(w.safe_value for w in opts):
+        return False  # an unquoted `$X` could be `-Osh`
+    for w in opts:
+        t = w.text
+        if not w.lit or not t.startswith("-") or t == "-":
+            continue
+        name = t.partition("=")[0]
+        if name.startswith("--out") and name not in _OUTPUT_OK:
+            return False  # `--outp=<file>` is `--output`, git's own file writer
+        if sub == "grep" and ((name.startswith("--o") and name != "--only-matching")
+                              or (not t.startswith("--") and "O" in t)):
+            return False  # --open-files-in-pager and its prefixes, and a cluster like -nO
+    if sub == "ls-remote":
+        split = _split_positionals(_LS_REMOTE_FLAGS, args)
+        return split is not None and all(
+            not p.text.startswith("-") and "::" not in p.text for p in split[1]
+        )
+    if sub == "help":
+        return all(not w.lit or not w.text.startswith("-") or w.text in _HELP_FLAGS for w in args)
+    return True
+
+
 def _ro_shape(sub: str, args: list[_Word]) -> bool:
     if sub in _RO_SUBCOMMANDS:
-        if sub == "grep":
-            return not any(w.lit and (w.text.startswith("-O") or w.text.startswith("--open-files-in-pager"))
-                           for w in args)
-        return True
+        return _ro_options_safe(sub, args)
     if sub == "stash":
         return bool(args) and args[0].lit and args[0].text in ("list", "show")
     if sub == "worktree":
@@ -687,7 +754,7 @@ def _fetch_shape(args: list[_Word]) -> bool:
         return False
     _flags, pos = split
     for idx, w in enumerate(pos):
-        if w.text.startswith("+") or (idx > 0 and ":" in w.text):
+        if w.text.startswith("+") or "::" in w.text or (idx > 0 and ":" in w.text):  # `ext::` runs a program
             return False
     return True
 
@@ -730,16 +797,24 @@ def _handle_git(
         return None
     args = words[i + 1:]
 
-    if _ro_shape(sub, args) or (sub == "fetch" and _fetch_shape(args)):
-        return _Res("read", Check(raw, False, None))
-    if not writes_ok or not all(w.plain for w in words[1:]):
-        return None
-
     c_path: str | None = None
     if c_word is not None:
         c_path = _clean_abs(c_word)
-        if c_path is None:
-            return None
+    if _ro_shape(sub, args):
+        return _Res("read", Check(raw, False, None))
+    if sub == "fetch" and _fetch_shape(args):
+        shallow = any(w.lit and w.text.partition("=")[0] in ("--depth", "--unshallow") for w in args)
+        # --depth and --unshallow rewrite the repository's `shallow` file, which a linked worktree
+        # shares with the primary: only a scratch repository this command created may take them.
+        if not shallow or (c_path is not None and c_path in created) or (
+            c_word is None and ctx is not None and ctx[0] == "scratch" and ctx[1] in created
+        ):
+            return _Res("read", Check(raw, False, None))
+        return None
+    if not writes_ok or not all(w.plain for w in words[1:]):
+        return None
+    if c_word is not None and c_path is None:
+        return None
 
     if sub == "worktree":
         return _worktree_add(args, raw)
@@ -770,7 +845,7 @@ def _handle_git(
             )
             return _Res("scratch") if ok else None
         if sub in DASH_C_FLAGS and _flags_ok(DASH_C_FLAGS[sub], args):
-            return _Res("scratch")
+            return _Res("scratch", moves_head=sub in _HEAD_MOVERS)
         return None
     # a linked worktree git proved
     if sub == "push":
@@ -781,7 +856,7 @@ def _handle_git(
         tail = " ".join(a.text for a in args)
         if "git" in tail and hooks.legacy_denies(tail):
             return None  # a message that spells a git write: pass it with -F <file>
-        return _Res("worktree", Check(raw, True, root))
+        return _Res("worktree", Check(raw, True, root), moves_head=sub in _HEAD_MOVERS)
     return None
 
 
@@ -830,7 +905,7 @@ def _clone(args: list[_Word]) -> _Res | None:
     if split is None:
         return None
     _flags, pos = split
-    if len(pos) != 2:
+    if len(pos) != 2 or "::" in pos[0].text:  # `ext::` runs a program
         return None
     dest = _clean_abs(pos[1])
     if dest is None or not _fresh_scratch_dir(dest):
@@ -852,6 +927,7 @@ def _first_plain(word: _RawWord) -> str | None:
 
 def analyze(command: str, hooks: Hooks) -> Admission | None:
     """The admission verdict for *command*, or None (the caller falls through)."""
+    command = command.strip(" \t\n")
     if not command or len(command) > MAX_COMMAND:
         return None
     try:
@@ -901,7 +977,7 @@ def _redirect_kinds(seg: _RawSeg, env: Env) -> tuple[bool, bool]:
 
 
 def _substitutions(words: Any) -> list[_Subst]:
-    return [text for w in words for kind, text in w.parts if kind == "c"]
+    return [text for w in words for kind, text in w.parts if kind in ("c", "C")]
 
 
 class _Run:
@@ -910,16 +986,32 @@ class _Run:
 
     def __init__(self, command: str, hooks: Hooks) -> None:
         self.hooks = hooks
-        self.writes_ok = _GIT_ENV_RE.search(command) is None
+        # a quote-split name (`GIT''_DIR`) is still the variable: judge the text with quotes and backslashes gone
+        self.writes_ok = _GIT_ENV_RE.search(re.sub(r"[\"'\\]", "", command)) is None
         self.git_in_command = hooks.has_git_word(command)
         self.created: set[str] = set()
         self.checks: list[Check] = []
         self.kinds: set[str] = set()
         self.substitutions = 0
         self.executor = False  # a segment that can run text: an interpreter, a shell, xargs
+        #: A segment that is not an admitted git segment, a plain `cd <literal>`, an inert head or a
+        #: plain assignment. While a write is admitted none may stand beside it: the proof of the
+        #: worktree is read before the command runs, and such a segment can move the cwd, swap a
+        #: path for a symlink, change the environment or move HEAD first.
+        self.other = False
+        self.file_writes = False
+        self.head_moves = False
+        self.ops: set[str] = set()
 
     def finish(self, segs: list[_RawSeg]) -> Admission:
         self.run(segs, {}, None)
+        writes = self.kinds & {"worktree", "push", "detached", "scratch"}
+        if writes and (self.other or self.file_writes):
+            raise _Refuse
+        if self.kinds & {"worktree", "push"} and self.ops & {";", "\n", "||"}:
+            raise _Refuse  # Sam's ruling: `cd <wt> &&` and `&&`-chained -C literals, not `;`, `||` or a newline
+        if "push" in self.kinds and self.head_moves:
+            raise _Refuse  # `switch main && push origin HEAD`: the branch is read before the command runs
         if self.executor:
             # The unchanged guard withholds every exemption from a command that holds an
             # interpreter: verb text and the interpreter may meet through an environment
@@ -930,6 +1022,14 @@ class _Run:
             if kind in self.kinds:
                 return Admission(kind, tuple(self.checks))
         return Admission("read", tuple(self.checks))
+
+    def _names_a_directory(self, word: str) -> bool:
+        base = self.hooks.cwd
+        path = word if os.path.isabs(word) or not base else os.path.join(base, word)
+        try:
+            return os.path.isdir(path)
+        except (OSError, ValueError):
+            return True  # unreadable: refuse
 
     def _cd_context(self, path: str | None) -> tuple[str, str] | None:
         if path is None:
@@ -954,7 +1054,7 @@ class _Run:
         ctx = ctx0  # a subshell or substitution starts in the directory its outer command is in
         base = ctx0  # where a command after `;`, a newline or `||` is: the cwd a guarded cd set
         keep_ctx = ctx0 is not None
-        pending_ctx: tuple[str, str] | None = None
+        or_seen = False  # a `||` earlier in this run since the last `;` or newline
         depth = 0
         tainted = False
         prev_op = ""
@@ -964,6 +1064,10 @@ class _Run:
             if prev_op in ("", ";", "\n", "||") and not keep_ctx:
                 ctx = base
             keep_ctx = False
+            if prev_op in (";", "\n"):
+                or_seen = False
+            elif prev_op == "||":
+                or_seen = True
             piped_in = prev_op == "|"
             piped = piped_in or seg.op == "|"
             if not piped_in:
@@ -972,6 +1076,7 @@ class _Run:
                 if piped or seg.redirects:
                     raise _Refuse
                 self.run(list(seg.sub), dict(env), ctx)
+                self.ops.add(seg.op)
                 prev_op = seg.op
                 continue
             words = list(seg.words)
@@ -985,6 +1090,7 @@ class _Run:
                         raise _Refuse
                 elif kw not in _INTRO:
                     break
+                self.other = True  # a compound command: which segments run is not read here
                 words.pop(0)
             self._subst(_substitutions(words) + _substitutions(w for _o, w in seg.redirects), env, ctx)
             if not words:
@@ -998,6 +1104,7 @@ class _Run:
                 ):
                     raise _Refuse
                 env[name] = (" ".join(_resolve(w, env).text for w in words[3:]), False)
+                self.other = True
                 depth += 1
                 prev_op = seg.op
                 continue
@@ -1025,30 +1132,33 @@ class _Run:
                     env[name] = (w.text, w.lit and not conditional)
                 prev_op = seg.op
                 continue
+            self.ops.add(seg.op)  # (a plain assignment's own separator names nothing that runs)
             rw = [_resolve(w, env) for w in words]
             head = rw[0]
             name = _bare_command(head)
             writes_file, reads_file = _redirect_kinds(seg, env)
+            self.file_writes = self.file_writes or writes_file
+            if assigns:
+                self.other = True  # `X=1 cmd`: an environment only that command sees
+            if (
+                head.lit and name not in ("git", "cd") and name not in _INERT_HEADS
+                and self._names_a_directory(head.text)
+            ):
+                raise _Refuse  # zsh auto_cd: a bare directory path as a command is a `cd`
 
             if name == "cd":
                 if piped or len(rw) != 2 or rw[1].text.startswith("-") or writes_file or reads_file:
                     raise _Refuse
                 base = None  # after a cd the cwd is the new one or, if it failed, the old one
-                new_ctx = self._cd_context(_clean_abs(rw[1])) if depth == 0 else None
-                if new_ctx is not None and seg.op == "&&":
+                target = _clean_abs(rw[1])
+                if target is None:
+                    self.other = True  # not a plain `cd <literal>`
+                new_ctx = self._cd_context(target) if depth == 0 else None
+                # `a || cd <wt> && git add` parses as `(a || cd <wt>) && git add`: the cd may not have run
+                if new_ctx is not None and seg.op == "&&" and not or_seen and prev_op in ("", "&&", ";", "\n"):
                     ctx, keep_ctx = new_ctx, True
                 else:
                     ctx = None
-                    nxt = segs[k + 1] if k + 1 < len(segs) else None
-                    if (
-                        new_ctx is not None and seg.op == "||" and nxt is not None and nxt.words
-                        and _first_plain(nxt.words[0]) in ("exit", "return") and nxt.op in (";", "\n", "")
-                    ):
-                        pending_ctx = new_ctx  # `cd <root> || exit 1`: the next command runs only in it
-                prev_op = seg.op
-                continue
-            if name == "exit" and pending_ctx is not None:
-                ctx, base, keep_ctx, pending_ctx = pending_ctx, pending_ctx, True, None
                 prev_op = seg.op
                 continue
 
@@ -1061,6 +1171,8 @@ class _Run:
                 )
                 if res is not None and res.created:
                     self.created.add(res.created)
+                if res is not None and res.moves_head:
+                    self.head_moves = True
             elif name == "printf" and any(a.text == "-v" for a in rw[1:]):
                 raise _Refuse  # `printf -v V ...` sets a variable the later commands read
             elif name in _INERT_HEADS or (name == "sed" and _sed_print_only(rw[1:])):
@@ -1075,13 +1187,14 @@ class _Run:
                 if res.check is not None:
                     self.checks.append(res.check)
                 self.kinds.add(res.kind)
-                if carries and writes_file:
+                if (carries or (piped_in and tainted)) and writes_file:
                     raise _Refuse
                 if piped and carries:
                     tainted = True
                 prev_op = seg.op
                 continue
             # anything else must pass the unchanged guard on its own text
+            self.other = True
             if piped_in and tainted:
                 raise _Refuse
             # `export V=stash`, `declare -x V=stash`, `env V=stash cmd`: read the value back

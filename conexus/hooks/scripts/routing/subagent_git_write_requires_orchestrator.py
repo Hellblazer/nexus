@@ -4114,15 +4114,15 @@ def _deny_message(agent_type: str, verb_names: str, *,
                   sidefx: bool = False) -> str:
     head = (
         f"Denied: subagent `{agent_type or 'unknown'}` may not run git write verbs ({verb_names}) "
-        f"in the shared tree. The guard is STRUCTURE-AGNOSTIC (it reads the raw command text), so "
-        f"a verb word inside a pattern or filename can trip it: rephrase.\n"
+        f"in the shared tree. The guard is STRUCTURE-AGNOSTIC (it reads the raw command text): a "
+        f"verb word that an interpreter, a pipe, a file or a variable could run denies; rephrase.\n"
         f"Allowed shape, in a linked worktree you were given: `git -C <absolute worktree root> "
         f"<verb> ...`, or `cd <worktree root> && git <verb> ...` (a `cd <wt>` counts only before "
         f"`&&`), calls chained with `&&`; verb add, commit, rm, mv, switch -c, reset "
         f"(--soft/--mixed), rebase, cherry-pick, revert, merge or branch <new>; flags spelled "
         f"out (no `-am`), `'HEAD~1'` quoted; a commit message that names a git verb goes "
         f"through `-F <file>`. Also open: read-only git, `git fetch`, `git push [-u] origin "
-        f"HEAD` of that worktree's own branch.\n"
+        f"HEAD` of that worktree's own branch. Or dispatch with isolation: worktree.\n"
         f"Not from a subagent: checkout, stash, restore, reset --hard, clean, or any write in "
         f"the primary checkout (`gh pr checkout` and `gh repo sync` too). Ask the orchestrator: "
         f"hand back diffs and paths (a background agent does that via SubagentHandback or "
@@ -4608,7 +4608,7 @@ def _has_git_word(text: str) -> bool:
     return _first_git_command(_normalize_for_primary_scan(text)) is not None
 
 
-def _admission(command: str) -> Any:
+def _admission(command: str, cwd: str = "") -> Any:
     """The admission module's verdict for *command* (nexus-5y47c), after the config
     and side-effect rules have run on every git segment it admitted; None when
     nothing is admitted. Each segment is judged as a worktree command exactly when
@@ -4616,12 +4616,12 @@ def _admission(command: str) -> Any:
     if _git_admit is None:
         return None
     try:
-        return _admission_unguarded(command)
+        return _admission_unguarded(command, cwd)
     except Exception:  # noqa: BLE001 -- run_hook(fail_closed=False) would ALLOW on a crash; an admission bug must deny
         return None
 
 
-def _admission_unguarded(command: str) -> Any:
+def _admission_unguarded(command: str, cwd: str) -> Any:
     proven: dict[str, bool] = {}
 
     def is_wt_root(path: str) -> bool:
@@ -4634,7 +4634,7 @@ def _admission_unguarded(command: str) -> Any:
         _git_admit.Hooks(
             legacy_denies=_legacy_denies, is_wt_root=is_wt_root, branch_of=_current_branch,
             safe_config_key=_config_worktree_key, has_verb_word=_has_verb_word,
-            has_git_word=_has_git_word,
+            has_git_word=_has_git_word, cwd=cwd,
         ),
     )
     if adm is None:
@@ -4731,7 +4731,7 @@ def body(payload: dict[str, Any]) -> None:
     # read-only shape, a text command, a plain fetch, or an allowlisted write aimed
     # at a worktree git proves. It never overrides the adjacency rule.
     if not spliced_fragment:
-        admitted = _admission(command)
+        admitted = _admission(command, str(payload.get("cwd") or "") or os.environ.get("CLAUDE_PROJECT_DIR", ""))
         if admitted is not None:
             _lib.log_routing_event(
                 rule=RULE_NAME, outcome=f"allow_admit_{admitted.kind}", tool_name="Bash",

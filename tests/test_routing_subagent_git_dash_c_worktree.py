@@ -221,7 +221,15 @@ def test_anything_beyond_one_literal_invocation_falls_through(primary, worktree)
     wt, p = str(worktree), str(primary)
     cmds = [
         f"git -C {wt} commit -m x && git commit -m y",
+        f"git -C {wt} commit -m x && touch /tmp/y",
+        f"git -C {wt} commit -m x; touch /tmp/y",
+        f"git -C {wt} commit -m x || touch /tmp/y",
+        f"git -C {wt} commit -m x\ntouch /tmp/y",
+        f'git -C {wt} commit -m "{D}(touch /tmp/y)"',
         f"git -C {wt} commit -m {BT}touch /tmp/y{BT}",
+        f"git -C {wt} add -A; git -C {wt} commit -m x",
+        f"git -C {wt} add -A\ngit -C {wt} commit -m x",
+        f"git -C {wt} add -A || git -C {wt} commit -m x",
         f"git -C {wt} rebase --ex 'x=g; y=it; {D}x{D}y -C {p} reset --hard' abc1234",
         f"git -C {wt} switch --ignore-other-worktrees develop",
         f"git -C {wt} branch -u origin/develop",
@@ -243,22 +251,6 @@ def test_anything_beyond_one_literal_invocation_falls_through(primary, worktree)
     ]
     passed = [c for c in cmds if _allowed(c, primary)]
     assert not passed, passed
-
-
-def test_a_chain_of_admitted_shapes_and_other_commands_is_admitted_since_nexus_5y47c(primary, worktree):
-    """The carve-out used to take ONE literal invocation. Sam's ruling (nexus-5y47c, fix 2) trusts a chain of them
-    and any other command the unchanged guard passes on its own text; the plain-write and primary-targeting
-    chains stay in the refusal test above and in tests/test_routing_subagent_git_admit.py."""
-    wt = str(worktree)
-    cmds = [
-        f"git -C {wt} commit -m x && touch /tmp/y",
-        f"git -C {wt} commit -m x; touch /tmp/y",
-        f"git -C {wt} commit -m x || touch /tmp/y",
-        f"git -C {wt} commit -m x\ntouch /tmp/y",
-        f'git -C {wt} commit -m "{D}(touch /tmp/y)"',
-    ]
-    blocked = [c for c in cmds if not _allowed(c, primary)]
-    assert not blocked, blocked
 
 
 def test_the_deny_message_gives_the_working_shape(primary):

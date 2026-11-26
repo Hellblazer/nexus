@@ -315,25 +315,24 @@ def test_a_planted_write_in_each_read_shape_stays_denied(primary):
 
 _WT_ADMITTED = [
     "git -C {wt} add -A && git -C {wt} commit -m 'fix(x): y'",
-    "git -C {wt} add -- f.txt; git -C {wt} commit --message=msg; git -C {wt} log --oneline -1",
+    "git -C {wt} add -- f.txt && git -C {wt} commit --message=msg && git -C {wt} log --oneline -1",
     "git -C {wt} commit --message 'msg' --quiet",
     "git -C {wt} commit --quiet --amend --no-edit",
     "git -C {wt} rm --quiet --cached f.txt",
     "git -C {wt} switch --create step-4 --quiet",
     "git -C {wt} add -A && git -C {wt} commit -F /tmp/msg.txt && git -C {wt} log -1 --format=%h",
     "git -C {wt} add -A 2>&1 | tail -3",
-    "git -C {wt} commit -m x 2>&1 | tail -3; git -C {wt} status --short",
+    "git -C {wt} commit -m x 2>&1 | tail -3 && git -C {wt} status --short",
     "cd {wt} && git add -A && git commit -m x",
     "cd {wt} && git status --short && git add -A && git commit -q -m 'wip'",
     "cd {wt} && git rebase origin/develop 2>&1 | tail -3",
     "cd {wt} && git merge --ff-only origin/develop",
     "cd {wt} && git reset --soft 'HEAD~1'",
     "cd {wt} && git log --oneline -3 && git cherry-pick abc1234",
-    "cd {wt} || exit 1; git add -A; git commit -m x",
     "W={wt}; git -C " + D + "W add -A && git -C " + D + "W commit -m x",
     "W={wt}; cd " + D + "W && git add -A && git commit -m x",
     "cd {wt} && git add f.txt && git commit -m 'a' && cd {wt} && git commit --amend --no-edit",
-    "cd {wt} && (git status --short; git add -A) && git commit -m x",
+    "cd {wt} && (git status --short && git add -A) && git commit -m x",
     "git -C {wt} branch step-5 abc1234 && git -C {wt} switch step-5",
     "git -C {wt} cherry-pick --no-edit abc1234 2>&1 | tail -3",
     "git -C {wt} commit --dry-run",
@@ -509,7 +508,7 @@ _SCRATCH_PASSES = [
     "mkdir -p {box}/r2 && cd {box}/r2 && git init -q -b main && git config commit.gpgsign false",
     "git clone -q {primary} {box}/c1 && git -C {box}/c1 log --oneline -1",
     "git clone -q --branch trunk --depth 1 {primary} {box}/c2 && cd {box}/c2 && git switch --create t",
-    "S={box}; rm -rf " + D + "S/r3 && git init -q " + D + "S/r3 && git -C " + D + "S/r3 add -A",
+    "S={box}; git init -q " + D + "S/r3 && git -C " + D + "S/r3 add -A",
 ]
 
 
@@ -738,12 +737,92 @@ def test_every_admitted_shape_refuses_a_write_planted_beside_it(primary, worktre
     assert not leaked, leaked[:10]
 
 
-def test_a_bug_in_the_admission_denies_instead_of_crashing_into_an_allow(guard_module, monkeypatch):
-    """``run_hook(fail_closed=False)`` allows when the hook crashes, so the admission may never raise."""
+@pytest.mark.parametrize("error", [RecursionError("deep"), OSError("disk"), ValueError("bad"), RuntimeError("x")])
+def test_a_bug_in_the_admission_denies_instead_of_crashing_into_an_allow(guard_module, monkeypatch, error):
+    """``run_hook(fail_closed=False)`` allows when the hook crashes, so the admission may never raise: not from
+    the module, nor from any proof or scan callback it makes."""
     def boom(*a, **k):
-        raise RuntimeError("an admission bug")
+        raise error
 
     monkeypatch.setattr(guard_module._git_admit, "analyze", boom)
     assert guard_module._admission("git stash list") is None
+    monkeypatch.undo()
+    monkeypatch.setattr(guard_module, "_is_linked_worktree_root", boom)
+    assert guard_module._admission("cd /some/wt && git add -A") is None
+    monkeypatch.undo()
+    monkeypatch.setattr(guard_module, "_scan_command", boom)
+    assert guard_module._admission("git stash list | head -1") is None
+    monkeypatch.undo()
+    monkeypatch.setattr(guard_module, "_current_branch", boom)
+    assert guard_module._admission("git -C /some/wt push origin HEAD") is None
+    monkeypatch.undo()
     monkeypatch.setattr(guard_module, "_git_admit", None)
     assert guard_module._admission("git stash list") is None
+
+
+def _state_probes() -> list[str]:
+    """Every shape the two reviews of 53f62fa364 found: a write admitted because the worktree was proved before
+    the rest of the command changed the cwd, a path, the environment or HEAD. Each is denied by the unchanged guard."""
+    q = chr(39)
+    return [
+        # SB1: the path, the .git file or the environment changes after the proof
+        "rm {wt}/.git && ln -s {primary}/.git {wt}/.git && git -C {wt} add -A",
+        "mv {wt} {wt}.old && ln -s {primary} {wt} && git -C {wt} add -A",
+        "ln -sfn {primary} {wt}; git -C {wt} add -A",
+        "export GIT" + q + q + "_DIR={primary}/.git; git -C {wt} add -A",
+        'export GIT"_"DIR={primary}/.git; git -C {wt} add -A',
+        'declare -x GI"T_DIR"={primary}/.git; git -C {wt} add -A',
+        "export P" + q + q + "ATH=/tmp/evil:" + D + "PATH; git -C {wt} add -A",
+        "x={wt}; read x < f; git -C " + D + "x add -A",
+        "cat f > {wt}/.git && git -C {wt} add -A",
+        # SB1b: scratch and detached trust computed before an earlier ln runs
+        "ln -s {primary} {box}/l && git init {box}/l && git -C {box}/l add -A",
+        "ln -s {primary} {box}/l && git init {box}/l && cd {box}/l && git add -A",
+        "ln -s {primary} {box}/l; git init {box}/l; git -C {box}/l add -A",
+        "ln -s {primary} {box}/q; git worktree add --detach {box}/q/sub HEAD",
+        # cwd changers after a cd: the context outlived them
+        "cd {wt} && pushd {primary} && git add f.txt",
+        "cd {wt} && builtin cd {primary} && git add f.txt",
+        "cd {wt} && command cd {primary} && git add f.txt",
+        "cd {wt} && chdir {primary} && git add f.txt",
+        "cd {wt} && popd && git add f.txt",
+        "cd {wt} && {primary} && git add f.txt",
+        "cd {wt} || exit 1; pushd {primary}; git add f.txt",
+        "git init {box}/r && cd {box}/r && pushd {primary} && git add f.txt",
+        # SB2: push HEAD after HEAD moves
+        "git -C {wt} switch main && git -C {wt} push origin HEAD",
+        "git -C {wt} switch --create main && git -C {wt} push -u origin HEAD",
+        "git -C {wt} switch --create=main && git -C {wt} push origin HEAD",
+        "cd {wt} && git switch main && git merge --ff-only wt-branch && git push origin HEAD",
+        "git -C {wt} rebase --onto main wt-branch main && git -C {wt} push origin HEAD",
+        "git -C {wt} switch -c develop && git -C {wt} push -u origin HEAD",
+        # SB3: `a || cd <wt> && git add` runs the add in the start cwd when a succeeds
+        "true || cd {wt} && git add -A",
+        "ls || cd {wt} && git add -A",
+        "cd {primary} || cd {wt} && git add -A",
+        "git status || cd {wt} && git add -A",
+        # SB4: a read-only subcommand that runs the program it is given
+        "git ls-remote --upload-pack=" + q + "git checkout f.txt" + q + " .",
+        "git ls-remote --exec=" + q + "git stash" + q + " .",
+        "git ls-remote --upload-pa=" + q + "git stash" + q + " .",
+        "git grep -nO" + q + "git checkout f.txt" + q + " x",
+        "git grep --open-f=" + q + "git stash" + q + " x",
+        "git grep --open-files-in-pager=" + q + "git stash" + q + " x",
+        "git help -m checkout",
+        "git help -w checkout",
+        # a value slot that splits into more flags
+        "X=" + q + "main --exec true" + q + "; git -C {wt} rebase --onto " + D + "X HEAD",
+        "git -C {wt} rebase --onto " + D + "(echo " + q + "main --exec=true" + q + ") HEAD",
+        # a transport that runs a program
+        "git fetch " + q + "ext::sh -c " + chr(34) + "git checkout f.txt" + chr(34) + q,
+        "git clone ext::git%20checkout%20f.txt {box}/c9 && git -C {box}/c9 add -A",
+        # a shallow primary
+        "git fetch --depth=1 origin pull/1/head",
+        "git fetch --unshallow origin pull/1/head",
+    ]
+
+
+def test_every_state_change_probe_of_the_two_reviews_is_denied(primary, worktree, scratch):
+    cmds = _fill(_state_probes(), wt=worktree, primary=primary, box=scratch)
+    leaked = [c for c in cmds if not _denied(c, primary)]
+    assert not leaked, leaked
