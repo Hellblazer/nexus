@@ -146,8 +146,10 @@ GUARD_ROWS: list[tuple[str, str, str]] = [
     ("git stash pop", "pass", "deny"),
     ("git stash drop", "deny", "deny"),
     ("git stash clear", "deny", "deny"),
-    ('echo "git reset --hard"', "pass", "deny"),
-    ("git log --grep=reset", "pass", "deny"),
+    # Text that only names a write verb is admitted (nexus-5y47c); the same text beside a real write still denies in strict.
+    ('echo "git reset --hard"', "pass", "pass"),
+    ("git log --grep=reset", "pass", "pass"),
+    ('echo "git reset --hard" && git add f', "pass", "deny"),
     ("git status", "pass", "pass"),
     ("git log", "pass", "pass"),
     ("git diff", "pass", "pass"),
