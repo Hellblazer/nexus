@@ -534,7 +534,7 @@ def wait_for_service_health(
             import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
             headers = {"Authorization": f"Bearer {token}"} if token else {}
-            from nexus.db.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+            from nexus.db.t2.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
             return httpx.get(url, timeout=timeout, headers=headers, **bearer_httpx_kwargs(url))  # nexus-ec37o: a health probe may carry the bearer
 
     url = service_url.rstrip("/") + "/health"

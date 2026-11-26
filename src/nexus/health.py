@@ -4185,7 +4185,7 @@ def _check_static_service_token() -> list[HealthResult]:
     if not url:
         return [HealthResult(label=label, ok=True,
                              detail="not applicable — no service_url configured")]
-    from nexus.db.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred
+    from nexus.db.t2.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred
     from nexus.db.service_endpoint import bound_static_service_token  # noqa: PLC0415 — deferred
     token, refused = bound_static_service_token(url)  # nexus-ec37o: sent only to the origin it was issued for
     if refused or not token:

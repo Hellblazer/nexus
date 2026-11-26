@@ -154,7 +154,7 @@ def test_the_harness_is_not_vacuous(tmp_path, pki, origin, mitm):
     _add_network(tmp_path, ca_bundle=str(pki[0].pem))
     env = {**os.environ, "NEXUS_CONFIG_DIR": str(_config_dir(tmp_path))}
     code = (
-        "import httpx, sys; from nexus.db.bearer_transport import bearer_httpx_kwargs; "
+        "import httpx, sys; from nexus.db.t2.bearer_transport import bearer_httpx_kwargs; "
         "r = httpx.get(sys.argv[1] + '/x', headers={'Authorization': 'Bearer probe'}, **bearer_httpx_kwargs(sys.argv[1])); print(r.status_code)"
     )
     out = subprocess.run([sys.executable, "-c", code, origin.url], capture_output=True, text=True, env=env, timeout=120)

@@ -131,7 +131,7 @@ _RECOVERY_FUTILE_WINDOW_S: float = 60.0
 # bounded wait as the nine mixin adopters (call sites unchanged — only
 # the alias target moved to the gated resolver).
 from nexus.db.client_identity import client_identity_headers
-from nexus.db.bearer_transport import bearer_httpx_kwargs
+from nexus.db.t2.bearer_transport import bearer_httpx_kwargs
 from nexus.identity.token_header import identity_headers, retry_headers_after_401, superseded_from_response
 from nexus.db.service_endpoint import (
     resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,

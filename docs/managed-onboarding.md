@@ -49,14 +49,15 @@ issued for ...` instead of sending the credential there. For a staging or
 self-hosted service, run `nx config set service_url <its URL>` with its token,
 or export `NX_SERVICE_TOKEN` for it. Plain `http` to a host that is not this
 machine is refused with any token and has no opt-in, and a lease token never
-goes through a proxy. A request that carries a token reads no proxy or CA
+goes through a proxy. A request that carries a token follows no redirect, and reads no proxy or CA
 variable from the environment (`HTTPS_PROXY`, `SSL_CERT_FILE` and the rest: a
 project can set them); behind a corporate proxy or CA, run
 `nx config set network.https_proxy=<proxy URL>` and
 `nx config set network.ca_bundle=<CA file>` once
 ([Configuration § A proxy or CA for the managed service](configuration.md#a-proxy-or-ca-for-the-managed-service)). Two limits stay, by design: a token you export yourself
-travels with the URL you export, and a project can still name the host an
-unauthenticated read goes to. Details:
+(with the identity and session tokens that ride beside it)
+travels with the URL you export, and a project can still name the host the
+unauthenticated probes (`/version`, `/health`) go to, and so steer what they report. Details:
 [Configuration § A saved credential goes only to the service it was issued for](configuration.md#a-saved-credential-goes-only-to-the-service-it-was-issued-for).
 
 `NX_STORAGE_BACKEND=service` is not needed: `service` is the default and only

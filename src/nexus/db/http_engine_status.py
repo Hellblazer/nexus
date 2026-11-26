@@ -73,7 +73,7 @@ def fetch_engine_status(*, timeout: float = 5.0, mint_deadline_s: float | None =
         # 403 to a bare GET and 200 with the resolved token (nexus-grzai; the
         # unauthenticated probe reported a false UNKNOWN on every cloud box).
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        from nexus.db.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred: this module loads on the CLI's startup path
+        from nexus.db.t2.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred: this module loads on the CLI's startup path
         resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout, **bearer_httpx_kwargs(base_url))  # nexus-ec37o: proxy and CA from config.yml, never the env
         resp.raise_for_status()
         body = resp.json()
@@ -91,7 +91,7 @@ def fetch_engine_status_at(base_url: str, token: str | None, *, timeout: float =
     endpoint resolution, or ``None`` on any failure. Never raises (nexus-f3yqd.3)."""
     try:
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        from nexus.db.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred: this module loads on the CLI's startup path
+        from nexus.db.t2.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred: this module loads on the CLI's startup path
         resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout, **bearer_httpx_kwargs(base_url))  # nexus-ec37o: proxy and CA from config.yml, never the env
         resp.raise_for_status()
         body = resp.json()

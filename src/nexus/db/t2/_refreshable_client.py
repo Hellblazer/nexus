@@ -68,7 +68,7 @@ import structlog
 from nexus._log_safe_url import log_endpoint
 from nexus.collection_errors import label_reserved_error_from_body, superseded_write_error_from_body
 from nexus.db.client_identity import client_identity_headers
-from nexus.db.bearer_transport import bearer_httpx_kwargs as _bearer_httpx_kwargs
+from nexus.db.t2.bearer_transport import bearer_httpx_kwargs as _bearer_httpx_kwargs
 from nexus.identity.token_header import request_with_identity, superseded_from_response
 from nexus.db import gateway_hold
 from nexus.db.request_gate import before_request

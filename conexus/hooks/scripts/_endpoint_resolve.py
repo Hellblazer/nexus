@@ -745,7 +745,7 @@ def read_config_yml_credentials(
 
 
 #: The keys of the ``network:`` section a bearer-carrying request reads (nexus-ec37o); the CLI's
-#: ``nexus.db.bearer_transport.NETWORK_KEYS``.
+#: ``nexus.db.t2.bearer_transport.NETWORK_KEYS``.
 NETWORK_KEYS = ("https_proxy", "ca_bundle")
 
 
@@ -1016,6 +1016,24 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def no_redirect_handler() -> Any:
+    """A urllib handler that follows no redirect: the 3xx answer surfaces as an ``HTTPError``.
+
+    urllib copies ``Authorization`` to a redirect's target, so a bound origin that answers 3xx
+    (or an attacker who can make it) would carry the credential to any host, and an https
+    origin to plain http. Every urllib opener that carries a bearer includes this handler
+    (nexus-ec37o); httpx follows nothing by default, and a lint pins that no bearer client
+    turns it on. Mirror of ``nexus.db.service_endpoint.no_redirect_handler``.
+    """
+    import urllib.request  # noqa: PLC0415 — deferred: stdlib, only a caller that builds an opener needs it
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    return _NoRedirect()
+
+
 def bound_origin_for_saved(saved_service_url: str | None) -> str:
     """The origin a saved credential was issued for."""
     return (saved_service_url or "").strip().rstrip("/") or DEFAULT_MANAGED_SERVICE_URL
@@ -1149,8 +1167,8 @@ def bearer_opener(url: str, config_dir: Path | None = None) -> Any:
     *config_dir*'s ``config.yml`` (default: :func:`default_config_dir`), never the environment's.
 
     ``ProxyHandler`` with an explicit mapping reads no proxy variable (``{}`` is no proxy), and the
-    ``HTTPSHandler`` carries :func:`bearer_ssl_context`. Mirrors
-    ``nexus.db.bearer_transport.bearer_opener``."""
+    ``HTTPSHandler`` carries :func:`bearer_ssl_context`; no redirect is followed (:func:`no_redirect_handler`). Mirrors
+    ``nexus.db.t2.bearer_transport.bearer_opener``."""
     import urllib.request  # noqa: PLC0415 — deferred: only a request builds an opener
 
     net = read_config_yml_network(config_dir if config_dir is not None else default_config_dir())
@@ -1158,6 +1176,7 @@ def bearer_opener(url: str, config_dir: Path | None = None) -> Any:
     return urllib.request.build_opener(
         urllib.request.ProxyHandler({"https": proxy} if proxy else {}),
         urllib.request.HTTPSHandler(context=bearer_ssl_context(net.get("ca_bundle", ""))),
+        no_redirect_handler(),
     )
 
 
@@ -1189,8 +1208,20 @@ def audited_lease(config_dir: Path) -> dict[str, Any] | None:
     return {"host": lease["host"], "port": lease["port"], "token": token}
 
 
+def host_port_url(host: object, port: object) -> str:
+    """``http://host:port`` for a host the environment or a lease names, an IPv6 literal bracketed.
+
+    The one spelling of that URL: the CLI's and the plugin's copies are held to the same AST
+    (``tests/hooks/test_origin_binding_parity.py``), so an IPv6 lease or env host reads as the
+    same origin on both sides."""
+    shown = str(host)
+    if ":" in shown and not shown.startswith("["):
+        shown = f"[{shown}]"
+    return f"http://{shown}:{port}"
+
+
 def lease_origin(lease: dict[str, Any]) -> str:
-    return f"http://{lease['host']}:{lease['port']}"
+    return host_port_url(lease['host'], lease['port'])
 
 
 def select_service_token(
@@ -1318,11 +1349,11 @@ def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
                 f"not, and no live local supervisor lease at {_shown(lease_path)} "
                 f"supplies a port"
             )
-        return f"http://{host}:{port}", False
+        return host_port_url(host, port), False
 
     lease = read_storage_service_lease(config_dir)
     if lease is not None:
-        return f"http://{lease['host']}:{lease['port']}", True
+        return host_port_url(lease['host'], lease['port']), True
 
     lease_path = _lease_path_or_none(config_dir)
     raise EndpointUnresolvable(
@@ -1407,7 +1438,7 @@ def endpoint_usable(config_dir: Path, *, retry_budget_s: float | None = None, gr
             return False
         # The lease token goes only to the lease's own endpoint, and no bearer over cleartext off
         # this machine (nexus-ec37o). This leg never read the saved token, so ``saved`` is empty.
-        url = f"http://{host or '127.0.0.1'}:{port}"
+        url = host_port_url(host or '127.0.0.1', port)
         return select_service_token(config_dir, url, saved={}, lease=lease) is not None
     except Exception:  # noqa: BLE001 -- any failure to resolve is "not usable", as the CLI's raise is
         return False

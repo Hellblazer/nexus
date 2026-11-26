@@ -387,19 +387,19 @@ def _buffered_response(
 
 def _shared_ssl_context() -> Any:
     """The process-wide client SSL context: every request through this pool may carry a bearer,
-    so it is :func:`nexus.db.bearer_transport.bearer_ssl_context` (certifi's bundle plus
+    so it is :func:`nexus.db.t2.bearer_transport.bearer_ssl_context` (certifi's bundle plus
     ``network.ca_bundle`` of ``config.yml``), which reads no trust variable from the environment
     (nexus-ec37o). One context for the whole pool, as it is a pool key."""
-    from nexus.db.bearer_transport import bearer_ssl_context  # noqa: PLC0415 — deferred import — keeps module load light
+    from nexus.db.t2.bearer_transport import bearer_ssl_context  # noqa: PLC0415 — deferred import — keeps module load light
 
     return bearer_ssl_context()
 
 
-_handler_classes: dict[OnConnect, tuple[type, type]] = {}
+_handler_classes: dict[OnConnect, tuple[type, type, type]] = {}
 _handler_classes_lock = threading.Lock()
 
 
-def _make_handler_classes(on_connect: OnConnect) -> tuple[type, type]:
+def _make_handler_classes(on_connect: OnConnect) -> tuple[type, type, type]:
     import urllib.error  # noqa: PLC0415 — deferred import — keeps module load light
     import urllib.request  # noqa: PLC0415 — deferred import — keeps module load light
 
@@ -551,7 +551,12 @@ def _make_handler_classes(on_connect: OnConnect) -> tuple[type, type]:
                 _HTTPSConnection, req, self._debuglevel, context=self._context
             )
 
-    return _PooledHTTPHandler, _PooledHTTPSHandler
+    class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+        # nexus-ec37o: every request here may carry a bearer, which urllib would copy to a redirect's target
+        def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    return _PooledHTTPHandler, _PooledHTTPSHandler, _NoRedirectHandler
 
 
 def build_opener(on_connect: OnConnect) -> Any:
@@ -571,6 +576,6 @@ def build_opener(on_connect: OnConnect) -> Any:
     # nexus-ec37o: every request here may carry a bearer, so the proxy is ``network.https_proxy`` of
     # ``config.yml`` and never the environment's (``bearer_proxy_handler``); an ``http`` request
     # is never proxied.
-    from nexus.db.bearer_transport import bearer_proxy_handler  # noqa: PLC0415 — deferred import — keeps module load light
+    from nexus.db.t2.bearer_transport import bearer_proxy_handler  # noqa: PLC0415 — deferred import — keeps module load light
 
     return urllib.request.build_opener(bearer_proxy_handler(), *classes)

@@ -21,7 +21,7 @@ from types import ModuleType
 import pytest
 import yaml
 
-from nexus.db import bearer_transport as bt
+from nexus.db.t2 import bearer_transport as bt
 from nexus.db import service_endpoint as se
 from tests._tls_pki import TlsOrigin, make_ca
 

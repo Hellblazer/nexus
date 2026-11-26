@@ -142,7 +142,7 @@ class GroupsClient:
         self._bearer = _unavailable_on_failure(bearer if callable(bearer) else (lambda: bearer))
         self._tenant = tenant
         if http is None:
-            from nexus.db.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+            from nexus.db.t2.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred: the db package import is heavy for this module
 
             # The process-wide SSL context (see IdentityClient.__init__).
             http = httpx.Client(timeout=timeout, **bearer_httpx_kwargs())  # nexus-ec37o: the proxy and CA come from config.yml, never the environment

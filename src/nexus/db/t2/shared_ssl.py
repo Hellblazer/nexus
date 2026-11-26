@@ -10,7 +10,7 @@ pathless ``[Errno 2] No such file or directory`` (2026-11-21).
 
 A request that carries a bearer does NOT use this context: it honours ``SSL_CERT_FILE`` and
 ``SSL_CERT_DIR``, which a repository's env can set. Those requests use
-:func:`nexus.db.bearer_transport.bearer_ssl_context` (nexus-ec37o).
+:func:`nexus.db.t2.bearer_transport.bearer_ssl_context` (nexus-ec37o).
 """
 
 from __future__ import annotations

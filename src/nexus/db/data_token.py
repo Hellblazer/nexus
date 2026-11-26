@@ -259,7 +259,7 @@ from nexus._log_safe_url import (
 )
 from nexus._winsec import make_user_dir, open_private
 from nexus.db import gateway_hold
-from nexus.db.bearer_transport import bearer_opener
+from nexus.db.t2.bearer_transport import bearer_opener
 from nexus.db.request_gate import before_request
 from nexus.db.engine_reasons import error_reason
 from nexus.db.service_endpoint import (

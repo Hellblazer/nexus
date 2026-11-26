@@ -551,7 +551,7 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
         except ValueError:
             return None, None
         host = os.environ.get("NX_SERVICE_HOST", "").strip() or "127.0.0.1"
-        url = f"http://{host}:{port}"
+        url = _ep.host_port_url(host, port)
         data_token = _read_data_token_lease(config_dir, url)
         if data_token:
             return url, data_token
@@ -560,7 +560,7 @@ def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
         return (url, token) if token else (None, None)
 
     if lease is not None:
-        url = f"http://{lease['host']}:{lease['port']}"
+        url = _ep.host_port_url(lease['host'], lease['port'])
         data_token = _read_data_token_lease(config_dir, url)
         if data_token:
             return url, data_token
@@ -699,7 +699,8 @@ def _post_routing_event_once(
                 "Content-Type": "application/json",
             },
         )
-        # nexus-ec37o: the proxy and CA of config.yml, never the environment's; no proxy over plain http.
+        # nexus-ec37o: the proxy and CA of config.yml, never the environment's; no proxy over plain http; no
+        # redirect followed (urllib would copy the bearer to its target).
         # This is the detached one-shot poster, so the process-wide opener is ours to set.
         urllib.request.install_opener(_ep.bearer_opener(base_url, _default_config_dir()))
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed internal engine URL, not user input

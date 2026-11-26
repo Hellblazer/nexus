@@ -27,7 +27,7 @@ _SCRIPTS = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
 
 PURE = (
     "normalize_origin", "origins_equal", "is_loopback_host", "bound_origin_for_saved",
-    "choose_bound_token", "mismatch_message", "insecure_message", "bearer_proxy_for",
+    "choose_bound_token", "mismatch_message", "insecure_message", "bearer_proxy_for", "no_redirect_handler", "host_port_url",
 )
 
 MANAGED = "https://api.conexus-nexus.com"
@@ -202,3 +202,36 @@ def test_select_service_token_agrees(hook, monkeypatch, saved, env, lease, url):
         lambda: hook.select_service_token(config_dir, url, lease=hook_lease, allow_mint=True)
     )
     assert got_hook == got_cli
+
+
+HOST_PORT_CASES = [
+    ("127.0.0.1", 8080), ("localhost", 9), ("::1", 8080), ("fe80::1", 1), ("[::1]", 80), ("example.com", "443"), ("2001:db8::7", 5),
+]
+
+
+@pytest.mark.parametrize(("host", "port"), HOST_PORT_CASES)
+def test_host_port_url_brackets_an_ipv6_host_the_same_way_on_both_sides(hook, host, port):
+    """The plugin's lease_origin / env URL and the CLI's agree on an IPv6 host (nexus-ec37o hardening)."""
+    assert hook.host_port_url(host, port) == cli.host_port_url(host, port)
+    url = cli.host_port_url(host, port)
+    assert cli.normalize_origin(url) == hook.normalize_origin(url) is not None
+
+
+def test_a_lease_origin_with_an_ipv6_host_is_a_url_the_normaliser_reads(hook):
+    url = hook.lease_origin({"host": "::1", "port": 4321})
+    assert url == "http://[::1]:4321" and hook.normalize_origin(url) == ("http", "::1", 4321)
+
+
+@pytest.mark.parametrize("env", [{"NX_SERVICE_HOST": "::1", "NX_SERVICE_PORT": "4321"}])
+def test_the_cli_env_url_brackets_an_ipv6_host(monkeypatch, env):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert cli.env_host_port_url() == "http://[::1]:4321"
+
+
+def test_an_idn_host_is_refused_by_both_copies_and_its_punycode_form_is_read(hook):
+    """Non-ASCII hosts are unsupported on purpose (two stacks can map one IDN to two hosts): a saved
+    service_url must carry the ``xn--`` form, which both copies read alike."""
+    assert cli.normalize_origin("https://b\u00fccher.example") is None and hook.normalize_origin("https://b\u00fccher.example") is None
+    puny = "https://xn--bcher-kva.example"
+    assert cli.normalize_origin(puny) == hook.normalize_origin(puny) == ("https", "xn--bcher-kva.example", 443)

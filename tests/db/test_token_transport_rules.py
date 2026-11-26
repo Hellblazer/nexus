@@ -362,7 +362,7 @@ class TestOnlyConfigNamesAProxy:
     def test_an_httpx_client_ignores_the_environment_and_tunnels_https_through_the_configured_proxy(
         self, proxy, tmp_path, monkeypatch,
     ) -> None:
-        from nexus.db import bearer_transport as bt
+        from nexus.db.t2 import bearer_transport as bt
 
         # ``proxy`` named every proxy variable; the config names the same recorder, so the request tunnels
         cfg = tmp_path / "cfg"
@@ -376,7 +376,7 @@ class TestOnlyConfigNamesAProxy:
         assert all(auth == "" for _, _, auth in proxy.seen), "the bearer is inside the tunnel, never in the CONNECT"
 
     def test_the_environment_proxy_is_not_used_when_config_names_none(self, proxy, tmp_path, monkeypatch) -> None:
-        from nexus.db import bearer_transport as bt
+        from nexus.db.t2 import bearer_transport as bt
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         with httpx.Client(**bt.bearer_httpx_kwargs()) as client:

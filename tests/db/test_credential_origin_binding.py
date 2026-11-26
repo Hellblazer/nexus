@@ -196,3 +196,18 @@ def test_default_managed_url_is_the_real_cloud_endpoint():
     # tests/conftest.py repoints managed_endpoint.DEFAULT_MANAGED_SERVICE_URL at a dead port
     # for isolation; the binding default is the real one and is not patched.
     assert se.DEFAULT_MANAGED_SERVICE_URL == "https://api.conexus-nexus.com"
+
+
+def test_a_mint_credential_issued_for_another_origin_warns_once_per_process(monkeypatch):
+    """bearer_for asks on every request: the refusal is logged the first time, not each time."""
+    from structlog.testing import capture_logs  # noqa: PLC0415 -- this test only
+
+    se._WARNED_ONCE.clear()
+    _save({"service_url": MANAGED, "mint_token": "mint-secret"})
+    with capture_logs() as logs:
+        for _ in range(5):
+            assert se.bound_mint_credential(DECOY) is None
+    warnings = [e for e in logs if e["event"] == "mint_credential_origin_mismatch"]
+    assert len(warnings) == 1, logs
+    assert "mint-secret" not in str(logs)
+    se._WARNED_ONCE.clear()

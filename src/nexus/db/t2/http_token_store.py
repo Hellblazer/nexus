@@ -40,7 +40,7 @@ DEFAULT_TENANT: str = "default"
 # bounded wait as the nine mixin adopters (call sites unchanged — only
 # the alias target moved to the gated resolver).
 from nexus.db.client_identity import client_identity_headers
-from nexus.db.bearer_transport import bearer_httpx_kwargs
+from nexus.db.t2.bearer_transport import bearer_httpx_kwargs
 from nexus.db.service_endpoint import (
     resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,
 )

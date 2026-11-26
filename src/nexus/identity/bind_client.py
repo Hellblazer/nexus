@@ -166,7 +166,7 @@ class IdentityClient:
         self._bearer = bearer if callable(bearer) else (lambda: bearer)
         self._tenant = tenant
         if http is None:
-            from nexus.db.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+            from nexus.db.t2.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred: the db package import is heavy for this module
 
             # The process-wide SSL context: the MCP identity lease builds one of these periodically, and a
             # per-client context re-reads the CA bundle from an install generation that may be gone (2026-11-21).

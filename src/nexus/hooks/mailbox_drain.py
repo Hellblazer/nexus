@@ -684,7 +684,7 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
 
     def _do() -> None:
         try:
-            from nexus.db.bearer_transport import bearer_opener  # noqa: PLC0415 — deferred: a drain with no address never sends
+            from nexus.db.t2.bearer_transport import bearer_opener  # noqa: PLC0415 — deferred: a drain with no address never sends
 
             # nexus-ec37o: the proxy and CA of config.yml, never the environment's; no proxy over plain http
             opener = bearer_opener(base_url)
@@ -1189,7 +1189,7 @@ def _resolve_base_url() -> tuple[str, bool]:
     """
     from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred, same reason
     from nexus.config import get_service_url  # noqa: PLC0415 — deferred to avoid a heavy import on every call
-    from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 — deferred, same reason
+    from nexus.db.service_endpoint import discover_lease, host_port_url  # noqa: PLC0415 — deferred, same reason
 
     try:
         url = get_service_url()
@@ -1224,7 +1224,7 @@ def _resolve_base_url() -> tuple[str, bool]:
                 f"NX_SERVICE_HOST={host_str!r} is set but NX_SERVICE_PORT is "
                 "not, and no live local supervisor lease supplies a port"
             )
-        return f"http://{host}:{port}", False
+        return host_port_url(host, port), False
 
     lease_url, _lease_token = discover_lease()
     if lease_url is not None:

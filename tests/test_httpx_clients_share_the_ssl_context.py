@@ -13,7 +13,7 @@ four sessions, and review of the fix found the same build in
 ``IdentityClient``, ``groups.py``, the engine-version probes and more.
 
 The rule: pass ``verify=get_shared_ssl_context()`` (``nexus.db.t2.shared_ssl``), or, for a request
-that carries a bearer, ``**bearer_httpx_kwargs(...)`` (``nexus.db.bearer_transport``: the same one-per-process
+that carries a bearer, ``**bearer_httpx_kwargs(...)`` (``nexus.db.t2.bearer_transport``: the same one-per-process
 context, built with no environment in it, nexus-ec37o), or, for a client, a ``transport=`` that builds no SSL context (an
 ``httpx.MockTransport``, or a transport the caller passes in: a test seam),
 or be listed in ``ALLOWED`` with the reason the process is short-lived. An

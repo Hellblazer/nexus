@@ -50,7 +50,7 @@ def network_settings() -> NetworkSettings:
     """The proxy and extra CA bundle a bearer-carrying request may use, from ``config.yml`` only."""
     from nexus.config import get_global_config_section  # noqa: PLC0415 — deferred: nexus.config imports the db package
 
-    section = get_global_config_section(NETWORK_SECTION)
+    section = get_global_config_section("network")
 
     def text(key: str) -> str:
         value = section.get(key)
@@ -152,7 +152,7 @@ def bearer_httpx_kwargs(url: str | None = None) -> dict[str, Any]:
         # ``ssl_context=ctx`` for the hop to an ``https://`` proxy too: httpcore's default context reads SSL_CERT_FILE
         kwargs["proxy"] = httpx.Proxy(proxy, ssl_context=ctx) if proxy.lower().startswith("https:") else proxy
         if url is None:
-            kwargs["mounts"] = {"http://": httpx.HTTPTransport(verify=ctx)}
+            kwargs["mounts"] = {"http://": httpx.HTTPTransport(verify=bearer_ssl_context())}
     return kwargs
 
 
@@ -166,8 +166,13 @@ def bearer_proxy_handler(url: str | None = None) -> urllib.request.ProxyHandler:
 
 
 def bearer_opener(url: str | None = None) -> urllib.request.OpenerDirector:
-    """A urllib opener for a bearer-carrying request: :func:`bearer_proxy_handler` and an
-    ``HTTPSHandler`` on :func:`bearer_ssl_context`."""
+    """A urllib opener for a bearer-carrying request: :func:`bearer_proxy_handler`, an
+    ``HTTPSHandler`` on :func:`bearer_ssl_context` and no redirect followed (urllib would copy the
+    ``Authorization`` header to the target)."""
     import urllib.request  # noqa: PLC0415 — deferred: stdlib, loaded only when a request is built
 
-    return urllib.request.build_opener(bearer_proxy_handler(url), urllib.request.HTTPSHandler(context=bearer_ssl_context()))
+    from nexus.db.service_endpoint import no_redirect_handler  # noqa: PLC0415 — deferred: service_endpoint is a large module
+
+    return urllib.request.build_opener(
+        bearer_proxy_handler(url), urllib.request.HTTPSHandler(context=bearer_ssl_context()), no_redirect_handler(),
+    )
