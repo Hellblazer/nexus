@@ -43,6 +43,19 @@ the user's own nexus engine: `routing_events` (each guard deny or advice,
 with a fragment of the command) and the **dispatch record** (each finished
 subagent's type and how many T1 notes it wrote). **T1** is session scratch.
 **P0** is a machine with the plugin and no nx; **P2** is a full install.
+An **RDR** is a decision record like this one. A **bead** is an issue in
+the project's tracker (`bd`), named by an id such as `nexus-sby49`. **Sam**
+is the project's owner and the person whose rulings this RDR carries out.
+The **threads board** is a per-session status entry in nx's persistent
+notes that Sam reads. The **Stop wake guard** is the Stop hook that
+continues a turn once when it ends on a promise to wait that nothing will
+wake. The **behaviour leg** is the test that runs every real hook
+registration in scratch repositories and checks what each prints; the
+**golden replay** is a test that replays recorded real subagent commands
+through the git guard and checks that no verdict changed; the **lint** is a
+set of static tests over the source (the lint bucket, run apart from the
+main suite). **S1 to S6** are the decisions this RDR leaves to Sam, listed
+at the end under "Decisions Only Sam Can Make".
 
 Origin. The plugin portability work (epic nexus-sby49) built an "audience"
 model: each hook rule fired for every user, for "the nexus repo", or for
