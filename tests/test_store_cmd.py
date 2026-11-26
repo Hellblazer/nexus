@@ -649,7 +649,11 @@ def test_collection_not_found(runner, mock_collection, subcmd, args):
 
 
 def test_collection_delete_without_yes_prompts(runner, mock_collection):
-    runner.invoke(main, ["collection", "delete", "knowledge__test"], input="n\n")
+    # ``delete LABEL`` reads the registry listing before it asks (RDR-229 P3.12); give it an empty one, not a service.
+    cat = MagicMock()
+    cat.list_collections.return_value = []
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=cat):
+        runner.invoke(main, ["collection", "delete", "knowledge__test"], input="n\n")
     mock_collection.delete_collection.assert_not_called()
 
 
