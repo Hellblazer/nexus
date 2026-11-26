@@ -54,6 +54,7 @@ PREDICATES: dict[str, str] = {
     "advice_blocked": "frozenset()",
     "remote_test_hosts": "frozenset()",
     "note_hook_error": "void",
+    "forced_strict_clause": "None",
 }
 #: The settings an audience ``SETTING:<key>`` may name, and the reader a module must call for each.
 SETTING_READERS: dict[str, tuple[str, ...]] = {

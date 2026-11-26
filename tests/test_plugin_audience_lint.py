@@ -447,7 +447,7 @@ def test_the_real_guard_and_the_real_lib_pass_t9() -> None:
     """The three real shapes, against the real files: the guard (run_hook), the routing library (local_try) and the src hooks."""
     for rel, wrapper, preds, dotted in (
         ("conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py", "run_hook",
-         ["guard_mode", "note_hook_error", "remote_test_hosts"], None),
+         ["forced_strict_clause", "guard_mode", "note_hook_error", "remote_test_hosts"], None),
         ("conexus/hooks/scripts/routing/_lib.py", "local_try", ["telemetry_enabled"], None),
         ("src/nexus/hooks/subagent_stop_t1_nudge.py", "never_fail", ["t1_nudge_enabled", "telemetry_enabled"], "nexus.hooks.subagent_stop_t1_nudge"),
     ):
