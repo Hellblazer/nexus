@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for PermissionRequest auto-approve hooks (nx + sn plugins).
+"""Tests for the auto-approve hooks (nx + sn plugins).
+
+The nx verb answers only PreToolUse (RDR-259 S4, nexus-sby49.6): no answer on
+PermissionRequest or an absent event. The sn hook still answers both.
 
 Both hooks must:
-1. Output valid JSON with hookSpecificOutput.decision.behavior = "allow" for matching tools
+1. Output valid JSON allowing matching tools (nx: PreToolUse permissionDecision; sn: PermissionRequest decision.behavior)
 2. Output nothing (empty stdout) for non-matching tools
 3. Agree on the output format
 
@@ -55,13 +58,14 @@ def _run_hook(script: Path, tool_name: str) -> str:
     return result.stdout.strip()
 
 
-def _run_nx_hook(tool_name: str, hook_event_name: str | None = None) -> str:
+def _run_nx_hook(tool_name: str, hook_event_name: str | None = "PreToolUse") -> str:
     """Call the ported ``hook_auto_approve`` tool on the REAL, live
     ``nx-mcp`` server (``nexus.mcp.core.mcp``) through its own in-process
     ``call_tool`` dispatch -- the same path a ``tools/call`` request over
-    stdio takes, minus the transport. ``hook_event_name`` omitted matches
-    the bash script's own default (absent stdin field -> ``PermissionRequest``,
-    see ``nexus.hooks.auto_approve.run``'s docstring).
+    stdio takes, minus the transport. The verb answers only ``PreToolUse``
+    (RDR-259 S4, nexus-sby49.6), so the default event is ``PreToolUse``;
+    pass ``None`` to omit the field, or ``"PermissionRequest"``: both get
+    no answer.
     """
     core_mcp = importlib.import_module("nexus.mcp.core").mcp
     kwargs: dict[str, str] = {"tool_name": tool_name}
@@ -72,11 +76,15 @@ def _run_nx_hook(tool_name: str, hook_event_name: str | None = None) -> str:
 
 
 def _parse_decision(output: str) -> str | None:
-    """Extract behavior from hook output, or None if empty."""
+    """Extract the verdict from hook output, or None if empty: the
+    ``PermissionRequest`` ``decision.behavior`` (sn) or the ``PreToolUse``
+    ``permissionDecision`` (nx)."""
     if not output:
         return None
-    data = json.loads(output)
-    return data["hookSpecificOutput"]["decision"]["behavior"]
+    out = json.loads(output)["hookSpecificOutput"]
+    if "decision" in out:
+        return out["decision"]["behavior"]
+    return out["permissionDecision"]
 
 
 # nexus-cnzei.5: destructiveHint tools deliberately EXCLUDED from
@@ -180,7 +188,18 @@ class TestNxPermissionHook:
         output = _run_nx_hook("mcp__plugin_conexus_nexus__scratch")
         data = json.loads(output)
         assert "hookSpecificOutput" in data
-        assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
+        assert data["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+
+    @pytest.mark.parametrize("event", [None, "PermissionRequest"])
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["mcp__plugin_conexus_nexus__search", "mcp__plugin_conexus_nexus__procedure_run"],
+    )
+    def test_gives_no_answer_off_pretooluse(self, tool_name: str, event: str | None) -> None:
+        """RDR-259 S4 (nexus-sby49.6): an answer on PermissionRequest overrides a
+        user's own ``ask`` rule, so the verb answers an event that is exactly
+        PreToolUse and nothing else, an absent event included."""
+        assert _run_nx_hook(tool_name, hook_event_name=event) == ""
 
 
 class TestDemotedOperatorsAreNotAutoApproved:
@@ -226,7 +245,7 @@ class TestDestructiveToolsRequireManualApproval:
     def test_registered_tool_is_not_auto_approved_on_permissionrequest(
         self, tool_name: str
     ) -> None:
-        output = _run_nx_hook(tool_name)
+        output = _run_nx_hook(tool_name, hook_event_name="PermissionRequest")
         assert output == "", (
             f"{tool_name} is in _MANUAL_APPROVAL_REQUIRED but nexus.hooks.auto_approve "
             f"still approves it on PermissionRequest — the allowlist exclusion "
@@ -258,7 +277,7 @@ class TestDestructiveToolsRequireManualApproval:
         assert _run_nx_hook(tool_name, hook_event_name="PreToolUse") == ""
         assert _run_nx_hook(tool_name, hook_event_name="PermissionRequest") == ""
 
-    def test_procedure_run_is_auto_approved_on_both_events(self) -> None:
+    def test_procedure_run_is_auto_approved_on_pretooluse_only(self) -> None:
         """nexus-qo7ie.31: Sam chose auto-approval (threads/marlowe ask procedure-run-autoapprove,
         2026-11-08): the sandboxed, read-only procedure runner skips the prompt."""
         import json as _json
@@ -269,7 +288,8 @@ class TestDestructiveToolsRequireManualApproval:
         assert tool_name not in _MANUAL_APPROVAL_REQUIRED
         assert tool_name in auto_approve._ALLOWED_TOOLS
         assert _parse_decision(_run_nx_hook(tool_name)) == "allow"
-        assert _parse_decision(_run_nx_hook(tool_name, hook_event_name="PermissionRequest")) == "allow"
+        assert _run_nx_hook(tool_name, hook_event_name="PermissionRequest") == ""
+        assert _run_nx_hook(tool_name, hook_event_name=None) == ""
         pre = _json.loads(_run_nx_hook(tool_name, hook_event_name="PreToolUse"))["hookSpecificOutput"]
         assert pre["permissionDecision"] == "allow"
 
@@ -344,19 +364,15 @@ class TestSnPermissionHook:
 
 
 class TestHookAgreement:
-    """Both hooks must produce identical output structure."""
+    """Both hooks allow their own tools; the nx verb does it on PreToolUse
+    only (RDR-259 S4, nexus-sby49.6), so the envelopes differ by event."""
 
-    def test_same_decision_structure(self) -> None:
-        """nx and sn hooks use the same JSON envelope for allow decisions."""
-        nx_out = json.loads(_run_nx_hook("mcp__plugin_conexus_nexus__search"))
-        sn_out = json.loads(_run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__jet_brains_find_symbol"))
-
-        # Same top-level keys
-        assert set(nx_out.keys()) == set(sn_out.keys())
-        # Same nested structure
-        assert set(nx_out["hookSpecificOutput"].keys()) == set(sn_out["hookSpecificOutput"].keys())
-        # Same decision
-        assert nx_out["hookSpecificOutput"]["decision"] == sn_out["hookSpecificOutput"]["decision"]
+    def test_same_decision(self) -> None:
+        """nx (PreToolUse envelope) and sn (PermissionRequest envelope) both allow."""
+        nx_raw = _run_nx_hook("mcp__plugin_conexus_nexus__search")
+        sn_raw = _run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__jet_brains_find_symbol")
+        assert json.loads(nx_raw)["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert _parse_decision(nx_raw) == _parse_decision(sn_raw) == "allow"
 
     def test_no_cross_approval(self) -> None:
         """nx hook doesn't approve sn tools, sn hook doesn't approve nx tools."""
@@ -442,13 +458,17 @@ class TestPreToolUseApproval:
         )
         assert output == ""
 
-    def test_permissionrequest_shape_unchanged_without_event_name(self) -> None:
-        """A payload with no hook_event_name keeps the PermissionRequest shape."""
-        nx_data = json.loads(_run_nx_hook("mcp__plugin_conexus_nexus__search"))
+    def test_nx_gives_no_answer_without_event_name(self) -> None:
+        """RDR-259 S4 (nexus-sby49.6): a payload with no hook_event_name, or a
+        PermissionRequest one, gets no answer from the nx verb."""
+        assert _run_nx_hook("mcp__plugin_conexus_nexus__search", hook_event_name=None) == ""
+        assert _run_nx_hook("mcp__plugin_conexus_nexus__search", hook_event_name="PermissionRequest") == ""
+
+    def test_sn_permissionrequest_shape_unchanged_without_event_name(self) -> None:
+        """A payload with no hook_event_name keeps the sn PermissionRequest shape."""
         sn_data = json.loads(_run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__jet_brains_find_symbol"))
-        for data in (nx_data, sn_data):
-            assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
-            assert data["hookSpecificOutput"]["decision"] == {"behavior": "allow"}
+        assert sn_data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
+        assert sn_data["hookSpecificOutput"]["decision"] == {"behavior": "allow"}
 
     def test_hooks_json_registers_the_approver_on_pretooluse(self) -> None:
         assert "mcp__plugin_conexus_.*" in _pretooluse_matchers(self.NX_HOOKS)
