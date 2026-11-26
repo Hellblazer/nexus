@@ -1,5 +1,5 @@
 {
- "comment": "Parity corpus for the audience helper (RDR-259 Decisions 1-4, 7 and 11; nexus-sby49.8). Each row lays out a tree under a tmp dir and names the user settings file and the account home. payload is a dict whose cwd is relative to tmp (raw_cwd: taken as written), or null (not a dict), or {} (no cwd). Layout kinds: dir; file (c as text, or bytes_b64 for raw bytes; pad_to appends spaces up to that many bytes); symlink or link (t, relative to tmp); fifo (posix only); rm (deletes a file); git (dir, args: runs git in tmp/dir with no global or system config). home_files use the same kinds, relative to the account home. user is null, an object (written as JSON), a raw string, or \"dir\" (a directory in its place). expect lists only the fields that differ from defaults; a listed field replaces the default whole. Compared fields: guard_mode, project, user, telemetry, t1_nudge, advice_blocked, brief_questions, integration_branch and problems (sorted [file, key] pairs); remote_test_hosts when a row lists it. Flags: head (readers called with head=True), needs_git (skipped without git on PATH), posix_only, env_project_dir (CLAUDE_PROJECT_DIR, relative to tmp), no_home (no account home), prev_release false (the previous release's helper cannot know the row), covers (the Decision 4 and related cases the row exercises). Expectations were derived by hand from the RDR, not taken from running a reader.",
+ "comment": "Parity corpus for the audience helper (RDR-259 Decisions 1-4, 7 and 11; nexus-sby49.8). Each row lays out a tree under a tmp dir and names the user settings file and the account home. payload is a dict whose cwd is relative to tmp (raw_cwd: taken as written), or null (not a dict), or {} (no cwd). Layout kinds: dir; file (c as text, or bytes_b64 for raw bytes; pad_to appends spaces up to that many bytes); symlink or link (t, relative to tmp); fifo (posix only); rm (deletes a file); git (dir, args: runs git in tmp/dir with no global or system config). home_files use the same kinds, relative to the account home. user is null, an object (written as JSON), a raw string, or \"dir\" (a directory in its place). expect lists only the fields that differ from defaults; a listed field replaces the default whole. Compared fields: guard_mode, project, user, telemetry, t1_nudge, advice_blocked, brief_questions, integration_branch and problems (sorted [file, key] pairs); remote_test_hosts when a row lists it. Flags: head (readers called with head=True), needs_git (skipped without git on PATH), posix_only, env_project_dir (CLAUDE_PROJECT_DIR, relative to tmp), no_home (no account home), prev_release false (the previous release's helper cannot know the row, or answers it differently on purpose), covers (the Decision 4 and related cases the row exercises). Expectations were derived by hand from the RDR, not taken from running a reader.",
  "defaults": {
   "guard_mode": "seatbelt",
   "project": {},
@@ -17,7 +17,7 @@
   "integration_branch": null,
   "problems": []
  },
- "markers": [
+ "retired_markers": [
   ".nexus/dev-process.json",
   "scripts/agent-worktree-preflight.sh"
  ],
@@ -70,7 +70,7 @@
    "prev_release": false
   },
   {
-   "id": "phase1-marker-no-user-file",
+   "id": "retired-marker-1-no-user-file",
    "layout": [
     {
      "p": "r/.git",
@@ -86,17 +86,12 @@
    },
    "user": null,
    "covers": [
-    "legacy-marker-1"
+    "retired-marker-1"
    ],
-   "expect": {
-    "guard_mode": "strict",
-    "project": {
-     "subagent_git": "strict"
-    }
-   }
+   "prev_release": false
   },
   {
-   "id": "phase2-marker-no-user-file",
+   "id": "retired-marker-2-no-user-file",
    "layout": [
     {
      "p": "r/.git",
@@ -113,17 +108,12 @@
    },
    "user": null,
    "covers": [
-    "legacy-marker-2"
+    "retired-marker-2"
    ],
-   "expect": {
-    "guard_mode": "strict",
-    "project": {
-     "subagent_git": "strict"
-    }
-   }
+   "prev_release": false
   },
   {
-   "id": "both-markers",
+   "id": "both-retired-markers",
    "layout": [
     {
      "p": "r/.git",
@@ -151,9 +141,6 @@
    },
    "expect": {
     "guard_mode": "strict",
-    "project": {
-     "subagent_git": "strict"
-    },
     "user": {
      "subagent_git": "strict",
      "advice_block": [],
@@ -172,9 +159,9 @@
      "k": "dir"
     },
     {
-     "p": "r/.nexus/dev-process.json",
+     "p": "r/.nexus/project.json",
      "k": "file",
-     "c": ""
+     "c": "{\"version\": 1, \"subagent_git\": \"strict\"}"
     },
     {
      "p": "r/src/pkg",
@@ -190,7 +177,8 @@
     "project": {
      "subagent_git": "strict"
     }
-   }
+   },
+   "prev_release": false
   },
   {
    "id": "strict-project-repo-cwd-in-dot-git",
@@ -200,9 +188,9 @@
      "k": "dir"
     },
     {
-     "p": "r/.nexus/dev-process.json",
+     "p": "r/.nexus/project.json",
      "k": "file",
-     "c": ""
+     "c": "{\"version\": 1, \"subagent_git\": \"strict\"}"
     }
    ],
    "payload": {
@@ -214,7 +202,8 @@
     "project": {
      "subagent_git": "strict"
     }
-   }
+   },
+   "prev_release": false
   },
   {
    "id": "strict-project-repo-cwd-gone",
@@ -224,9 +213,9 @@
      "k": "dir"
     },
     {
-     "p": "r/.nexus/dev-process.json",
+     "p": "r/.nexus/project.json",
      "k": "file",
-     "c": ""
+     "c": "{\"version\": 1, \"subagent_git\": \"strict\"}"
     }
    ],
    "payload": {
@@ -238,7 +227,8 @@
     "project": {
      "subagent_git": "strict"
     }
-   }
+   },
+   "prev_release": false
   },
   {
    "id": "nested-repo-inside-strict-project-no-user-file",
@@ -248,9 +238,9 @@
      "k": "dir"
     },
     {
-     "p": "r/.nexus/dev-process.json",
+     "p": "r/.nexus/project.json",
      "k": "file",
-     "c": ""
+     "c": "{\"version\": 1, \"subagent_git\": \"strict\"}"
     },
     {
      "p": "r/vendor/lib/.git",
@@ -270,9 +260,9 @@
      "k": "dir"
     },
     {
-     "p": "r/.nexus/dev-process.json",
+     "p": "r/.nexus/project.json",
      "k": "file",
-     "c": ""
+     "c": "{\"version\": 1, \"subagent_git\": \"strict\"}"
     },
     {
      "p": "r/vendor/lib/.git",
@@ -309,9 +299,9 @@
      "k": "dir"
     },
     {
-     "p": "r/.nexus/dev-process.json",
+     "p": "r/.nexus/project.json",
      "k": "file",
-     "c": ""
+     "c": "{\"version\": 1, \"subagent_git\": \"strict\"}"
     },
     {
      "p": "r/sub/.git",
@@ -333,9 +323,9 @@
      "c": "gitdir: /nonexistent\n"
     },
     {
-     "p": "wt/.nexus/dev-process.json",
+     "p": "wt/.nexus/project.json",
      "k": "file",
-     "c": ""
+     "c": "{\"version\": 1, \"subagent_git\": \"strict\"}"
     }
    ],
    "payload": {
@@ -347,7 +337,8 @@
     "project": {
      "subagent_git": "strict"
     }
-   }
+   },
+   "prev_release": false
   },
   {
    "id": "linked-worktree-older-branch-no-user-file",
@@ -483,9 +474,9 @@
      "k": "dir"
     },
     {
-     "p": "r/.nexus/dev-process.json",
+     "p": "r/.nexus/project.json",
      "k": "file",
-     "c": ""
+     "c": "{\"version\": 1, \"subagent_git\": \"strict\"}"
     },
     {
      "p": "elsewhere/here",
@@ -503,7 +494,8 @@
      "subagent_git": "strict"
     }
    },
-   "posix_only": true
+   "posix_only": true,
+   "prev_release": false
   },
   {
    "id": "project-dir-env-names-a-strict-project-repo",
@@ -513,9 +505,9 @@
      "k": "dir"
     },
     {
-     "p": "r/.nexus/dev-process.json",
+     "p": "r/.nexus/project.json",
      "k": "file",
-     "c": ""
+     "c": "{\"version\": 1, \"subagent_git\": \"strict\"}"
     }
    ],
    "payload": {},
@@ -537,9 +529,9 @@
      "k": "dir"
     },
     {
-     "p": "r/.nexus/dev-process.json",
+     "p": "r/.nexus/project.json",
      "k": "file",
-     "c": ""
+     "c": "{\"version\": 1, \"subagent_git\": \"strict\"}"
     },
     {
      "p": "u/.git",
@@ -579,9 +571,9 @@
      "k": "dir"
     },
     {
-     "p": "r/.nexus/dev-process.json",
+     "p": "r/.nexus/project.json",
      "k": "file",
-     "c": ""
+     "c": "{\"version\": 1, \"subagent_git\": \"strict\"}"
     }
    ],
    "payload": {
@@ -825,7 +817,7 @@
    "prev_release": false
   },
   {
-   "id": "project-file-wins-over-the-phase-one-marker",
+   "id": "project-file-beside-a-retired-marker",
    "layout": [
     {
      "p": "r/.git",
@@ -846,7 +838,7 @@
    },
    "user": null,
    "covers": [
-    "legacy-beside-project"
+    "retired-marker-beside-project"
    ],
    "expect": {
     "project": {

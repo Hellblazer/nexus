@@ -23,7 +23,7 @@ The conexus plugin ships one development process to every Claude Code user: work
 | `brief_questions` | a list of strings added to the implementer brief check after the four generic questions |
 | `advice_block` | advice row ids that block in this project instead of warning |
 
-`.nexus/dev-process.json` (the Phase 2 file) and `scripts/agent-worktree-preflight.sh` (the Phase 1 marker) are still accepted for two client releases and read as `{"subagent_git": "strict"}`; `.nexus/project.json` decides alone when it exists.
+The two older markers, `.nexus/dev-process.json` (the Phase 2 file) and `scripts/agent-worktree-preflight.sh` (the Phase 1 file), are gone: a checkout with no `.nexus/project.json` reads plain (the seatbelt) whatever those files say. A project that relied on `.nexus/dev-process.json` for the strict guard writes `.nexus/project.json` with `"subagent_git": "strict"`.
 
 **User settings**, `<account home>/.config/nexus/conexus.json`: `subagent_git` (as above; a project's strict is not loosened by a user's seatbelt), `telemetry` (bool, default false: routing events and the dispatch record are sent only when true), `t1_nudge` (bool, default true: the SubagentStop reminder to write findings to T1) and `advice_block`. An error reading it leaves the defaults.
 
@@ -31,7 +31,7 @@ The default for every key is the same for everyone: the seatbelt, neutral text, 
 
 ## The helper
 
-`_audience.py` (the settings reader) exists twice, byte for byte: `conexus/hooks/scripts/_audience.py` (the plugin's command hooks, stdlib only) and `src/nexus/hooks/_audience.py` (`nx-hook` and the MCP server). `tests/hooks/test_audience_parity.py` checks the bytes and drives both copies over `tests/fixtures/audience_corpus.json`. A second test, marked `lint`, drives the helper at the newest release tag that carries one (an older plugin paired with this checkout, which knows only the two old markers) over the same corpus. It needs tags, which only the `test-lint` job has (it checks out at depth 0; develop's `test` shards and the Windows job are depth 1 with none), so elsewhere it skips, and it fails when `CI` or `NX_REQUIRE_PREV_RELEASE_COPY=1` is set and no tag is readable. Change one copy and copy it over the other.
+`_audience.py` (the settings reader) exists twice, byte for byte: `conexus/hooks/scripts/_audience.py` (the plugin's command hooks, stdlib only) and `src/nexus/hooks/_audience.py` (`nx-hook` and the MCP server). `tests/hooks/test_audience_parity.py` checks the bytes and drives both copies over `tests/fixtures/audience_corpus.json`. A second test, marked `lint`, drives the helper at the newest release tag that carries one (an older plugin paired with this checkout, which still reads the two retired markers: a corpus row where it answers differently on purpose says `prev_release: false`) over the same corpus. It needs tags, which only the `test-lint` job has (it checks out at depth 0; develop's `test` shards and the Windows job are depth 1 with none), so elsewhere it skips, and it fails when `CI` or `NX_REQUIRE_PREV_RELEASE_COPY=1` is set and no tag is readable. Change one copy and copy it over the other.
 
 Invariants, each of which is a test:
 

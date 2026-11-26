@@ -68,11 +68,11 @@ def test_a_repository_with_no_project_file_runs_no_git_on_any_path(audience_copy
     assert shim.calls() == [], "git ran for settings in a repository with no settings file: " + repr(shim.calls())
 
 
-def test_a_checkout_with_a_legacy_marker_and_no_project_file_runs_no_git(audience_copy, tmp_path, monkeypatch):
-    """The marker reads strict from the working tree; the committed copy cannot add to a strict answer."""
+def test_a_checkout_with_a_retired_marker_and_no_project_file_runs_no_git(audience_copy, tmp_path, monkeypatch):
+    """A retired marker file is just a file: the checkout reads plain and no git process asks for a committed copy."""
     repo = init_repo(tmp_path / "r", {"scripts/agent-worktree-preflight.sh": "#!/bin/sh\n"})
     shim = GitShim(tmp_path).install(monkeypatch)
-    assert audience_copy.guard_mode({"cwd": str(repo)}, head=True) == "strict"
+    assert audience_copy.guard_mode({"cwd": str(repo)}, head=True) == "seatbelt"
     assert shim.calls() == []
 
 

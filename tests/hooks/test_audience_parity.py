@@ -5,7 +5,8 @@ nexus-sby49.4 and nexus-sby49.8).
 ``conexus/hooks/scripts/_audience.py`` runs in the plugin's command hooks (stdlib only, no ``nexus`` import).
 ``src/nexus/hooks/_audience.py`` runs inside ``nx-hook`` and the MCP server. They must be byte-identical, and the
 older plugin that a newer checkout is paired with (the helper at the newest release tag that carries one) must give the
-same answer on every row it can know (it knows the two legacy markers only). ``tests/fixtures/audience_corpus.json``
+same answer on every row it can know (it knows the two retired markers only, which this release no longer reads: a row
+where they differ on purpose says ``prev_release: false``). ``tests/fixtures/audience_corpus.json``
 holds layouts x user settings -> the answer of each reader (RDR-259 Decisions 1-4, 7 and 11); the two live copies are
 driven over it, so a change to one copy's walk, files or defaults fails here until the other agrees. Every row of the
 Decision 4 failure table, for the project file and the user file, is covered by at least one row (``covers``).
@@ -40,9 +41,10 @@ MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 #: A corpus below this size is a vacuous corpus; a copy that examines fewer rows than this is a vacuous pass. A row a
 #: platform cannot run (posix_only on Windows, git absent) is reported as skipped, never counted.
 MIN_ROWS = 90
-#: The previous release's helper knows only the legacy markers, so it examines only the rows with no project file beyond
-#: a marker, no HEAD, no user file, no account-home change and no CLAUDE_PROJECT_DIR.
-MIN_PREVIOUS_ROWS = 15
+#: The previous release's helper knows only the retired markers and no project file, so it examines only the rows where it
+#: and this release agree: no project file that says anything, no HEAD, no user file, no account-home change and no
+#: CLAUDE_PROJECT_DIR.
+MIN_PREVIOUS_ROWS = 12
 
 #: The fields the readers are compared on, in the order the corpus states them.
 COMPARED = (
@@ -60,7 +62,7 @@ _DECISION_FOUR = (
 )
 _USER_ONLY = ("telemetry-notbool", "t1-nudge-notbool")
 _OTHER = (
-    "no-home", "legacy-marker-1", "legacy-marker-2", "legacy-beside-project", "head-union", "head-absent",
+    "no-home", "retired-marker-1", "retired-marker-2", "retired-marker-beside-project", "head-union", "head-absent",
     "head-unborn", "head-invalid-json", "head-oversize", "head-lowers-strict-cannot-lower-wt", "cwd-checkout-adds",
     "cwd-checkout-cannot-lower", "session-root-env-wins", "precedence-matrix",
 )
@@ -236,12 +238,13 @@ def test_the_corpus_is_big_enough_and_complete(corpus: dict) -> None:
         assert set(row.get("expect", {})) <= set(COMPARED) | {"remote_test_hosts"}, row["id"]
         for entry in row["layout"]:
             assert entry["k"] in _LAYOUT_KINDS, (row["id"], entry)
-    # Both legacy markers are named once, here and in the helper: a marker the corpus does not mention is untested.
-    plugin = _load(PLUGIN_COPY, "_audience_marker_probe")
-    assert list(plugin.LEGACY_MARKERS) == corpus["markers"]
+    # The retired markers are named once, in the corpus: a marker no row builds is untested, and the readers no longer know them.
+    probe = _load(PLUGIN_COPY, "_audience_marker_probe")
+    for name in ("LEGACY_MARKERS", "LEGACY_ACCEPTED_UNTIL"):
+        assert not hasattr(probe, name), name
     layout_paths = {e["p"].split("/", 1)[1] for r in rows for e in r["layout"] if "p" in e and "/" in e["p"]}
-    for marker in corpus["markers"]:
-        assert marker in layout_paths, f"no corpus row builds the marker {marker}"
+    for marker in corpus["retired_markers"]:
+        assert marker in layout_paths, f"no corpus row builds the retired marker {marker}"
 
 
 def test_the_corpus_covers_every_decision_four_case(corpus: dict) -> None:
@@ -327,5 +330,4 @@ def test_the_previous_releases_copy_gives_the_corpus_answers(
 def test_the_src_copy_imports_as_a_package_module() -> None:
     from nexus.hooks import _audience  # noqa: PLC0415 -- the import path the src hooks use
 
-    assert _audience.LEGACY_MARKERS == _load(PLUGIN_COPY, "_audience_marker_probe_2").LEGACY_MARKERS
     assert sys.modules["nexus.hooks._audience"] is _audience

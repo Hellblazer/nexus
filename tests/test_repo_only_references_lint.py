@@ -305,12 +305,6 @@ _ALLOWED: dict[str, list[Site]] = {
         Site("reinstall-tool.sh", "a dev checkout uses", "named for the dev-checkout case only, in a sentence conditional on running from one"),
         Site("reinstall-tool.sh", "For a checkout, run", "printed when nx runs from a source checkout, where the script is in the checkout's scripts directory"),
     ],
-    "conexus/hooks/scripts/_audience.py": [
-        Site("scripts/agent-worktree-preflight.sh", "scripts/agent-worktree-preflight.sh", "the marker file the audience helper probes with os.path.isfile in the payload's checkout to tell a nexus checkout from a user's repository, never printed"),
-    ],
-    "src/nexus/hooks/_audience.py": [
-        Site("scripts/agent-worktree-preflight.sh", "scripts/agent-worktree-preflight.sh", "a byte copy of the plugin helper above: the marker file probed with os.path.isfile in the payload's checkout, never printed"),
-    ],
     "src/nexus/storage_boundary_lint.py": [
         # Path constants the storage-boundary lint matches against its own checkout; none is printed.
         Site("src/nexus/catalog/", "CATALOG_PHASE_ALLOWLIST_PREFIX", "a prefix matched against scanned file paths, never shown"),
