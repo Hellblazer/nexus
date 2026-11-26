@@ -51,11 +51,9 @@ import shutil
 #: nexus-qo7ie.36, plus the SessionEnd(clear) resume-pointer writer, RDR-253 Step 6
 #: part 2; it was 21 before that writer, 20 before the advice hook; it
 #: was 18 while the nexus-i93tz integrity check was registered on
-#: Pre/Post/PostToolUseFailure Bash, removed again 2026-10-25; 22 -> 21 at
-#: nexus-sby49.5, which removes the PermissionRequest auto-approve entry so a
-#: user's own ask rule for a conexus tool is not overridden). A stated floor,
+#: Pre/Post/PostToolUseFailure Bash, removed again 2026-10-25). A stated floor,
 #: not a derived one, on purpose: a derived count falls with the manifest.
-DEFAULT_MIN_EXECUTED = 21
+DEFAULT_MIN_EXECUTED = 22
 
 #: What the launcher writes when it finds no CLI (_cli_lookup.missing_note).
 _MISSING_MARK = "is not installed"
