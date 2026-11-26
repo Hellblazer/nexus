@@ -24,6 +24,7 @@ from nexus.daemon.service_registry import service_identity
 from nexus.daemon.service_registry import ServiceRegistry
 from nexus.db.service_endpoint import (
     CredentialOriginMismatchError,
+    InsecureServiceTransportError,
     discover_lease,
     resolve_service_config,
     resolve_service_endpoint,
@@ -55,10 +56,20 @@ def _clean_env(monkeypatch):
 
 class TestResolveServiceConfig:
     def test_env_only_resolves_without_lease(self, monkeypatch):
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", "9999")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "env-token")
+        assert resolve_service_config() == ("127.0.0.1", 9999, "env-token")
+
+    @pytest.mark.expects_unresolvable_endpoint
+    def test_env_only_refuses_a_bearer_for_plain_http_off_the_machine(self, monkeypatch):
+        # nexus-ec37o: this leg is always plain http, so a token (env or lease) goes only to a
+        # loopback host. Was: 10.0.0.5 resolved with the env token. No opt-in for a LAN engine.
         monkeypatch.setenv("NX_SERVICE_HOST", "10.0.0.5")
         monkeypatch.setenv("NX_SERVICE_PORT", "9999")
         monkeypatch.setenv("NX_SERVICE_TOKEN", "env-token")
-        assert resolve_service_config() == ("10.0.0.5", 9999, "env-token")
+        with pytest.raises(InsecureServiceTransportError):
+            resolve_service_config()
 
     def test_lease_fills_when_env_absent(self):
         _publish_lease(port=4242, token="lease-token")

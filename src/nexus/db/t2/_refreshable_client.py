@@ -68,6 +68,7 @@ import structlog
 from nexus._log_safe_url import log_endpoint
 from nexus.collection_errors import label_reserved_error_from_body, superseded_write_error_from_body
 from nexus.db.client_identity import client_identity_headers
+from nexus.db.t2.shared_ssl import direct_cleartext_mounts as _direct_cleartext_mounts
 from nexus.db.t2.shared_ssl import get_shared_ssl_context as _get_shared_ssl_context
 from nexus.identity.token_header import request_with_identity, superseded_from_response
 from nexus.db import gateway_hold
@@ -168,6 +169,7 @@ def build_shared_t2_client(
         timeout=timeout,
         verify=_get_shared_ssl_context(),
         limits=limits if limits is not None else _SHARED_CLIENT_LIMITS,
+        mounts=_direct_cleartext_mounts(),  # nexus-ec37o: no proxy for a plain-http bearer
     )
 
 
@@ -658,7 +660,9 @@ class RefreshableHttpStoreMixin:
             self._client = client
             self._owns_client = False
         else:
-            self._client = httpx.Client(timeout=timeout, verify=_get_shared_ssl_context())
+            self._client = httpx.Client(
+                timeout=timeout, verify=_get_shared_ssl_context(), mounts=_direct_cleartext_mounts(),
+            )
             self._owns_client = True
 
     def close(self) -> None:

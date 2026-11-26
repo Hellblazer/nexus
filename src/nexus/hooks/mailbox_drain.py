@@ -684,8 +684,11 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
 
     def _do() -> None:
         try:
+            from nexus.db.service_endpoint import bearer_may_use_proxy  # noqa: PLC0415 — deferred: a drain with no address never sends
+
             handlers: list[urllib.request.BaseHandler] = []
-            if is_local:
+            if is_local or not bearer_may_use_proxy(base_url):
+                # nexus-ec37o: a plain-http bearer (the lease token always) never goes through a proxy
                 handlers.append(urllib.request.ProxyHandler({}))
             opener = urllib.request.build_opener(*handlers)
             with opener.open(req, timeout=call_timeout) as resp:  # noqa: S310 — fixed engine URL
@@ -1304,7 +1307,12 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     ``DataTokenManager.bearer_for``.
     """
     from nexus.db.data_token import DataTokenManager  # noqa: PLC0415 — deferred: a drain with no address never resolves
-    from nexus.db.service_endpoint import ServiceTokenUnresolvableError, discover_lease, select_service_token  # noqa: PLC0415 — deferred, same reason
+    from nexus.db.service_endpoint import (  # noqa: PLC0415 — deferred, same reason
+        ServiceTokenUnresolvableError,
+        discover_lease,
+        require_secure_transport,
+        select_service_token,
+    )
 
     base_url, is_local = _resolve_base_url()
 
@@ -1319,6 +1327,12 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     except Exception:  # noqa: BLE001 — best-effort, as the static legs below are the fallback
         data_token = None
     if data_token:
+        # nexus-ec37o: a lease is bound to its host, not to a transport; the data token goes only
+        # over https or to a loopback host, as a stored credential does.
+        try:
+            require_secure_transport(base_url)
+        except ServiceTokenUnresolvableError as exc:
+            raise _Skip(str(exc)) from exc
         return base_url, data_token, is_local
 
     # Each stored credential goes only to the origin it was issued for (nexus-ec37o): the URL

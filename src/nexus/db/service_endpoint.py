@@ -518,6 +518,11 @@ def resolve_service_config(
         if picked is None:
             raise CredentialOriginMismatchError(mismatch_message(describe_url_source(), refused))
         token = picked[0]
+    if token and port is not None:
+        # nexus-ec37o: this leg is always plain http, so a bearer (an env token or the lease
+        # token alike) goes only to a loopback host. A LAN or docker engine needs https.
+        shown_host = f"[{host}]" if ":" in host else host
+        require_secure_transport(f"http://{shown_host}:{port}")
 
     if port is None or not token:
         # RDR-155 P4b: the nexus-0rwwv migration-hint bridge died with the
@@ -677,7 +682,7 @@ def choose_bound_token(
 
 def mismatch_message(url_source: str, refused: list[str]) -> str:
     return (
-        f"{url_source} names a service that the {' and the '.join(refused)} was not issued for, "
+        f"{url_source} names a service that {' and '.join(refused)} was not issued for, "
         "so that credential is not sent there. Export NX_SERVICE_TOKEN for this service, or "
         "point it at the service the credential belongs to (`nx config set service_url`)."
     )
@@ -710,6 +715,20 @@ def require_secure_transport(url: str, *, url_source: str | None = None) -> None
     if origin is not None and (origin[0] == "https" or is_loopback_host(origin[1])):
         return
     raise InsecureServiceTransportError(insecure_message(url_source or describe_url_source()))
+
+
+def bearer_may_use_proxy(url: str) -> bool:
+    """True only for an https endpoint, where a proxy can only tunnel ciphertext (CONNECT).
+
+    A plain-http request is sent direct, whatever ``HTTP_PROXY`` / ``ALL_PROXY`` name: a proxy
+    would read its ``Authorization`` header, and the supervisor lease token (loopback http
+    only, by its binding) and every cleartext bearer travel that way. A URL that does not
+    normalize gets no proxy either. The clients apply this as
+    :func:`nexus.db.t2.shared_ssl.direct_cleartext_mounts` (httpx), an empty ``ProxyHandler``
+    (urllib) or :func:`nexus.db.pooled_http.build_opener`, and the plugin's mirror of this
+    function (nexus-ec37o)."""
+    origin = normalize_origin(url)
+    return origin is not None and origin[0] == "https"
 
 
 def _stored_credential(name: str) -> tuple[str, str, str | None] | None:

@@ -591,4 +591,9 @@ def build_opener(on_connect: OnConnect) -> Any:
         classes = _handler_classes.get(on_connect)
         if classes is None:
             classes = _handler_classes[on_connect] = _make_handler_classes(on_connect)
-    return urllib.request.build_opener(*classes)
+    # nexus-ec37o: every request here may carry a bearer, and a plain-http one carries it in
+    # the clear, so the environment's ``http`` proxy is never used (see
+    # ``nexus.db.service_endpoint.bearer_may_use_proxy``); an ``https`` request keeps its
+    # proxy, which can only tunnel ciphertext.
+    proxies = {k: v for k, v in urllib.request.getproxies().items() if k != "http"}
+    return urllib.request.build_opener(urllib.request.ProxyHandler(proxies), *classes)

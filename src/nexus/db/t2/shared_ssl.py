@@ -138,3 +138,21 @@ def ca_bundle_path() -> str:
     import certifi  # noqa: PLC0415 — deferred: only on the error path
 
     return certifi.where()
+
+
+def direct_cleartext_mounts() -> dict[str, httpx.BaseTransport]:
+    """``mounts=`` for an ``httpx.Client`` that sends a bearer to the service (nexus-ec37o).
+
+    httpx honours ``HTTP_PROXY`` / ``ALL_PROXY`` by default, and a repository's
+    ``.claude/settings.json`` env reaches every ``nx`` the model runs. A plain-http request
+    carries its ``Authorization`` header in the clear, so a proxy named there would read the
+    supervisor lease token (loopback http, always) or any other bearer sent that way. The
+    mount sends every ``http://`` request direct; an ``https://`` request keeps the
+    environment's proxy, which can only tunnel ciphertext. Empty (no transport built) when no
+    proxy is set, the common case. See
+    :func:`nexus.db.service_endpoint.bearer_may_use_proxy`."""
+    import urllib.request  # noqa: PLC0415 — deferred: stdlib, only the proxy check needs it
+
+    if not urllib.request.getproxies():
+        return {}
+    return {"http://": httpx.HTTPTransport(verify=get_shared_ssl_context())}
