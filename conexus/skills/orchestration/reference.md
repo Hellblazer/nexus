@@ -238,3 +238,7 @@ Thoughts that mean STOP, because you are rationalizing past a tier check:
 | "This finding isn't worth storing" | Findings not stored are findings lost. The next session redoes your work. |
 | "I'll file a bead for that and move on" | Filing is deferral that reads as progress. A gap in the work in hand is closed in this session; file only what cannot finish here (blocked on the user, another instance, or evidence that does not exist yet), and a filed bead is the next thing worked. |
 | "One more pass would tighten this" | Execute the plan to done. No new round on finished work, no hop to an adjacent item mid-plan. Rounds are capped (2 for a code review, set in the nexus wheel's `review-rounds.toml` table). |
+
+## Git in an implementer brief (nexus-5y47c)
+
+The guard judges a subagent's git from the primary checkout, so a brief that touches git says: **where** (an absolute worktree root made before dispatch, not by `git worktree add`); **which shape** (`git -C <root> <verb> <flags in full>` per call or chained with `&&`, or `cd <root> && git <verb> ...`; `-F <file>` for a message naming a git verb; checkout, stash, restore, reset --hard and primary-tree writes stay with the orchestrator); **who pushes** (the orchestrator, or `git -C <root> push -u origin HEAD`, never `develop`, `main`, `--force`).

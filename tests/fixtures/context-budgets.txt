@@ -35,7 +35,7 @@ conexus/resources/agent-shared/CONTEXT_PROTOCOL.md 24587
 conexus/resources/agent-shared/ERROR_HANDLING.md 6668
 conexus/resources/agent-shared/MAINTENANCE.md 3825
 conexus/resources/agent-shared/README.md 2565
-conexus/resources/agent-shared/RELAY_TEMPLATE.md 8532
+conexus/resources/agent-shared/RELAY_TEMPLATE.md 7278
 conexus/resources/rdr/README-TEMPLATE.md 568
 conexus/resources/rdr/REGISTER.md 3426
 conexus/resources/rdr/TEMPLATE.md 10839

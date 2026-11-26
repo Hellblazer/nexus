@@ -160,7 +160,7 @@ ship-blocking. Report it as a Critical and name the fix line that introduced it.
 5. **State.** Every cache or shared state touched, who invalidates it, the invalidate-versus-in-flight-fill race, the first-write and empty cases, the test reset hooks.
 6. **Destroys.** Name what the action destroys, not only what it produces: a push produces a commit and can cancel or replace a verdict someone is waiting on, a branch switch can revert a peer's uncommitted files (feedback_destructive_action_guards).
 
-**Git in the brief (nexus-5y47c).** The guard judges a subagent's git from the primary checkout, so the brief gives the worktree root (made before dispatch, not by `git worktree add`), the one shape (`git -C <root> <verb> ...` or `cd <root> && git <verb> ...`, flags in full, `-F <file>` for a message naming a git verb) and who pushes (the orchestrator, or `git -C <root> push -u origin HEAD`, never `develop`, `main`, `--force`). See RELAY_TEMPLATE.md.
+**Git in the brief (nexus-5y47c).** The guard judges a subagent's git from the primary checkout, so the brief gives the worktree root (made before dispatch), the one git shape and who pushes: [reference.md](./reference.md) § Git in an implementer brief.
 
 **Shared-host clauses.** Every developer, test or debugger brief that touches a test host or the laptop carries these four, verbatim or tightened, because the agent cannot infer them and a stop message arrives after the script has started (feedback_destructive_action_guards):
 

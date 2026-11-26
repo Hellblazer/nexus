@@ -58,7 +58,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/agents/strategic-planner.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
 - `conexus/agents/substantive-critic.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
 - `conexus/agents/test-validator.md`: Relay Reception's Bead field also takes a tracking id (D10), nexus-sby49.3.
-- `conexus/resources/agent-shared/RELAY_TEMPLATE.md`: the Bead field also takes a tracking id (D10), nexus-sby49.3; a section says what an implementer relay gives a subagent about git (worktree root, the one shape, who pushes), nexus-5y47c.
+- `conexus/resources/agent-shared/RELAY_TEMPLATE.md`: the Bead field also takes a tracking id (D10), nexus-sby49.3; a one-line pointer to the orchestration skill's reference.md for what a brief gives a subagent about git, nexus-5y47c.
 - `conexus/hooks/scripts/routing/_lib.py`: `log_routing_event` records only under `maintainer()`, so a user's command fragments no longer reach their engine as routing_events rows, nexus-sby49.3.
 - `conexus/hooks/scripts/_audience.py`: three lazy imports carry a `noqa: PLC0415` reason so the byte copy under `src/` passes the repo's ruff job (comment only), nexus-sby49.3.
 - `conexus/README.md`: the relay example's Bead field takes a tracking id, nexus-sby49.3.
@@ -67,7 +67,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/commands/review-code.md`: the relay's Bead field takes a tracking id, nexus-sby49.3.
 - `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`: the maintainer's full guard also denies `git reflog delete` (plan 2.1), nexus-sby49.3; it admits read-only git and verb words in text, chained writes in a worktree git proves, a plain fetch, a detached worktree outside every repo, a scratch repository the command creates, and a push of the worktree's own branch, and its deny text is 1.3 KB where it was 2.9 KB, nexus-5y47c.
 - `conexus/hooks/scripts/routing/_git_admit.py`: new module, the admission half of nexus-5y47c: a strict lexer, per-segment shapes and the unchanged guard as the fallback for every segment it does not recognise.
-- `conexus/skills/orchestration/SKILL.md`: the implementer dispatch section says what a brief gives a subagent about git, nexus-5y47c.
+- `conexus/skills/orchestration/SKILL.md`: the implementer dispatch section points to reference.md for what a brief gives a subagent about git, nexus-5y47c.
+- `conexus/skills/orchestration/reference.md`: a section, Git in an implementer brief (worktree root, the one shape, who pushes), nexus-5y47c.
 - `conexus/hooks/scripts/routing/README.md`: the git guard's freeze note records the one lift for the six nexus-5y47c fixes (Sam, 2026-11-25).
 - `conexus/hooks/audience.yaml`: the audience manifest, one entry per hook registration, module and injected constant; read by the lint and the behaviour leg, nexus-sby49.3; a module entry for `_git_admit.py`, nexus-5y47c.
 - `conexus/hooks/scripts/routing/registry.yaml`: each rule carries its `audience`, nexus-sby49.3.
