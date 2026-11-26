@@ -123,7 +123,10 @@ def main(argv: list[str]) -> int:
         "CLAUDE_PLUGIN_ROOT": plugin_root,
         "NX_NO_TELEMETRY": "1",
         "TERM": "dumb",
+        # The settings notice keeps its once-per-session mark in the temporary directory: keep it in the scratch one.
+        "TMPDIR": os.path.join(scratch, "tmp"),
     }
+    os.makedirs(env["TMPDIR"], exist_ok=True)
     # uv's caches live under the caller's, not the scratch HOME: a fresh HOME
     # per CLI would re-resolve and may re-download an interpreter every time.
     for passthrough in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR"):

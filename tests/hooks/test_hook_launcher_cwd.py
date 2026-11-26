@@ -119,7 +119,10 @@ def _run(args: list[str], root: Path, project: Path) -> subprocess.CompletedProc
         "HOME": os.environ.get("HOME", ""),
         "CLAUDE_PROJECT_DIR": str(project),
         "CLAUDE_PLUGIN_ROOT": str(root),
+        # A once-per-session mark (the settings notice) goes in the temporary directory: keep it in this test's own.
+        "TMPDIR": str(root.parent / "tmp"),
     }
+    (root.parent / "tmp").mkdir(exist_ok=True)
     if any(a.endswith("/launch/nx_launch.py") for a in args):
         # A launcher entry would find this machine's own install and run its real
         # hook verbs (an upgrade, a generation sweep). This file is about which

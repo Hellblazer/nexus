@@ -23,6 +23,11 @@ import tempfile
 import time
 from pathlib import Path
 
+try:
+    import pwd
+except ImportError:  # Windows
+    pwd = None  # type: ignore[assignment]
+
 import pytest
 
 from tests.hooks.audience_harness import path_without
@@ -205,18 +210,20 @@ def test_a_plain_repository_with_no_settings_files_is_silent(tmp_path):
 BROKEN = {"version": 1, "subagent-git": "strict"}
 
 
-def _marks(home: Path) -> Path:
-    return home / ".config" / "nexus" / "logs" / "audience-settings-notice"
-
-
 def _temp_marks(tmp_path: Path) -> list[Path]:
     return sorted((tmp_path / "tmp").glob("conexus-settings-notice-*"))
 
 
-@pytest.mark.parametrize("logs", [True, False], ids=["logs-dir", "no-logs-dir"])
-def test_the_first_prompt_shows_and_the_second_prompt_of_the_session_is_silent(tmp_path, logs):
+def _tree(root: Path) -> set[str]:
+    """Every path under *root* (relative), as the nexus-pfuns guard snapshots it; empty when *root* is absent."""
+    if not root.exists():
+        return set()
+    return {str(p.relative_to(root)) for p in root.rglob("*")}
+
+
+def test_the_first_prompt_shows_and_the_second_prompt_of_the_session_is_silent(tmp_path):
     repo = _repo(tmp_path / "repo", BROKEN)
-    home = _home(tmp_path / "home", logs=logs)
+    home = _home(tmp_path / "home")
     first = _out(_run(tmp_path, repo, home, session_id="s-a"))
     assert "did you mean subagent_git" in first["systemMessage"]
     for _ in range(2):
@@ -224,10 +231,9 @@ def test_the_first_prompt_shows_and_the_second_prompt_of_the_session_is_silent(t
         assert again.returncode == 0 and again.stdout == "" and again.stderr == ""
 
 
-@pytest.mark.parametrize("logs", [True, False], ids=["logs-dir", "no-logs-dir"])
-def test_a_new_session_shows_it_again(tmp_path, logs):
+def test_a_new_session_shows_it_again(tmp_path):
     repo = _repo(tmp_path / "repo", BROKEN)
-    home = _home(tmp_path / "home", logs=logs)
+    home = _home(tmp_path / "home")
     first = _out(_run(tmp_path, repo, home, session_id="s-a"))
     assert _run(tmp_path, repo, home, session_id="s-a").stdout == ""
     second = _out(_run(tmp_path, repo, home, session_id="s-b"))  # after /clear the session id is new
@@ -253,34 +259,36 @@ def test_a_clean_first_prompt_is_silent_and_still_marks_the_session(tmp_path):
     home = _home(tmp_path / "home", logs=True)
     proc = _run(tmp_path, repo, home, session_id="s-clean")
     assert proc.returncode == 0 and proc.stdout == "" and proc.stderr == ""
-    assert (_marks(home) / "s-clean").exists()
+    assert [m.name.rsplit("-", 2)[-1] for m in _temp_marks(tmp_path)] == ["clean"]
 
 
-def test_the_mark_is_kept_with_the_audience_log_marks_when_the_logs_directory_exists(tmp_path):
+def test_the_mark_is_a_temporary_file_and_the_nexus_config_directory_is_never_written(tmp_path):
     repo = _repo(tmp_path / "repo", BROKEN)
     home = _home(tmp_path / "home", logs=True)
     _out(_run(tmp_path, repo, home, session_id="s-a"))
-    assert (_marks(home) / "s-a").is_file()
-    assert _temp_marks(tmp_path) == []
-
-
-def test_without_a_logs_directory_the_mark_is_a_temporary_file_and_no_config_directory_is_made(tmp_path):
-    repo = _repo(tmp_path / "repo", BROKEN)
-    home = _home(tmp_path / "home")
-    _out(_run(tmp_path, repo, home, session_id="s-a"))
     assert len(_temp_marks(tmp_path)) == 1
-    assert not (home / ".config").exists(), "a machine with no nexus configuration gets no new directory"
+    assert not (home / ".config" / "nexus" / "logs" / "audience-settings-notice").exists()
 
 
-def test_a_mark_directory_that_cannot_be_made_falls_back_to_the_temporary_file(tmp_path):
-    """State unwritable is not silence and not a notice on every prompt: the temporary file keeps the once-per-session promise."""
-    repo = _repo(tmp_path / "repo", BROKEN)
-    home = _home(tmp_path / "home", logs=True)
-    _marks(home).write_text("in the way", encoding="utf-8")  # a file where the mark directory should be
-    first = _out(_run(tmp_path, repo, home, session_id="s-a"))
-    assert "did you mean" in first["systemMessage"]
-    assert len(_temp_marks(tmp_path)) == 1
-    assert _run(tmp_path, repo, home, session_id="s-a").stdout == ""
+def test_a_hook_entry_run_leaves_the_real_logs_directory_untouched(tmp_path):
+    """The nexus-pfuns class: a test must never write the operator's real configuration. The script runs here with no pinned
+    account home (so the reader sees the real one) and a clean repository (so nothing is logged); its mark must land in the
+    test's own temporary directory, and the real ``~/.config/nexus/logs`` tree must be exactly as it was. Non-vacuous: the mark
+    is found, so the claim ran."""
+    real = Path(pwd.getpwuid(os.getuid()).pw_dir if pwd else os.path.expanduser("~")) / ".config" / "nexus" / "logs"
+    before = _tree(real)
+    repo = _repo(tmp_path / "repo", {"version": 1})
+    env = {**os.environ, "NX_TOOLS_DIR": str(tmp_path / "no-tools")}
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        env[name] = str(tmp_path / "tmp")
+    (tmp_path / "tmp").mkdir()
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT)], input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "real-home-probe", "cwd": str(repo)}),
+        capture_output=True, text=True, env=env, timeout=60, check=False,
+    )
+    assert proc.returncode == 0 and proc.stderr == ""
+    assert len(_temp_marks(tmp_path)) == 1, "the claim must have run and kept its mark in the test's temporary directory"
+    assert _tree(real) == before, "a hook-entry run wrote under the real ~/.config/nexus/logs"
 
 
 #: A driver for a machine where no mark can be kept at all: no account home, and a temporary directory that is not there.
@@ -342,10 +350,7 @@ def test_the_prompt_hooks_are_the_mailbox_drain_and_the_notice_in_groups_of_thei
 REPEAT_CLAIM_MAX_MS = 5.0
 
 
-@pytest.mark.parametrize("logs", [True, False], ids=["logs-dir", "no-logs-dir"])
-def test_a_repeat_claim_is_cheap_and_scans_nothing(audience_copy, tmp_path, monkeypatch, logs):
-    if logs:
-        (audience_copy.HOME / ".config" / "nexus" / "logs").mkdir(parents=True)
+def test_a_repeat_claim_is_cheap_and_scans_nothing(audience_copy, tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     payload = {"session_id": "s-cost"}
     assert audience_copy.claim_session_once("settings-notice", payload) is True
@@ -358,18 +363,6 @@ def test_a_repeat_claim_is_cheap_and_scans_nothing(audience_copy, tmp_path, monk
     per_call_ms = (time.perf_counter() - start) * 1000 / 200
     assert scans == [], "a repeat claim must not scan the mark directory"
     assert per_call_ms < REPEAT_CLAIM_MAX_MS, per_call_ms
-
-
-def test_a_mark_older_than_a_week_is_deleted_by_the_next_claim_beside_it(audience_copy):
-    marks = audience_copy.HOME / ".config" / "nexus" / "logs" / "audience-settings-notice"
-    marks.mkdir(parents=True)
-    old, fresh = marks / "old-session", marks / "fresh-session"
-    for f in (old, fresh):
-        f.write_text("", encoding="utf-8")
-    eight_days = time.time() - 8 * 24 * 3600
-    os.utime(old, (eight_days, eight_days))
-    assert audience_copy.claim_session_once("settings-notice", {"session_id": "new-session"}) is True
-    assert not old.exists() and fresh.exists() and (marks / "new-session").exists()
 
 
 def test_claim_session_once_says_none_without_a_session_and_never_raises(audience_copy):
