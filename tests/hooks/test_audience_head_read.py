@@ -2,7 +2,7 @@
 """The strictness keys' ``HEAD`` read, its case table, the index check and the session-root rule (nexus-sby49.8, RDR-259 Decision 1).
 
 Real repositories, and a recording ``git`` on ``PATH`` (``tests/hooks/git_shim.py``) so each case also says how many git
-processes ran: at most two (``ls-tree``, then ``cat-file`` only when ``ls-tree`` named a blob). Both byte copies run every case.
+processes ran: exactly one (``cat-file --batch``) whenever the read runs at all, whatever git answers. Both byte copies run every case.
 The corpus (``tests/fixtures/audience_corpus.json``) holds the answer rows; this file holds the process counts, the exit-code
 cases a corpus layout cannot stage (a hung or failing git) and the index check.
 """
@@ -64,7 +64,7 @@ def test_a_committed_strict_survives_a_working_tree_that_dropped_it(audience, tm
     shim.install(monkeypatch)
     assert audience.guard_mode(_p(repo)) == "seatbelt" and shim.calls() == [], "the default reads no HEAD"
     assert audience.guard_mode(_p(repo), head=True) == "strict"
-    assert shim.verbs() == ["ls-tree", "cat-file"]
+    assert shim.verbs() == ["cat-file"]
     assert audience.read_settings(_p(repo), head=True).sources["subagent_git"] == "project (HEAD)"
 
 
@@ -73,7 +73,7 @@ def test_a_deleted_working_copy_is_still_strict_from_head(audience, tmp_path, sh
     _set_wt(repo, None)
     shim.install(monkeypatch)
     assert audience.guard_mode(_p(repo), head=True) == "strict", "the index names the file, so HEAD is read"
-    assert shim.verbs() == ["ls-tree", "cat-file"]
+    assert shim.verbs() == ["cat-file"]
 
 
 def test_a_strict_working_tree_needs_no_git_unless_the_report_asks_for_it(audience, tmp_path, shim, monkeypatch):
@@ -81,7 +81,7 @@ def test_a_strict_working_tree_needs_no_git_unless_the_report_asks_for_it(audien
     shim.install(monkeypatch)
     assert audience.guard_mode(_p(repo), head=True) == "strict" and shim.calls() == []
     audience.read_settings(_p(repo), head=True, full=True)
-    assert shim.verbs() == ["ls-tree", "cat-file"], "show and check read HEAD whatever the working tree says"
+    assert shim.verbs() == ["cat-file"], "show and check read HEAD whatever the working tree says"
 
 
 def test_a_commit_that_lacks_the_file_is_absence_not_strict_and_runs_one_process(audience, tmp_path, shim, monkeypatch):
@@ -91,7 +91,7 @@ def test_a_commit_that_lacks_the_file_is_absence_not_strict_and_runs_one_process
     shim.install(monkeypatch)
     s = audience.read_settings(_p(repo), head=True)
     assert s.values["subagent_git"] == "seatbelt" and s.problems == []
-    assert shim.verbs() == ["ls-tree"]
+    assert shim.verbs() == ["cat-file"]
 
 
 def test_an_unborn_head_is_no_head_copy(audience, tmp_path, shim, monkeypatch):
@@ -99,7 +99,7 @@ def test_an_unborn_head_is_no_head_copy(audience, tmp_path, shim, monkeypatch):
     shim.install(monkeypatch)
     s = audience.read_settings(_p(repo), head=True)
     assert s.values["subagent_git"] == "seatbelt" and s.problems == []
-    assert shim.verbs() == ["ls-tree"]
+    assert shim.verbs() == ["cat-file"]
 
 
 @pytest.mark.parametrize("blob,what", [
@@ -160,18 +160,18 @@ def test_the_index_alone_can_make_the_read_happen(audience, tmp_path, shim, monk
     _set_wt(repo, None)  # staged, never committed, working copy gone: only the index names it
     shim.install(monkeypatch)
     assert audience.guard_mode(_p(repo), head=True) == "seatbelt"  # an unborn HEAD gives nothing
-    assert shim.verbs() == ["ls-tree"], "the index named it, so git was asked"
+    assert shim.verbs() == ["cat-file"], "the index named it, so git was asked"
 
 
 def test_exit_128_is_no_head_copy_and_not_strict(audience, tmp_path, shim, monkeypatch):
     repo = tmp_path / "r"
-    (repo / ".git").mkdir(parents=True)  # a .git that is not a repository: ls-tree exits 128
+    (repo / ".git").mkdir(parents=True)  # a .git that is not a repository: cat-file exits 128
     (repo / ".nexus").mkdir()
     (repo / PROJECT).write_text(_j())
     shim.install(monkeypatch)
     s = audience.read_settings(_p(repo), head=True)
     assert s.values["subagent_git"] == "seatbelt" and s.problems == []
-    assert shim.verbs() == ["ls-tree"]
+    assert shim.verbs() == ["cat-file"]
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +223,7 @@ def test_any_other_nonzero_exit_is_strict_and_reported(audience, tmp_path, shim,
     shim.mode("fail7")
     s = audience.read_settings(_p(repo), head=True)
     assert s.values["subagent_git"] == "strict" and _probs(s) == [(HEAD, "")]
-    assert shim.verbs() == ["ls-tree"]
+    assert shim.verbs() == ["cat-file"]
 
 
 def test_a_cat_file_failure_is_strict_and_reported(audience, tmp_path, shim, monkeypatch):
@@ -232,7 +232,65 @@ def test_a_cat_file_failure_is_strict_and_reported(audience, tmp_path, shim, mon
     shim.mode("catfail")
     s = audience.read_settings(_p(repo), head=True)
     assert s.values["subagent_git"] == "strict" and _probs(s) == [(HEAD, "")]
-    assert shim.verbs() == ["ls-tree", "cat-file"], "never more than two processes"
+    assert shim.verbs() == ["cat-file"], "one process, whatever git answered"
+
+
+def test_git_output_that_is_not_what_cat_file_prints_is_strict_and_reported(audience, tmp_path, shim, monkeypatch):
+    repo = init_repo(tmp_path / "r", {PROJECT: _j()})
+    shim.install(monkeypatch)
+    for mode in ("junk", "cut"):  # exit 0 with nonsense, and a blob header whose body is shorter than it says
+        shim.mode(mode)
+        s = audience.read_settings(_p(repo), head=True)
+        assert s.values["subagent_git"] == "strict" and _probs(s) == [(HEAD, "")] and s.problems[0].forced_strict, mode
+    assert shim.verbs() == ["cat-file", "cat-file"], "one process per read"
+
+
+def test_a_directory_at_the_path_is_strict_and_reported(audience, tmp_path, shim, monkeypatch):
+    repo = init_repo(tmp_path / "r", {PROJECT + "/inner": "x\n"})
+    import shutil  # noqa: PLC0415
+
+    shutil.rmtree(repo / PROJECT)
+    (repo / PROJECT).write_text(_j())  # a working file, so the committed copy is asked for
+    shim.install(monkeypatch)
+    s = audience.read_settings(_p(repo), head=True)
+    assert s.values["subagent_git"] == "strict" and _probs(s) == [(HEAD, "")] and "not a file" in s.problems[0].what
+    assert shim.verbs() == ["cat-file"]
+
+
+def test_a_submodule_at_the_path_is_strict_and_reported(audience, tmp_path, shim, monkeypatch):
+    repo = init_repo(tmp_path / "r", {"README": "x\n"})
+    run_git(repo, "update-index", "--add", "--cacheinfo", "160000," + run_git(repo, "rev-parse", "HEAD").strip() + "," + PROJECT)
+    run_git(repo, "commit", "-q", "-m", "gitlink")
+    (repo / ".nexus").mkdir(exist_ok=True)
+    (repo / PROJECT).write_text(_j())
+    shim.install(monkeypatch)
+    s = audience.read_settings(_p(repo), head=True)
+    assert s.values["subagent_git"] == "strict" and _probs(s) == [(HEAD, "")] and "not a file" in s.problems[0].what
+    assert shim.verbs() == ["cat-file"]
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
+def test_a_committed_symlink_is_a_blob_of_its_target_text_and_so_is_strict_when_it_does_not_parse(audience, tmp_path, shim, monkeypatch):
+    repo = init_repo(tmp_path / "r", {"README": "x\n"})
+    (repo / ".nexus").mkdir()
+    os.symlink("elsewhere.json", repo / PROJECT)
+    run_git(repo, "add", PROJECT)
+    run_git(repo, "commit", "-q", "-m", "link")
+    (repo / PROJECT).unlink()
+    (repo / PROJECT).write_text(_j())
+    shim.install(monkeypatch)
+    s = audience.read_settings(_p(repo), head=True)
+    assert s.values["subagent_git"] == "strict" and _probs(s) == [(HEAD, "")]
+    assert shim.verbs() == ["cat-file"]
+
+
+def test_a_committed_file_over_the_cap_is_strict_with_one_process(audience, tmp_path, shim, monkeypatch):
+    repo = init_repo(tmp_path / "r", {PROJECT: _j() + " " * 70000})
+    _set_wt(repo, _j())
+    shim.install(monkeypatch)
+    s = audience.read_settings(_p(repo), head=True)
+    assert s.values["subagent_git"] == "strict" and "64 KiB" in s.problems[0].what
+    assert shim.verbs() == ["cat-file"]
 
 
 def test_a_repository_owned_by_another_user_is_not_read_and_the_working_tree_decides(audience, tmp_path, shim, monkeypatch):

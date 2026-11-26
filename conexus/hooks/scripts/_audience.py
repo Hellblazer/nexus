@@ -15,7 +15,7 @@ which file may set it, how two values combine, the failure value and the limit (
 Which project copy is read: the *session root* is the checkout at or above ``CLAUDE_PROJECT_DIR`` (the primary, which stays put
 for a worktree subagent), else the one at or above the payload's ``cwd``. The text and list keys come from the session root's
 working-tree file. The strictness keys (``subagent_git``, ``advice_block``) combine, tighter wins, the session root's working
-tree, its file at ``HEAD`` (two git processes at most, only when the caller asks and a project file may exist: see
+tree, its file at ``HEAD`` (one git process, only when the caller asks and a project file may exist: see
 ``read_settings``) and the working tree of the checkout the payload's ``cwd`` sits in when that is a different one.
 
 Failure: a safety key fails toward the protection (``subagent_git`` strict), the rest to the default. Every problem is a
@@ -528,7 +528,7 @@ def _read_file(label: str, path: str, role: str, *, who: str, follow: bool, keys
 
 
 # ---------------------------------------------------------------------------
-# The committed copy: one or two git processes, the index check, the case table
+# The committed copy: one git process, the index check, the case table
 # ---------------------------------------------------------------------------
 
 
@@ -574,36 +574,58 @@ def _head_problem(what: str, forced: bool = True, category: str = "settings") ->
     return Problem(HEAD_LABEL, "", what, used, category, forced)
 
 
-def _run_git(root: str, gitdir: str, *args: str) -> "subprocess.CompletedProcess[bytes]":
-    return subprocess.run(  # noqa: S603 -- fixed argv, no shell
-        ["git", "--git-dir", gitdir, *args], cwd=root, stdin=subprocess.DEVNULL, capture_output=True,
+_HEAD_SPEC = b"HEAD:.nexus/project.json"
+
+
+def _run_cat_file(root: str, gitdir: str) -> "subprocess.CompletedProcess[bytes]":
+    """One ``git cat-file --batch`` process asked for the committed file on stdin: the whole HEAD read is one spawn."""
+    return subprocess.run(  # noqa: S603 -- fixed argv, no shell; the request is a constant on stdin
+        ["git", "--git-dir", gitdir, "cat-file", "--batch"], cwd=root, input=_HEAD_SPEC + b"\n", capture_output=True,
         timeout=GIT_TIMEOUT_S, check=False,
     )
+
+
+def _parse_batch(out: bytes) -> "bytes | None":
+    """The committed file's bytes from ``cat-file --batch`` output, or None when HEAD has no such path.
+
+    ``<spec> missing`` is the answer for an absent path, an unborn HEAD and an unresolvable name alike (exit 0). A found object
+    prints ``<oid> <type> <size>``, then exactly *size* bytes and a newline. A type other than ``blob`` (a directory, a
+    submodule) or any output that is not that shape is a git failure.
+    """
+    header, _, body = out.partition(b"\n")
+    if header == _HEAD_SPEC + b" missing" and not body:
+        return None
+    fields = header.split(b" ")
+    if len(fields) != 3 or not fields[2].isdigit():
+        raise _GitFailure("git cat-file gave unexpected output")
+    if fields[1] != b"blob":
+        raise _GitFailure("the committed path is not a file")
+    size = int(fields[2])
+    if len(body) != size + 1 or not body.endswith(b"\n"):
+        raise _GitFailure("git cat-file gave unexpected output")
+    return body[:-1]
 
 
 def _read_head(root: str, gitdir: str) -> _FileRead:
     """The session root's committed ``.nexus/project.json``, strictness keys only (the case table of Decision 1).
 
-    Told apart by what ran and its exit code, never by git's message (locale dependent): ``ls-tree`` exit 128 (not a
-    repository, an unborn HEAD) or exit 0 with no output means no committed copy; a blob that does not parse, or any other
-    failure, means ``subagent_git`` strict, reported.
+    One git process, ``cat-file --batch``. Told apart by what ran and its exit code, never by git's message (locale
+    dependent): exit 128 (not a repository) or ``<spec> missing`` (no such path, an unborn HEAD) means no committed copy; a blob
+    that does not parse, a non-blob at the path, or any other failure, means ``subagent_git`` strict, reported.
     """
     fr = _FileRead(HEAD_LABEL, PROJECT_LABEL + " at HEAD", "head")
     try:
         if hasattr(os, "getuid") and os.stat(root).st_uid != os.getuid():
             fr.problems.append(_head_problem("the repository is owned by another user; the committed copy was not read", False, "environment"))
             return fr
-        listing = _run_git(root, gitdir, "ls-tree", "-z", "HEAD", "--", ".nexus/project.json")
-        if listing.returncode == 128 or (listing.returncode == 0 and not listing.stdout.strip(b"\0 \n")):
+        proc = _run_cat_file(root, gitdir)
+        if proc.returncode == 128:
             return fr
-        if listing.returncode != 0:
-            raise _GitFailure("git exited " + str(listing.returncode))
-        meta = listing.stdout.split(b"\t", 1)[0].split()
-        if len(meta) != 3 or meta[1] != b"blob":
-            raise _GitFailure("the committed path is not a file")
-        blob = _run_git(root, gitdir, "cat-file", "blob", meta[2].decode("ascii", "replace"))
-        if blob.returncode != 0:
-            raise _GitFailure("git cat-file exited " + str(blob.returncode))
+        if proc.returncode != 0:
+            raise _GitFailure("git exited " + str(proc.returncode))
+        committed = _parse_batch(proc.stdout)
+        if committed is None:
+            return fr
     except subprocess.TimeoutExpired:
         fr.state, fr.forced, fr.values = "broken", True, {"subagent_git": STRICT}
         fr.problems.append(_head_problem("could not be read: git timed out after " + str(GIT_TIMEOUT_S) + " seconds"))
@@ -616,11 +638,10 @@ def _read_head(root: str, gitdir: str) -> _FileRead:
         fr.state, fr.forced, fr.values = "broken", True, {"subagent_git": STRICT}
         fr.problems.append(_head_problem("could not be read: git could not be run (" + type(exc).__name__ + ")"))
         return fr
-    data = blob.stdout
-    if len(data) > MAX_FILE_BYTES:
-        state, parsed, reason, raw = "broken", None, "larger than 64 KiB", data
+    if len(committed) > MAX_FILE_BYTES:
+        state, parsed, reason, raw = "broken", None, "larger than 64 KiB", committed
     else:
-        state, parsed, reason, raw = _parse_bytes(data)
+        state, parsed, reason, raw = _parse_bytes(committed)
     fr.state, fr.raw = state, raw
     if state == "ok":
         fr.values, fr.problems, fr.forced = _validate(parsed, HEAD_LABEL, "project", _STRICTNESS_KEYS)  # type: ignore[arg-type]

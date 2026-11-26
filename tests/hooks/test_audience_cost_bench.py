@@ -12,7 +12,7 @@ Slow-marked (``-m slow``; the default suite does not run it). Run it by hand whe
 It prints a header (machine, versions), a table, and one ``COSTBENCH_JSON`` line, then asserts the bounds. The bounds are the
 RDR's, not tuned to a machine. Every posture runs on a real repository (a real ``git``). The git process count of each posture is
 asserted too: a plain repository runs none, a repository whose settings are already strict runs none, and a read that does run
-spends at most two.
+spends exactly one (``git cat-file --batch``).
 
 Cold means the first call in a fresh interpreter (the OS file cache is warm: dropping it needs privileges the hand run lacks).
 """
@@ -170,12 +170,12 @@ def test_the_reader_stays_within_the_file_read_and_head_read_budgets(tmp_path: P
     warm_stats["account_home (real lookup, no override)"] = _stats(real_home_ns)
     git_spawn_ns = [_time_call(subprocess.run, [real_git(), "--version"], capture_output=True, check=False) for _ in range(30)]
     one_proc_ns = [
-        _time_call(subprocess.run, [real_git(), "--git-dir", str(repo / ".git"), "cat-file", "blob", "HEAD:.nexus/project.json"],
-                   cwd=str(repo), capture_output=True, check=False)
+        _time_call(subprocess.run, [real_git(), "--git-dir", str(repo / ".git"), "cat-file", "--batch"],
+                   cwd=str(repo), input=b"HEAD:.nexus/project.json\n", capture_output=True, check=False)
         for _ in range(30)
     ]
     warm_stats["git --version (one spawn, for scale)"] = _stats(git_spawn_ns)
-    warm_stats["git cat-file blob HEAD:path (a one-process read, informational)"] = _stats(one_proc_ns)
+    warm_stats["git cat-file --batch HEAD:path (the one-process read)"] = _stats(one_proc_ns)
     cold_stats = _cold(repo, home, real_home=False)
     cold_real = _cold(repo, home, real_home=True)
 
@@ -219,7 +219,7 @@ def test_the_reader_stays_within_the_file_read_and_head_read_budgets(tmp_path: P
     # ---- the bounds ---------------------------------------------------------------------------------------------------------
     for name, (_, _, runs_git) in postures.items():
         if runs_git:
-            assert 1 <= git_counts[name] <= 2, f"{name}: the HEAD read ran {git_counts[name]} git processes (expected 1 or 2)"
+            assert git_counts[name] == 1, f"{name}: the HEAD read ran {git_counts[name]} git processes (expected exactly 1)"
         else:
             assert git_counts[name] == 0, f"{name}: ran {git_counts[name]} git processes where none is allowed"
     assert warm_stats["both_files"]["p90"] < FILE_READ_BUDGET_MS, f"warm file reads p90 {warm_stats['both_files']['p90']:.3f} ms >= budget"
