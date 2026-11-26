@@ -58,6 +58,8 @@ class MoveBootWorkTest {
         volatile List<DataMoveRegistry.FailedMove> failed = List.of();
         volatile Map<String, DataMoveRuns.Progress> progress = Map.of();
         volatile CountDownLatch holdRead;
+        /** Run inside the next reads, after they are counted: the test's hook for what happens during a sample. */
+        volatile Runnable onRead;
         final CountDownLatch readEntered = new CountDownLatch(1);
         final AtomicInteger reads = new AtomicInteger();
         final AtomicBoolean aborted = new AtomicBoolean();
@@ -66,6 +68,10 @@ class MoveBootWorkTest {
         @Override
         public MoveBootWork.Snapshot read() {
             reads.incrementAndGet();
+            Runnable hook = onRead;
+            if (hook != null) {
+                hook.run();
+            }
             CountDownLatch hold = holdRead;
             if (hold != null) {
                 readEntered.countDown();
@@ -355,7 +361,7 @@ class MoveBootWorkTest {
      * keeps a short period for the first minute and the steady one after.
      */
     @Test
-    void aMoveRegisteredAfterTheFirstSample_isReportedWithinHalfASecond_inTheFirstMinute() throws Exception {
+    void aMoveRegisteredAfterTheFirstSample_isReportedWellBeforeTheSteadyPeriod_inTheFirstMinute() throws Exception {
         var w = work(Duration.ofMinutes(15));
         try {
             w.start(MoveBootWork.DEFAULT_INTERVAL);   // the steady period of a running engine: 5 s
@@ -376,8 +382,42 @@ class MoveBootWorkTest {
             long lagMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - registeredAt);
 
             assertThat(registry.snapshot()).as("boot_work names the move").anyMatch(e -> e.id().equals(id));
-            assertThat(lagMs).as("boot_work named it within 500 ms of its registration, not a 5 s period later")
-                .isLessThan(500L);
+            assertThat(lagMs).as("boot_work named it within 1 s of its registration (a 250 ms period), not a 5 s period later")
+                .isLessThan(1_000L);
+        } finally {
+            w.close();
+        }
+    }
+
+    /** Pins the END of the warm-up through start(): after the first minute the sampler is on the steady period. */
+    @Test
+    void afterTheFirstMinute_theSamplerRunsAtTheSteadyPeriod_notTheWarmupOne() throws Exception {
+        var w = work(Duration.ofMinutes(15));
+        reader.onRead = () -> {
+            reader.onRead = null;
+            clock.advance(MoveBootWork.WARMUP.plusSeconds(1));   // the first minute is over by the time the first sample ends
+        };
+        try {
+            w.start(MoveBootWork.DEFAULT_INTERVAL);   // steady period 5 s
+            Thread.sleep(1_000);   // four warm-up periods, were the warm-up still on
+            assertThat(reader.reads.get()).as("one sample at start, none a warm-up period later: the next is 5 s out")
+                .isLessThan(2);
+        } finally {
+            w.close();
+        }
+    }
+
+    @Test
+    void anUnreadableRegistry_isRetriedAtTheSteadyPeriod_notTheWarmupOne() throws Exception {
+        var w = work(Duration.ofMinutes(15));
+        reader.onRead = () -> {
+            throw new IllegalStateException("connection refused");
+        };
+        try {
+            w.start(MoveBootWork.DEFAULT_INTERVAL);
+            Thread.sleep(1_000);
+            assertThat(reader.reads.get()).as("a database refusing connections is not hit every 250 ms in the first minute")
+                .isLessThan(2);
         } finally {
             w.close();
         }

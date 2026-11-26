@@ -217,20 +217,35 @@ public final class MoveBootWork implements AutoCloseable {
         scheduler = s;
         Instant startedAt = clock.instant();
         s.execute(new Runnable() {
+            /** The last surprise logged, so one that repeats every tick logs once; touched only on the sampler thread. */
+            private String lastSurprise;
+
             @Override
             public void run() {
+                Duration next = interval;   // the steady period unless a sample says the registry was read
                 try {
-                    publish();
+                    if (publish() >= 0) {   // an unreadable registry (-1) is retried at the steady period, not 4 times a second
+                        next = periodAfter(startedAt, clock.instant(), interval);
+                    }
+                    lastSurprise = null;
                 } catch (VirtualMachineError e) {
                     throw e;
                 } catch (Throwable t) {   // a surprise costs one sample, never the thread
-                    log.warn("event=data_move_boot_work_failed cause=\"{}\"", FailureHandler.oneLine(t.toString()));
+                    String cause = FailureHandler.oneLine(t.toString());
+                    if (!cause.equals(lastSurprise)) {
+                        log.warn("event=data_move_boot_work_failed cause=\"{}\"", cause);
+                        lastSurprise = cause;
+                    }
                 }
                 try {
                     // fixed delay, as before: the next sample is one period after this one ENDS
-                    s.schedule(this, periodAfter(startedAt, clock.instant(), interval).toMillis(), TimeUnit.MILLISECONDS);
-                } catch (RejectedExecutionException closed) {
+                    s.schedule(this, next.toMillis(), TimeUnit.MILLISECONDS);
+                } catch (RejectedExecutionException shutDown) {
                     // close() shut the scheduler down: no next sample
+                } catch (VirtualMachineError e) {
+                    throw e;
+                } catch (Throwable t) {   // nothing may end sampling without a line saying so
+                    log.error("event=data_move_boot_work_stopped cause=\"{}\"", FailureHandler.oneLine(t.toString()));
                 }
             }
         });
