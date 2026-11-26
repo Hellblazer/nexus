@@ -19,8 +19,8 @@ It is a UserPromptSubmit hook and speaks on the first prompt of a session only. 
 * UserPromptSubmit fires on every prompt, and the CLI shows the message each time. The first-prompt gate is
   ``_audience.claim_session_once``: one ``O_EXCL`` file per session id, so a later prompt costs one failed ``open`` and exits
   before the settings are read. The session id is the same across a resume (the notice does not repeat there) and new after
-  ``/clear`` (it speaks again). The mark is kept under the audience log marks; when it cannot be kept anywhere the hook stays
-  silent, because a hook that cannot remember having spoken would speak on every prompt.
+  ``/clear`` (it speaks again). The mark is a file in the system temporary directory (never the nexus configuration directory); when it cannot be
+  made the hook stays silent, because a hook that cannot remember having spoken would speak on every prompt.
 
 It prints one JSON object with two parts:
 
