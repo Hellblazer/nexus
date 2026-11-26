@@ -2002,3 +2002,4 @@ each machine where he wants strict and telemetry; delete
 - 2026-11-25: spikes recorded (records 26 to 32). Auto-approve defers to Claude Code's `ask` and `deny` rules, and `confirm_tools` is dropped; the project file is read from the session root, and a worktree's copy can only add; Critical Assumptions restated.
 - 2026-11-26: Gate round 1 — BLOCKED (1 Critical, 6 Significant, 1 ship-blocker(s)); blob `46f4df2ba82a`; critique `nexus_rdr/259-gate-critique-2026-11-26-r1`.
 - 2026-11-26: Gate round 2 — PASSED (0 Critical, 9 Significant, 0 ship-blocker(s)); blob `25fa8e275868`; critique `nexus_rdr/259-gate-critique-2026-11-26-r2`.
+- 2026-11-26: post-gate fix round (scope cuts and seven fixes, Sams ruling `nexus/sam-ruling-rdr-259-scope-and-fixes-2026-11-26`); fix check `nexus_rdr/259-fix-check-e4db84c2c7e3` PASS; S1-S6 decided as recommended (`nexus/sam-ruling-rdr-259-s1-s6-2026-11-26`).
