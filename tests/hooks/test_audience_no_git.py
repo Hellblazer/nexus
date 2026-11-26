@@ -88,4 +88,4 @@ def test_the_shim_would_have_recorded_a_read_that_needed_git(audience_copy, tmp_
     repo = init_repo(tmp_path / "r", {".nexus/project.json": json.dumps({"version": 1})})
     shim = GitShim(tmp_path).install(monkeypatch)
     audience_copy.guard_mode({"cwd": str(repo)}, head=True)
-    assert shim.verbs() == ["ls-tree", "cat-file"], shim.calls()
+    assert shim.verbs() == ["cat-file"], shim.calls()

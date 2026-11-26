@@ -3,7 +3,7 @@
 
 ``GitShim`` puts a ``git`` script first on ``PATH``. It records every call's argument line, then either runs the real git or,
 in a failure *mode*, answers like a git that is broken: ``fail7`` (exit 7 for every call), ``catfail`` (``cat-file`` exits 1),
-``sleep`` (it hangs). POSIX only: a Windows run would need a ``.cmd`` twin, and the behaviour it pins (how many processes the
+``sleep`` (it hangs), ``junk`` (exit 0 with output that is not ``cat-file --batch``'s), ``cut`` (a blob header whose body is short). POSIX only: a Windows run would need a ``.cmd`` twin, and the behaviour it pins (how many processes the
 reader starts, and what each exit code means) is not platform-specific.
 """
 from __future__ import annotations
@@ -65,6 +65,8 @@ class GitShim:
             "  fail7) exit 7 ;;\n"
             "  sleep) exec sleep 30 ;;\n"
             '  catfail) case "$*" in *cat-file*) exit 1 ;; esac ;;\n'
+            '  junk) echo "nonsense"; exit 0 ;;\n'
+            '  cut) printf "491d734467aa3c01755731be31c79b942ca8bd34 blob 99\\n{}\\n"; exit 0 ;;\n'
             "esac\n"
             f'exec "{real_git()}" "$@"\n',
             encoding="utf-8",
