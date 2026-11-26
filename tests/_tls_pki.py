@@ -111,7 +111,10 @@ def make_ca(directory: Path, name: str) -> Ca:
 
 
 def server_context(leaf: Leaf) -> ssl.SSLContext:
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # ``import nexus`` injects truststore's SSLContext into ``ssl`` on Windows, whose wrap_socket verifies a
+    # peer certificate even when it is the server: build the server on the stdlib class
+    base = next(c for c in ssl.SSLContext.__mro__ if c.__module__ == "ssl")
+    ctx = base(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(leaf.cert_file, leaf.key_file)
     return ctx
 

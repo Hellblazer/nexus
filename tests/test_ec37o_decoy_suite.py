@@ -777,15 +777,18 @@ def test_an_exported_token_at_a_plain_http_url_never_goes_through_a_proxy(tmp_pa
 
 
 @pytest.mark.parametrize("caller", [pytest.param(c, id=c.name, marks=_marks(c.name == "nx_t3_vector_client")) for c in _TOKEN_CALLERS])
-def test_an_https_engine_behind_a_proxy_is_tunnelled_without_the_bearer(tmp_path, decoy, caller):
-    """https keeps using a configured proxy, and the proxy sees a CONNECT with no credential in it."""
+def test_an_https_engine_is_not_reached_through_an_environment_proxy(tmp_path, decoy, caller):
+    """A request that carries a bearer to an https origin reads no proxy variable either (the proxy and CA come from
+    ``config.yml`` alone; ``tests/test_ec37o_netcfg_suite.py`` runs a TLS-terminating proxy against every caller).
+    The proxy here is a CONNECT-refusing recorder: it reads no credential, and no hook-side caller reaches it at
+    all. The ``nx`` callers may send it a CONNECT for an unauthenticated probe (``/version``), which the rule leaves
+    alone, so for them only the absence of a credential is asserted."""
     proc = caller.run(tmp_path, {"NX_SERVICE_URL": "https://engine.example:8443", "NX_SERVICE_TOKEN": "exported-by-the-user", **_proxy_env(decoy)})
     if caller.after is not None:
         caller.after(tmp_path, decoy, decoy, False)
     assert decoy.auth == [], (proc.returncode, proc.stderr[-400:], decoy.requests)
-    assert all(path.startswith("CONNECT engine.example:8443") for path, _a in decoy.requests), decoy.requests
-    if caller.name in ("nx_subprocess", "nx_t3_vector_client"):
-        assert decoy.requests, (proc.stdout[-300:], proc.stderr[-300:])  # the https request really went to the proxy
+    if not caller.name.startswith("nx_") and caller.name != "mcp_t2_construction":
+        assert decoy.requests == [], (proc.stdout[-300:], proc.stderr[-300:], decoy.requests)
 
 
 def _no_secret_anywhere(tmp_path: Path, proc: subprocess.CompletedProcess[str], secret: str) -> None:

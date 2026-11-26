@@ -77,12 +77,15 @@ def _build_context(ca_bundle: str) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # verify_mode CERT_REQUIRED and check_hostname on
     if sys.version_info >= (3, 13):  # what create_default_context added in 3.13
         ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN | ssl.VERIFY_X509_STRICT
-    ctx.load_verify_locations(cafile=certifi.where())
+    # The PEM text, not the path: OpenSSL then opens no file (on Windows a file BIO needs an OPENSSL_Applink
+    # the host process may not carry, and the process dies with "no OPENSSL_Applink").
+    ctx.load_verify_locations(cadata=certifi.contents())
     if ca_bundle:
         if os.path.isdir(ca_bundle):
             ctx.load_verify_locations(capath=ca_bundle)
         else:
-            ctx.load_verify_locations(cafile=ca_bundle)
+            with open(ca_bundle, encoding="ascii", errors="replace") as fh:
+                ctx.load_verify_locations(cadata=fh.read())
     return ctx
 
 

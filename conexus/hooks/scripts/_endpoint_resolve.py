@@ -1116,6 +1116,13 @@ _SYSTEM_CA_BUNDLES = (
 )
 
 
+def _read_pem(path: str) -> str:
+    """A PEM bundle's text, so OpenSSL loads it from memory: a file BIO on Windows needs an OPENSSL_Applink
+    the host process may not carry (the process dies with "no OPENSSL_Applink")."""
+    with open(path, encoding="ascii", errors="replace") as fh:
+        return fh.read()
+
+
 def bearer_ssl_context(ca_bundle: str = "") -> Any:
     """A client ``ssl.SSLContext`` for a bearer-carrying request, with NO environment in it.
 
@@ -1137,7 +1144,7 @@ def bearer_ssl_context(ca_bundle: str = "") -> Any:
         ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN | ssl.VERIFY_X509_STRICT
     if cafile is not None:
         try:
-            ctx.load_verify_locations(cafile=cafile)
+            ctx.load_verify_locations(cadata=_read_pem(cafile))
         except (OSError, ssl.SSLError):
             pass
     capath = paths.openssl_capath
@@ -1158,7 +1165,7 @@ def bearer_ssl_context(ca_bundle: str = "") -> Any:
         if os.path.isdir(ca_bundle):
             ctx.load_verify_locations(capath=ca_bundle)
         else:
-            ctx.load_verify_locations(cafile=ca_bundle)
+            ctx.load_verify_locations(cadata=_read_pem(ca_bundle))
     return ctx
 
 

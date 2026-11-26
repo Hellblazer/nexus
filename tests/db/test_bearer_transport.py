@@ -234,7 +234,7 @@ class TestPluginTrust:
         """The interpreter's own bundle loads: the context holds roots, so a real site's chain can verify."""
         ctx = hook.bearer_ssl_context()
         assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
-        assert ctx.cert_store_stats()["x509_ca"] + len(ctx.get_ca_certs()) > 0, "no trust roots loaded: every https call would fail"
+        assert len(ctx.get_ca_certs()) > 0, "no trust roots loaded: every https call would fail"
 
 
 class TestPluginOpener:

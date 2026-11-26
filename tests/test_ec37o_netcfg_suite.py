@@ -101,8 +101,18 @@ def _add_network(tmp_path: Path, **network: str) -> None:
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
 
 
-@pytest.mark.parametrize("leg", LEGS)
-@pytest.mark.parametrize("caller", CALLERS, ids=lambda c: c.name)
+def _matrix() -> list[pytest.param]:
+    params = []
+    for caller in CALLERS:
+        for leg in LEGS:
+            # the T3 client reads /version from whatever answers: the terminating proxy standing in for the engine
+            # is not a conformant one, and the client raises ManagedServiceIncompatible (a guarded error) in the child
+            marks = (pytest.mark.expects_unresolvable_endpoint,) if caller.name == "nx_t3_vector_client" and leg == "config_corporate_proxy" else ()
+            params.append(pytest.param(caller, leg, id=f"{caller.name}-{leg}", marks=marks))
+    return params
+
+
+@pytest.mark.parametrize(("caller", "leg"), _matrix())
 def test_a_bearer_request_takes_its_proxy_and_ca_from_config_only(tmp_path, pki, origin, mitm, tunnel, caller, leg):
     real_ca, attacker_ca = pki[0], pki[1]
     kind = _kind(caller)
