@@ -66,7 +66,7 @@ class _Server:
     assertions are on what arrived, not on what the caller did with the reply.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, bind: str = "127.0.0.1") -> None:
         self.requests: list[tuple[str, str | None]] = []
         outer = self
 
@@ -97,9 +97,11 @@ class _Server:
             def log_message(self, *_a: object) -> None:
                 pass
 
-        self._httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self._httpd = http.server.ThreadingHTTPServer((bind, 0), _Handler)
         self.port = self._httpd.server_address[1]
-        self.url = f"http://127.0.0.1:{self.port}"
+        self.url = f"http://{bind}:{self.port}"
+        #: a URL for this server whose host the cleartext rule does not call "this machine" (``off_machine``)
+        self.off_machine_url = self.url
         threading.Thread(target=self._httpd.serve_forever, daemon=True).start()
 
     @property
@@ -430,12 +432,12 @@ def test_residual_two_an_env_url_with_no_credential_is_sent_no_credential(tmp_pa
 
 # ── transport rules (step 5): no bearer in the clear off this machine, no proxy for a lease token ──
 #
-# ``127.1`` reaches the loopback server through the platform resolver, yet is neither ``localhost``
-# nor an IP literal, so it is a host that is not "this machine" as far as the cleartext rule can
-# tell. That makes the refusal observable: a caller that sent a bearer anyway would put it on the
-# recording server.
-
-_OFF_MACHINE_HOST = "127.1"
+# The refusal has to be observable: a caller that sent a bearer anyway must put it on the recording
+# server. So the server is reached through a host the cleartext rule does not call "this machine"
+# (neither ``localhost`` nor a loopback address literal) that still lands on it: ``127.1`` where
+# the platform resolver reads it as 127.0.0.1 (macOS, Linux), otherwise the machine's own LAN
+# address with the server bound to it (Windows does not resolve ``127.1``). A box with neither
+# fails the fixture, loudly, rather than passing the absence checks over a server nothing reached.
 
 #: every caller whose requests carry a bearer, and the cases that need step 5 to be green
 _STEP_5 = pytest.mark.xfail(strict=True, reason="nexus-ec37o step 5")
@@ -451,21 +453,61 @@ _PROXY_FAILS_UNTIL_STEP_5: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _off_machine_url(server: _Server) -> str:
-    return f"http://{_OFF_MACHINE_HOST}:{server.port}"
+def _lan_address() -> str | None:
+    """This machine's outbound IPv4 address (a UDP connect sends no packet), or None with no network."""
+    import socket  # noqa: PLC0415 -- this helper only
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        try:
+            probe.connect(("192.0.2.1", 9))
+            return probe.getsockname()[0]
+        except OSError:
+            return None
 
 
-def test_the_off_machine_host_really_reaches_the_loopback_server(real):
-    """Non-vacuity: the cleartext cases below assert an absence, so first prove the address works."""
-    import urllib.request  # noqa: PLC0415 -- this test only
+def _reaches(server: _Server) -> bool:
+    import urllib.request  # noqa: PLC0415 -- this helper only
 
-    with urllib.request.urlopen(_off_machine_url(real) + "/probe", timeout=20) as resp:  # noqa: S310 -- loopback
-        assert resp.status == 200
-    assert real.paths == ["/probe"]
+    try:
+        with urllib.request.urlopen(server.off_machine_url + "/probe", timeout=10) as resp:  # noqa: S310 -- our own server
+            return resp.status == 200
+    except OSError:
+        return False
+
+
+@pytest.fixture
+def off_machine() -> Iterator[_Server]:
+    """A recording server reached through a host that is not "this machine" to the cleartext rule."""
+    from nexus.db.service_endpoint import is_loopback_host  # noqa: PLC0415 -- fixture only
+
+    lan = _lan_address()
+    candidates: list[tuple[str, str]] = [("127.0.0.1", "127.1")]
+    if lan:
+        candidates.append((lan, lan))
+    tried: list[str] = []
+    for bind, host in candidates:
+        if is_loopback_host(host):
+            tried.append(f"{host} (counts as loopback)")
+            continue
+        server = _Server(bind=bind)
+        server.off_machine_url = f"http://{host}:{server.port}"
+        if _reaches(server):
+            server.requests.clear()
+            yield server
+            server.close()
+            return
+        server.close()
+        tried.append(f"{host} (does not reach a local server)")
+    pytest.fail("no host that is not 'this machine' reaches a local server here, so the cleartext cases would pass over nothing: " + "; ".join(tried))
+
+
+def test_the_off_machine_host_really_reaches_the_recording_server(off_machine):
+    """Non-vacuity: the cleartext cases assert an absence, so the address they use is shown to land."""
+    assert _reaches(off_machine) and off_machine.paths == ["/probe"]
 
 
 def _cleartext_case(tmp_path: Path, server: _Server, source: str) -> dict[str, str]:
-    url = _off_machine_url(server)
+    url = server.off_machine_url
     if source == "exported_token":
         return {"NX_SERVICE_URL": url, "NX_SERVICE_TOKEN": "exported-by-the-user"}
     if source == "saved_token_and_url":
@@ -484,12 +526,12 @@ _CLEARTEXT_SOURCES = ("exported_token", "saved_token_and_url", "saved_mint_and_u
 
 @pytest.mark.parametrize("source", _CLEARTEXT_SOURCES)
 @pytest.mark.parametrize("caller", [c for c in CALLERS if c.name != "mint_armed_bearer_for"], ids=lambda c: c.name)
-def test_no_bearer_over_plain_http_to_a_host_that_is_not_this_machine(tmp_path, real, caller, source):
-    env = _cleartext_case(tmp_path, real, source)
+def test_no_bearer_over_plain_http_to_a_host_that_is_not_this_machine(tmp_path, off_machine, caller, source):
+    env = _cleartext_case(tmp_path, off_machine, source)
     proc = caller.run(tmp_path, env)
     if caller.after is not None:
-        caller.after(tmp_path, real, real, False)
-    assert real.auth == [], (proc.returncode, proc.stderr[-400:], real.requests)
+        caller.after(tmp_path, off_machine, off_machine, False)
+    assert off_machine.auth == [], (proc.returncode, proc.stderr[-400:], off_machine.requests)
     if caller.name != "routing_telemetry_poster" and source in ("exported_token", "saved_token_and_url"):
         # refused for the right reason: the transport rule names itself (the poster child is silent)
         output = proc.stdout + proc.stderr
@@ -497,11 +539,11 @@ def test_no_bearer_over_plain_http_to_a_host_that_is_not_this_machine(tmp_path, 
 
 
 @pytest.mark.parametrize("source", _CLEARTEXT_SOURCES)
-def test_no_mint_credential_over_plain_http_to_a_host_that_is_not_this_machine(tmp_path, real, source):
-    env = _cleartext_case(tmp_path, real, source)
+def test_no_mint_credential_over_plain_http_to_a_host_that_is_not_this_machine(tmp_path, off_machine, source):
+    env = _cleartext_case(tmp_path, off_machine, source)
     caller = next(c for c in CALLERS if c.name == "mint_armed_bearer_for")
-    proc = caller.run(tmp_path, {**env, "NX_SERVICE_URL": _off_machine_url(real), "_NX_TEST_REAL_URL": real.url})
-    assert real.auth == [], (proc.stdout, proc.stderr[-400:], real.requests)
+    proc = caller.run(tmp_path, {**env, "NX_SERVICE_URL": off_machine.off_machine_url, "_NX_TEST_REAL_URL": off_machine.url})
+    assert off_machine.auth == [], (proc.stdout, proc.stderr[-400:], off_machine.requests)
 
 
 def _proxy_matrix() -> list[pytest.param]:
