@@ -596,7 +596,8 @@ def test_the_readme_records_06_and_07_as_dated_observations_not_findings() -> No
     assert section.count("Observed on 2.1.302 on 2026-10-18") == 2
     assert section.count("This has flipped across Claude Code versions; re-measure on every pin bump") == 2
     assert "nothing may be deleted, or relied on, on the strength of what is written here" in section
-    assert "stays as a hedge" in section
+    # The PermissionRequest registration is gone on purpose (RDR-259 S4), not kept as a hedge.
+    assert "removed on purpose" in section and "so nobody restores it as insurance" in section
     # 14b is no longer described as skipped because the plugin agent is not registered
     assert "isn't even registered" not in readme and "Doubly unsupported" not in readme
     assert "process_launched" in section[section.index("**14b**"):]
@@ -608,7 +609,7 @@ def test_06_and_07_headers_are_observations_and_the_deleted_script_is_not_a_goal
     assert "DOES match" not in head06 and "OBSERVATION, NOT A CONTRACT" in head06
     head07 = "\n".join(_scenario_file("07_").read_text(encoding="utf-8").splitlines()[:30])
     assert "delete auto-approve-nx-mcp.sh" not in _scenario_file("07_").read_text(encoding="utf-8")
-    assert "OBSERVATION, NOT A CONTRACT" in head07 and "hedge" in head07
+    assert "OBSERVATION, NOT A CONTRACT" in head07 and "removed on purpose" in head07
 
 
 # --- reset_scenario_state ----------------------------------------------------------------

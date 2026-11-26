@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [8.5.8] - 2026-11-26
+
+Pairs with engine-service-v0.1.203 (REQUIRED_ENGINE_VERSION unchanged from 8.5.7). A plugin-only release: the client code is 8.5.7's; the plugin change below becomes live at this pin.
+
+### Changed
+
+- **conexus no longer answers Claude Code's permission dialog for its own tools.** Its auto-approve now answers only before the tool runs, so a permission rule you wrote that asks before running a conexus tool prompts again, as the rule says. Conexus tools with no rule are still approved automatically (nexus-sby49.5).
+
 ## [8.5.7] - 2026-11-25
 
 Pairs with engine-service-v0.1.203 (REQUIRED_ENGINE_VERSION unchanged from 8.5.6). A plugin-only release: the client code is 8.5.6's; the plugin changes below become live at this pin.

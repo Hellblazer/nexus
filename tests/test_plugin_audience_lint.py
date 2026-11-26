@@ -47,11 +47,11 @@ def test_the_manifest_is_true(manifest, hooks_json) -> None:
 
 
 def test_the_lint_examined_the_whole_plugin(manifest, hooks_json) -> None:
-    """Non-vacuity: 23 registrations of 22 distinct argv, and every constant the census sees is classified."""
+    """Non-vacuity: 22 registrations of 22 distinct argv, and every constant the census sees is classified."""
     regs = am.registrations(hooks_json)
-    assert len(regs) == 23 and len(manifest["registrations"]) == 23
-    assert len({tuple(r["argv"]) for r in regs}) == 22, "auto-approve is registered twice with one argv"
-    assert len({r["key"] for r in regs}) == 23, "event plus argv is the key"
+    assert len(regs) == 22 and len(manifest["registrations"]) == 22
+    assert len({tuple(r["argv"]) for r in regs}) == 22, "no argv is registered twice"
+    assert len({r["key"] for r in regs}) == 22, "event plus argv is the key"
     injected = len(manifest["constants"])
     classified = sum(len(m.get("not_injected") or {}) for m in manifest["modules"].values())
     assert injected >= 45 and classified >= 20, (injected, classified)
@@ -208,9 +208,9 @@ def test_a_registration_whose_argv_drifted_fails(manifest, hooks_json) -> None:
     assert any("differ from hooks.json" in p for p in _problems(m, hooks_json))
 
 
-def test_the_same_argv_under_two_events_needs_two_entries(manifest, hooks_json) -> None:
+def test_auto_approve_is_registered_on_pretooluse_only(manifest, hooks_json) -> None:
     keys = [r["key"] for r in manifest["registrations"] if "auto-approve" in r["key"]]
-    assert sorted(k.split(" ", 1)[0] for k in keys) == ["PermissionRequest", "PreToolUse"]
+    assert sorted(k.split(" ", 1)[0] for k in keys) == ["PreToolUse"]
 
 
 @pytest.mark.parametrize("field,value,needle", [

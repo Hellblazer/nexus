@@ -15,8 +15,8 @@
 #   phase     when the item changes: - (never), 1, 2, 3, after-2, 4
 #   decision  the owner decision (D1..D13) the entry rests on
 #
-# A registration is keyed on event plus argv: 23 registrations, 22 distinct argv (auto-approve is registered for PreToolUse
-# and PermissionRequest with one argv). `modules` is the table of every hook module that has text or a predicate; each
+# A registration is keyed on event plus argv: 22 registrations, 22 distinct argv (auto-approve is registered on PreToolUse
+# only, since 8.5.8). `modules` is the table of every hook module that has text or a predicate; each
 # module-level string constant of 40 characters or more is declared injected (a constant entry) or not_injected (a reason).
 version: 1
 audiences:
@@ -282,20 +282,6 @@ registrations:
   live: false
 - key: PreToolUse hooks/scripts/nx_hook_shim.py auto-approve
   event: PreToolUse
-  matcher: mcp__plugin_conexus_.*
-  argv:
-  - hooks/scripts/nx_hook_shim.py
-  - auto-approve
-  modules:
-  - hooks/scripts/nx_hook_shim.py
-  - nexus.hooks.auto_approve
-  audience: EVERY-USER
-  gate: none
-  evidence: 'U2a: a documented feature (the plugin README and the MCP servers doc); U2b is a rule below'
-  target_state: as is
-  phase: '-'
-- key: PermissionRequest hooks/scripts/nx_hook_shim.py auto-approve
-  event: PermissionRequest
   matcher: mcp__plugin_conexus_.*
   argv:
   - hooks/scripts/nx_hook_shim.py
