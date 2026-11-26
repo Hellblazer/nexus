@@ -325,7 +325,7 @@ finding.
 
 ### Observations that change with the Claude Code version
 
-Scenarios 06, 07, 33 and 34 ask permission questions whose answers have flipped, or may flip, across Claude
+Scenarios 06, 07, 33, 34 and 35 ask permission questions whose answers have flipped, or may flip, across Claude
 Code releases (and between a bypass-flag launch and an enforced one). Each is an
 OBSERVATION of one build, recorded with its date, never a fact about the product.
 Re-measure on every pin bump (see "Bumping the Claude Code pin"); nothing may be
@@ -405,7 +405,21 @@ deleted, or relied on, on the strength of what is written here.
   clause was added, because a call pending on the dialog leaves the agent nothing to act on
   until it is answered, and the dialog is in the parent's pane, where the user sees it.
 
-Verdict lines from 06, 07, 33 and 34 say `observed on Claude Code <version>`, report what they saw without
+- **35** — a PreToolUse hook that answers `permissionDecision: allow` (and no
+  PermissionRequest hook) against a `permissions.ask` rule for the same tool, at user scope
+  (35a, `$TEST_HOME/.claude/settings.json`) and at project scope (35b, a project directory of its
+  own, so the two scopes are two files), with a control leg that has the hook and no rule (35c:
+  the tool must run with no prompt, which proves the hook fires, its allow is honoured and the
+  server connects). The prompt's own text names the scope the rule came from, and the verdict
+  requires it. RDR-259 Decision 9 leaves the plugin's auto-approve answering on PreToolUse only,
+  which is safe only if the ask rule wins. Baseline reading (nexus-sby49.15): "prompted" in both
+  legs on 2.1.332 (records `nexus_rdr/259-research-51` and `-52` measured the real conexus hook
+  headless and interactively; this scenario is the stub-server version in the enforced launcher).
+  "Overridden" (the allow ran the tool through the rule) FAILS on every build. The table rows
+  name 2.1.302 and "unrecorded" together and carry `since = "2.1.332"`, so a pin bump compares
+  with that reading until a row per version says otherwise.
+
+Verdict lines from 06, 07, 33, 34 and 35 say `observed on Claude Code <version>`, report what they saw without
 asserting a direction, and compare it with `docs/tables/cc-version-answers.toml` (a
 checked RDR-201 table; `lib/version_answers.py` reads it): the recorded answer for that
 version passes; a different answer FAILS "answer changed since <version>"; a version with
@@ -416,7 +430,7 @@ that does not enforce permissions.
 ### Bumping the Claude Code pin
 
 `ARG CLAUDE_CODE_VERSION` in `container/Dockerfile` pins the build. A bump re-runs
-scenarios 06, 07, 33 and 34 and updates `docs/tables/cc-version-answers.toml` (add the new
+scenarios 06, 07, 33, 34 and 35 and updates `docs/tables/cc-version-answers.toml` (add the new
 version's rows, or read why a recorded answer changed before touching it). A bump with no
 re-run leaves the table silent about the new build, so these scenarios are what announce it:
 an unrecorded version prints the INFO line, a recorded one whose answer flipped FAILS, and so does a
@@ -698,9 +712,9 @@ container/                      # Dockerfile + run.sh: how Claude Code runs (cha
 fixtures/stub_server.py         # MCPServer stub (needs an interpreter with `mcp`)
 ../e2e/lib.sh                   # _tmux, claude_start, claude_prompt, claude_wait, capture
 ../e2e/lib/claude_credentials.py # shared credential helper (run/status); no file, ever (RDR-219)
-lib/                            # stdlib-only readers the verdicts call: version_answers.py (the 06/07/33/34
+lib/                            # stdlib-only readers the verdicts call: version_answers.py (the 06/07/33/34/35
                                 # table), agent_facts.py (17), debug_log.py (01, 15)
-../../docs/tables/cc-version-answers.toml  # the version -> observed answer table for 06, 07, 33 and 34
+../../docs/tables/cc-version-answers.toml  # the version -> observed answer table for 06, 07, 33, 34 and 35
 ```
 
 Companion gist (older notes): `4a7d73baa4409e02af7af222023b8b9d`.
