@@ -92,6 +92,11 @@ class _Server:
                 self.end_headers()
                 self.wfile.write(payload)
 
+            def do_CONNECT(self) -> None:  # noqa: N802 -- stdlib callback name
+                # a proxy tunnel request: record it and refuse (no upstream exists)
+                outer.requests.append((f"CONNECT {self.path}", self.headers.get("Authorization")))
+                self.send_error(502)
+
             do_GET = do_POST = _answer  # noqa: N815 -- stdlib callback names
 
             def log_message(self, *_a: object) -> None:
@@ -439,20 +444,6 @@ def test_residual_two_an_env_url_with_no_credential_is_sent_no_credential(tmp_pa
 # address with the server bound to it (Windows does not resolve ``127.1``). A box with neither
 # fails the fixture, loudly, rather than passing the absence checks over a server nothing reached.
 
-#: every caller whose requests carry a bearer, and the cases that need step 5 to be green
-_STEP_5 = pytest.mark.xfail(strict=True, reason="nexus-ec37o step 5")
-
-#: (caller, leg) pairs that send a lease token through an env-named proxy until step 5 lands
-_PROXY_FAILS_UNTIL_STEP_5: frozenset[tuple[str, str]] = frozenset(
-    (caller.name, leg)
-    for caller in CALLERS
-    if caller.name not in ("doctor_whoami_probe", "mint_armed_bearer_for")
-    for leg in ("bare", "url_real", "hostport_real")
-    # the two hook drains already dial the lease endpoint directly when the URL came from the lease
-    if not (caller.name.startswith("drain_") and leg == "bare")
-)
-
-
 def _lan_address() -> str | None:
     """This machine's outbound IPv4 address (a UDP connect sends no packet), or None with no network."""
     import socket  # noqa: PLC0415 -- this helper only
@@ -536,6 +527,7 @@ def test_no_bearer_over_plain_http_to_a_host_that_is_not_this_machine(tmp_path, 
         # refused for the right reason: the transport rule names itself (the poster child is silent)
         output = proc.stdout + proc.stderr
         assert "plain http" in output or "InsecureServiceTransportError" in output, output[-400:]
+        assert off_machine.off_machine_url.split("//")[1] not in output, output[-400:]  # names the source, never the URL
 
 
 @pytest.mark.parametrize("source", _CLEARTEXT_SOURCES)
@@ -546,14 +538,20 @@ def test_no_mint_credential_over_plain_http_to_a_host_that_is_not_this_machine(t
     assert off_machine.auth == [], (proc.stdout, proc.stderr[-400:], off_machine.requests)
 
 
+def _proxy_env(proxy: _Server) -> dict[str, str]:
+    """What a repository's settings could set: every proxy variable, no exemption."""
+    env = {name: proxy.url for name in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
+    env.update({"NO_PROXY": "", "no_proxy": ""})
+    return env
+
+
 def _proxy_matrix() -> list[pytest.param]:
     params = []
     for caller in CALLERS:
         if caller.name in ("doctor_whoami_probe", "mint_armed_bearer_for"):
             continue  # neither carries a lease token
         for leg in ("bare", "url_real", "hostport_real"):
-            marks = [_STEP_5] if (caller.name, leg) in _PROXY_FAILS_UNTIL_STEP_5 else []
-            params.append(pytest.param(caller, leg, marks=marks, id=f"{caller.name}-{leg}"))
+            params.append(pytest.param(caller, leg, id=f"{caller.name}-{leg}"))
     return params
 
 
@@ -564,10 +562,84 @@ def test_a_lease_token_never_goes_through_a_proxy(tmp_path, real, decoy, caller,
     URL came from the lease or from an env URL or port that names the same engine. ``decoy`` stands
     in as the proxy; the loopback engine still gets its token directly."""
     _store_supervisor_lease(tmp_path, real)
-    proxy_env = {"http_proxy": decoy.url, "HTTP_PROXY": decoy.url, **_leg_env(leg, real, decoy)}
+    proxy_env = {**_proxy_env(decoy), **_leg_env(leg, real, decoy)}
     proc = caller.run(tmp_path, proxy_env)
     if caller.after is not None:
         caller.after(tmp_path, real, decoy, True)
     context = (proc.returncode, proc.stderr[-400:], real.requests, decoy.requests)
-    assert decoy.requests == [], context  # nothing, not just no credential: the lease holder dials the engine directly
+    # nothing, not just no credential: a request with a bearer dials the engine directly. The one request
+    # that may meet a proxy is the T3 client's unauthenticated GET /version compatibility probe (no bearer).
+    allowed = [("http://127.0.0.1:%d/version" % real.port, None)] if caller.name == "nx_t3_vector_client" else []
+    assert decoy.auth == [] and all(r in allowed for r in decoy.requests), context
     assert LEASE in real.auth, context
+
+
+@pytest.mark.parametrize("caller", _TOKEN_CALLERS, ids=lambda c: c.name)
+def test_an_exported_token_at_a_plain_http_url_never_goes_through_a_proxy(tmp_path, real, decoy, caller):
+    """The env-token leg of the same rule: the bearer goes straight to the engine whatever proxy is named."""
+    proc = caller.run(tmp_path, {"NX_SERVICE_URL": real.url, "NX_SERVICE_TOKEN": "exported-by-the-user", **_proxy_env(decoy)})
+    if caller.after is not None:
+        caller.after(tmp_path, real, decoy, True)
+    context = (proc.returncode, proc.stderr[-400:], real.requests, decoy.requests)
+    allowed = [(f"{real.url}/version", None)] if caller.name == "nx_t3_vector_client" else []
+    assert decoy.auth == [] and all(r in allowed for r in decoy.requests), context
+    assert EXPORTED in real.auth, context
+
+
+@pytest.mark.parametrize("caller", _TOKEN_CALLERS, ids=lambda c: c.name)
+def test_an_https_engine_behind_a_proxy_is_tunnelled_without_the_bearer(tmp_path, decoy, caller):
+    """https keeps using a configured proxy, and the proxy sees a CONNECT with no credential in it."""
+    proc = caller.run(tmp_path, {"NX_SERVICE_URL": "https://engine.example:8443", "NX_SERVICE_TOKEN": "exported-by-the-user", **_proxy_env(decoy)})
+    if caller.after is not None:
+        caller.after(tmp_path, decoy, decoy, False)
+    assert decoy.auth == [], (proc.returncode, proc.stderr[-400:], decoy.requests)
+    assert all(path.startswith("CONNECT engine.example:8443") for path, _a in decoy.requests), decoy.requests
+    if caller.name in ("nx_subprocess", "nx_t3_vector_client"):
+        assert decoy.requests, (proc.stdout[-300:], proc.stderr[-300:])  # the https request really went to the proxy
+
+
+def _no_secret_anywhere(tmp_path: Path, proc: subprocess.CompletedProcess[str], secret: str) -> None:
+    assert secret not in proc.stdout + proc.stderr, (proc.stdout + proc.stderr)[-400:]
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            assert secret not in path.read_text(encoding="utf-8", errors="replace"), f"{secret!r} written to {path}"
+
+
+_PASSWORD = "S3CR3T-PASSWORD"
+
+
+@pytest.mark.parametrize("caller", [c for c in CALLERS if c.name != "doctor_whoami_probe"], ids=lambda c: c.name)
+def test_a_url_with_userinfo_is_refused_for_a_bearer_and_its_password_is_never_written(tmp_path, real, caller):
+    """A URL ``normalize_origin`` cannot read (user:password@) gets no bearer, and nothing echoes the password."""
+    url = f"http://user:{_PASSWORD}@127.0.0.1:{real.port}"
+    env = {"NX_SERVICE_URL": url, "NX_SERVICE_TOKEN": "exported-by-the-user", "NX_MINT_TOKEN": "exported-mint"}
+    if caller.name == "mint_armed_bearer_for":
+        env["_NX_TEST_REAL_URL"] = real.url
+    proc = caller.run(tmp_path, env)
+    if caller.after is not None:
+        caller.after(tmp_path, real, real, False)
+    assert real.auth == [], (proc.returncode, proc.stderr[-400:], real.requests)
+    _no_secret_anywhere(tmp_path, proc, _PASSWORD)
+
+
+@pytest.mark.parametrize("caller", [c for c in CALLERS if c.name in ("nx_subprocess", "drain_wheel_verb", "drain_plugin_script")], ids=lambda c: c.name)
+def test_an_env_host_that_is_not_this_machine_gets_no_bearer_and_the_refusal_names_the_source(tmp_path, off_machine, caller):
+    """NX_SERVICE_HOST / NX_SERVICE_PORT naming a plain-http host off the machine, with an exported token."""
+    host = off_machine.off_machine_url.split("//")[1].rsplit(":", 1)[0]
+    proc = caller.run(tmp_path, {"NX_SERVICE_HOST": host, "NX_SERVICE_PORT": str(off_machine.port), "NX_SERVICE_TOKEN": "exported-by-the-user"})
+    output = proc.stdout + proc.stderr
+    assert off_machine.auth == [], (proc.returncode, output[-400:], off_machine.requests)
+    assert "NX_SERVICE_HOST / NX_SERVICE_PORT" in output, output[-400:]
+    assert f"{host}:{off_machine.port}" not in output and host not in output, output[-400:]
+
+
+@pytest.mark.parametrize("caller", [c for c in CALLERS if c.name in ("nx_subprocess", "drain_wheel_verb", "drain_plugin_script")], ids=lambda c: c.name)
+def test_a_data_token_lease_for_a_plain_http_host_off_the_machine_is_not_sent(tmp_path, off_machine, caller):
+    url = off_machine.off_machine_url
+    _save(tmp_path, {"service_url": url, "mint_token": "SAVED-MINT-TOKEN"})
+    _write_lease_file(_config_dir(tmp_path), url, scheme="http", tenant="default").chmod(0o600)
+    proc = caller.run(tmp_path, {"NX_SERVICE_URL": url})
+    output = proc.stdout + proc.stderr
+    assert off_machine.auth == [], (proc.returncode, output[-400:], off_machine.requests)
+    assert "plain http" in output or "InsecureServiceTransportError" in output, output[-400:]
+    assert url.split("//")[1] not in output, output[-400:]
