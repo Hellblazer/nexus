@@ -1,0 +1,7 @@
+### Added
+
+- **`nx collection delete --id N` deletes a collection by its ID.** `N` is the `ID` column of `nx collection list`; give a label or `--id`, never both and never neither (a usage error). The ID goes to the engine as it is, with no lookup from ID to label, so a rename cannot redirect the delete. It needs an engine that advertises `catalog_collection_delete_by_id_supported` (engine-service 0.1.202 or later); without it, or when `GET /version` cannot be read, the command refuses before the prompt and sends nothing. `Deleted:` names the label and the ID. An unknown ID is `no collection with id N`, never a silent no-op.
+
+### Changed
+
+- **A delete by label refuses a retired label and a label two collections hold.** A label that a rename or re-embed retired is refused and names the live successor's label and ID; the retired row stays in the history (it used to be removed). A label held by two live collections is refused and names both IDs, and `--id` deletes one of them. Both are read from the registry listing before anything is sent; a listing that cannot be read is said on stderr and the delete goes on, the engine being the authority. An engine 409 `collection_label_ambiguous` is the same refusal, no longer reported as an unconfirmed delete. `nx collection delete LABEL` for an ordinary live collection is unchanged, and so is the empty-tombstone sweep of `nx collection list --all`.

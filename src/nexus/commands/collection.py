@@ -11,6 +11,8 @@ import click
 import structlog
 
 from nexus.collection_errors import LabelReservedError, label_reserved_error_from_body
+from nexus.commands._collection_delete import collection_busy_message as _collection_busy_message
+from nexus.commands._collection_delete import run_delete
 from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.commands.store import _t3
 from nexus.config import DEFAULT_EXTRACTOR
@@ -561,37 +563,21 @@ def _aspects_from_config(*, dry_run: bool, yes: bool = False) -> None:
     )
 
 
-def _collection_busy_message(busy: dict[str, str], retry: str) -> str:
-    """What to tell a person whose delete the engine refused with 409 ``collection_busy`` (engine 0.1.202).
-
-    One wording for ``delete``, ``prune`` and ``reindex``. The fence holds the collection while a job is planned,
-    running, paused, cutover or failed, and the way out depends on which: a running or cutover job ends on its own,
-    a paused one needs ``--resume`` or ``--abort``, a failed one ``--abort`` (``--resume`` retries it). The engine
-    names the state in its text, not in a field; when it is not one the fence holds, the engine's own message goes
-    beside the generic advice. *retry* is the command to run again once the job has ended."""
-    name, job, state, said = busy["collection"], busy.get("job_id", ""), busy.get("state", ""), busy.get("message", "")
-    job_arg = shlex.quote(job) if job else "JOB"
-    status, abort, resume = (f"`nx collection re-embed --{v} {job_arg}`" for v in ("status", "abort", "resume"))
-    head = (f"re-embed job {job or '(unnamed)'}{f' ({state})' if state else ''} holds collection '{name}' as its source "
-            f"or its target, so nothing was deleted.")
-    advice = {
-        "running": f"Wait for it to finish ({status}), or cancel it ({abort}; documents already moved stay moved)",
-        "cutover": f"Wait for it to finish ({status}), or cancel it ({abort}; documents already moved stay moved)",
-        "planned": f"Wait for it to start and finish ({status}), or cancel it ({abort})",
-        "paused": f"Resume it and let it finish ({resume}), or cancel it ({abort}; documents already moved stay moved)",
-        "failed": f"Cancel it ({abort}; documents already moved stay moved); {resume} retries it",
-    }.get(state)
-    if advice is None:
-        advice = (f"The engine said: {said or 'no detail'}. Check the job ({status}); wait for it to finish, or cancel it "
-                  f"({abort}; documents already moved stay moved)")
-    return f"{head} {advice}, then run `{retry}` again."
-
-
 @collection.command("delete")
-@click.argument("name")
+@click.argument("name", required=False)
+@click.option("--id", "collection_id", type=click.IntRange(min=1), default=None,
+              help="Delete the collection with this ID (the ID column of `nx collection list`) instead of a label. Needs an engine "
+                   "that advertises catalog_collection_delete_by_id_supported (engine-service 0.1.202 or later).")
 @click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
-def delete_cmd(name: str, yes: bool) -> None:
+def delete_cmd(name: str | None, collection_id: int | None, yes: bool) -> None:
     """Delete a T3 collection + cascade-purge taxonomy state (irreversible).
+
+    Name the collection by its label (``nx collection delete LABEL``) or by its
+    ID (``nx collection delete --id N``): exactly one. A label held by two live
+    collections is refused, naming their IDs; delete one by ``--id``. A label
+    that a rename or re-embed retired is refused, naming the live successor
+    (the retired row stays in the history). An unknown ID is an error, never a
+    silent no-op.
 
     Deleting an origin also deletes its rows in its ``quarantine-`` siblings
     (one gc_audit row per sibling). Deleting a ``quarantine-*`` collection
@@ -602,76 +588,7 @@ def delete_cmd(name: str, yes: bool) -> None:
     re-embed job holds the collection as its source or target; the message
     says whether to wait, resume or abort the job.
     """
-    if not yes:
-        click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
-
-    # nexus-jm3z / nexus-8a8e / nexus-vxz3: the full delete cascade (T3 +
-    # taxonomy + chash + pipeline + catalog docs + projection) is the
-    # canonical ``purge_collection_cascade`` (RDR-144 nexus-prgf4), shared
-    # with the 384->768 migration so both leave the same clean state.
-    # nexus-lub: a T3 delete may find the collection already absent (a prior
-    # half-delete); the cascade still runs to clean the orphan rows.
-    from nexus.db.collection_purge import purge_collection_cascade  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-    cascade = purge_collection_cascade(_t3(), name)
-    if cascade.t3_absent:
-        click.echo(
-            f"note: T3 collection '{name}' already absent — running cascade anyway",
-            err=True,
-        )
-    if cascade.collection_busy is not None:
-        # RDR-229 P3.5a row 14 (engine 0.1.202): the engine refused with 409 collection_busy; nothing was removed.
-        raise click.ClickException(_collection_busy_message(cascade.collection_busy, f"nx collection delete {shlex.quote(name)}"))
-    # Surface any cascade-step failure to the user (orphan rows may remain).
-    for failure in cascade.failures:
-        click.echo(f"warn: {failure}", err=True)
-    if cascade.service_delete_failed:
-        # nexus-oq5gd: the service never confirmed the delete (a read timeout
-        # makes ONE attempt, so it may or may not have committed). Do not
-        # claim "Deleted:".
-        raise click.ClickException(
-            f"delete of '{name}' is unconfirmed: the service cascade failed. "
-            f"Re-run `nx collection delete {shlex.quote(name)}`."
-        )
-
-    taxonomy_counts = cascade.taxonomy
-    chash_deleted = cascade.chash_deleted
-    pipeline_rows_deleted = cascade.pipeline_rows_deleted
-    catalog_docs_deleted = cascade.catalog_docs_deleted
-    catalog_projection_deleted = cascade.catalog_projection_deleted
-    quarantine_chunks_deleted = cascade.quarantine_chunks_deleted
-
-    from nexus.catalog.chunk_quarantine import is_quarantine_sibling_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-    # The one sanctioned name parser for the quarantine flag (no new raw parse sites, RDR-204).
-    is_quarantine_name = is_quarantine_sibling_name(name)
-    parts: list[str] = []
-    # For a quarantine-* name the engine reports the rows it held under both keys; say them once, below.
-    if cascade.chunks_deleted and not is_quarantine_name:
-        parts.append(f"{cascade.chunks_deleted} chunks")
-    if taxonomy_counts and any(taxonomy_counts.values()):
-        parts.append(
-            f"{taxonomy_counts['topics']} topics, "
-            f"{taxonomy_counts['assignments']} assignments, "
-            f"{taxonomy_counts['links']} links, "
-            f"{taxonomy_counts['meta']} meta"
-        )
-    if chash_deleted:
-        parts.append(f"{chash_deleted} chash rows")
-    if pipeline_rows_deleted:
-        parts.append(f"{pipeline_rows_deleted} pipeline rows")
-    if catalog_docs_deleted:
-        parts.append(f"{catalog_docs_deleted} catalog docs")
-    if catalog_projection_deleted:
-        parts.append(f"{catalog_projection_deleted} catalog projection row")
-    if quarantine_chunks_deleted:
-        # nexus-wbfpw.68/.71: the origin's quarantine rows go with it, audited per sibling.
-        audit_op = "quarantine_collection_delete" if is_quarantine_name else "collection_delete_quarantine"
-        parts.append(f"{quarantine_chunks_deleted} quarantined chunks (gc_audit: {audit_op})")
-    if parts:
-        click.echo(f"Deleted: {name} ({'; '.join(parts)})")
-    else:
-        click.echo(f"Deleted: {name}")
+    run_delete(_t3, name, collection_id, yes)
 
 
 # ── prune (nexus-9tsdf / GH #1113) ──────────────────────────────────────────
