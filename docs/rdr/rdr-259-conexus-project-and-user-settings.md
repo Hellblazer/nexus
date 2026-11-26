@@ -51,10 +51,12 @@ notes that Sam reads. The **Stop wake guard** is the Stop hook that
 continues a turn once when it ends on a promise to wait that nothing will
 wake. The **behaviour leg** is the test that runs every real hook
 registration in scratch repositories and checks what each prints; the
-**golden replay** is a test that replays recorded real subagent commands
-through the git guard and checks that no verdict changed; the **lint** is a
-set of static tests over the source (the lint bucket, run apart from the
-main suite). **S1 to S6** are the decisions this RDR leaves to Sam, listed
+**golden replay** (`tests/test_audience_golden_replay.py`) is a test that
+replays a corpus of real subagent commands, recorded with their working
+directories, through the git guard as it stood at an earlier release and as
+it stands now, and checks that the full guard's verdicts did not move; the
+**lint** is a set of static tests over the source (the lint bucket, run
+apart from the main suite). **S1 to S7** are the decisions this RDR leaves to Sam, listed
 at the end under "Decisions Only Sam Can Make".
 
 Origin. The plugin portability work (epic nexus-sby49) built an "audience"
