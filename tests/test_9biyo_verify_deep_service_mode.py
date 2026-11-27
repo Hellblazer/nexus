@@ -20,9 +20,20 @@ from nexus.db.http_vector_client import HttpVectorClient, is_service_backed
 from nexus.mcp.core import collection_verify
 
 _NOTES = {
-    "9biyo-note-hnsw": "HNSW indexes approximate nearest neighbor search using a layered proximity graph.",
-    "9biyo-note-wal": "Write ahead logging flushes a durable record of each change before the data pages are touched.",
-    "9biyo-note-vacuum": "Autovacuum reclaims dead tuples left behind by updates so that tables do not bloat over time.",
+    # Twelve short, distinct documents: more than the probe's n_results=10, so a 100% hit rate means each sampled
+    # document was found among others rather than because the collection fits inside one result page.
+    "9biyo-note-hnsw": "HNSW graphs find approximate nearest neighbors through layered proximity links.",
+    "9biyo-note-wal": "Write ahead logging records every change durably before data pages are touched.",
+    "9biyo-note-vacuum": "Autovacuum reclaims dead tuples so that updated tables do not bloat.",
+    "9biyo-note-bread": "Sourdough bread rises slowly because wild yeast ferments the flour overnight.",
+    "9biyo-note-orbit": "A geostationary satellite orbits above the equator once every sidereal day.",
+    "9biyo-note-chess": "In chess the knight moves in an L shape and may jump over other pieces.",
+    "9biyo-note-coral": "Coral reefs shelter a quarter of marine species despite covering little seafloor.",
+    "9biyo-note-latin": "Latin nouns change their endings to show case, number and grammatical gender.",
+    "9biyo-note-solder": "Solder joins electronic components by melting a tin alloy around the leads.",
+    "9biyo-note-monsoon": "The summer monsoon brings heavy rain to South Asia as warm air rises inland.",
+    "9biyo-note-fugue": "A fugue weaves one melodic subject through several independent voices.",
+    "9biyo-note-glacier": "Glaciers carve broad valleys as slowly flowing ice drags rock across the bed.",
 }
 
 

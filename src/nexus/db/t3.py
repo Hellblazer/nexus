@@ -1822,8 +1822,8 @@ class VerifyResult:
 def verify_collection_deep(db: "T3Database", collection_name: str) -> VerifyResult:
     """Verify retrieval health by probing up to 5 known documents.
 
-    Peeks at up to 5 stored documents, queries each, and checks if the
-    original document appears in top-10 results.  Reports ``probe_hit_rate``
+    Samples up to 5 stored documents with an unfiltered ``get``, queries each,
+    and checks if the original document appears in top-10 results.  Reports ``probe_hit_rate``
     as a crude Robustness-delta@K proxy.
 
     Raises KeyError if the collection does not exist.
@@ -1849,15 +1849,18 @@ def verify_collection_deep(db: "T3Database", collection_name: str) -> VerifyResu
 
     if is_service_backed(db):
         metric = "cosine"  # pgvector HNSW cosine; the service exposes no collection metadata
+    elif db._local_mode:
+        # Test-only facade over an injected client: the collection's own distance space, l2 when unstated.
+        metric = (getattr(col, "metadata", None) or {}).get("hnsw:space", "l2")
     else:
-        metric = (getattr(col, "metadata", None) or {}).get("hnsw:space", "l2") if db._local_mode else "cosine"
+        metric = "cosine"
 
     found_count = 0
     last_distance: float | None = None
     probed_count = 0
 
     for pid, pdoc in zip(probe_ids, probe_docs):
-        words = pdoc.split()[:50]
+        words = (pdoc or "").split()[:50]  # a reference-only chunk (RDR-169) has null text
         query = " ".join(words).strip()
         if not query:
             continue

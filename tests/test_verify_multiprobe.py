@@ -71,6 +71,35 @@ def test_five_of_five_probes_healthy() -> None:
     assert result.probe_doc_id is not None
 
 
+# ── Reference-only chunk (null text) among the sampled rows (nexus-9biyo) ───
+
+def test_null_text_chunk_in_the_sample_is_skipped_not_fatal() -> None:
+    """A reference-only chunk (RDR-169) has null text; ``pdoc.split()`` on it used to raise.
+
+    The null-text row is inserted first, so it is inside the first-five sample. It is not probed; the four real
+    documents sampled beside it are, and all four are found.
+    """
+    db = _make_db()
+    col_name = "knowledge__multiprobe_null_text"
+    col = db.get_or_create_collection(col_name, strict=False)
+    col.add(ids=["ref-only"], embeddings=[[1.0] + [0.0] * 383], documents=None, metadatas=[{"title": "ref-only"}])
+    _add_docs(db, col_name, [
+        ("doc-1", "The quick brown fox jumps over the lazy dog near the river bank"),
+        ("doc-2", "Python programming language uses indentation for code blocks syntax"),
+        ("doc-3", "Machine learning models require large amounts of training data samples"),
+        ("doc-4", "Database indexing improves query performance by creating efficient lookups"),
+        ("doc-5", "Network security protocols protect data transmission over internet connections"),
+    ])
+    sample = col.get(limit=5, include=["documents"], sensitivity="include")
+    assert sample["ids"][0] == "ref-only" and sample["documents"][0] is None  # non-vacuity: null text is sampled
+
+    result = verify_collection_deep(db, col_name)
+
+    assert result.status == "healthy"
+    assert result.probe_hit_rate == pytest.approx(1.0)
+    assert result.doc_count == 6
+
+
 # ── Partial-hit: degraded ─────────────────────────────────────────────────────
 
 def test_partial_probes_degraded() -> None:

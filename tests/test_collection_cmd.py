@@ -794,6 +794,19 @@ def test_verify_deep_error_exits_one(runner, env_creds, mock_db) -> None:
     assert "embedding service unavailable" in result.output or "Error" in result.output
 
 
+def test_verify_deep_failure_hint_points_at_the_storage_service(runner, env_creds, mock_db) -> None:
+    """nexus-9biyo: the client does no embedding, so a failed probe must not send the user to voyage_api_key."""
+    result, _ = _verify_deep(
+        runner, mock_db, "knowledge__broken", 3, None,
+        verify_side_effect=RuntimeError("probe blew up"),
+    )
+    assert result.exit_code == 1
+    assert "embedding probe failed for 'knowledge__broken': probe blew up" in result.output
+    assert "nx daemon service status" in result.output
+    assert "nx doctor" in result.output
+    assert "voyage_api_key" not in result.output
+
+
 # ── reindex ─────────────────────────────────────────────────────────────────
 
 

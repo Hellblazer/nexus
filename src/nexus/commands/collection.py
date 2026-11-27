@@ -1658,7 +1658,7 @@ def verify_cmd(name: str, deep: bool) -> None:
         raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
     except Exception as exc:  # noqa: BLE001 — embedding-probe failure surfaced to user via click.echo + Exit
         click.echo(
-            f"embedding probe failed for '{name}': {exc} — check voyage_api_key with: nx config get voyage_api_key",
+            f"embedding probe failed for '{name}': {exc} — check the storage service with: nx daemon service status, or nx doctor (the Embedding family row)",
             err=True,
         )
         raise click.exceptions.Exit(1)
