@@ -296,8 +296,8 @@ class TestRenameCLI:
             ("c4812", "docs", "my-repo", True),
             # An unreadable row infers nothing.
             ("c4812", None, "my-repo", False),
-            # `knowledge__x` reads as voyage-context-3 and `c4812` as
-            # voyage-code-3 by name; that comparison is not a finding.
+            # By name `knowledge__x` and `c4812` read as two different embedding
+            # models; that name-to-name comparison is not a finding.
             ("c4812", "knowledge", "knowledge__x", False),
             # The row's own type still guards a target that names another.
             ("c4812", "knowledge", "docs__foo", True),

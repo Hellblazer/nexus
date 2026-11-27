@@ -44,7 +44,7 @@ SITES: tuple[S, ...] = (
       ('else:', 'conflict = rename_model_conflict(old, new)'),
       'primitive_call', 'mint', MINT_A),
     S('src/nexus/commands/collection.py',
-      ('else:', 'old_model = embedding_model_for_collection(old)'),
+      ('elif not minted:', 'old_model = embedding_model_for_collection(old)'),
       'primitive_call', 'mint', MINT_A),
     S('src/nexus/commands/collection.py',
       ('old_model = embedding_model_for_collection(old)', 'new_model = embedding_model_for_collection(new)'),
