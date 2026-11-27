@@ -104,7 +104,7 @@ evals/                       (at the plugin root)
 | o04-retry-coverage-verdict | "not enough", naming the missing retry tests; debugger agent not dispatched | regex, llm, tool_used `0..0` |
 | o05-intermittent-npe-race | the race in `ConnectionPool` named as the root cause; test-validator agent not dispatched | regex, llm, tool_used `0..0` |
 | o06-asks-echo-before-send | the `asks` mediator reads the queue with `nx ask list --json`, echoes back before any send, and a "change, then send both" reply sends nothing (it echoes the change back and asks again) | regex ×3 (log ×2, final message), llm |
-| o07-asks-sam-words-span | every `nx ask answer` carries `--expect`, `--via mediator` and a `--sam-words` that is a contiguous span of the user's reply, echo-back first | regex ×5 (log, trace) |
+| o07-asks-sam-words-span | every `nx ask answer` carries `--expect`, `--via mediator` and a `--user-words` that is a contiguous span of the user's reply, echo-back first | regex ×5 (log, trace) |
 | o08-asks-reversible-only | "yes to the reversible ones" answers the two reversible asks and leaves a `reversible: no` ask and a mislabelled tag ask alone, and says so | regex ×6 (log), llm |
 | o09-asks-ambiguous-reply | an ambiguous reply gets a question back and no send | regex ×2, llm |
 | o10-asks-no-reply | the opening message says to take the recommendations and not wait; no confirmation of an echo-back arrives, so nothing is sent | regex ×3 |

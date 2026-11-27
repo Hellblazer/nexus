@@ -908,8 +908,16 @@ def _ask_matches(record: object, parsed: dict[str, str]) -> bool:
         record.get("answer_id") == parsed["answer"]
         and mail_choice == parsed["choice"]
         and record.get("via") == parsed["via"]
-        and isinstance(record.get("sam_words"), str)
+        and isinstance(_ask_record_words(record), str)
     )
+
+
+def _ask_record_words(record: dict[str, Any]) -> object:
+    """The words in an answer record: ``user_words``, else ``sam_words`` for a record an older client wrote.
+
+    The fallback is read for one release after the release that first ships ``user_words``, then dropped
+    (the client writes both keys until then, so a copy of this hook from 8.5.9 still finds the words)."""
+    return record["user_words"] if "user_words" in record else record.get("sam_words")
 
 
 def _ask_stamp_text(row: dict[str, Any]) -> str:
@@ -953,7 +961,7 @@ def _ask_check(base_url: str, token: str, address: str, row: dict[str, Any],
         record = _ask_record_of(entry)
         if not isinstance(record, dict) or not _ask_matches(record, parsed):
             return None, _REASON_NO_RECORD
-        words = record["sam_words"]
+        words = _ask_record_words(record)
         return {
             "ask": parsed["ask"], "version": parsed["version"], "choice": parsed["choice"],
             "via": parsed["via"], "stamp": _ask_stamp_text(row),

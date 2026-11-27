@@ -7692,13 +7692,13 @@ Structured asks on the threads board (RDR-245, nexus-wc4jj.7): the mediator's to
 |------------|-------------|
 | `list [--json] [--all]` | Interrupt asks, then the batch, then one-line counts of quiet, conditional and answered asks (`--all` lists them), then legacy asks and needs-sam beads (a bead that a structured ask folds into carries `-> <entry>/<ask id>`; the ask stays in its own group), then lint findings, then the last 48 hours of answers and, when the digest could not read some `asks` rows, a line naming them. An ask whose answer record is `sending` or `failed` shows `[answer sending]` or `[answer failed]` (`[answer sending: outcome unknown]` when the mail may have been delivered). `--json` carries every parsed field of every ask with its version and `answer_status`, the bead objects with `ask_pointers`, the lint findings, the digest and `digest_skipped` |
 | `show <ref> [--json]` | Every field of one ask: numbered options with the recommendation marked, the version, the asker session, the entry age, the raw ask lines, the repeated and bad-valued fields, and the answer record for this version, if any |
-| `answer <ref> <n\|text> --expect VERSION [--note TEXT] [--via cli\|mediator] [--sam-words TEXT] [--batch-words TEXT] [--replace]` | Answer one ask. A number picks that option; any other text is a note-only answer that authorizes no option |
+| `answer <ref> <n\|text> --expect VERSION [--note TEXT] [--via cli\|mediator] [--user-words TEXT] [--batch-words TEXT] [--replace]` | Answer one ask. A number picks that option; any other text is a note-only answer that authorizes no option |
 | `digest` | Every answer of the last seven days, newest first: time, `via`, Sam's words, the batch reply they came from, and the tuple id (or the `sending` / `failed` status) |
 
 ### nx ask answer
 
 ```
-nx ask answer ENTRY/ID N|TEXT --expect VERSION [--note TEXT] [--via cli|mediator] [--sam-words TEXT] [--batch-words TEXT] [--replace]
+nx ask answer ENTRY/ID N|TEXT --expect VERSION [--note TEXT] [--via cli|mediator] [--user-words TEXT] [--batch-words TEXT] [--replace]
 ```
 
 Refused, with nothing recorded or sent: `--expect` differs from the ask's current version (the current text is printed); the ask has an `after:` value; the entry has no `session:` line, or one that is not a lower-case canonical UUID, or two or more entries carry the same `session:` id; a number outside `1..` the option count; a `sent` record for the same version without `--replace`; a `sending` record under 10 minutes old (even with `--replace`). A `sending` record over 10 minutes old, or a `failed` one, is retried without `--replace`. The record is written `sending` with a fresh `answer_id`, read back, and the command stops without sending if the `answer_id` read back is not its own (first record wins). It then posts the tuple and updates the record to `sent` with the tuple id, or `failed` with the error, and prints which. When the post's outcome is unknown (a read or write timeout, a dropped connection, a half-read response, a 502, 503 or 504, in any link of the exception chain) the mail may have been delivered: the record stays `sending` with `error: "outcome unknown: <reason>"`, the command exits non-zero and says "do not re-run", and a re-send is refused for 10 minutes and allowed after that. A refusal the engine answered (a 4xx, 500 or 503), a client pre-check or a connect failure is `failed`.
@@ -7707,8 +7707,8 @@ Refused, with nothing recorded or sent: `--expect` differs from the ask's curren
 |------|-------------|
 | `--expect VERSION` | Required. The 16-hex version of the ask Sam saw |
 | `--note TEXT` | A note on a chosen option. Not allowed with a free-text reply (the reply is the note) |
-| `--via cli\|mediator` | `cli` (default): stdin must be a TTY; the note, or the text of a note-only answer, is recorded as Sam's words. `mediator`: a session relaying Sam's words; needs `--sam-words` and this session's own id (tuple-watch marker, then `NX_T1_SESSION_ID`) |
-| `--sam-words TEXT` | `--via mediator` only. The contiguous span Sam typed for this ask, 1 to 500 characters |
+| `--via cli\|mediator` | `cli` (default): stdin must be a TTY; the note, or the text of a note-only answer, is recorded as Sam's words. `mediator`: a session relaying Sam's words; needs `--user-words` and this session's own id (tuple-watch marker, then `NX_T1_SESSION_ID`) |
+| `--user-words TEXT` | `--via mediator` only. The contiguous span the user typed for this ask, 1 to 500 characters. The old name `--sam-words` still works for one more client release, hidden, and prints a deprecation line on stderr; giving both is a usage error |
 | `--batch-words TEXT` | `--via mediator` only. Sam's whole reply when it covered several asks, at most 2000 characters; shown only by `digest`. Answers sent with the same words by the same mediator within 10 minutes share one `batch/<mediator session>/<YYYYMMDDTHHMMSSZ>` record |
 | `--replace` | Supersede a `sent` answer to the same version |
 

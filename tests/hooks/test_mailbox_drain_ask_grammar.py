@@ -181,7 +181,7 @@ def test_the_match_rule_edges(hook: ModuleType) -> None:
     assert hook._ask_matches(rec, parsed)
     for key, value in (("status", "failed"), ("status", "SENT"), ("status", None), ("answer_id", "x"),
                        ("choice", 2), ("choice", None), ("choice", "1"), ("choice", True),
-                       ("via", "cli"), ("sam_words", None), ("sam_words", 5)):
+                       ("via", "cli"), ("user_words", None), ("user_words", 5)):
         assert not hook._ask_matches({**rec, key: value}, parsed), (key, value)
     assert not hook._ask_matches({k: v for k, v in rec.items() if k != "answer_id"}, parsed)
     for junk in (None, [], "sent", 3):
@@ -446,10 +446,32 @@ def test_a_cut_marker_follows_the_cut_words(hook: ModuleType) -> None:
 
 
 def test_words_are_cut_at_500_by_the_check(hook: ModuleType, monkeypatch) -> None:
-    rec = {**_record("answer_record_v1.json"), "sam_words": "é" * 501}
+    rec = {**_record("answer_record_v1.json"), "user_words": "é" * 501}
     monkeypatch.setattr(hook, "_get", lambda *_a, **_k: _entry(rec))
     fields, _ = hook._ask_check("http://x", "t", "a", _row(), is_local=True, budget_s=5.0)
     assert fields["words"] == "é" * 500 and fields["cut"] is True
+
+
+def test_a_record_with_only_sam_words_still_matches_and_a_record_with_neither_does_not(hook: ModuleType) -> None:
+    """Records stored before the rename carry ``sam_words`` alone; the check falls back to it."""
+    rec = _record("answer_record_v1.json")
+    parsed = hook._ask_parse_body(_CORR, _text("mail_body_v1.txt"))
+    legacy = {k: v for k, v in rec.items() if k != "user_words"}
+    assert hook._ask_matches(legacy, parsed)
+    assert not hook._ask_matches({**legacy, "sam_words": None}, parsed)
+    assert not hook._ask_matches({k: v for k, v in legacy.items() if k != "sam_words"}, parsed)
+
+
+def test_the_check_reads_the_legacy_key_and_prefers_the_new_one(hook: ModuleType, monkeypatch) -> None:
+    rec = _record("answer_record_v1.json")
+    legacy = {k: v for k, v in rec.items() if k != "user_words"} | {"sam_words": "old words"}
+    monkeypatch.setattr(hook, "_get", lambda *_a, **_k: _entry(legacy))
+    fields, _ = hook._ask_check("http://x", "t", "a", _row(), is_local=True, budget_s=5.0)
+    assert fields["words"] == "old words"
+    both = {**rec, "user_words": "new words", "sam_words": "old words"}
+    monkeypatch.setattr(hook, "_get", lambda *_a, **_k: _entry(both))
+    fields, _ = hook._ask_check("http://x", "t", "a", _row(), is_local=True, budget_s=5.0)
+    assert fields["words"] == "new words"
 
 
 def test_the_nonce_never_appears_in_the_words(hook: ModuleType, monkeypatch) -> None:

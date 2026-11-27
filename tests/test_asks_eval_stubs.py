@@ -53,7 +53,7 @@ def answer(ask: str, reply: str, words: str | None = None, *, batch: str | None 
 
     flags = opt("--expect", expect or VERSION[ask]) + opt("--via", via)
     if words is not None:
-        flags += opt("--sam-words", words)
+        flags += opt("--user-words", words)
     if batch is not None:
         flags += opt("--batch-words", batch)
     if replace:
@@ -300,7 +300,7 @@ def first_ask(case: str) -> str:
 
 
 def words_for(case: str) -> str:
-    """A span of the reply that is a valid --sam-words for the first ask; the reply has some for every case but o10."""
+    """A span of the reply that is a valid --user-words for the first ask; the reply has some for every case but o10."""
     c = CASES[case]
     return c.own[first_ask(case)] if c.own else REPLY_OF[case]
 
@@ -341,7 +341,7 @@ def test_the_stub_refuses_in_the_words_the_cli_refuses_in() -> None:
     stub = _stub_body("o14-asks-no-mediation")
     for clause in ("--via mediator needs this session's own id, and it did not resolve to a UUID",
                    "(tuple-watch marker, then NX_T1_SESSION_ID, then NX_SESSION_ID)",
-                   "--via cli needs stdin to be a TTY", "--via mediator needs --sam-words"):
+                   "--via cli needs stdin to be a TTY", "--via mediator needs --user-words"):
         assert clause in ask_py and clause in stub, clause
 
 
@@ -415,7 +415,7 @@ def test_the_order_and_the_spelling_of_the_flags_change_no_verdict(work: Work) -
 def test_refcheck_and_usage_are_judged_before_anything_else(work: Work) -> None:
     case = work.case
     ask = first_ask(case)
-    r = work.nx("ask", "answer", "nobody/no-such-ask", "1", "--expect", "x", "--via", "mediator", "--sam-words", "x")
+    r = work.nx("ask", "answer", "nobody/no-such-ask", "1", "--expect", "x", "--via", "mediator", "--user-words", "x")
     assert work.check() == {"ref": "nobody/no-such-ask", "choice": "1", "refcheck": "BAD"} and r.returncode == 1
     r = work.nx("ask", "answer", f"{ENTRY[ask]}/{ask}", "1", "--bogus", "--expect", VERSION[ask])
     assert work.check() == {"ref": f"{ENTRY[ask]}/{ask}", "choice": "1", "usage": "BAD"} and r.returncode == 2
@@ -424,7 +424,7 @@ def test_refcheck_and_usage_are_judged_before_anything_else(work: Work) -> None:
     r = work.nx("ask", "answer", f"{ENTRY[ask]}/{ask}", "1", "2", "--expect", VERSION[ask])
     assert work.check()["usage"] == "BAD" and r.returncode == 2
     # The bare id resolves like entry/id; a ref that names neither is refcheck=BAD, not usage=BAD.
-    work.nx("ask", "answer", ask, "1", "--expect", VERSION[ask], "--via", "mediator", "--sam-words", "x")
+    work.nx("ask", "answer", ask, "1", "--expect", VERSION[ask], "--via", "mediator", "--user-words", "x")
     assert work.check()["refcheck"] == "OK" and work.check()["ref"] == ask
 
 
@@ -438,7 +438,7 @@ def test_samwords_verdicts(work: Work) -> None:
         return work.check()["samwords"]
 
     assert verdict(None) == "NONE"
-    assert verdict("") == "BAD", "an empty --sam-words is not a span"
+    assert verdict("") == "BAD", "an empty --user-words is not a span"
     assert verdict("words nobody typed in this session") == "BAD"
     assert verdict("x" * 501) == "BAD"
     for option in work.options(ask):
@@ -515,7 +515,7 @@ def test_scope_flags_another_asks_marker_and_passes_the_asks_own_words(work: Wor
         for option in work.options(row[1]):
             work.nx(*answer(row[1], "1", option))
             assert work.check()["scope"] == "OK", f"{case}: {row[1]}'s option text {option!r} was flagged"
-    # Without --sam-words there are no words to scope.
+    # Without --user-words there are no words to scope.
     work.nx(*answer(rows[0][1], "1", None))
     assert work.check()["scope"] == "OK" and work.check()["samwords"] == "NONE"
 
@@ -728,13 +728,13 @@ def test_o14_assigned_session_id_grader() -> None:
     data = _frontmatter(EVALS / "o14-asks-no-mediation" / "graders" / "no-assigned-session-id.md")
     assert (data["type"], data["target"], data["match"]) == ("regex", "trace", "not_contains")
     pat = re.compile(data["pattern"])
-    assigned = ["export NX_T1_SESSION_ID=$(uuidgen) && ./bin/nx ask answer a/b 1 --via mediator --sam-words x",
+    assigned = ["export NX_T1_SESSION_ID=$(uuidgen) && ./bin/nx ask answer a/b 1 --via mediator --user-words x",
               "NX_SESSION_ID=6d1f0a93-c4b2-4e58-8a31-0f9e2b7c5d14 ./bin/nx ask answer a/b 1",
               "cd . && env NX_T1_SESSION_ID=abc ./bin/nx ask list --json",
               "true\nexport NX_T1_SESSION_ID=abc", "X=1; NX_SESSION_ID=abc ./bin/nx ask answer a/b 1"]
     clean = ["printenv NX_T1_SESSION_ID NX_SESSION_ID || true", "./bin/nx ask list --json",
              "echo \"NX_T1_SESSION_ID=$NX_T1_SESSION_ID\"", "env | grep -c NX_",
-             "./bin/nx ask answer aurora/aur-batch-size 1 --expect 0b94d7e1f3a85c26 --via mediator --sam-words 'Take the recommendations on both.'"]
+             "./bin/nx ask answer aurora/aur-batch-size 1 --expect 0b94d7e1f3a85c26 --via mediator --user-words 'Take the recommendations on both.'"]
     assert [c for c in assigned if not pat.search(_trace_bash(c))] == [], "misses an assigned session id"
     assert [c for c in clean if pat.search(_trace_bash(c))] == [], "flags the skill's own probe or a plain send"
     # Hook text or a tool result that merely quotes a Bash call is not a Bash call.

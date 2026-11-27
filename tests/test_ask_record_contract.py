@@ -45,7 +45,7 @@ MAIL_LINES = (
 )
 
 ANSWER_KEYS = {
-    "answer_id", "question", "options", "choice", "note", "sam_words", "batch_title",
+    "answer_id", "question", "options", "choice", "note", "user_words", "sam_words", "batch_title",
     "via", "asked", "blocking", "tty", "time", "status", "tuple_id", "error",
 }
 BATCH_KEYS = {"batch_words", "via", "time", "answer_titles"}
@@ -102,7 +102,8 @@ def test_answer_record_field_types(name: str) -> None:
     assert isinstance(rec["question"], str) and rec["question"]
     assert isinstance(rec["options"], list) and all(isinstance(o, str) for o in rec["options"])
     assert isinstance(rec["note"], str)
-    assert isinstance(rec["sam_words"], str)
+    assert isinstance(rec["user_words"], str)
+    assert rec["sam_words"] == rec["user_words"]  # the one-release copy an older plugin copy reads
     assert rec["batch_title"] is None or isinstance(rec["batch_title"], str)
     assert type(rec["blocking"]) is bool
     assert rec["tty"] is None or isinstance(rec["tty"], str)
@@ -145,10 +146,10 @@ def test_a_tty_is_recorded_for_cli_and_only_for_cli(name: str) -> None:
     assert (rec["tty"] is not None) == (rec["via"] == "cli")
 
 
-def test_a_note_only_answer_has_no_choice_and_records_its_note_as_sam_words() -> None:
+def test_a_note_only_answer_has_no_choice_and_records_its_note_as_user_words() -> None:
     rec = _json("answer_record_v1_note_only.json")
     assert rec["choice"] is None
-    assert rec["note"] and rec["sam_words"] == rec["note"]
+    assert rec["note"] and rec["user_words"] == rec["note"]
 
 
 def test_sending_has_no_tuple_yet_and_failed_carries_an_error() -> None:

@@ -325,7 +325,7 @@ def _bash(command: str) -> str:
     return _trace_line([{"type": "tool_use", "id": "toolu_b", "name": "Bash", "input": {"command": command}}])
 
 
-_ASK_ANSWER = "./bin/nx ask answer aurora/aur-batch-size 2 --expect 0b94d7e1f3a85c26 --via mediator --sam-words \"go with the bigger batch\""
+_ASK_ANSWER = "./bin/nx ask answer aurora/aur-batch-size 2 --expect 0b94d7e1f3a85c26 --via mediator --user-words \"go with the bigger batch\""
 
 
 def _hook(output: str) -> str:

@@ -1,0 +1,3 @@
+### Changed
+
+- **`nx ask answer --sam-words` is now `--user-words`, and the answer record's `sam_words` field is now `user_words`.** The old flag still works for one more client release as a hidden alias that prints one deprecation line on stderr. New records carry the words under both keys, so a plugin copy from 8.5.9 (whose drain hook reads `sam_words`) still finds them; every reader (`nx ask list` and `digest`, the drain hook) reads `user_words` and falls back to `sam_words`, so records already stored keep working. `nx ask list --json` names the digest field `user_words`. The `asks` skill and the eval stubs use `--user-words` (nexus-sby49).

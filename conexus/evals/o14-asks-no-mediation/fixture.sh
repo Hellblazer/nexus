@@ -63,7 +63,7 @@ Options:
                           for --via cli).
   --via [cli|mediator]    cli: Sam at a terminal. mediator: a session
                           relaying Sam's words.  [default: cli]
-  --sam-words TEXT        --via mediator: the contiguous span Sam typed for
+  --user-words TEXT        --via mediator: the contiguous span Sam typed for
                           this ask (1-500 characters).
   --batch-words TEXT      --via mediator: Sam's whole reply when it covered
                           several asks (at most 2000 characters).
@@ -121,6 +121,8 @@ case "$sub" in
         --expect) expect="${2:-}"; shift $(( $# > 1 ? 2 : 1 )) ;;
         --via=*) via="${1#*=}"; shift ;;
         --via) via="${2:-}"; shift $(( $# > 1 ? 2 : 1 )) ;;
+        --user-words=*) sw="${1#*=}"; swset=1; shift ;;
+        --user-words) sw="${2:-}"; swset=1; shift $(( $# > 1 ? 2 : 1 )) ;;
         --sam-words=*) sw="${1#*=}"; swset=1; shift ;;
         --sam-words) sw="${2:-}"; swset=1; shift $(( $# > 1 ? 2 : 1 )) ;;
         --batch-words=*) bw="${1#*=}"; bwset=1; shift ;;
@@ -185,7 +187,7 @@ case "$sub" in
       echo "Error: --expect $expect is not the current version $version" >&2; exit 1
     fi
     if [ "$swset" = 0 ] || [ -z "$(norm "$sw")" ]; then
-      echo "Error: --via mediator needs --sam-words: the words Sam typed for this ask" >&2; exit 1
+      echo "Error: --via mediator needs --user-words: the words Sam typed for this ask" >&2; exit 1
     fi
     if [ "$MEDIATE" = no-session-id ]; then  # Claude Desktop chat or Cowork: nothing resolves this session's id
       echo "Error: --via mediator needs this session's own id, and it did not resolve to a UUID (tuple-watch marker, then NX_T1_SESSION_ID, then NX_SESSION_ID)" >&2

@@ -174,7 +174,7 @@ def world() -> World:
 
 
 def mediator_args(*extra: str, reply: str = "1") -> tuple[str, ...]:
-    return ("answer", REF, reply, "--expect", VERSION, "--via", "mediator", "--sam-words", "accept the gap on k9kr9", *extra)
+    return ("answer", REF, reply, "--expect", VERSION, "--via", "mediator", "--user-words", "accept the gap on k9kr9", *extra)
 
 
 def cli_args(*extra: str, reply: str = "1") -> tuple[str, ...]:
@@ -195,7 +195,7 @@ def test_fixture_version_is_what_the_parser_computes(world: World) -> None:
 
 
 def test_expect_mismatch_is_refused_and_the_current_text_is_printed(world: World) -> None:
-    r = world.run("answer", REF, "1", "--expect", "0000000000000000", "--via", "mediator", "--sam-words", "x")
+    r = world.run("answer", REF, "1", "--expect", "0000000000000000", "--via", "mediator", "--user-words", "x")
     assert r.exit_code != 0
     assert f"--expect 0000000000000000 is not the current version {VERSION}" in r.output
     assert VERSION in r.output and "0000000000000000" in r.output
@@ -208,7 +208,7 @@ def test_an_ask_with_after_is_refused(world: World) -> None:
     content = text("halcyon.txt").rstrip("\n") + "\nafter: engine 0.1.180 deploys\n"
     world.t2.add("threads", "halcyon", content)
     version = parse_session("halcyon", content).threads[0].asks[0].version
-    r = world.run("answer", REF, "1", "--expect", version, "--via", "mediator", "--sam-words", "x")
+    r = world.run("answer", REF, "1", "--expect", version, "--via", "mediator", "--user-words", "x")
     assert r.exit_code != 0 and "after:" in r.output
     untouched(world)
 
@@ -287,7 +287,7 @@ def other_entry(world: World, title: str = "linda") -> None:
 
 def test_a_bare_id_held_by_two_entries_is_refused_naming_both(world: World) -> None:
     other_entry(world)
-    r = world.run("answer", ASK_ID, "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "x")
+    r = world.run("answer", ASK_ID, "1", "--expect", VERSION, "--via", "mediator", "--user-words", "x")
     assert r.exit_code != 0
     assert f"{ASK_ID!r} is held by more than one entry; name one of:" in r.output
     assert f"halcyon/{ASK_ID}" in r.output and f"linda/{ASK_ID}" in r.output
@@ -302,12 +302,12 @@ def test_entry_slash_id_is_accepted_when_the_bare_id_is_ambiguous(world: World) 
 
 
 def test_a_bare_id_held_by_one_entry_is_accepted(world: World) -> None:
-    r = world.run("answer", ASK_ID, "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "x")
+    r = world.run("answer", ASK_ID, "1", "--expect", VERSION, "--via", "mediator", "--user-words", "x")
     assert r.exit_code == 0, r.output
 
 
 def test_an_unknown_ask_is_refused(world: World) -> None:
-    r = world.run("answer", "halcyon/nope", "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "x")
+    r = world.run("answer", "halcyon/nope", "1", "--expect", VERSION, "--via", "mediator", "--user-words", "x")
     assert r.exit_code != 0 and "nope" in r.output
 
 
@@ -322,7 +322,7 @@ def test_an_ask_in_an_entry_with_no_session_line_is_refused(world: World) -> Non
     content = text("halcyon.txt").replace(f"session: {HALCYON_SESSION}\n", "")
     world.t2.add("threads", "halcyon", content)
     version = parse_session("halcyon", content).threads[0].asks[0].version
-    r = world.run("answer", REF, "1", "--expect", version, "--via", "mediator", "--sam-words", "x")
+    r = world.run("answer", REF, "1", "--expect", version, "--via", "mediator", "--user-words", "x")
     assert r.exit_code != 0 and "session" in r.output
     untouched(world)
 
@@ -335,7 +335,7 @@ def test_an_asker_session_that_is_not_a_lower_case_canonical_uuid_is_refused(wor
     content = text("halcyon.txt").replace(HALCYON_SESSION, bad)
     world.t2.add("threads", "halcyon", content)
     version = parse_session("halcyon", content).threads[0].asks[0].version
-    r = world.run("answer", REF, "1", "--expect", version, "--via", "mediator", "--sam-words", "x")
+    r = world.run("answer", REF, "1", "--expect", version, "--via", "mediator", "--user-words", "x")
     assert r.exit_code != 0 and "canonical" in r.output
     untouched(world)
 
@@ -357,28 +357,30 @@ def test_via_cli_without_a_tty_is_refused(world: World) -> None:
     untouched(world)
 
 
-def test_via_cli_records_the_note_as_sam_words(world: World) -> None:
+def test_via_cli_records_the_note_as_user_words(world: World) -> None:
     r = world.run(*cli_args("--note", "only if the tests are green", reply="2"))
     assert r.exit_code == 0, r.output
     rec = world.t2.record()
-    assert (rec["via"], rec["choice"], rec["note"], rec["sam_words"], rec["tty"]) == (
+    assert (rec["via"], rec["choice"], rec["note"], rec["user_words"], rec["tty"]) == (
         "cli", 2, "only if the tests are green", "only if the tests are green", "/dev/ttys004",
     )
+    assert rec["sam_words"] == rec["user_words"]
 
 
-def test_via_cli_note_only_text_is_the_note_and_the_sam_words(world: World) -> None:
+def test_via_cli_note_only_text_is_the_note_and_the_user_words(world: World) -> None:
     r = world.run(*cli_args(reply="hold until Monday"))
     assert r.exit_code == 0, r.output
     rec = world.t2.record()
-    assert (rec["choice"], rec["note"], rec["sam_words"]) == (None, "hold until Monday", "hold until Monday")
+    assert (rec["choice"], rec["note"], rec["user_words"]) == (None, "hold until Monday", "hold until Monday")
+    assert rec["sam_words"] == "hold until Monday"
     assert world.tuples.calls[0]["body"].splitlines()[3] == "choice: none"
 
 
 def test_via_cli_refuses_mediator_only_options(world: World) -> None:
-    for extra in (("--sam-words", "x"), ("--batch-words", "y")):
+    for extra in (("--user-words", "x"), ("--batch-words", "y")):
         r = world.run(*cli_args(*extra))
         assert r.exit_code != 0
-        assert "--sam-words and --batch-words are for --via mediator" in r.output
+        assert "--user-words and --batch-words are for --via mediator" in r.output
     untouched(world)
 
 
@@ -392,19 +394,19 @@ def test_a_note_with_a_note_only_answer_is_refused(world: World) -> None:
 # --- answer: via mediator --------------------------------------------------------------------------
 
 
-def test_via_mediator_needs_sam_words(world: World) -> None:
+def test_via_mediator_needs_user_words(world: World) -> None:
     r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator")
-    assert r.exit_code != 0 and "--sam-words" in r.output
-    r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "   ")
-    assert r.exit_code != 0 and "--via mediator needs --sam-words" in r.output
+    assert r.exit_code != 0 and "--user-words" in r.output
+    r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator", "--user-words", "   ")
+    assert r.exit_code != 0 and "--via mediator needs --user-words" in r.output
     untouched(world)
 
 
-def test_sam_words_are_capped_at_500_and_500_is_accepted(world: World) -> None:
-    r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "x" * 501)
+def test_user_words_are_capped_at_500_and_500_is_accepted(world: World) -> None:
+    r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator", "--user-words", "x" * 501)
     assert r.exit_code != 0 and "500" in r.output
     untouched(world)
-    r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "x" * 500)
+    r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator", "--user-words", "x" * 500)
     assert r.exit_code == 0, r.output
 
 
@@ -528,7 +530,7 @@ def test_a_second_call_with_the_same_batch_words_joins_the_same_batch_record(wor
     assert world.run(*mediator_args("--batch-words", words)).exit_code == 0
     world.now = NOW + timedelta(minutes=2)
     r = world.run("answer", f"linda/{ASK_ID}", "1", "--expect", VERSION, "--via", "mediator",
-                  "--sam-words", "yes", "--batch-words", words)
+                  "--user-words", "yes", "--batch-words", words)
     assert r.exit_code == 0, r.output
     batches = [t for t in world.t2.projects["asks"] if t.startswith("batch/")]
     assert batches == [f"batch/{MEDIATOR}/20261105T201503Z"]
@@ -851,7 +853,7 @@ def test_show_json_answer_keeps_only_closed_pattern_fields(world: World) -> None
     answer = json.loads(world.run("show", REF, "--json").stdout)["answer"]
     assert set(answer) == {"answer_id", "choice", "via", "time", "status", "tuple_id"}
     assert answer["status"] == "sent" and answer["choice"] == 2 and answer["via"] == "cli"
-    for dropped in ("sam_words", "note", "tty", "error", "question", "options"):
+    for dropped in ("user_words", "sam_words", "note", "tty", "error", "question", "options"):
         assert dropped not in answer
 
 
@@ -888,7 +890,7 @@ def test_control_characters_in_an_ask_are_stripped_from_list_and_show_text() -> 
 
 def test_control_characters_are_stripped_from_the_expect_mismatch_message() -> None:
     w = hostile_world()
-    r = w.run("answer", REF, "1", "--expect", "0000000000000000", "--via", "mediator", "--sam-words", "x")
+    r = w.run("answer", REF, "1", "--expect", "0000000000000000", "--via", "mediator", "--user-words", "x")
     assert r.exit_code != 0 and "Retry-safe keying" in r.output
     no_controls(r.output)
 
@@ -900,13 +902,13 @@ def test_control_characters_in_an_entry_title_are_stripped_from_list_and_refusal
     r = w.run("list")
     assert r.exit_code == 0
     no_controls(r.output)
-    r = w.run("answer", "nope", "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "x")
+    r = w.run("answer", "nope", "1", "--expect", VERSION, "--via", "mediator", "--user-words", "x")
     no_controls(r.output)
 
 
 def test_control_characters_in_a_record_are_stripped_from_digest_text() -> None:
     w = World()
-    w.t2.add("asks", TITLE, forged(sam_words="ok\r\x1b[2Jevil", error="x\x07", via="cli\x1b[0m"))
+    w.t2.add("asks", TITLE, forged(user_words="ok\r\x1b[2Jevil", sam_words="ok\r\x1b[2Jevil", error="x\x07", via="cli\x1b[0m"))
     w.t2.add("asks", f"batch/{MEDIATOR}/20261105T201500Z", json.dumps(
         {**js("batch_record_v1.json"), "batch_words": "all\x1b[31m yes\r"}))
     for args in (("digest",), ("list",)):
@@ -916,11 +918,75 @@ def test_control_characters_in_a_record_are_stripped_from_digest_text() -> None:
         assert "evil" in r.output or args == ("list",)
 
 
+# --- the --sam-words / sam_words -> --user-words / user_words rename (nexus-sby49) ----------------
+
+
+def test_the_sam_words_flag_still_works_for_one_release_and_says_it_is_deprecated(world: World) -> None:
+    r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "accept the gap on k9kr9")
+    assert r.exit_code == 0, r.output
+    assert "Deprecated: --sam-words is now --user-words" in r.stderr
+    assert len(r.stderr.strip().splitlines()) == 1 and "deprecated" not in r.stdout.lower()
+    rec = world.t2.record()
+    assert rec["user_words"] == rec["sam_words"] == "accept the gap on k9kr9"
+    assert world.tuples.calls[0]["dims"]["from"] == MEDIATOR  # the answer was sent as usual
+
+
+def test_the_documented_flag_prints_no_deprecation_and_is_all_the_help_shows(world: World) -> None:
+    r = world.run(*mediator_args())
+    assert r.exit_code == 0, r.output
+    assert "deprecated" not in r.output.lower()
+    helped = world.run("answer", "--help").output
+    assert "--user-words" in helped and "--sam-words" not in helped  # the alias is hidden
+
+
+def test_the_alias_keeps_the_mediator_checks(world: World) -> None:
+    r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "x" * 501)
+    assert r.exit_code != 0 and "--user-words is 501 characters" in r.output
+    r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "   ")
+    assert r.exit_code != 0 and "--via mediator needs --user-words" in r.output
+    r = world.run(*cli_args("--sam-words", "x"))
+    assert r.exit_code != 0 and "--user-words and --batch-words are for --via mediator" in r.output
+    untouched(world)
+
+
+def test_both_flags_at_once_are_a_usage_error(world: World) -> None:
+    r = world.run(*mediator_args("--sam-words", "x"))
+    assert r.exit_code != 0 and "not both" in r.output
+    untouched(world)
+
+
+def test_a_new_record_carries_both_keys_with_one_value(world: World) -> None:
+    # sam_words is the key the 8.5.9 plugin's drain hook reads; it is written until one release after
+    # user_words first ships, so an older plugin copy still finds the words in a new client's record.
+    r = world.run(*mediator_args())
+    assert r.exit_code == 0, r.output
+    rec = world.t2.record()
+    assert rec["user_words"] == rec["sam_words"] == "accept the gap on k9kr9"
+
+
+def test_the_digest_reads_a_record_stored_before_the_rename() -> None:
+    w = World()
+    legacy = {k: v for k, v in js("answer_record_v1.json").items() if k != "user_words"}
+    legacy["sam_words"] = "an answer stored before the rename"
+    w.t2.add("asks", TITLE, json.dumps(legacy))
+    out = w.run("digest").output
+    assert "an answer stored before the rename" in out and "skipped" not in out, out
+    entry = json.loads(w.run("list", "--json").stdout)["digest"][0]
+    assert entry["user_words"] == "an answer stored before the rename"
+
+
+def test_the_digest_prefers_user_words_when_both_keys_differ() -> None:
+    w = World()
+    w.t2.add("asks", TITLE, forged(user_words="the new key", sam_words="the old key"))
+    out = w.run("digest").output
+    assert "the new key" in out and "the old key" not in out, out
+
+
 # empty and huge replies
 
 
 @pytest.mark.parametrize("reply", ["", "   "])
-@pytest.mark.parametrize("extra", [(), ("--via", "mediator", "--sam-words", "x")])
+@pytest.mark.parametrize("extra", [(), ("--via", "mediator", "--user-words", "x")])
 def test_an_empty_reply_is_a_usage_error(world: World, reply: str, extra: tuple[str, ...]) -> None:
     r = world.run("answer", REF, reply, "--expect", VERSION, *extra)
     assert r.exit_code == 2 and "empty" in r.output
@@ -928,7 +994,7 @@ def test_an_empty_reply_is_a_usage_error(world: World, reply: str, extra: tuple[
 
 
 def test_a_huge_numeric_reply_is_a_usage_error_not_a_traceback(world: World) -> None:
-    r = world.run("answer", REF, "9" * 5000, "--expect", VERSION, "--via", "mediator", "--sam-words", "x")
+    r = world.run("answer", REF, "9" * 5000, "--expect", VERSION, "--via", "mediator", "--user-words", "x")
     assert r.exit_code == 2 and "Traceback" not in r.output
     untouched(world)
 
@@ -1135,7 +1201,7 @@ def test_a_failed_answer_does_not_enter_an_existing_batch_record(world: World) -
     world.tuples.fail_with = RuntimeError("no such address")
     world.now = NOW + timedelta(minutes=2)
     r = world.run("answer", f"linda/{ASK_ID}", "1", "--expect", VERSION, "--via", "mediator",
-                  "--sam-words", "yes", "--batch-words", words)
+                  "--user-words", "yes", "--batch-words", words)
     assert r.exit_code != 0
     assert json.loads(world.t2.projects["asks"][batch]["content"])["answer_titles"] == [TITLE]
 
@@ -1263,7 +1329,7 @@ def test_digest_lists_an_identity_keyed_answer_beside_a_session_keyed_one() -> N
     # identity: line; the digest reads both forms, so a mixed fleet's answers are all shown, none skipped.
     w = World()
     w.t2.add("asks", "i11/rdr229-accept-route/4484386a17af0c37", json.dumps(
-        {**js("answer_record_v1.json"), "time": "2026-11-05T18:00:00Z", "sam_words": "go with your recommendations"}))
+        {**js("answer_record_v1.json"), "time": "2026-11-05T18:00:00Z", "user_words": "go with your recommendations", "sam_words": "go with your recommendations"}))
     w.t2.add("asks", f"{OTHER_SESSION}/a-new/0000000000000001", json.dumps(
         {**js("answer_record_v1.json"), "time": "2026-11-05T17:00:00Z"}))
     out = w.run("digest").output
@@ -1307,9 +1373,9 @@ def test_digest_skipped_titles_are_shown_without_control_characters() -> None:
 
 
 def test_a_free_text_reply_starting_with_a_dash_needs_the_double_dash(world: World) -> None:
-    r = world.run("answer", REF, "-hold", "--expect", VERSION, "--via", "mediator", "--sam-words", "hold")
+    r = world.run("answer", REF, "-hold", "--expect", VERSION, "--via", "mediator", "--user-words", "hold")
     assert r.exit_code != 0  # click reads -hold as an option
-    r = world.run("answer", "--expect", VERSION, "--via", "mediator", "--sam-words", "hold", "--", REF, "-hold until Monday")
+    r = world.run("answer", "--expect", VERSION, "--via", "mediator", "--user-words", "hold", "--", REF, "-hold until Monday")
     assert r.exit_code == 0, r.output
     assert world.t2.record()["note"] == "-hold until Monday"
 

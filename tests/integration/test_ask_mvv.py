@@ -13,7 +13,7 @@ Four engine tests and one bound:
   the stale-version and deleted-ask arms, then a second cli answer that must reuse the minted sender id. Run without a T1 session, as Sam at a bare terminal, so the
   engine stamps nothing and the frame says "no stamp".
 * ``test_mediator_answer_...``: ``--via mediator`` without a pty and without ``--note``, so the frame's
-  words can only have come from the record's ``sam_words``.
+  words can only have come from the record's ``user_words``.
 * ``test_a_session_carrying_a_t1_token_...``: the stamp control. The same mediator call from a process
   holding the fixture's T1 token must make the frame print that session's id, so "no stamp" elsewhere is
   a measured absence.
@@ -161,7 +161,7 @@ def _groups_of(data: dict, ref: str) -> list[str]:
 
 
 def _mediator_call(ref: str, version: str) -> list[str]:
-    return ["ask", "answer", ref, "1", "--expect", version, "--via", "mediator", "--sam-words", WORDS]
+    return ["ask", "answer", ref, "1", "--expect", version, "--via", "mediator", "--user-words", WORDS]
 
 
 def _drain(tmp_path: Path, session: str) -> tuple[str, str]:
@@ -253,7 +253,7 @@ def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_ser
     assert [r["title"] for r in records] == [answer_title], "exactly one record, at <asker>/<ask>/<version>"
     record = json.loads(records[0]["content"])
     assert record["status"] == "sent" and record["choice"] == 1 and record["via"] == "cli"
-    assert record["note"] == "accept the gap" and record["sam_words"] == "accept the gap"
+    assert record["note"] == "accept the gap" and record["user_words"] == "accept the gap"
     assert record["tty"], "the record names the terminal it was typed at"
     assert record["error"] is None and record["batch_title"] is None
     tuples = _mailbox(ASKER)
@@ -336,7 +336,7 @@ def _mediator_roundtrip(tmp_path: Path, session: dict[str, str]) -> tuple[TupleR
     record = json.loads(records[0]["content"])
     mediator = session["NX_T1_SESSION_ID"]
     assert record["status"] == "sent" and record["choice"] == 1 and record["via"] == f"mediator:{mediator}"
-    assert record["sam_words"] == WORDS and record["note"] == "" and record["tty"] is None
+    assert record["user_words"] == WORDS and record["note"] == "" and record["tty"] is None
     tuples = _mailbox(ASKER)
     assert len(tuples) == 1 and record["tuple_id"] == tuples[0].id
     mail = tuples[0]
@@ -353,7 +353,7 @@ def test_mediator_answer_words_come_from_the_record_not_a_note(t2_service_env, t
     mediator = str(uuid.uuid4())
     mail, out, diag, version = _mediator_roundtrip(tmp_path, {"NX_T1_SESSION_ID": mediator})
     assert not mail.sender_session, f"no T1 token was presented, so no stamp: {mail.sender_session!r}"
-    # No --note was given, so the fenced words can only have been read from the record's sam_words.
+    # No --note was given, so the fenced words can only have been read from the record's user_words.
     _check_frame(out, diag, version=version, option="1", via=f"mediator:{mediator}", stamp="no stamp", words=WORDS)
 
 

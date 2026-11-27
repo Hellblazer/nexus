@@ -53,7 +53,7 @@ SENDING_STALE = timedelta(minutes=10)
 BATCH_WINDOW = timedelta(minutes=10)
 LIST_DIGEST_WINDOW = timedelta(hours=48)
 DIGEST_WINDOW = timedelta(days=7)
-SAM_WORDS_MAX = 500
+USER_WORDS_MAX = 500
 BATCH_WORDS_MAX = 2000
 
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -429,7 +429,7 @@ def _answer_entries(
             "via": rec.get("via", ""),
             "choice": rec.get("choice"),
             "note": rec.get("note", ""),
-            "sam_words": rec.get("sam_words", ""),
+            "user_words": record_words(rec),
             "batch_words": batch.get("batch_words", "") if batch else "",
             "tuple_id": rec.get("tuple_id"),
             "status": rec.get("status", ""),
@@ -437,6 +437,14 @@ def _answer_entries(
         }))
     out.sort(key=lambda p: p[0], reverse=True)
     return [e for _, e in out], sorted(skipped)
+
+
+def record_words(rec: dict[str, Any]) -> Any:
+    """The words an answer record carries: ``user_words``, else ``sam_words`` for a record stored before the rename.
+
+    ``sam_words`` is read for one release after the release that first ships ``user_words``, then dropped.
+    """
+    return rec["user_words"] if "user_words" in rec else rec.get("sam_words", "")
 
 
 _SKIPPED_SHOWN = 5
@@ -460,7 +468,7 @@ def _digest_lines(entries: list[dict[str, Any]]) -> list[str]:
             f"tuple {_c(e['tuple_id'])}" if e["status"] == "sent"
             else f"[{_c(e['status'])}{': ' + _c(e['error']) if e['error'] else ''}]"
         )
-        lines.append(f'{head}  "{_one_line(str(e["sam_words"]))}"  {tail}')
+        lines.append(f'{head}  "{_one_line(str(e["user_words"]))}"  {tail}')
         if e["batch_words"]:
             lines.append(f'      batch: "{_one_line(str(e["batch_words"]))}"')
     return lines
@@ -625,7 +633,7 @@ def _closed_answer(rec: dict[str, Any] | None) -> dict[str, Any] | None:
     """The answer record's fields that match a closed pattern, or None when any of them does not.
 
     ``show`` is what an asker runs to check an answer is fresh, so nothing a writer typed freely
-    (``sam_words``, ``note``, ``tty``, ``error``, the question and options) is passed on (RDR-245 Decision 10).
+    (``user_words``, ``sam_words``, ``note``, ``tty``, ``error``, the question and options) is passed on (RDR-245 Decision 10).
     """
     if rec is None:
         return None
@@ -856,15 +864,23 @@ def _mail_body(ask: Ask, choice: int | None, via: str, answer_id: str) -> str:
 @click.option("--note", default=None, help="A note on a chosen option (recorded as the user's words for --via cli).")
 @click.option("--via", type=click.Choice(["cli", "mediator"]), default="cli", show_default=True,
               help="cli: the user at a terminal. mediator: a session relaying the user's words.")
-@click.option("--sam-words", default=None, help="--via mediator: the contiguous span the user typed for this ask (1-500 characters).")
+@click.option("--user-words", "user_words", default=None, help="--via mediator: the contiguous span the user typed for this ask (1-500 characters).")
+@click.option("--sam-words", "sam_words", default=None, hidden=True, help="Deprecated: use --user-words.")
 @click.option("--batch-words", default=None, help="--via mediator: the user's whole reply when it covered several asks (at most 2000 characters).")
 @click.option("--replace", is_flag=True, help="Supersede a sent answer to the same version.")
 @click.pass_context
 def answer_cmd(
     ctx: click.Context, ref: str, reply: str, expect: str, note: str | None, via: str,
-    sam_words: str | None, batch_words: str | None, replace: bool,
+    user_words: str | None, sam_words: str | None, batch_words: str | None, replace: bool,
 ) -> None:
     """Answer one ask. REPLY is an option number, or free text for a note-only answer that authorizes no option."""
+    if sam_words is not None:
+        # The old name of --user-words, kept for one release after the release that first ships --user-words
+        # (nexus-sby49). The notice goes to stderr, so stdout stays what it was.
+        if user_words is not None:
+            raise click.UsageError("give --user-words, not both it and its deprecated alias --sam-words")
+        click.echo("Deprecated: --sam-words is now --user-words. The old name works for one more client release and is then removed.", err=True)
+        user_words = sam_words
     stripped = reply.strip()
     if not stripped:
         raise click.UsageError("the reply is empty: give an option number, or the text of a note-only answer")
@@ -907,8 +923,8 @@ def answer_cmd(
 
     tty: str | None = None
     if via == "cli":
-        if sam_words is not None or batch_words is not None:
-            raise click.UsageError("--sam-words and --batch-words are for --via mediator; --via cli records the note")
+        if user_words is not None or batch_words is not None:
+            raise click.UsageError("--user-words and --batch-words are for --via mediator; --via cli records the note")
         tty = s.tty()
         if tty is None:
             raise _refuse("--via cli needs stdin to be a TTY; a session relaying the user's words uses --via mediator")
@@ -916,10 +932,10 @@ def answer_cmd(
         sender = s.cli_sender()
         words = recorded_note
     else:
-        if sam_words is None or not sam_words.strip():
-            raise _refuse("--via mediator needs --sam-words: the words the user typed for this ask")
-        if len(sam_words) > SAM_WORDS_MAX:
-            raise _refuse(f"--sam-words is {len(sam_words)} characters; the limit is {SAM_WORDS_MAX}")
+        if user_words is None or not user_words.strip():
+            raise _refuse("--via mediator needs --user-words: the words the user typed for this ask")
+        if len(user_words) > USER_WORDS_MAX:
+            raise _refuse(f"--user-words is {len(user_words)} characters; the limit is {USER_WORDS_MAX}")
         if batch_words is not None and len(batch_words) > BATCH_WORDS_MAX:
             raise _refuse(f"--batch-words is {len(batch_words)} characters; the limit is {BATCH_WORDS_MAX}")
         try:
@@ -928,7 +944,7 @@ def answer_cmd(
             raise _refuse("--via mediator needs this session's own id, and it did not resolve to a UUID "
                           "(tuple-watch marker, then NX_T1_SESSION_ID, then NX_SESSION_ID)") from None
         via_value = f"mediator:{sender}"
-        words = sam_words
+        words = user_words
 
     title = answer_title(ask)
     for existing in answer_titles(ask):
@@ -945,6 +961,10 @@ def answer_cmd(
         "options": [_option_text(ask, o.n) for o in ask.options],
         "choice": choice,
         "note": recorded_note,
+        "user_words": words,
+        # The key before the rename. The plugin's drain hook of 8.5.9 reads only this one, so the same words
+        # are written under both keys. This is the first release that carries user_words; the release after it
+        # drops sam_words here, with the fallback in record_words and in the plugin's drain hook.
         "sam_words": words,
         "batch_title": batch_title,
         "via": via_value,
