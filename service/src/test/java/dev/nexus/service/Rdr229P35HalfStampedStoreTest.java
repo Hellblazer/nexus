@@ -5,9 +5,13 @@ package dev.nexus.service;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.datamove.RenameReadiness.Missing;
+import org.jooq.Field;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.time.OffsetDateTime;
 
 /**
  * RDR-229 P3.5 / P3.7 joint test (residual R8, nexus-p2m1x.47 step 2), and the Test Plan scenario "an engine with the P3.5 and P3.7 cut boots on a store
@@ -35,10 +39,15 @@ class Rdr229P35HalfStampedStoreTest {
         return "knowledge__" + owner + "__minilm-l6-v2-384__v" + version;
     }
 
+    private static final Table<?> MOVES = DSL.table(DSL.name("nexus", "data_moves"));
+    private static final Field<String> LABEL = DSL.field(DSL.name("label"), String.class);
+    private static final Field<OffsetDateTime> COMPLETED_AT = DSL.field(DSL.name("completed_at"), OffsetDateTime.class);
+
     private static void setPaused(Rdr229RenameEngine engine, boolean paused) {
-        int n = engine.su(ctx -> ctx.execute(paused
-            ? "update nexus.data_moves set paused_at = now(), paused_by = 'p35-half-stamped-test' where label = ?"
-            : "update nexus.data_moves set paused_at = null, paused_by = null where label = ?", CHUNKS_STAMP));
+        int n = engine.su(ctx -> ctx.update(MOVES)
+            .set(DSL.field(DSL.name("paused_at"), OffsetDateTime.class), paused ? OffsetDateTime.now() : null)
+            .set(DSL.field(DSL.name("paused_by"), String.class), paused ? "p35-half-stamped-test" : null)
+            .where(LABEL.eq(CHUNKS_STAMP)).execute());
         assertThat(n).as("non-vacuity: the chunks stamp move is registered").isEqualTo(1);
     }
 
@@ -48,8 +57,7 @@ class Rdr229P35HalfStampedStoreTest {
             engine.boot();
             setPaused(engine, true);
             engine.startWorker();
-            assertThat(Rdr229RenameEngine.await(Duration.ofMinutes(2), () -> engine.su(ctx -> ctx.fetchOne(
-                "select count(*) from nexus.data_moves where label like 'rdr229-stamp-%' and completed_at is not null").get(0, Long.class)) > 0))
+            assertThat(Rdr229RenameEngine.await(Duration.ofMinutes(2), () -> engine.su(ctx -> ctx.fetchCount(MOVES, LABEL.like("rdr229-stamp-%").and(COMPLETED_AT.isNotNull()))) > 0))
                 .as("the other stamp moves complete while the chunks stamp stays paused").isTrue();
             assertThat(engine.moveCompleted(CHUNKS_STAMP)).as("non-vacuity: the chunks stamp move is not complete: the store is half stamped").isFalse();
             assertThat(engine.completion().gate1()).as("and gate 1 does not hold").isFalse();

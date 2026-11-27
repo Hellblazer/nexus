@@ -20,6 +20,11 @@ import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
 /** Reads the rename tests share: registry ids, per-table row snapshots, the per-collection index, the name keys, queued aspect tasks. */
 final class Rdr229RenameChecks {
 
+    /** How many {@code pg_constraint} rows carry the name {@code conname} (a name may repeat across partitions). */
+    static int constraintCount(DSLContext ctx, String conname) {
+        return ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_constraint")), DSL.field(DSL.name("conname"), String.class).eq(conname));
+    }
+
     /** The seven registry name foreign keys the name-key drop move drops (RDR-229 item 6, Switch). */
     static final List<String> NAME_KEYS = List.of("chunks_collection_fk", "canary_query_ring_collection_fk",
         "document_aspects_collection_fk", "topics_collection_fk", "taxonomy_meta_collection_fk",

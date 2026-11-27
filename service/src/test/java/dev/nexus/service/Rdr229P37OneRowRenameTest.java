@@ -178,8 +178,8 @@ class Rdr229P37OneRowRenameTest {
         long id = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, oldName));
         assertThat(engine.completion().gate3Latched()).as("non-vacuity: after the latch" + why()).isTrue();
         assertThat(engine.moveCompleted(Rdr229RenameEngine.DROP_LABEL)).as("non-vacuity: the drop move completed" + why()).isTrue();
-        assertThat(engine.<Long>su(ctx -> ctx.fetchOne("select count(*) from pg_catalog.pg_constraint where conname = 'topic_assignments_chunk_fk'")
-            .get(0, Long.class))).as("non-vacuity: the drop move left topic_assignments_chunk_fk in place" + why()).isPositive();
+        assertThat(engine.<Integer>su(ctx -> Rdr229RenameChecks.constraintCount(ctx, "topic_assignments_chunk_fk")))
+            .as("non-vacuity: the drop move left topic_assignments_chunk_fk in place" + why()).isPositive();
         var before = engine.su(ctx -> Rdr229RenameChecks.snapshot(ctx, tenant,
             new Rdr229RenameChecks.Site("topic_assignments", "source_collection", "source_collection_id"), oldName));
         assertThat(before).as("non-vacuity: topic_assignments rows name the collection").hasSize(2);
@@ -190,8 +190,8 @@ class Rdr229P37OneRowRenameTest {
         assertThat(engine.<java.util.List<String>>su(ctx -> Rdr229RenameChecks.snapshot(ctx, tenant,
             new Rdr229RenameChecks.Site("topic_assignments", "source_collection", "source_collection_id"), oldName)))
             .as("the assignments are untouched: same rows, same xmin, still naming their chunks' stored label" + why()).isEqualTo(before);
-        assertThat(engine.<Long>su(ctx -> ctx.fetchOne("select count(*) from pg_catalog.pg_constraint where conname = 'topic_assignments_chunk_fk'")
-            .get(0, Long.class))).as("and the key is still there" + why()).isPositive();
+        assertThat(engine.<Integer>su(ctx -> Rdr229RenameChecks.constraintCount(ctx, "topic_assignments_chunk_fk")))
+            .as("and the key is still there" + why()).isPositive();
     }
 
     // ---- (c) ---------------------------------------------------------------------------------------------------------------

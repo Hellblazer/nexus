@@ -55,7 +55,9 @@ class Rdr229P37RestartValueTest {
     }
 
     private void setExecType(String execType) {
-        int n = engine.su(ctx -> ctx.execute("update public.databasechangelog set exectype = ? where id = ?", execType, one));
+        var log = org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("public", "databasechangelog"));
+        int n = engine.su(ctx -> ctx.update(log).set(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("exectype"), String.class), execType)
+            .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("id"), String.class).eq(one)).execute());
         assertThat(n).as("non-vacuity: the changeset " + one + " has a databasechangelog row").isPositive();
     }
 

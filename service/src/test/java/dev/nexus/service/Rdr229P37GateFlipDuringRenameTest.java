@@ -2,9 +2,13 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.db.RenameLatchLock;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
@@ -30,14 +34,18 @@ class Rdr229P37GateFlipDuringRenameTest {
         return "knowledge__" + owner + "__minilm-l6-v2-384__v" + version;
     }
 
+    /** How many advisory locks on {@code RenameLatchLock}'s key are held ({@code granted}) or waited for in {@code mode}, read from {@code pg_locks}. */
     private static long advisoryOn(Rdr229RenameEngine engine, String mode, boolean granted) {
-        return engine.su(ctx -> ctx.fetchOne("select count(*) from pg_locks where locktype = 'advisory' and classid::bigint = ? "
-            + "and objid::bigint = ? and mode = ? and granted = ?", (long) RenameLatchLock.NAMESPACE, (long) RenameLatchLock.GATE3_KEY,
-            mode, granted).get(0, Long.class));
+        return engine.su(ctx -> ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
+            DSL.field(DSL.name("locktype"), String.class).eq("advisory")
+                .and(DSL.field(DSL.name("classid")).cast(SQLDataType.BIGINT).eq((long) RenameLatchLock.NAMESPACE))
+                .and(DSL.field(DSL.name("objid")).cast(SQLDataType.BIGINT).eq((long) RenameLatchLock.GATE3_KEY))
+                .and(DSL.field(DSL.name("mode"), String.class).eq(mode))
+                .and(DSL.field(DSL.name("granted"), Boolean.class).eq(granted))));
     }
 
     private static long latchRows(Rdr229RenameEngine engine) {
-        return engine.su(ctx -> ctx.fetchOne("select count(*) from nexus.rdr229_gate_latch").get(0, Long.class));
+        return engine.su(ctx -> ctx.fetchCount(DSL.table(DSL.name("nexus", "rdr229_gate_latch"))));
     }
 
     @Test
@@ -68,9 +76,8 @@ class Rdr229P37GateFlipDuringRenameTest {
             CompletableFuture<Object> flip;
             try (Connection holder = engine.pg.createConnection("")) {
                 holder.setAutoCommit(false);
-                try (var st = holder.createStatement()) {
-                    st.execute("select 1 from nexus.catalog_collections where tenant_id = '" + tenant + "' and name = '" + old + "' for update");
-                }
+                DSL.using(holder, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(old)).forUpdate().fetch();
                 try {
                     rename = CompletableFuture.supplyAsync(() -> {
                         try {
