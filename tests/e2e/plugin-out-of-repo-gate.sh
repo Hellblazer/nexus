@@ -51,12 +51,13 @@
 #      written reason; a stale allowlist entry fails too.
 #   1b. BEHAVIOUR (conexus only, deterministic, needs uv and no claude: it runs in --static-only too). The static
 #      pass reads the plugin's markdown; this runs its hooks (tests/e2e/lib/plugin_behaviour.py, nexus-sby49.3). It
-#      drives every hooks.json registration's real argv under payloads of the shape Claude Code sends, in a scratch
-#      user repository, a marked nexus repository and a flagged account, with no nx on PATH (P0: the nx entries must
-#      exit 0 and print nothing) and with the checkout's nx (P2; --installed uses the installed tool's). A user's
-#      output must carry no internal name and no deny outside D1's list; the maintainer's constants must appear in
-#      the marked and flagged fixtures and never in a user's. The plugin's own hooks/audience.yaml says which is
-#      which, and tests/e2e/plugin-behaviour-allowlist.txt holds the Phase 3 rows still to do. A conexus plugin with
+#      drives every hooks.json registration's real argv under payloads of the shape Claude Code sends, in three
+#      fixtures (RDR-259): plain (a scratch repository and an account with no settings file), project-strict (a
+#      tracked .nexus/project.json) and user-strict (the account's conexus.json), with no nx on PATH (P0: the nx
+#      entries must exit 0 and print nothing) and with the checkout's nx (P2; --installed uses the installed tool's).
+#      Plain output must carry no internal name and no deny outside D1's list; each setting-gated text must appear
+#      only in the fixture whose setting turns it on, labelled with its source. The plugin's own hooks/audience.yaml
+#      says which is which; tests/e2e/plugin-behaviour-allowlist.txt is empty and stays empty. A conexus plugin with
 #      no audience.yaml is UNVERIFIED, never a pass.
 #   2. CANARY. The static classes rest on beliefs about Claude Code (the variable
 #      is substituted in an agent, a skill and a command but NOT in a file the
