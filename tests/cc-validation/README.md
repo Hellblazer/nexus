@@ -429,6 +429,31 @@ no row prints `INFO: record this version's answer` and passes. The control legs 
 that cannot match must stop at a prompt; sub-run B must reach a gate) still FAIL a session
 that does not enforce permissions.
 
+### Scenario 36: RDR-259's Minimum Viable Validation (nexus-sby49.16)
+
+Installs the conexus plugin of THIS checkout (`cc_plugin_require "$REPO_ROOT/conexus"`) and runs the RDR's
+validation live: a seatbelt session (no settings file: a subagent commits and plain-pushes, is denied
+`git push --force`), a strict session (`.nexus/project.json` with `subagent_git: strict`: denied `git commit`
+in the primary, allowed it in an `isolation: worktree` subagent), a misspelled-key session (the first prompt's
+`UserPromptSubmit` message, read from the transcript's `hook_system_message` attachment, once over two prompts),
+`_audience.py show` for each state, and `nx settings show` against the plugin's reader on a PATH with the
+checkout's `.venv/bin/nx`. Facts the run found, for the next author:
+
+- The plugin version string does not prove provenance: this tree and the released plugin both say 8.5.8. Claude
+  Code runs the hooks from the marketplace copy (`<HOME>/marketplace-conexus/conexus`, the debug log's hook
+  commands name it), not from the cache copy; the scenario checks both are byte-identical to `$REPO_ROOT/conexus`.
+- P0 is built, not assumed: the sessions' PATH is a directory of `claude` and `uv` symlinks plus the system
+  directories, and the scenario fails unless `nx` is not found on it. It needs `uv sync` in the checkout (the P2
+  half runs `.venv/bin/nx`; the on-PATH `nx` of a laptop is usually older and has no `settings` command).
+- `_audience.py` reads the user file from the OS account database, not `HOME`, so the sandbox HOME does not move
+  it; the scenario asserts the report says it is `(not present)` and never writes it.
+- The main model refuses a bare "dispatch an agent to run git push --force" and a repeat of a refused dispatch in
+  the same session. The prompt says it is an automated hook test against a local bare remote, and each dispatch
+  gets a fresh session. A subagent told to work in a "scratch repository" ran `git init` instead of using the one
+  it was in. A refusal or a command never attempted FAILS the leg ("not attempted"); it is never read as a deny.
+- A subagent's deny is read from its own transcript (`agent-*.jsonl`: the Bash command, its cwd, the tool
+  result) and from the debug log's `Hook PreToolUse (...) returned permissionDecision: deny` line.
+
 ### Bumping the Claude Code pin
 
 `ARG CLAUDE_CODE_VERSION` in `container/Dockerfile` pins the build. A bump re-runs
@@ -582,8 +607,8 @@ scenario part: an install replaces all plugin state.
 Evidence (plugin list/install output, debug log, settings, registry, transcripts)
 goes to `$CC_VAL_EVIDENCE_DIR/<scenario>` when the container mounted one.
 
-Census (2026-10-17, 30 scenarios; 31 with 33, nexus-xhisb; 32 with 34, nexus-kqqxt): plugin-dependent were
-12, 13b, 14b, 18, 32 and 34; the other 26 install nothing. The container carries what a loaded plugin needs:
+Census (2026-10-17, 30 scenarios; 31 with 33, nexus-xhisb; 32 with 34, nexus-kqqxt; 34 with 35 and 36,
+nexus-sby49.15 and .16): plugin-dependent are 12, 13b, 14b, 18, 32, 34 and 36; the other 27 install nothing. The container carries what a loaded plugin needs:
 the Nexus CLI built from the staged source tree, not fetched from PyPI by version
 (`nx-mcp`, `nx-hook`; without it the plugin loads and then its `mcp_tool` hooks
 fail with "Nexus is not installed"),
