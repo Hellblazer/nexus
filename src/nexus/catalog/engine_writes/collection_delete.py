@@ -138,7 +138,8 @@ def refusal_of(exc: BaseException) -> CollectionDeleteRefusedError | None:
     ``collection_label_ambiguous`` answers to a delete, read by status AND ``reason`` (a 409 is also ``collection_busy``), else None.
     A body missing what the error names is not turned into it: the caller keeps its generic failure."""
     from nexus.db.engine_reasons import (  # noqa: PLC0415 — deferred: keeps this module a leaf for the CLI boundary
-        COLLECTION_LABEL_AMBIGUOUS_REASON, COLLECTION_SUPERSEDED_REASON, UNKNOWN_COLLECTION_ID_REASON, error_reason)
+        COLLECTION_LABEL_AMBIGUOUS_REASON, COLLECTION_SUPERSEDED_REASON, RETIRED_NO_SUCCESSOR_REASON, UNKNOWN_COLLECTION_ID_REASON,
+        error_reason)
 
     status, body = _body_of(exc)
     if not isinstance(body, dict):
@@ -148,7 +149,7 @@ def refusal_of(exc: BaseException) -> CollectionDeleteRefusedError | None:
         return UnknownCollectionIdError(body["collection_id"])
     if status != 409:
         return None
-    if reason == COLLECTION_SUPERSEDED_REASON and isinstance(body.get("collection"), str):
+    if reason in (COLLECTION_SUPERSEDED_REASON, RETIRED_NO_SUCCESSOR_REASON) and isinstance(body.get("collection"), str):
         succ, succ_id = body.get("superseded_by"), body.get("successor_collection_id")
         cid = body.get("collection_id")
         return SupersededCollectionDeleteError(body["collection"], cid if _is_id(cid) else None,

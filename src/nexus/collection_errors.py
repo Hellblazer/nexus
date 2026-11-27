@@ -142,12 +142,14 @@ class RetiredNoSuccessorError(VectorServiceError):
     ``collection_id`` (None when the engine named none)."""
 
     def __init__(self, name: str, collection_id: int | None = None, *, engine_body: dict | None = None) -> None:
-        from nexus.db.engine_reasons import COLLECTION_SUPERSEDED_REASON  # noqa: PLC0415 — deferred: engine_reasons is a leaf, kept lazy like the others here
+        from nexus.db.engine_reasons import COLLECTION_SUPERSEDED_REASON, error_reason  # noqa: PLC0415 — deferred: engine_reasons is a leaf, kept lazy like the others here
 
         self.name = name
         self.collection_id = collection_id
+        # The engine's own reason when its body carried one (retired_no_successor, or collection_superseded from the earlier body).
         super().__init__(
-            retired_no_successor_message(name), code=409, reason=COLLECTION_SUPERSEDED_REASON, engine_body=engine_body,
+            retired_no_successor_message(name), code=409,
+            reason=error_reason(engine_body) or COLLECTION_SUPERSEDED_REASON, engine_body=engine_body,
         )
 
 
@@ -172,9 +174,10 @@ def retired_no_successor_error_from_body(status: int | None, body: Any) -> Retir
     THE SEAM for the engine's RETIRED_NO_SUCCESSOR reason marker. Today the no-successor case is recognised by the absence
     of a successor in a ``collection_superseded`` body. When the engine names it with an explicit reason, this is the one
     place that reads it (every transport calls this function); the marker is deliberately NOT parsed yet."""
-    from nexus.db.engine_reasons import COLLECTION_SUPERSEDED_REASON, error_reason  # noqa: PLC0415 — deferred: this module stays import-free for the CLI boundary
+    from nexus.db.engine_reasons import COLLECTION_SUPERSEDED_REASON, RETIRED_NO_SUCCESSOR_REASON, error_reason  # noqa: PLC0415 — deferred: this module stays import-free for the CLI boundary
 
-    if status != 409 or not isinstance(body, dict) or error_reason(body) != COLLECTION_SUPERSEDED_REASON:
+    # The engine's explicit reason (RETIRED_NO_SUCCESSOR_REASON) and the earlier body, which kept collection_superseded with no successor fields.
+    if status != 409 or not isinstance(body, dict) or error_reason(body) not in (COLLECTION_SUPERSEDED_REASON, RETIRED_NO_SUCCESSOR_REASON):
         return None
     if body.get("superseded_by") or body.get("successor_collection_id") not in (None, "", 0):
         return None

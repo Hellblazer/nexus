@@ -52,6 +52,11 @@ COLLECTION_MODEL_MISMATCH_REASON: str = "collection_model_mismatch"
 #: explicit registration revives a name.
 COLLECTION_SUPERSEDED_REASON: str = "collection_superseded"
 
+#: A request named a retired collection that has no live successor (HTTP 409, RDR-229 R7): its successor was deleted, so the row names no
+#: collection to go to. The body keeps ``error`` ``collection_superseded`` and carries ``collection`` and ``collection_id`` but no
+#: ``superseded_by`` and no ``successor_collection_id``; nothing the client holds can be redirected, so it is never retried.
+RETIRED_NO_SUCCESSOR_REASON: str = "retired_no_successor"
+
 #: A collection route was given a ``collection_id`` no row of the tenant has (HTTP 404, RDR-229 P3.5a). Also carries
 #: ``collection_id`` (the id sent). The id of a retired row (a rename's or supersede's tombstone) is the 409
 #: ``collection_superseded`` instead, on every route (linda's D3 ruling). A label with no row keeps the

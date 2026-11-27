@@ -43,6 +43,9 @@ from tests.conftest import catalog_row_for_collection_name
 NAME = "docs__papers__bge-base-en-v15-768__v1"
 RETIRED = {"error": "collection_superseded", "reason": "collection_superseded", "collection": NAME, "collection_id": 41,
            "message": f"collection_id 41 ('{NAME}') is retired and names no live successor, so a request that names it is refused"}
+# The engine's own body since 8595519d90 (RETIRED_NO_SUCCESSOR_REASON): the same body with the explicit reason.
+RETIRED_NEW = {**RETIRED, "reason": "retired_no_successor"}
+BOTH_BODIES = pytest.mark.parametrize("retired", [RETIRED, RETIRED_NEW], ids=["old reason", "retired_no_successor reason"])
 WITH_SUCCESSOR = {**RETIRED, "superseded_by": "docs__papers__bge-base-en-v15-768__v2", "successor_collection_id": 42}
 
 
@@ -72,12 +75,13 @@ def _no_prod_write_guard():
 # ── the vector client (search, query, get, store get/list, taxonomy, aspects ride _post and _get) ──
 
 
+@BOTH_BODIES
 @pytest.mark.parametrize("call", ["post", "get"], ids=["POST search/get/list routes", "GET routes"])
-def test_the_vector_client_turns_the_retired_no_successor_409_into_the_typed_error_once(call) -> None:
+def test_the_vector_client_turns_the_retired_no_successor_409_into_the_typed_error_once(call, retired) -> None:
     fn = hv._post if call == "post" else hv._get
     args = ({"collection": NAME},) if call == "post" else ()
     with patch.object(hv, "_resolve_endpoint", return_value=("http://engine", None)), \
-         patch.object(hv, "_request", side_effect=_urllib_409(RETIRED)) as request, \
+         patch.object(hv, "_request", side_effect=_urllib_409(retired)) as request, \
          pytest.raises(RetiredNoSuccessorError) as raised:
         fn("/v1/vectors/search", *args)
     assert raised.value.name == NAME and raised.value.collection_id == 41
@@ -85,8 +89,8 @@ def test_the_vector_client_turns_the_retired_no_successor_409_into_the_typed_err
     _assert_the_one_message(str(raised.value))
     # what the generic 409 VectorServiceError was before the type existed, so every handler written for it recovers
     assert isinstance(raised.value, VectorServiceError)
-    assert raised.value.code == 409 and raised.value.reason == "collection_superseded"
-    assert raised.value.engine_body == RETIRED and raised.value.edge_refusal is False
+    assert raised.value.code == 409 and raised.value.reason == retired["reason"]
+    assert raised.value.engine_body == retired and raised.value.edge_refusal is False
 
 
 def test_a_collection_superseded_409_with_a_successor_is_still_the_write_error() -> None:
@@ -105,6 +109,9 @@ def test_a_collection_superseded_409_with_a_successor_is_still_the_write_error()
     {"error": "collection_superseded", "reason": "collection_superseded", "collection": ""},
     {**RETIRED, "superseded_by": "docs__x"},                                                            # names a successor
     {**RETIRED, "successor_collection_id": 5},
+    {**RETIRED_NEW, "superseded_by": "docs__x"},                                                        # the new reason, with a successor
+    {**RETIRED_NEW, "successor_collection_id": 5},
+    {"error": "x", "reason": "retired_no_successor", "collection_id": 41},                              # the new reason, names no collection
     {"error": "collection_superseded", "collection": NAME, "collection_id": 41},                       # no reason
 ])
 def test_every_other_409_is_left_to_its_own_handling(body) -> None:
@@ -145,8 +152,9 @@ def _catalog(body: dict, status: int = 409) -> HttpCatalogClient:
     return cat
 
 
-def test_the_shared_transport_turns_the_retired_no_successor_409_into_the_typed_error_once() -> None:
-    cat = _catalog(RETIRED)
+@BOTH_BODIES
+def test_the_shared_transport_turns_the_retired_no_successor_409_into_the_typed_error_once(retired) -> None:
+    cat = _catalog(retired)
     with pytest.raises(RetiredNoSuccessorError) as raised:
         cat.list_by_collection(NAME)
     _assert_the_one_message(str(raised.value))
@@ -154,7 +162,7 @@ def test_the_shared_transport_turns_the_retired_no_successor_409_into_the_typed_
     # still the httpx status error this 409 was (a store that recovers from it by catching that keeps recovering), with
     # its response, and a VectorServiceError for the handlers written for the vector client's 409
     assert isinstance(raised.value, httpx.HTTPStatusError) and raised.value.response.status_code == 409
-    assert isinstance(raised.value, VectorServiceError) and raised.value.code == 409 and raised.value.engine_body == RETIRED
+    assert isinstance(raised.value, VectorServiceError) and raised.value.code == 409 and raised.value.engine_body == retired
 
 
 def test_the_shared_transport_keeps_the_with_successor_and_other_409s() -> None:
@@ -308,6 +316,12 @@ def test_catalog_show_preview_prints_the_retired_marker_the_degraded_one_and_the
     (409, "collection_superseded", False),
     (409, None, False),
     (409, [RETIRED], False),
+    (409, RETIRED_NEW, True),                                       # the engine's explicit reason
+    (409, {**RETIRED_NEW, "collection_id": None}, True),
+    (409, {**RETIRED_NEW, "superseded_by": ""}, True),
+    (409, {**RETIRED_NEW, "superseded_by": "docs__x"}, False),
+    (409, {**RETIRED_NEW, "collection": ""}, False),
+    (404, RETIRED_NEW, False),
 ])
 def test_the_converter_keys_on_status_reason_name_and_the_absence_of_a_successor(status, body, expect) -> None:
     got = retired_no_successor_error_from_body(status, body)

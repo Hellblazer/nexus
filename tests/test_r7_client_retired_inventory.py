@@ -21,6 +21,7 @@ from click.testing import CliRunner
 from structlog.testing import capture_logs
 
 from nexus import health, search_engine
+from nexus.catalog.engine_writes.collection_delete import SupersededCollectionDeleteError, refusal_of
 from nexus.commands.collection import _reembed_job_error
 from nexus.db.t2._refreshable_client import _RetiredNoSuccessorHttpError
 from nexus.db.t2.http_document_aspects_store import _raise_fenced_refusal
@@ -513,3 +514,16 @@ def test_the_aspect_upsert_and_taxonomy_persist_do_not_flatten_the_retired_error
 
     with pytest.raises(RetiredNoSuccessorError):
         _raise_fenced_refusal(typed)
+
+
+# ── the engine's explicit reason on the delete route (RETIRED_NO_SUCCESSOR_REASON, engine 8595519d90) ───────────────
+
+@pytest.mark.parametrize("reason", ["collection_superseded", "retired_no_successor"])
+def test_a_delete_refused_for_a_retired_row_with_no_successor_is_the_typed_refusal_under_either_reason(reason):
+    request = httpx.Request("POST", "http://mock.test/delete")
+    body = {"error": "collection_superseded", "reason": reason, "collection": RETIRED_NAME, "collection_id": 41}
+    exc = httpx.HTTPStatusError("x", request=request, response=httpx.Response(409, json=body, request=request))
+
+    refusal = refusal_of(exc)
+
+    assert isinstance(refusal, SupersededCollectionDeleteError) and refusal.successor == ""
