@@ -277,8 +277,6 @@ ALLOWED: dict[tuple[str, str], str] = {
         "the control test shows the global exposure on purpose",
     ("tests/daemon/_children.py", "os.getuid"):
         "adds a missing os.getuid on Windows (raising=False) for this helper's own call",
-    ("tests/daemon/test_service_status_clarity.py", "urllib.request.urlopen"):
-        "nexus.commands.daemon imports urllib.request inside _probe_health (deferred for CLI startup)",
     ("tests/test_nx_answer.py", "asyncio.sleep"):
         "nexus.mcp.core imports asyncio inside each function; the spy asserts no positive sleep anywhere",
     ("tests/test_session_end_launcher.py", "subprocess.Popen"):

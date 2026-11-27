@@ -21,6 +21,7 @@ import structlog
 from nexus._log_safe_url import log_endpoint
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import default_db_path
+from nexus.db.t2.bearer_transport import probe_httpx_kwargs  # nexus-ec37o: a trusted probe reads no proxy or CA from the environment
 from nexus.db.t2.shared_ssl import get_shared_ssl_context
 from nexus.install_holders_row import (  # noqa: F401 — moved out at the size ceiling; re-exported
     _format_held_size,
@@ -3378,12 +3379,7 @@ def probe_t2_schema_fingerprint(
 
             resolved_base_url, _token = resolve_service_endpoint()
 
-        # nexus-ec37o: the answer is trusted, so no proxy or CA from the environment
-        from nexus.db.t2.bearer_transport import probe_httpx_kwargs  # noqa: PLC0415 — deferred: the db package import is heavy for this module
-
-        get = http_get if http_get is not None else (
-            lambda u, t: httpx.get(u, timeout=t, **probe_httpx_kwargs(u))
-        )
+        get = http_get if http_get is not None else (lambda u, t: httpx.get(u, timeout=t, **probe_httpx_kwargs(u)))
         resp = get(f"{resolved_base_url.rstrip('/')}/version", timeout)
         resp.raise_for_status()
         body = resp.json()
@@ -4538,10 +4534,7 @@ def _check_storage_service_health(
         if http_get is not None:
             resp = http_get(url, timeout=5.0)
         else:
-            # nexus-ec37o: the answer says whether the service is up, so no proxy or CA from the environment
-            from nexus.db.t2.bearer_transport import probe_httpx_kwargs  # noqa: PLC0415 — deferred: the db package import is heavy for this module
-
-            resp = _httpx.get(url, timeout=5.0, **probe_httpx_kwargs(url))
+            resp = _httpx.get(url, timeout=5.0, **probe_httpx_kwargs(url))  # nexus-ec37o: no proxy or CA from the environment
     except (_httpx.ConnectError, _httpx.TimeoutException, OSError) as exc:
         # Fatal: we have a confirmed endpoint and it is not responding.
         # Unlike the undiscoverable case above, here we know the address and

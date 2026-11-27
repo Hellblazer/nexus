@@ -456,9 +456,7 @@ _NOT_SENDERS: dict[str, str] = {
     # engine on its identity bind and on every renewal (bind_client above), and nothing here writes a chunk
     "nexus/groups.py": "group and membership routes: the version rides the identity bind and renewal",
     # probes and admin calls of the engine; none writes a chunk
-    "nexus/commands/daemon.py": "engine probe: GET /health",
     "nexus/commands/doctor.py": "probes: health and the MinerU server",
-    "nexus/daemon/binary_lifecycle.py": "engine probe: GET /version",
     "nexus/daemon/service_registry.py": "engine probe: loopback liveness",
     "nexus/daemon/storage_service_daemon.py": "engine probe and appliance admin calls",
     "nexus/db/data_token.py": "token mint (POST to the mint endpoint)",

@@ -13,7 +13,7 @@ four sessions, and review of the fix found the same build in
 ``IdentityClient``, ``groups.py``, the engine-version probes and more.
 
 The rule: pass ``verify=get_shared_ssl_context()`` (``nexus.db.t2.shared_ssl``), or, for a request
-that carries a bearer, ``**bearer_httpx_kwargs(...)`` (``nexus.db.t2.bearer_transport``: the same one-per-process
+that carries a bearer, ``**bearer_httpx_kwargs(...)`` or ``**probe_httpx_kwargs(...)`` (``nexus.db.t2.bearer_transport``: the same one-per-process
 context, built with no environment in it, nexus-ec37o), or, for a client, a ``transport=`` that builds no SSL context (an
 ``httpx.MockTransport``, or a transport the caller passes in: a test seam),
 or be listed in ``ALLOWED`` with the reason the process is short-lived. An
@@ -41,7 +41,7 @@ BUILDERS = frozenset({
 CLIENTS = frozenset({"Client", "AsyncClient"})
 SHARED_CONTEXT_FUNCS = frozenset({"get_shared_ssl_context", "_get_shared_ssl_context", "bearer_ssl_context"})
 #: ``**bearer_httpx_kwargs(...)`` carries ``verify=bearer_ssl_context()`` (and ``trust_env=False``, the proxy).
-BEARER_KWARGS_FUNCS = frozenset({"bearer_httpx_kwargs", "_bearer_httpx_kwargs"})
+BEARER_KWARGS_FUNCS = frozenset({"bearer_httpx_kwargs", "_bearer_httpx_kwargs", "probe_httpx_kwargs"})
 NO_CONTEXT_TRANSPORTS = frozenset({"MockTransport"})
 
 #: (path under src/nexus, enclosing function) -> why a per-client SSL context is acceptable there.
