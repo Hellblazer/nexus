@@ -74,7 +74,9 @@ PRIVATE_HANDLE_CENSUS: dict[str, int] = {
     "src/nexus/commands/taxonomy_cmd.py": 1,
     # T3Database's own module: db._client_for / db._client on instances of the
     # class defined in this file. Self-access in substance, not syntax.
-    "src/nexus/db/t3.py": 2,
+    # 2 -> 1 (nexus-9biyo): verify_collection_deep's db._client_for went; it
+    # samples through the public collection handle, which the service client has.
+    "src/nexus/db/t3.py": 1,
     # 2 -> 0 (nexus-i711w Stage 2 sub-stage C): both `get_t3()._client` sites
     # lived in taxonomy_assign_batch_hook's raw arm, which the instance-based
     # is_service_backed check already returned before on every shipping
