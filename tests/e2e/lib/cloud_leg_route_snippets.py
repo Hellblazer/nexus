@@ -618,3 +618,77 @@ REEMBED_PROBES = {
     "POST /v1/vectors/reembed/plan": ("route-reembed-plan-unregistered", REEMBED_PLAN_REFUSAL, "reembed plan of an unregistered source refused"),
     "POST /v1/vectors/reembed/jobs": ("route-reembed-jobs-unregistered", REEMBED_JOBS_REFUSAL, "reembed jobs of an unregistered source refused"),
 }
+
+#: RDR-229 R7 (nexus-p2m1x.25): the 27 read routes that refuse a label-addressed read of a retired collection with no live successor. The leg
+#: cannot make that tombstone (it would delete a collection's successor in the cloud), so the probe is the one request it CAN send to each route: a
+#: read that names a label no registry row has. The route boundary must let that through to the handler (the guard refuses only a retired label), so
+#: the probe asserts the route answers, is not a 405, and carries neither retired reason. A refusal for the right cause (a retired label) is
+#: pinned by RetiredLabelReadersTest, the engine's own gate. Each entry is (verb, path, collection field, extra payload or query).
+_R7_READS: tuple[tuple[str, str, str, dict[str, object]], ...] = (
+    ("POST", "/v1/vectors/search", "collection", {"query": "r7"}),
+    ("POST", "/v1/vectors/query", "collection", {"query": "r7"}),
+    ("POST", "/v1/vectors/search-per-collection", "collection", {"query": "r7", "limit": 5, "per_collection_k": 5}),
+    ("POST", "/v1/vectors/hybrid-search", "collection", {"query": "r7"}),
+    ("POST", "/v1/vectors/search-metadata-scoped", "collection", {"query": "r7"}),
+    ("POST", "/v1/vectors/search-topic-scoped", "collection", {"query": "r7", "topic": "r7"}),
+    ("POST", "/v1/vectors/search-graph-hop", "collection", {"query": "r7", "seeds": ["1.1.1"]}),
+    ("POST", "/v1/vectors/search-aspect-scoped", "collection", {"query": "r7"}),
+    ("POST", "/v1/vectors/get", "collection", {}),
+    ("POST", "/v1/vectors/get-all-metadata", "collection", {}),
+    ("POST", "/v1/vectors/store-get", "collection", {}),
+    ("POST", "/v1/vectors/get-embeddings", "collection", {}),
+    ("POST", "/v1/vectors/store-list", "collection", {}),
+    ("GET", "/v1/taxonomy/topics", "collection", {}),
+    ("GET", "/v1/taxonomy/topics/unreviewed", "collection", {}),
+    ("GET", "/v1/taxonomy/topics/resolve", "collection", {}),
+    ("GET", "/v1/taxonomy/top_topics", "collection", {}),
+    ("GET", "/v1/taxonomy/chunk_grounded", "source_collection", {"doc_id": "0" * 63 + "1"}),
+    ("GET", "/v1/taxonomy/audit", "collection", {}),
+    ("GET", "/v1/taxonomy/rebuild/old_state", "collection", {}),
+    ("POST", "/v1/taxonomy/assignments/cross-preview", "collection", {"chashes": ["0" * 63 + "1"]}),
+    ("POST", "/v1/taxonomy/assignments/unassigned", "collection", {}),
+    ("POST", "/v1/taxonomy/centroids/query", "collection", {"embedding": [0.1]}),
+    ("GET", "/v1/taxonomy/centroids/by_collection", "collection", {}),
+    ("GET", "/v1/aspects/get", "collection", {}),
+    ("GET", "/v1/aspects/list_by_collection", "collection", {}),
+    ("GET", "/v1/catalog/resolve_span", "collection", {"span_chash": "0" * 63 + "1"}),
+)
+
+_R7_READ = r"""
+import httpx
+from nexus.commands.catalog import _get_catalog
+from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin as _Wire
+retired = {"collection_superseded", "retired_no_successor"}
+cat = _get_catalog()
+label = "@label@-r7-read-probe"
+fields = {"@field@": label, **@extra@}
+try:
+    if "@verb@" == "POST":
+        _Wire._post(cat, "@path@", fields, idempotent=False, mutates=False)
+    else:
+        _Wire._get(cat, "@path@", params=fields)
+    status = 200
+except httpx.HTTPStatusError as exc:
+    status = exc.response.status_code
+    try:
+        body = exc.response.json()
+    except ValueError:
+        body = None
+    reason = body.get("reason") if isinstance(body, dict) else None
+    assert status != 405, f"@verb@ @path@ is not served: 405"
+    assert reason not in retired, f"@path@ refused a label no row has as retired: {body!r}"
+print("@verb@ @path@ reached, no retired refusal")
+"""
+
+
+def _r7_read_probe(verb: str, path: str, field: str, extra: dict[str, object]) -> tuple[str, str, str]:
+    code = (_R7_READ.replace("@verb@", verb).replace("@path@", path).replace("@field@", field)
+            .replace("@extra@", repr(extra)))
+    slug = path.removeprefix("/v1/").replace("/", "-").replace("_", "-")
+    return (f"route-retired-label-{slug}", code, f"{verb} {path} reached, no retired refusal")
+
+
+#: One probe per route, built by the one helper above, keyed as the ledger names the route (backticked `VERB /v1/...`).
+R7_READ_PROBES: dict[str, tuple[str, str, str]] = {
+    f"{verb} {path}": _r7_read_probe(verb, path, field, extra) for verb, path, field, extra in _R7_READS
+}
