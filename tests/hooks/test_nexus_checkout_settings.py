@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from nexus.hooks import subagent_start
+from tests._changelog_entry import changelog_entry
 
 ROOT = Path(__file__).resolve().parents[2]
 PROJECT_FILE = ROOT / ".nexus" / "project.json"
@@ -123,12 +124,16 @@ def test_the_ci_board_wake_fact_is_nexus_prose_in_a_rule() -> None:
 
 # --- the unreleased ledgers do not describe the gate that was removed ----------------------------------------------------
 
-_LEDGERS = (ROOT / "conexus" / "PENDING_RELEASE.md", ROOT / "changelog" / "unreleased" / "nexus-sby49.3-audience.md")
+def _ledgers() -> dict[str, str]:
+    return {
+        "PENDING_RELEASE.md": (ROOT / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8"),
+        "nexus-sby49.3-audience": changelog_entry("nexus-sby49.3-audience.md", "nexus-sby49.3"),
+    }
 
 
-@pytest.mark.parametrize("ledger", _LEDGERS, ids=lambda p: p.name)
-def test_no_ledger_says_a_hook_runs_only_for_a_maintainer(ledger: Path) -> None:
-    text = ledger.read_text(encoding="utf-8")
-    assert text, ledger
+@pytest.mark.parametrize("name", ["PENDING_RELEASE.md", "nexus-sby49.3-audience"])
+def test_no_ledger_says_a_hook_runs_only_for_a_maintainer(name: str) -> None:
+    text = _ledgers()[name]
+    assert text, name
     stale = [ln for ln in text.splitlines() if re.search(r"only under `?maintainer\(\)", ln)]
     assert not stale, stale
