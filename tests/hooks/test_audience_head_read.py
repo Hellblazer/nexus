@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import pathlib
 
 import pytest
@@ -273,7 +274,12 @@ def test_a_submodule_at_the_path_is_strict_and_reported(audience, tmp_path, shim
 def test_a_committed_symlink_is_a_blob_of_its_target_text_and_so_is_strict_when_it_does_not_parse(audience, tmp_path, shim, monkeypatch):
     repo = init_repo(tmp_path / "r", {"README": "x\n"})
     (repo / ".nexus").mkdir()
-    os.symlink("elsewhere.json", repo / PROJECT)
+    try:
+        os.symlink("elsewhere.json", repo / PROJECT)
+    except OSError as exc:
+        if sys.platform != "win32":
+            raise
+        pytest.skip(f"a file symlink needs SeCreateSymbolicLinkPrivilege, which this Windows account lacks ({exc})")
     run_git(repo, "add", PROJECT)
     run_git(repo, "commit", "-q", "-m", "link")
     (repo / PROJECT).unlink()
