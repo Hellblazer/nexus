@@ -335,8 +335,14 @@ public final class TargetSelection {
         }
     }
 
-    /** Refuse the start (a 409); {@code reason} names the row, its successor or the holding job. */
-    public record Refuse(String reason) implements Decision {
+    /**
+     * Refuse the start (a 409); {@code reason} names the row, its successor or the holding job. {@code retiredNoSuccessor} marks the refusal of
+     * a retired row that names no live successor, which the wire carries as the {@code retired_no_successor} reason (RDR-229 R7).
+     */
+    public record Refuse(String reason, boolean retiredNoSuccessor) implements Decision {
+        public Refuse(String reason) {
+            this(reason, false);
+        }
     }
 
     /**
@@ -355,7 +361,7 @@ public final class TargetSelection {
                     ? Optional.ofNullable(s.supersededBy()).filter(t -> !t.isEmpty())
                     : successors.liveLabelOf(s.collectionId());
                 if (successor.isEmpty()) {
-                    yield new Refuse(retiredWithNoSuccessor(s.name()) + "; it cannot be this job's target");
+                    yield new Refuse(retiredWithNoSuccessor(s.name()) + "; it cannot be this job's target", true);
                 }
                 if (!source.equals(successor.get())) {
                     yield new Refuse("target " + s.name() + " is superseded by " + successor.get()

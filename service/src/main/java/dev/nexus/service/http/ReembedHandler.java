@@ -382,6 +382,7 @@ public final class ReembedHandler implements HttpHandler {
             if (live.isEmpty()) {
                 throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
                     "error", TargetSelection.retiredWithNoSuccessor(source) + "; a retired collection is not re-embedded",
+                    "reason", HttpUtil.RETIRED_NO_SUCCESSOR_REASON,
                     "collection", source)));
             }
             throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
@@ -429,6 +430,9 @@ public final class ReembedHandler implements HttpHandler {
             id -> reader.liveSuccessorLabel(tenant, id));
         if (decision instanceof Refuse r) {
             Map<String, Object> refusal = orderedMap("error", r.reason(), "collection", candidate);
+            if (r.retiredNoSuccessor()) {
+                refusal.put("reason", HttpUtil.RETIRED_NO_SUCCESSOR_REASON);
+            }
             if (holder != null) {
                 refusal.put("job_id", holder.jobId().toString());
                 refusal.put("state", holder.state());

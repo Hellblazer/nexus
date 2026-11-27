@@ -93,6 +93,7 @@ class ReembedRetiredNoSuccessorTest {
 
     private static void assertRetiredWithNoSuccessor(Resp r, String retired, String deadLabel) {
         assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).as("the refusal carries the retired_no_successor reason: %s", r.body()).isEqualTo("retired_no_successor");
         String error = r.json().path("error").asText();
         assertThat(error).as(r.body()).contains("collection " + retired + " was retired and has no successor");
         assertThat(r.body()).as("its own dead label is no successor").doesNotContain(deadLabel);
@@ -102,7 +103,8 @@ class ReembedRetiredNoSuccessorTest {
 
     private static void assertSupersededBodyWithNoSuccessor(Resp r, String retired, long retiredId) {
         assertThat(r.status()).as(r.body()).isEqualTo(409);
-        assertThat(r.reason()).isEqualTo("collection_superseded");
+        assertThat(r.reason()).isEqualTo("retired_no_successor");
+        assertThat(r.json().path("error").asText()).isEqualTo("collection_superseded");
         assertThat(r.json().path("collection").asText()).isEqualTo(retired);
         assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(retiredId);
         assertThat(r.json().has("superseded_by")).as("no successor fields: %s", r.body()).isFalse();
