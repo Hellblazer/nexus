@@ -2053,8 +2053,11 @@ class StorageServiceSupervisor:
             import urllib.error  # noqa: PLC0415 — deferred import — branch-local
             import urllib.request  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
+            from nexus.db.t2.bearer_transport import probe_opener  # noqa: PLC0415 — deferred import — branch-local
+
             req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=_HEALTH_TIMEOUT) as resp:
+            # nexus-ec37o: the restart decision must not pass through a proxy the environment names
+            with probe_opener(url).open(req, timeout=_HEALTH_TIMEOUT) as resp:
                 return HealthProbe.OK if resp.status == 200 else HealthProbe.UNREADY
         except urllib.error.HTTPError:
             # An HTTP status IS an answer: the process is up and serving, its
@@ -2087,8 +2090,11 @@ class StorageServiceSupervisor:
             import urllib.error  # noqa: PLC0415 — deferred import — branch-local
             import urllib.request  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
+            from nexus.db.t2.bearer_transport import probe_opener  # noqa: PLC0415 — deferred import — branch-local
+
             req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=_LIVEZ_TIMEOUT):
+            # nexus-ec37o: the restart authority must not pass through a proxy the environment names
+            with probe_opener(url).open(req, timeout=_LIVEZ_TIMEOUT):
                 return True
         except urllib.error.HTTPError:
             # An HTTP status IS an answer: the socket was accepted, the request

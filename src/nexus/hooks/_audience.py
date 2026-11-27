@@ -1016,12 +1016,13 @@ def telemetry_enabled() -> bool:
 
 
 #: What a telemetry child must not inherit (RDR-259 Decision 9). Each of these names where telemetry goes, which credential
-#: it carries or how it gets there, and a repository can set an environment variable. Compared upper-cased: Windows
+#: it carries or how it gets there, or is read by OpenSSL itself (nexus-ec37o), and a repository can set an environment variable. Compared upper-cased: Windows
 #: environment names ignore case, and a lower-case proxy variable is as live as its upper-case form.
 _TELEMETRY_ENV_STRIPPED = frozenset({
     "NX_SERVICE_URL", "NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN", "NX_MINT_TOKEN", "NX_MINT_TENANT",
     "NX_CONFIG_DIR", "XDG_CONFIG_HOME", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
     "HOME", "USERPROFILE", "NEXUS_CONFIG_DIR",  # replaced below, never inherited
+    "SSLKEYLOGFILE", "OPENSSL_CONF",  # OpenSSL reads both: the first opens a file (which kills a Windows process), the second can load code
 })
 
 
@@ -1029,7 +1030,8 @@ def telemetry_child_env(environ: "Mapping[str, str]") -> "dict[str, str] | None"
     """The environment for a detached telemetry child (RDR-259 Decision 9), or None when the account has no home.
 
     *environ* is the hook's environment, passed in: this module reads no environment variable but ``CLAUDE_PROJECT_DIR``.
-    The result is a copy of it without the endpoint, token, mint, config-directory and proxy variables, with ``HOME`` and
+    The result is a copy of it without the endpoint, token, mint, config-directory, proxy, ``SSLKEYLOGFILE`` and
+    ``OPENSSL_CONF`` variables, with ``HOME`` and
     ``USERPROFILE`` set to the account home and ``NEXUS_CONFIG_DIR`` to its ``.config/nexus``, so the child's own endpoint
     resolver, its data-token mint and its HTTP client see only the account's configuration. A relative
     ``NX_DROPPED_WRITES_LOG_PATH`` is made absolute (the child starts in the filesystem root). ``NX_DISPATCH_COUNTER`` and

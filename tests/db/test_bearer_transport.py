@@ -203,6 +203,36 @@ class TestCliUrllib:
         assert origin.auth == ["Bearer t"]
 
 
+class TestProbeTransport:
+    """An unauthenticated probe whose answer is trusted (``/version``, ``/health``) takes the same transport (nexus-ec37o residual 1)."""
+
+    def test_the_httpx_kwargs_are_the_bearer_ones(self, config_dir, monkeypatch) -> None:
+        monkeypatch.setenv("HTTPS_PROXY", "http://evil.example:3128")
+        monkeypatch.setenv("HTTP_PROXY", "http://evil.example:3128")
+        kwargs = bt.probe_httpx_kwargs("https://svc.example")
+        assert kwargs["trust_env"] is False and "proxy" not in kwargs
+        assert kwargs["verify"] is bt.bearer_ssl_context()
+        _write_network(config_dir, https_proxy="http://proxy.corp:3128")
+        assert bt.probe_httpx_kwargs("https://svc.example")["proxy"] == "http://proxy.corp:3128"
+        assert "proxy" not in bt.probe_httpx_kwargs("http://127.0.0.1:9")
+
+    def test_a_plain_http_opener_has_no_proxy_and_follows_no_redirect(self, config_dir, monkeypatch) -> None:
+        import urllib.request
+
+        monkeypatch.setenv("HTTP_PROXY", "http://evil.example:3128")
+        monkeypatch.setenv("http_proxy", "http://evil.example:3128")
+        _write_network(config_dir, https_proxy="http://proxy.corp:3128")
+        opener = bt.probe_opener("http://127.0.0.1:9")
+        assert _proxies(opener) == {}
+        assert not any(type(h) is urllib.request.HTTPRedirectHandler for h in opener.handlers)
+
+    def test_an_https_opener_is_the_bearer_one(self, config_dir, monkeypatch) -> None:
+        monkeypatch.setenv("HTTPS_PROXY", "http://evil.example:3128")
+        assert _proxies(bt.probe_opener("https://svc.example")) == {}
+        _write_network(config_dir, https_proxy="http://proxy.corp:3128")
+        assert _proxies(bt.probe_opener("https://svc.example")) == {"https": "http://proxy.corp:3128"}
+
+
 # ── the plugin's stdlib mirror ───────────────────────────────────────────────
 
 class TestPluginTrust:

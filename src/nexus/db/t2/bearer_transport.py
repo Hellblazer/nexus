@@ -21,6 +21,11 @@ Also not read, because OpenSSL or ``httpx`` would take them from the environment
 ``REQUESTS_CA_BUNDLE``, ``CURL_CA_BUNDLE``, ``NO_PROXY``, ``ALL_PROXY``, a ``.netrc`` and
 ``SSLKEYLOGFILE``. The plugin's stdlib mirror is ``conexus/hooks/scripts/_endpoint_resolve.py``
 (``bearer_ssl_context``, ``bearer_opener``).
+
+The same rule holds for a request that carries NO bearer but whose answer the client trusts for a decision
+(``GET /version``: the engine floor, ``embedding_mode``, capability flags; ``GET /health``): a repository's proxy and CA
+could answer it as the engine. Those requests take :func:`probe_httpx_kwargs` and :func:`probe_opener`
+(nexus-ec37o residual 1, Sam 2026-11-27); ``tests/test_ec37o_bearer_transport_lint.py`` rule 3 finds one that does not.
 """
 
 from __future__ import annotations
@@ -193,3 +198,25 @@ def bearer_opener(url: str | None = None) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(
         bearer_proxy_handler(url), urllib.request.HTTPSHandler(context=bearer_ssl_context()), no_redirect_handler(),
     )
+
+
+# ── the same transport for an unauthenticated probe whose answer is trusted ──────────────────────────────────
+
+
+def probe_httpx_kwargs(url: str) -> dict[str, Any]:
+    """Keyword arguments for an ``httpx.get`` that reads ``/version`` or ``/health`` of the service at *url*:
+    :func:`bearer_httpx_kwargs`, under the name that says what it is for. No bearer is sent, but the answer is
+    trusted, so no proxy or CA is read from the environment."""
+    return bearer_httpx_kwargs(url)
+
+
+def probe_opener(url: str) -> urllib.request.OpenerDirector:
+    """A urllib opener for an unauthenticated probe of the service at *url*: :func:`bearer_opener` for https; for
+    plain http (the loopback service) an opener with no proxy and no redirect, which builds no TLS context."""
+    import urllib.request  # noqa: PLC0415 — deferred: stdlib, loaded only when a request is built
+
+    from nexus.db.service_endpoint import no_redirect_handler  # noqa: PLC0415 — deferred: service_endpoint is a large module
+
+    if url.lower().startswith("https:"):
+        return bearer_opener(url)
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), no_redirect_handler())

@@ -3378,8 +3378,11 @@ def probe_t2_schema_fingerprint(
 
             resolved_base_url, _token = resolve_service_endpoint()
 
+        # nexus-ec37o: the answer is trusted, so no proxy or CA from the environment
+        from nexus.db.t2.bearer_transport import probe_httpx_kwargs  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+
         get = http_get if http_get is not None else (
-            lambda u, t: httpx.get(u, timeout=t, verify=get_shared_ssl_context())
+            lambda u, t: httpx.get(u, timeout=t, **probe_httpx_kwargs(u))
         )
         resp = get(f"{resolved_base_url.rstrip('/')}/version", timeout)
         resp.raise_for_status()
@@ -4535,7 +4538,10 @@ def _check_storage_service_health(
         if http_get is not None:
             resp = http_get(url, timeout=5.0)
         else:
-            resp = _httpx.get(url, timeout=5.0, verify=get_shared_ssl_context())
+            # nexus-ec37o: the answer says whether the service is up, so no proxy or CA from the environment
+            from nexus.db.t2.bearer_transport import probe_httpx_kwargs  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+
+            resp = _httpx.get(url, timeout=5.0, **probe_httpx_kwargs(url))
     except (_httpx.ConnectError, _httpx.TimeoutException, OSError) as exc:
         # Fatal: we have a confirmed endpoint and it is not responding.
         # Unlike the undiscoverable case above, here we know the address and

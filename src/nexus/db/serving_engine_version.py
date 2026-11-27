@@ -62,8 +62,10 @@ def probe_serving_engine_version() -> tuple[int, int, int] | None:
         return None
 
     try:
-        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
-        resp = httpx.get(f"{base_url.rstrip('/')}/version", timeout=5.0, verify=get_shared_ssl_context())
+        # nexus-ec37o: the answer is trusted (the note-write floor), so no proxy or CA from the environment
+        from nexus.db.t2.bearer_transport import probe_httpx_kwargs  # noqa: PLC0415 — deferred: loaded only when a probe is made
+        url = f"{base_url.rstrip('/')}/version"
+        resp = httpx.get(url, timeout=5.0, **probe_httpx_kwargs(url))
         resp.raise_for_status()
         body = resp.json()
     except Exception as exc:  # noqa: BLE001 — best-effort: a transport blip or a pre-/version engine means "don't know"

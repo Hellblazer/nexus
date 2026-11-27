@@ -1027,8 +1027,9 @@ def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
             from nexus.db.service_endpoint import resolve_service_endpoint_with_evidence_gate  # noqa: PLC0415 — deferred local import
 
             base_url, _token = resolve_service_endpoint_with_evidence_gate()
-            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
-            resp = httpx.get(f"{base_url.rstrip('/')}/version", timeout=10, verify=get_shared_ssl_context())
+            from nexus.db.t2.bearer_transport import probe_httpx_kwargs  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+            probe_url = f"{base_url.rstrip('/')}/version"  # nexus-ec37o: the answer gates a delete, so no proxy or CA from the environment
+            resp = httpx.get(probe_url, timeout=10, **probe_httpx_kwargs(probe_url))
             resp.raise_for_status()
             body = resp.json()
             if isinstance(body, dict):

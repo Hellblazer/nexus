@@ -109,8 +109,8 @@ def verify_service_version(
         def _get(url: str, timeout: float) -> Any:
             import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
-            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
-            return httpx.get(url, timeout=timeout, verify=get_shared_ssl_context())
+            from nexus.db.t2.bearer_transport import probe_httpx_kwargs  # noqa: PLC0415 — deferred: loaded only when a probe is made
+            return httpx.get(url, timeout=timeout, **probe_httpx_kwargs(url))  # nexus-ec37o: the answer is trusted, so no proxy or CA from the environment
 
     url = service_url.rstrip("/") + "/version"
     try:
@@ -191,8 +191,8 @@ def verify_voyage_capability(
         def _get(url: str, timeout: float) -> Any:
             import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
-            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
-            return httpx.get(url, timeout=timeout, verify=get_shared_ssl_context())
+            from nexus.db.t2.bearer_transport import probe_httpx_kwargs  # noqa: PLC0415 — deferred: loaded only when a probe is made
+            return httpx.get(url, timeout=timeout, **probe_httpx_kwargs(url))  # nexus-ec37o: the answer is trusted, so no proxy or CA from the environment
 
     url = service_url.rstrip("/") + "/version"
     try:

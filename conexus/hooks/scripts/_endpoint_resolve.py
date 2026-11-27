@@ -49,6 +49,15 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+# nexus-ec37o: a repository's settings env reaches every hook. ``ssl.create_default_context()`` opens the file
+# ``SSLKEYLOGFILE`` names (on Windows a file BIO without an OPENSSL_Applink kills the process; elsewhere the file collects
+# the session's TLS secrets at a path the repository chose), and OpenSSL reads ``OPENSSL_CONF`` when it initialises, where
+# a configuration can load an engine or provider. This module builds the plugin's TLS contexts and is imported before any
+# of them is made: neither variable is read from here on. (``nexus/__init__.py`` does the same for the wheel.)
+for _openssl_name in ("SSLKEYLOGFILE", "OPENSSL_CONF"):
+    os.environ.pop(_openssl_name, None)
+del _openssl_name
+
 if sys.version_info < (3, 12):
     sys.stderr.write(
         f"ERROR: conexus plugin hook requires Python 3.12+, got {sys.version.split()[0]}\n"

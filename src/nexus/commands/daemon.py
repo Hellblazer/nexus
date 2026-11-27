@@ -1864,13 +1864,12 @@ def _stop_mineru_with_stack(config_dir: Path) -> None:
 
 def _probe_health(host: str, port: int, timeout: float = 3.0) -> str:
     """GET /health → "ok" | "db-down" | "unreachable" (nexus-pebfx.5)."""
-    import urllib.request  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.db.t2.bearer_transport import probe_opener  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
+    url = f"http://{host}:{port}/health"
     try:
-        with urllib.request.urlopen(
-            f"http://{host}:{port}/health",
-            timeout=timeout,
-        ) as resp:
+        # nexus-ec37o: the answer says whether the service is up, so no proxy from the environment
+        with probe_opener(url).open(url, timeout=timeout) as resp:
             return "ok" if resp.status == 200 else f"http-{resp.status}"
     except Exception as exc:  # noqa: BLE001 — boundary catch of urllib/transport errors; mapped to db-down status
         import urllib.error  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path

@@ -223,13 +223,15 @@ def _probe_health_identity(host: str, port: int, *, timeout: float) -> bool:
     as False ("not this service"). Never raises.
     """
     import json as _json  # noqa: PLC0415 — deferred import — only the grace path needs it
-    import urllib.error  # noqa: PLC0415 — deferred import — branch-local
     import urllib.request  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    from nexus.db.t2.bearer_transport import probe_opener  # noqa: PLC0415 — deferred import — only the grace path needs it
 
     url = f"http://{host}:{port}/health"
     try:
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed loopback URL built from the recorded endpoint, never user input
+        # nexus-ec37o: the identity decision must not pass through a proxy the environment names
+        with probe_opener(url).open(req, timeout=timeout) as resp:  # noqa: S310 — fixed loopback URL built from the recorded endpoint, never user input
             if resp.status != 200:
                 return False
             body = _json.loads(resp.read().decode("utf-8"))

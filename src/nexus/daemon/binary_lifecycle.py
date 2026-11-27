@@ -123,13 +123,13 @@ def fetch_service_version(
     service instead of failing the TLS negotiation (nexus-n3bwh). ``port`` may
     be ``None`` (scheme-default port, e.g. an ``https://host`` URL with no
     explicit ``:443``), in which case it is omitted from the authority."""
-    import urllib.request  # noqa: PLC0415 — heavy/optional dep deferred
+    from nexus.db.t2.bearer_transport import probe_opener  # noqa: PLC0415 — heavy/optional dep deferred
 
     authority = f"{host}:{port}" if port is not None else host
+    url = f"{scheme}://{authority}/version"
     try:
-        with urllib.request.urlopen(
-            f"{scheme}://{authority}/version", timeout=timeout,
-        ) as resp:
+        # nexus-ec37o: the answer is trusted (the upgrade ladder's version pin), so no proxy or CA from the environment
+        with probe_opener(url).open(url, timeout=timeout) as resp:
             data = json.loads(resp.read())
             return data if isinstance(data, dict) else None
     except Exception as exc:  # noqa: BLE001 — service version probe; unreachable logged at debug, returns None

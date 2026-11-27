@@ -17,7 +17,13 @@ Two rules over ``src/nexus``, ``conexus/hooks/scripts`` and ``conexus/launch``:
    (or anywhere in its function). The default (httpx ``trust_env=True``, urllib's environment proxy)
    sends a plain-http bearer through whatever ``http_proxy`` a repository's settings name.
 
-Both allowlists are exact in both directions (an entry that matches nothing, or a function that gained a
+3. **A probe whose answer is trusted takes the same transport.** A request with no ``Authorization`` header can still
+   decide something: ``GET /version`` gives the engine floor, ``embedding_mode`` and the capability flags, ``GET /health``
+   and ``/livez`` give "the service is up". A repository's proxy and CA, named in the environment, could answer them as the
+   engine, so each httpx one-shot call, ``urlopen`` and ``build_opener`` in a function that names one of those routes
+   carries ``**probe_httpx_kwargs(url)`` or ``probe_opener(url)`` (nexus-ec37o residual 1).
+
+All allowlists are exact in both directions (an entry that matches nothing, or a function that gained a
 site, fails) and each lint carries a non-vacuity floor and a mutation table for its own detector.
 """
 from __future__ import annotations
@@ -47,6 +53,10 @@ DECISION_SPLATS = frozenset({"bearer_httpx_kwargs", "_bearer_httpx_kwargs"})
 #: urllib factories that decide the proxy: the stdlib handler, and the config-only handler and opener of bearer_transport / _endpoint_resolve
 BEARER_CONTEXT_FUNCS = frozenset({"bearer_ssl_context"})
 PROXY_HANDLER_NAMES = frozenset({"ProxyHandler", "bearer_proxy_handler", "bearer_opener"})
+#: rule 3: the helpers of ``bearer_transport`` for a request with no bearer whose answer is trusted
+PROBE_SPLATS = frozenset({"probe_httpx_kwargs", "bearer_httpx_kwargs", "_bearer_httpx_kwargs"})
+PROBE_OPENERS = frozenset({"probe_opener", "bearer_opener"})
+PROBE_ROUTES = ("/version", "/health", "/livez")
 
 
 def _name(node: ast.AST) -> str | None:
@@ -241,8 +251,6 @@ _PROBE = "an unauthenticated probe: no Authorization header is built for it"
 PROXY_ALLOWED: Allowed = {}
 _allow(PROXY_ALLOWED, "src/nexus/daemon/binary_install.py", "_api_open", _GITHUB, _NO_DECISION.format("urlopen"), 2)
 _allow(PROXY_ALLOWED, "src/nexus/daemon/binary_install.py", "_fetch_once", _GITHUB, _NO_DECISION.format("urlopen"))
-_allow(PROXY_ALLOWED, "src/nexus/daemon/storage_service_daemon.py", "StorageServiceSupervisor._probe_service_health", _PROBE + " (loopback /health)", _NO_DECISION.format("urlopen"))
-_allow(PROXY_ALLOWED, "src/nexus/daemon/storage_service_daemon.py", "StorageServiceSupervisor._probe_service_liveness", _PROBE + " (loopback /livez)", _NO_DECISION.format("urlopen"))
 _allow(PROXY_ALLOWED, "src/nexus/health.py", "_check_cli_version", _PROBE + " (the published-version check)", _NO_DECISION.format("urlopen"))
 _allow(PROXY_ALLOWED, "src/nexus/db/http_vector_client.py", "_keepalive_opener", "builds the pooled opener, whose build_opener carries the ProxyHandler decision and is itself in scope of this lint (ALWAYS_IN_SCOPE)", _NO_DECISION.format("build_opener"))
 
@@ -330,3 +338,106 @@ def _decided_clients() -> int:
                     if walker._decided(node, kind):
                         total += 1
     return total
+
+
+# ── rule 3: a probe whose answer is trusted takes the bearer transport ───────
+
+_MINERU = "probes a local MinerU PDF server's /health, which is not the nexus engine and decides nothing about it"
+_NO_PROBE = "{} on a probed route with no probe transport"
+PROBE_ALLOWED: Allowed = {}
+for _path, _qual, _kind in (
+    ("src/nexus/_mineru_pid.py", "server_identified", "httpx.get"),
+    ("src/nexus/commands/doctor.py", "_run_check_mineru", "httpx.Client"),
+    ("src/nexus/commands/mineru.py", "start", "httpx.get"),
+    ("src/nexus/commands/mineru.py", "status", "httpx.get"),
+    ("src/nexus/daemon/mineru_lifecycle.py", "_healthy", "httpx.get"),
+    ("src/nexus/health.py", "_check_mineru_server", "httpx.get"),
+    ("src/nexus/pdf_extractor.py", "_live_server_slots", "httpx.get"),
+    ("src/nexus/pdf_extractor.py", "PDFExtractor._probe_mineru_health", "httpx.get"),
+    ("src/nexus/pdf_extractor.py", "PDFExtractor._restart_mineru_server", "httpx.get"),
+):
+    _allow(PROBE_ALLOWED, _path, _qual, _MINERU, _NO_PROBE.format(_kind))
+
+
+def _mentions_probe_route(node: ast.AST) -> bool:
+    for n in ast.walk(node):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and any(route in n.value for route in PROBE_ROUTES):
+            return True
+    return False
+
+
+class _Probe(_Scope):
+    """Every httpx one-shot call (headers or not), ``urlopen`` and ``build_opener`` inside a function, at any depth,
+    that names ``/version``, ``/health`` or ``/livez``."""
+
+    @staticmethod
+    def _kind(call: ast.Call) -> str | None:
+        func = call.func
+        if isinstance(func, ast.Attribute):
+            base = _name(func.value)
+            if base in HTTPX_MODULES and func.attr in HTTPX_ONE_SHOT | HTTPX_CLIENTS:
+                return f"httpx.{func.attr}"
+            if func.attr in ("build_opener", "urlopen"):
+                return func.attr
+        elif isinstance(func, ast.Name) and func.id in ("build_opener", "urlopen"):
+            return func.id
+        return None
+
+    def _decided(self, call: ast.Call, kind: str) -> bool:
+        if kind.startswith("httpx."):
+            return any(kw.arg is None and isinstance(kw.value, ast.Call) and _name(kw.value.func) in PROBE_SPLATS for kw in call.keywords)
+        return any(_mentions(call, word) for word in PROBE_OPENERS) or any(_mentions(f, word) for f in self.functions[-1:] for word in PROBE_OPENERS)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        kind = self._kind(node)
+        if kind is not None and any(_mentions_probe_route(f) for f in self.functions) and not self._decided(node, kind):
+            self.site(_NO_PROBE.format(kind), node)
+        self.generic_visit(node)
+
+
+@pytest.fixture(scope="module")
+def probe_scan() -> tuple[list[Site], int, int]:
+    return _scan(_Probe, only_bearer_files=False)
+
+
+@pytest.mark.parametrize(
+    ("source", "expect"),
+    [
+        ("import httpx\ndef f(u):\n    return httpx.get(u + '/version', timeout=1)\n", 1),
+        ("import httpx\ndef f(u):\n    return httpx.get(f'{u}/health', timeout=1, verify=ctx)\n", 1),
+        ("import httpx\ndef f(u):\n    return httpx.get(u + '/version', **bearer_httpx_kwargs(u))\n", 0),  # the same transport, under the bearer name
+        ("import httpx\ndef f(u):\n    return httpx.get(u + '/version', **other(u))\n", 1),
+        ("import httpx\ndef f(u):\n    return httpx.get(u + '/version', **probe_httpx_kwargs(u))\n", 0),
+        ("import httpx\ndef f(u):\n    return httpx.get(u, timeout=1)\n", 0),  # names no probed route
+        ("import httpx\ndef f(u):\n    def get(x):\n        return httpx.get(x, timeout=1)\n    return get(u + '/version')\n", 1),  # a nested helper of the probing function
+        ("import urllib.request as r\ndef f(u):\n    return r.urlopen(u + '/livez', timeout=1)\n", 1),
+        ("import urllib.request as r\ndef f(u):\n    return probe_opener(u).open(u + '/livez', timeout=1)\n", 0),
+        ("import urllib.request as r\ndef f(u):\n    o = r.build_opener()\n    return o.open(u + '/health')\n", 1),
+        ("import httpx\ndef f(u):\n    return httpx.Client(timeout=1).get(u + '/health')\n", 1),
+    ],
+)
+def test_the_probe_detector_sees_an_undecided_probe_and_leaves_a_decided_one_alone(source: str, expect: int) -> None:
+    assert len(_synthetic(_Probe, source)) == expect
+
+
+def test_every_trusted_probe_takes_the_probe_transport(probe_scan) -> None:
+    sites, _files, _in_scope = probe_scan
+    _check(sites, PROBE_ALLOWED, "probe transport")
+
+
+def test_the_probe_walk_is_not_vacuous(probe_scan) -> None:
+    sites, files, _in_scope = probe_scan
+    assert files >= 500, files
+    decided = 0
+    for root in SCAN_ROOTS:
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            walker = _Probe(path.relative_to(ROOT).as_posix())
+            walker.visit(tree)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and any(kw.arg is None and isinstance(kw.value, ast.Call) and _name(kw.value.func) in PROBE_SPLATS for kw in node.keywords):
+                    decided += 1
+                if isinstance(node, ast.Call) and _name(node.func) in PROBE_OPENERS:
+                    decided += 1
+    assert decided >= 9, f"only {decided} probes carry the probe transport; the detector or the sweep stopped matching"
+    assert len(sites) == len(PROBE_ALLOWED), "the allowlisted MinerU probes are the only undecided ones: if one is missing the detector stopped matching"

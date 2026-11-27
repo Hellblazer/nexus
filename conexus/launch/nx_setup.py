@@ -1184,12 +1184,9 @@ def _probe(base: str, host: str, token: str, tenant: str, end: float) -> CheckRe
     import urllib.error  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415
 
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *args: Any, **kwargs: Any) -> None:  # the 3xx answer then surfaces as an HTTPError
-            return None
-
-    # An empty ProxyHandler: the token goes to the address typed, never to a proxy the environment names.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
+    # The token goes to the address typed, never to a proxy or a CA the environment names: the proxy and extra CA of
+    # config.yml only, no redirect followed (nexus-ec37o).
+    opener = _endpoint_resolve.bearer_opener(base)
 
     def call(route: str, bearer: str | None = None, body: dict[str, Any] | None = None) -> tuple[int, bytes]:
         headers = {"Accept": "application/json", "User-Agent": "conexus-setup"}

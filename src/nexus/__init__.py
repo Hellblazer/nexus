@@ -112,6 +112,22 @@ def _use_os_trust_store(platform: str | None = None) -> bool:
     return True
 
 
+def _drop_openssl_environment() -> None:
+    """Remove ``SSLKEYLOGFILE`` and ``OPENSSL_CONF`` from this process's environment (nexus-ec37o).
+
+    A repository's ``.claude/settings.json`` env reaches every ``nx`` the model runs. ``ssl.create_default_context()``
+    opens the file ``SSLKEYLOGFILE`` names: on Windows, in uv's CPython, a file BIO without an ``OPENSSL_Applink`` kills the
+    process (``no OPENSSL_Applink``), and anywhere else the file collects the session's TLS secrets at a path the
+    repository chose. ``OPENSSL_CONF`` is read when OpenSSL initialises (``import ssl``) and can load an engine or provider,
+    which is code. Done before anything here imports ``ssl``. nx ignores both, as its bearer transport already does
+    (``nexus.db.t2.bearer_transport``); everything else in the process, a child it starts included, then sees neither."""
+    import os  # noqa: PLC0415 -- keep the package import light
+
+    for name in ("SSLKEYLOGFILE", "OPENSSL_CONF"):
+        os.environ.pop(name, None)
+
+
+_drop_openssl_environment()
 _use_os_trust_store()
 
 from nexus import _vcrt  # noqa: E402 -- stdlib-only, import-cheap

@@ -214,8 +214,9 @@ def probe_managed_service(
 
     if http_get is None:
         def http_get(u: str, t: float) -> httpx.Response:
-            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
-            return httpx.get(u, timeout=t, verify=get_shared_ssl_context())
+            # nexus-ec37o: the answer is trusted (the engine floor, embedding_mode), so no proxy or CA from the environment
+            from nexus.db.t2.bearer_transport import probe_httpx_kwargs  # noqa: PLC0415 — deferred: loaded only when a probe is made
+            return httpx.get(u, timeout=t, **probe_httpx_kwargs(u))
 
     before_request()  # nexus-ldf2s: the version probe is a request like any other
     try:
