@@ -1942,7 +1942,12 @@ while the engine serves:
     happen in this build, since `IdReaders.PRESENT` is true
     (`CompletionCheck.java:424-437`, `RenameReadiness.java:28-58`,
     `RenameRefusedException.java:55-65`, `HttpUtil.java:651-659`; T2
-    `229-research-301`, `229-research-303`, `229-research-329`). The same
+    `229-research-301`, `229-research-303`, `229-research-329`). On the real
+    chain `restart` is reached only when a listed changeset fails to apply on
+    its own: the boot that latches gate 3 applies them all, so a fresh or
+    half-stamped install sees `name_key_drop_move` and then `none`
+    (`Rdr229P37RestartValueTest`, `Rdr229FreshInstallRenameRestartTest`,
+    P3.7 lane 87990cb039). The same
     values, with `none`, go out as `rdr229_completion.rename_missing`, and
     `nx doctor` shows a row for each one that is not `none`
     (`CompletionStatusJson.java:26-36`; `rdr229_completion_health.py:155-171`).
@@ -2043,9 +2048,13 @@ while the engine serves:
     which nx doctor shows, reads `none` until gate 3 has latched
     (`CompletionBootWork.java:199-203`), and then `restart` only once the
     drop move has `completed_at` and a listed changeset is still unapplied
-    (`CompletionCheck.java:424-437`). On a half-stamped store the restart is
-    asked for by the notice alone: gate 3 latches only at the boot that
-    applies `vectors-078` and `vectors-084` (P3.5). The notice is the one exception among the
+    (`CompletionCheck.java:424-437`). On a fresh or half-stamped store the
+    restart is asked for by the notice alone, and `rename_missing` never reads
+    `restart`: gate 3 latches only at the boot that applies `vectors-078` and
+    `vectors-084` (P3.5), and that boot's walk applies every listed P3.5b
+    changeset with them, so after the latch the wait is `name_key_drop_move`.
+    `restart` shows only when a listed changeset fails to apply on its own
+    (`Rdr229P37RestartValueTest`). The notice is the one exception among the
     check's reports to the rule above (`id-unique-index-held`, above, is
     another entry the same skips pass over): a notice that does no work and
     is safe to stop, which `nx upgrade`'s
@@ -3400,8 +3409,22 @@ its acceptance is that test green plus the census pin it lowers.
   condition at `Main.java:902`; `CompletionCheck.java:660-686`), and the
   changeset's one CONTINUE `sqlCheck`, on every stamp move complete with its
   CHECKs present and validated (item 6), lets Liquibase apply it only at a
-  boot (`vectors-078:573-601`, the changeset and its one `sqlCheck`). Inferred from code, not tested (T2
-  `229-research-322`); bead nexus-p2m1x.48 tracks it.
+  boot (`vectors-078:573-601`, the changeset and its one `sqlCheck`). So in the first process a
+  rename is still the name path and succeeds (200, a new collection id,
+  `ids_stable` false); the engine only asks for the restart, with the
+  `rdr229-restart` `boot_work` notice, and `rename_missing` reads `none`. The
+  restart's walk applies `vectors-078-8`, `vectors-084-1` to `-3` and every other P3.5b
+  changeset together, gate 3 latches once the id-index pass has built what it
+  waits for, an engine pass registers the name-key drop move, and from the
+  latch until that move completes a rename is refused (409 `rename_refused`,
+  `missing` = `name_key_drop_move`); after it the rename is the one-row path
+  and the id survives. A fresh install follows the same chain, its stamp moves
+  completing on empty tables in boot 1. Tested over HTTP on a booted engine
+  running the production id-index pass, which simulates only gate 3's
+  PCI-coverage input: `Rdr229P35HalfStampedStoreTest` (half-stamped),
+  `Rdr229FreshInstallRenameRestartTest` (fresh install) and
+  `Rdr229P37RenameStagesTest` (the refusal window), at 87990cb039 on the P3.7
+  lane (T2 `229-research-322`; nexus-p2m1x.48).
   - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
     label index; every collection-taking route in the census accepts
     `collection_id` or a label, and a request carrying both for one
@@ -4200,17 +4223,20 @@ None.
 - **Scenario**: an engine with the P3.5 and P3.7 cut boots on a store with only half
   its chunks stamped (the stamp move paused part-way) — **Verify**: search,
   listings and a rename return, before gate 3 has latched, what they
-  returned before the cut, and the
-  engine reads by the id once gate 3 has latched (`Gate3.java:6-11`), with no
-  restart beyond the boot after the stamp moves complete, which gate 3 waits
-  for (P3.5). Once gate 3 holds, until the restart that applies P3.5b's
-  changesets, a rename is refused (409 `rename_refused`, `missing` =
-  `restart`; `/v1/status` shows it as `rdr229_completion.rename_missing`) and
-  the `rdr229-restart` `boot_work` entry is present; after that restart,
-  and once the name-key drop move has completed, the rename succeeds. Before
-  gate 3 holds a rename is the name path and is not refused. A fresh install
-  reaches the same state at its first boot, its stamp moves completing on
-  empty tables.
+  returned before the cut (the rename is the name path: 200, a new collection
+  id, `ids_stable` false), and the engine reads by the id once gate 3 has
+  latched (`Gate3.java:6-11`). The latch comes only at the restart, the boot
+  after the stamp moves complete, because the first walk skips `vectors-078-8`
+  and `vectors-084-1` to `-3`, which gate 3 waits for (P3.5); until then
+  `boot_work` carries the `rdr229-restart` notice and `rename_missing` reads
+  `none`. From the latch until the name-key drop move completes, a rename is
+  refused (409 `rename_refused`, `missing` = `name_key_drop_move`); after it
+  the rename is the one-row path (the same id, `ids_stable` true). A fresh
+  install follows the same chain, its stamp moves completing on empty tables
+  in boot 1. `missing` = `restart` appears only when a listed P3.5b changeset
+  fails to apply on its own. Tests: `Rdr229P35HalfStampedStoreTest`,
+  `Rdr229FreshInstallRenameRestartTest`, `Rdr229P37RenameStagesTest` and
+  `Rdr229P37RestartValueTest`, at 87990cb039 on the P3.7 lane.
 - **Scenario**: an engine with P4.0 boots on a store with only half its
   chunks stamped — **Verify**: it serves migration-only, refusing
   collection-scoped routes with an error that names the floor, the stamp
@@ -4220,11 +4246,10 @@ None.
   name-key drop move and the floor in one process and serves by the id.
 - **Scenario**: rename a collection that has chunk and `canary_query_ring`
   rows after P3.7, on a store that has had its restart: a rename test on a
-  fresh or half-stamped fixture first boots, waits for the restart signal
-  (the `rdr229-restart` `boot_work` entry; the helper reads the engine's
-  `RenameReadiness`, `Rdr229RenameRestartPrecondition`), restarts, waits for
-  gate 3 and for readiness `NONE` (the name-key drop move done too), and then
-  renames — **Verify**: one registry
+  fresh or half-stamped fixture first boots, waits for the stamp moves,
+  restarts, waits for gate 3 to latch and for the engine's readiness
+  (`RenameReadiness`) to read `none`, the name-key drop move done too
+  (`Rdr229RenameRestartPrecondition`), and then renames — **Verify**: one registry
   row changes; chunk, manifest, taxonomy and history rows and the
   per-collection index are untouched; search by the new label returns the
   same results.
@@ -4791,6 +4816,6 @@ large, and moved under a ratchet.
 - 2026-11-26: citations to landed, reviewed code (grant 3), nexus-p2m1x.48, the two boot_work warm-up commits of the next engine cut: the `MoveBootWork.java` and `MoveBootWorkTest.java` line cites (the announce and retainAnnounced block, the validation-in-flight block, the entry publisher, the restarted-engine builds line and its test) follow the sampler's new warm-up code, which shifted them; no wording changes.
 - 2026-11-26: the delete's lock modes follow the quarantine lane's fix round (grant 3, nexus-p2m1x.23 and .27; the commits of feature/rdr229-nextcut-quarantine, unpublished until the stack lands; T2 `nexus/nextcut-quarantine-lane-2026-11-26`): a delete by id takes the origin's row and its quarantine siblings' rows FOR UPDATE in one `collection_id`-ordered statement, a delete by label the siblings FOR UPDATE and the origin FOR KEY SHARE in the same order, and a rename's retag key-shares each sibling's row before it reads the rows; the `CollectionDeleteFence.java` cites are re-read from that tree.
 - 2026-11-26: the reaper's two expiry functions guard a quarantine row by its own origin id (grant 3, nexus-p2m1x.28; Sam's ruling, T2 `nexus/sam-ruling-rdr229-nextcut-ddl-cap-2961-2026-11-26`): `vectors-086` redefines `reaper_expire_quarantine` and `reaper_expire_client_quarantine`; after a one-row rename a move that commits after the retag leaves a row tagged with the old label, which the label-resolved guard missed; the I8 census's basis for the two reaper rows no longer says the call was ruled safe.
-- 2026-11-27: the Test Plan's two rename scenarios state the restart precondition (grant 3, nexus-p2m1x.48 step 2): once gate 3 holds, until the restart that applies P3.5b's changesets a rename is refused (409 `rename_refused`, `missing` = `restart`), and a rename test on a fresh or half-stamped fixture boots, waits for the restart signal, restarts, waits for readiness `NONE`, then renames; before gate 3 holds a rename is the name path and is not refused. Two Test Plan Verify clauses gain a sentence each (the amendment bead nexus-p2m1x.48 asked for); no decision changed.
+- 2026-11-27: the fresh-install and half-stamped chain, matching the engine as measured (grant 3, nexus-p2m1x.48 step 2; tests Rdr229P35HalfStampedStoreTest, Rdr229FreshInstallRenameRestartTest, Rdr229P37RenameStagesTest and Rdr229P37RestartValueTest at 87990cb039 on the P3.7 lane): gate 3 does not latch in boot 1, so a boot-1 rename is the name path; the restart's walk applies every P3.5b changeset and latches gate 3; renames are refused naming `name_key_drop_move` until that move completes, then the one-row rename runs; `missing` = `restart` appears only when a listed changeset fails on its own. P3.5's Test loses "inferred from code, not tested"; item 6's order and restart-signal text, the half-stamped Test Plan scenario's Verify clause and the rename scenario's setup (which now waits for the stamp moves, the restart, the latch and readiness `none`) say so. No decision changed.
 - 2026-11-27: the mint class does not empty at Phase 3 (Sam's ruling, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`, ask `rdr229-mint-pin`, option 1; grant 3, nexus-p2m1x.28): item 12's census paragraph and the routing paragraph's "all empty at P3.8" now say the class keeps the parsers of the names a user types and the names `nx` is about to register, is pinned at 129 (`tests/test_collection_name_parse_census.py:418`) so it cannot grow, and retires with the Phase 4 parsers (P4.3).
 - 2026-11-27: item 6's list says `topic_assignments_chunk_fk` is not dropped in Phase 3 (linda; matching P3.7's `vectors-079` trigger and `Rdr229P37OneRowRenameTest`; nexus-p2m1x.27): the trigger stamps a child row's `source_collection` from its chunk, so the key stays satisfied after a one-row rename; it goes with the name columns in P4.1. Committed locally; lands with the P3.7 lane's clean stacked review (grant 3).
