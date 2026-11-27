@@ -960,9 +960,8 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     # never-registered collection this very rename is meant to fix.
     # Candidate-string derivation for both sides keeps the prefix-mismatch
     # guard symmetric, never a row-based lookup that could raise on either.
-    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
     from nexus.corpus import _MINTED_LABEL_RE  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     old_prefix = split_candidate_collection_name(old)[0]
     new_prefix = split_candidate_collection_name(new)[0]
