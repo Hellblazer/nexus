@@ -944,7 +944,9 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
 
     Cross-prefix renames (e.g. ``code__`` ↔ ``docs__``) change the
     embedding-model space and are rejected unless ``--force-prefix-change``
-    is set; otherwise search hits would be garbage.
+    is set; otherwise search hits would be garbage. A minted ``c<id>`` label
+    names no type or model, so its row's type is compared instead (a plain
+    new label is a ``knowledge`` collection).
 
     A conformant new name is also checked against the source collection's
     catalog-row ``embedding_model``: the engine keeps the
@@ -965,7 +967,8 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     old_prefix = split_candidate_collection_name(old)[0]
     new_prefix = split_candidate_collection_name(new)[0]
     # nexus-a7o92: a label the engine minted (c<id>) carries no type and no model, so the guards below infer
-    # neither from it; a plain target names no type either. A prefixed target is still compared with the row's type.
+    # neither from it. The rename sends a plain target as a knowledge collection (collection_type_and_owner), so a
+    # minted source is compared with that type when its row is readable; a prefixed target keeps its own prefix.
     minted = _MINTED_LABEL_RE.fullmatch(old) is not None
     if not old_prefix:
         # RDR-229 P3.8: a label the engine minted (c<id>), or any prefix-free label, names no content type; its
@@ -976,7 +979,9 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
             old_prefix = (get_collection_row(old) or {}).get("content_type") or ""
         except Exception:  # noqa: BLE001 — an unreadable row keeps the name-only comparison, as before
             old_prefix = ""
-    if old_prefix != new_prefix and not force_prefix_change and not (minted and not new_prefix):
+    if minted and old_prefix and not new_prefix:
+        new_prefix = "knowledge"
+    if old_prefix != new_prefix and not force_prefix_change:
         raise click.ClickException(
             f"prefix mismatch: {old_prefix!r} → {new_prefix!r} would change "
             f"the embedding-model space. Pass --force-prefix-change if this "

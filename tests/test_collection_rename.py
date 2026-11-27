@@ -291,7 +291,11 @@ class TestRenameCLI:
             # nexus-a7o92: a minted label names no type and no model, so
             # nothing it spells is a claim the new name can contradict.
             ("c4812", "knowledge", "distributed-systems-papers", False),
-            ("c4812", "code", "my-repo", False),
+            # A readable row whose type is not knowledge: a plain target is sent as knowledge, a type change.
+            ("c4812", "code", "my-repo", True),
+            ("c4812", "docs", "my-repo", True),
+            # An unreadable row infers nothing.
+            ("c4812", None, "my-repo", False),
             # `knowledge__x` reads as voyage-context-3 and `c4812` as
             # voyage-code-3 by name; that comparison is not a finding.
             ("c4812", "knowledge", "knowledge__x", False),
@@ -300,6 +304,8 @@ class TestRenameCLI:
             # A real prefixed name is guarded as before, plain target included.
             ("code__foo", None, "plain-label", True),
             ("knowledge__foo", None, "plain-label", True),
+            # A minted source and a prefixed target of the row's own type.
+            ("c4812", "code", "code__foo", False),
             # Not the minted form (letters, no digits, a suffix): no exemption.
             ("cabc", "knowledge", "plain-label", True),
             ("c4812x", "knowledge", "plain-label", True),
