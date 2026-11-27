@@ -44,9 +44,11 @@ import sys as _sys  # noqa: E402
 # tests._signal_fence (nexus-xzorj): every os.kill/os.killpg target is classified as this session's or not, Linux
 # only; a foreign signal fails the run (fail mode, the default), listed in the terminal summary.
 # tests._malloc_trim (labrun-pex): malloc_trim(0) after each module, so a worker returns freed heap (Linux glibc).
+# tests._quarantine (nexus-2jomg.6): the `quarantine` marker from tests/quarantine.toml; the run fails on a stale entry.
 pytest_plugins = [
     "pytester", "tests._env_restore", "tests._storage_touch_guard", "tests._ddl_counter", "tests._tenant_pool",
     "tests._shard_collection_plugin", "tests._signal_fence", "tests._malloc_trim", "tests._audience_fixtures",
+    "tests._quarantine",
     "tests._named_rows",  # RDR-229 P2.9: the named_collection_rows fixture (prefix-named fixtures get a catalog row)
 ]
 if _sys.platform != "win32":

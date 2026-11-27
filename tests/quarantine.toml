@@ -1,0 +1,26 @@
+# The flake quarantine (RDR-258 Phase 5, nexus-2jomg.6). One file, one list.
+#
+# A test named here gets the `quarantine` marker at collection (tests/_quarantine.py), so no test file is edited
+# to quarantine a test. Being listed changes nothing about whether the test runs in the default suite or in CI;
+# the nightly job (.github/workflows/quarantine-nightly.yml) runs `-m quarantine`. Taking quarantined tests out
+# of the merge gate is Sam's decision and is not made here.
+#
+# Each entry, by `scripts/quarantine_report.py add` (never by hand, so `source` is a real hash):
+#   nodeid   the exact pytest node id, e.g. tests/test_x.py::TestY::test_z[param]
+#   since    the date it was quarantined (TOML date)
+#   deadline since + 14 days, checked on every collection and by the report (Sam, 2026-11-27)
+#   bead     the bead that owns the fix
+#   reason   one line: what flakes, and where
+#   source   sha256 of the candidates file (`red_run_report.py candidates` output) the nodeid came from
+#
+# A nodeid that no run collects fails the run loudly, so a quarantine of a deleted or renamed test cannot rot.
+# A passing quarantined test is not released automatically: delete its entry by hand.
+# Past its deadline a test is fixed or deleted, and `scripts/quarantine_report.py` exits non-zero until then.
+#
+# [[quarantine]]
+# nodeid = "tests/test_example.py::test_flaky"
+# since = 2026-11-27
+# deadline = 2026-12-11
+# bead = "nexus-xxxxx"
+# reason = "times out under pool load"
+# source = "<64 hex digits>"

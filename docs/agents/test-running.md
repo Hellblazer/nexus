@@ -43,6 +43,15 @@ nexus-clmlb (labrun RDR-001 lever 3, approved by Sam 2026-10-18). In the week of
 
 labrun measures the change a week after it lands: `kind=hand` full-suite lines in chas and qwent `/var/log/lab-runs.log` whose commit already had a finished develop CI run, and full-suite runs on a sha that already had a green hand full run.
 
+## Flake quarantine (RDR-258 Phase 5, nexus-2jomg.6)
+
+The `quarantine` marker marks a flaky test listed in `tests/quarantine.toml`. It is never written in a test file: `tests/_quarantine.py` (loaded by the root conftest) applies `@pytest.mark.quarantine(since=, deadline=, bead=)` at collection from the registry. **Being listed changes nothing about the default suite or CI today**: a quarantined test still runs in the shards and fails a merge. Taking quarantined tests out of the merge gate is Sam's decision; the draft is an `addopts` patch kept with the bead (nexus-2jomg.6), not applied.
+
+- **The registry.** One `[[quarantine]]` table per test: `nodeid` (the exact pytest id), `since`, `deadline`, `bead`, `reason`, `source` (the sha256 of the candidates file the nodeid came from). It ships empty. Add entries with `scripts/quarantine_report.py add --candidates <file> --bead <id> --reason <text> <nodeid>...`, which reads the `flake_infra` rows of the candidates JSON (`red_run_report.py candidates`), refuses a nodeid the file does not name, and refuses one found only under `unattributed` (that class is Sam's to decide).
+- **The 14-day rule** (Sam, 2026-11-27). `deadline` is `since` + 14 days, checked on every collection and by the report, never trusted. Past it the test is fixed or deleted and its entry removed by hand. `scripts/quarantine_report.py` lists each entry's age, deadline and days left, flags an overdue one, and exits 1 on any (`--json` for machines, `count` for the entry count).
+- **Loud failures.** A malformed registry, or an entry whose nodeid no collected test has (a quarantine of a deleted or renamed test), ends the run with exit 4. A scoped run (`pytest tests/x.py`, `file::test`) checks only the entries it could have collected.
+- **The nightly** (`.github/workflows/quarantine-nightly.yml`, hosted `ubuntu-latest` like the other nightlies; schedule and dispatch only). With an empty registry it prints "0 quarantined" and starts no pytest; otherwise it runs `-o addopts= -m quarantine` with the engine substrate armed, then the report with each test's result (`NX_QUARANTINE_RESULTS`, `--results`, `--expect-all`). A quarantined test that fails is the expected state and does not redden the job; the deadline, a broken registry and a listed test the run never examined do. A test that passes is not released: remove its entry by hand.
+
 ## Native Windows
 
 The `win-release` runner on qwent's Windows side runs CI's Windows set only after a push, so a Windows-only red used to surface a CI run late (2026-11-01: an import probe that passed on macOS and Linux charged nexus's own Windows truststore setup to the dispatch recorder, red on the Windows set for two pushes). Run it before the push instead:
