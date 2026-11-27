@@ -82,6 +82,7 @@ final class Rdr229RenameEngine implements AutoCloseable {
     private final AtomicBoolean gate3Open = new AtomicBoolean(true);
     private int boots;
     private int minted;
+    private volatile boolean workerAtBoot = true;
 
     private DmlUtilsInstaller installer;
     private HikariDataSource ds;
@@ -109,6 +110,17 @@ final class Rdr229RenameEngine implements AutoCloseable {
     }
 
     // ---- boot and restart -----------------------------------------------------------------------------------------------
+
+    /** Whether {@link #boot} starts the data-move worker (default true); false leaves every move open until a test calls {@link #startWorker}. */
+    Rdr229RenameEngine workerAtBoot(boolean start) {
+        workerAtBoot = start;
+        return this;
+    }
+
+    /** How many times the engine has booted (a restart is a second boot). */
+    int boots() {
+        return boots;
+    }
 
     /** Opens or closes the simulated P3.4 input of gate 3, for the next boot and for the running check (read on its next sample). */
     Rdr229RenameEngine gate3(boolean open) {
@@ -145,7 +157,9 @@ final class Rdr229RenameEngine implements AutoCloseable {
             () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled(), null, null, latched::gate3Latched, readiness);
         service.bootWork(bootWork);
         service.start();
-        startWorker();
+        if (workerAtBoot) {
+            startWorker();
+        }
         check.start();
         // P3.3b's pass, as Main starts it: it registers the two swap moves once gate 1 holds, and the worker completes them and their validations; gate 2 of
         // the boot read set (P3.3c) waits for them. Gate 3 itself stays simulated at its input.

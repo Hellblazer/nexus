@@ -4,8 +4,12 @@ package dev.nexus.service.datamove;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import dev.nexus.service.db.PciBuilders;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.sql.SQLException;
 import java.time.Clock;
@@ -164,6 +168,22 @@ class DataMoveWorkerDeferralForgetIntegrationTest extends DataMoveIntegrationBas
             "on_complete of " + c.move().label() + " did not complete: sqlstate=55P03", c.admin(), false));
     }
 
+    /** The {@code event=data_move_needs_operator} lines the root logger saw while {@code body} ran, one string each. */
+    private static List<String> pagesLogged(Runnable body) {
+        Logger root = (Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ListAppender<ILoggingEvent> logs = new ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            body.run();
+            return logs.list.stream().map(ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.contains("event=data_move_needs_operator")).toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
     @Test
     void aDeferralAfterAPage_keepsThePage_theWorkersBlockedHandlingReportsNoneOfItsOwn() throws Exception {
         register("d-page", "tenant_plain", 50, 0);
@@ -171,12 +191,13 @@ class DataMoveWorkerDeferralForgetIntegrationTest extends DataMoveIntegrationBas
         var next = new AtomicReference<MoveFinisher>(onCompleteTimeout());
         var w = pagedWorker(next);
 
-        assertThat(w.runCycle()).isEqualTo(1);
+        List<String> first = pagesLogged(() -> assertThat(w.runCycle()).isEqualTo(1));
         assertThat(w.states().state("d-page").orElseThrow().needsOperator()).as("non-vacuity: the failure paged").isTrue();
+        assertThat(first).as("non-vacuity: and logged its one page").hasSize(1);
 
         next.set(c -> wait.defer(c.move().label(), ONE, BuildWait.Path.BEFORE_LOCKS));
         pastTheRetry();
-        assertThat(w.runCycle()).isEqualTo(1);
+        List<String> second = pagesLogged(() -> assertThat(w.runCycle()).isEqualTo(1));
 
         var state = w.states().state("d-page").orElseThrow();
         assertThat(state.kind()).isEqualTo(MoveStates.Kind.BLOCKED);
@@ -185,7 +206,7 @@ class DataMoveWorkerDeferralForgetIntegrationTest extends DataMoveIntegrationBas
         assertThat(state.step()).isEqualTo("on_complete");
         assertThat(state.boundMs()).isEqualTo(900);
         assertThat(state.terminatesIndexBuilds()).isTrue();
-        assertThat(w.states().announce("d-page")).as("and announced nothing new: the failure's page is the only one").isFalse();
+        assertThat(second).as("and logged no second page: the failure's is the only one (a kept page is entered=false)").isEmpty();
     }
 
     @Test
@@ -217,5 +238,73 @@ class DataMoveWorkerDeferralForgetIntegrationTest extends DataMoveIntegrationBas
         assertThat(state.reason()).startsWith(BuildWait.REASON_PREFIX);
         assertThat(state.needsOperator()).as("nothing latched, so nothing kept").isFalse();
         assertThat(state.step()).isNull();
+    }
+
+    // ── the other BLOCKED sources that carried no page keep the latched one (nexus-p2m1x.27, 11-24 14:27 follow-up 2) ──────
+
+    /** A move whose CALL fails on every pass (a template without its chunking clause), so a pass reaches the failure handler. */
+    private void registerFailingCall(String label) {
+        DataMoveTestFixtures.register(ctx(), label, "leafed", 50, 0, null, "no-clause-template.sql");
+    }
+
+    /** Pages on its first failure, throws on every later one: the handler that fails after the page latched. */
+    private static final class PagesThenThrows implements FailureHandler {
+        private final java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+
+        @Override
+        public Disposition onFailure(Failure failure) {
+            if (calls.incrementAndGet() == 1) {
+                return Disposition.blocked("retry 3: needs an operator", "55P03", 3, PAGED);
+            }
+            throw new IllegalStateException("the handler's own connection is gone");
+        }
+    }
+
+    @Test
+    void aFailureHandlerThatThrowsAfterAPage_keepsThePage_andLogsNoSecondOne() throws Exception {
+        registerFailingCall("d-throws");
+        var w = worker(installed(), null, new PagesThenThrows(), MoveFinisher.RUNS_ONLY);
+
+        List<String> first = pagesLogged(() -> assertThat(w.runCycle()).isEqualTo(1));
+        assertThat(w.states().state("d-throws").orElseThrow().needsOperator()).as("non-vacuity: the first failure paged").isTrue();
+        assertThat(first).as("non-vacuity: and logged its one page").hasSize(1);
+
+        pastTheRetry();
+        List<String> second = pagesLogged(() -> assertThat(w.runCycle()).isEqualTo(1));
+
+        var state = w.states().state("d-throws").orElseThrow();
+        assertThat(state.reason()).as("non-vacuity: the handler failed on this pass").contains("the failure handler failed");
+        assertThat(state.kind()).isEqualTo(MoveStates.Kind.BLOCKED);
+        assertThat(state.needsOperator()).as("a handler that could not decide does not clear the page a counted failure latched").isTrue();
+        assertThat(state.step()).isEqualTo("on_complete");
+        assertThat(second).as("and the kept page is not announced again").isEmpty();
+    }
+
+    @Test
+    void aStoppedPassAfterAPage_keepsThePage_andLogsNoSecondOne() throws Exception {
+        registerFailingCall("d-stop");
+        FailureHandler paging = failure -> FailureHandler.Disposition.blocked("retry 3: needs an operator", "55P03", 3, PAGED);
+        var w = worker(installed(), null, paging, MoveFinisher.RUNS_ONLY);
+        // the first pass fails before any call connection is opened (the admin connection cannot be opened), and the handler pages it
+        w.beforeSessionOpenHook = () -> {
+            throw new IllegalStateException("no admin connection");
+        };
+
+        List<String> first = pagesLogged(() -> assertThat(w.runCycle()).isEqualTo(1));
+        assertThat(w.states().state("d-stop").orElseThrow().needsOperator()).as("non-vacuity: the failure paged").isTrue();
+        assertThat(first).as("non-vacuity: and logged its one page").hasSize(1);
+
+        // the engine goes down as the next pass opens its call connection: the pass ends at once, with no failure for the handler
+        w.beforeSessionOpenHook = null;
+        w.afterConnectionOpenedHook = w::stop;
+        pastTheRetry();
+        List<String> second = pagesLogged(() -> assertThat(w.runCycle()).isEqualTo(1));
+
+        var state = w.states().state("d-stop").orElseThrow();
+        assertThat(state.reason()).as("non-vacuity: the pass ended because the worker was stopped").contains("stopped");
+        assertThat(state.kind()).isEqualTo(MoveStates.Kind.BLOCKED);
+        assertThat(state.needsOperator()).as("a stop is not the operator's reset: the page stays").isTrue();
+        assertThat(state.step()).isEqualTo("on_complete");
+        assertThat(second).as("and the kept page is not announced again").isEmpty();
     }
 }

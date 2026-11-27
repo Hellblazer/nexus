@@ -159,6 +159,41 @@ class Rdr229P37OneRowRenameTest {
             .as("none of the five FK-bearing tables' rows is rewritten" + why()).isEqualTo(before);
     }
 
+    /**
+     * The chunk key {@code topic_assignments_chunk_fk} is name-keyed and the name-key drop move does not drop it (the RDR lists seven registry keys; this
+     * one points at {@code chunks}). Whether it blocks a one-row rename is a question of the vectors-079 trigger, which stamps the assignment's
+     * {@code source_collection} from the referenced chunk: the key stays satisfied because the child still names its chunk's stored (old) label.
+     * The rename must succeed and keep the assignments untouched.
+     */
+    @Test
+    void aOneRowRenameAfterTheLatch_succeedsWithTopicAssignmentsChunkFkStillInPlace_andKeepsTheAssignments() throws Exception {
+        String tenant = "p37-b2fk";
+        String token = engine.newTenant(tenant);
+        String oldName = coll("p37b2fk", 1);
+        String newName = coll("p37b2fk", 2);
+        engine.su(ctx -> {
+            Rdr229RenameSeeds.full(ctx, tenant, oldName);
+            return null;
+        });
+        long id = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, oldName));
+        assertThat(engine.completion().gate3Latched()).as("non-vacuity: after the latch" + why()).isTrue();
+        assertThat(engine.moveCompleted(Rdr229RenameEngine.DROP_LABEL)).as("non-vacuity: the drop move completed" + why()).isTrue();
+        assertThat(engine.<Long>su(ctx -> ctx.fetchOne("select count(*) from pg_catalog.pg_constraint where conname = 'topic_assignments_chunk_fk'")
+            .get(0, Long.class))).as("non-vacuity: the drop move left topic_assignments_chunk_fk in place" + why()).isPositive();
+        var before = engine.su(ctx -> Rdr229RenameChecks.snapshot(ctx, tenant,
+            new Rdr229RenameChecks.Site("topic_assignments", "source_collection", "source_collection_id"), oldName));
+        assertThat(before).as("non-vacuity: topic_assignments rows name the collection").hasSize(2);
+
+        var r = engine.rename(token, oldName, newName);
+
+        assertRenamedInPlace(tenant, oldName, newName, id, r);
+        assertThat(engine.<java.util.List<String>>su(ctx -> Rdr229RenameChecks.snapshot(ctx, tenant,
+            new Rdr229RenameChecks.Site("topic_assignments", "source_collection", "source_collection_id"), oldName)))
+            .as("the assignments are untouched: same rows, same xmin, still naming their chunks' stored label" + why()).isEqualTo(before);
+        assertThat(engine.<Long>su(ctx -> ctx.fetchOne("select count(*) from pg_catalog.pg_constraint where conname = 'topic_assignments_chunk_fk'")
+            .get(0, Long.class))).as("and the key is still there" + why()).isPositive();
+    }
+
     // ---- (c) ---------------------------------------------------------------------------------------------------------------
 
     @Test

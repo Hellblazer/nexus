@@ -497,7 +497,7 @@ class MainPciWiringTest {
      * string and char literals, so a {@code //} inside one (a URL) does not eat the rest of its line. Newlines inside
      * a block comment are kept, which keeps line numbers.
      */
-    private static String code(String src) {
+    static String code(String src) {
         StringBuilder out = new StringBuilder(src.length());
         int i = 0;
         int n = src.length();

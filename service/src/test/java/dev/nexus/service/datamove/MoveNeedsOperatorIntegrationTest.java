@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.BootWorkRegistry;
 import dev.nexus.service.TestHttp;
+import dev.nexus.service.db.PciBuilders;
 import dev.nexus.service.http.StatusHandler;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -781,6 +782,48 @@ class MoveNeedsOperatorIntegrationTest extends DataMoveIntegrationBase {
             assertThat(bootWorkEntry(after, NameKeyDropMove.LABEL).get("reason_class").asText())
                 .as("the same entry reads as a wait").isEqualTo("waiting_for_builds");
         }
+    }
+
+    @Test
+    void anOperatorResetAfterAKeptPage_clearsTheStatusPage_andTheNextRunOfThreeCountedFailuresPagesAgain() throws Exception {
+        registerMove("kept-reset", CHUNK_FAMILY_ON_COMPLETE);
+        var wait = new BuildWait();
+        wait.clock = clock;
+        var finisher = new AtomicReference<MoveFinisher>(onCompleteFailing("57014"));
+        var w = workerOn(c -> finisher.get().finish(c));
+        assertThat(w.runCycle()).isEqualTo(1);
+        cycle(w);
+        cycle(w);
+        assertThat(flag(status(w))).as("non-vacuity: three counted failures latched the page").isTrue();
+
+        // the move now defers behind a build: the page is KEPT (row 23), and the status still shows it
+        MoveFinisher defer = c -> wait.defer(c.move().label(), new PciBuilders.Building(1, List.of(4101)), BuildWait.Path.BEFORE_LOCKS);
+        finisher.set(defer);
+        cycle(w);
+        assertThat(stateOf(w, "kept-reset").reason()).as("non-vacuity: a deferral").startsWith(BuildWait.REASON_PREFIX);
+        assertThat(flag(status(w))).as("non-vacuity: the kept page is still on /v1/status").isTrue();
+
+        // the operator's retry-now UPDATE: the row's count is the status's own condition (MoveBootWork.needOperator), so the page goes
+        resetRow("kept-reset");
+        JsonNode reset = status(w);
+        assertThat(flag(reset)).as("the reset clears the page although the deferral kept it in memory").isFalse();
+        assertThat(labels(reset)).isEmpty();
+
+        cycle(w);   // another deferral: a deferral counts nothing, so it does not bring the page back
+        assertThat(retries("kept-reset")).as("a deferral counts nothing").isZero();
+        assertThat(flag(status(w))).as("and the status stays clear").isFalse();
+
+        // the count starts over: two counted failures page nobody, the third pages once
+        finisher.set(onCompleteFailing("57014"));
+        List<Event> first = capture(() -> cycle(w));
+        assertThat(retries("kept-reset")).isEqualTo(1);
+        assertThat(first).isEmpty();
+        assertThat(flag(status(w))).isFalse();
+        cycle(w);
+        assertThat(flag(status(w))).as("two counted failures after the reset do not page").isFalse();
+        List<Event> third = capture(() -> cycle(w));
+        assertThat(third).as("the third pages once, as a fresh run").hasSize(1);
+        assertThat(flag(status(w))).as("and /v1/status lists the move again").isTrue();
     }
 
     private static String shape(JsonNode n) {
