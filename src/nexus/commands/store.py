@@ -967,6 +967,13 @@ def expire_cmd(dry_run: bool) -> None:
         if report.notes_tombstoned:
             n = report.notes_tombstoned
             click.echo(f"{n} {'note' if n == 1 else 'notes'} retired; {count} {'chunk' if count == 1 else 'chunks'} deleted.")
+    skipped = report.retired_collections_skipped
+    if skipped:
+        click.echo(
+            f"{len(skipped)} retired collection{' was' if len(skipped) == 1 else 's were'} not swept (the engine "
+            f"refuses a read of a retired collection that has no live successor): {', '.join(skipped)}",
+            err=True,
+        )
     if report.row_ttl_unattributed:
         click.echo(
             f"{report.row_ttl_unattributed} chunk(s) carry a lapsed TTL on the chunk row but are held by "

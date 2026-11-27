@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from nexus.db.retired_rows import skip_retired_rows
+
 if TYPE_CHECKING:
     from nexus.db.http_vector_client import HttpVectorClient
 
@@ -65,6 +67,9 @@ class ExpireReport:
     orphan_chunks: int = 0
     candidate_chunks: int = 0
     dry_run: bool = False
+    retired_collections_skipped: tuple[str, ...] = ()
+    """Collections the sweep did not read because the registry lists them retired (RDR-229 R7): the engine refuses a
+    read of one by label when it has no live successor, and it can still hold chunks. Their rows are not swept."""
 
 
 class ExpireIncompleteError(RuntimeError):
@@ -280,7 +285,11 @@ def sweep_expired(client: HttpVectorClient, *, dry_run: bool = False) -> ExpireR
         return reader_box[0]
 
     try:
-        for entry in client.list_collections(routing=True):  # reads name and content_type only (nexus-mjmjl)
+        inventory, retired_skipped = skip_retired_rows(
+            client.list_collections(routing=True),  # reads name and content_type only (nexus-mjmjl)
+            site="store_expire",
+        )
+        for entry in inventory:
             name = entry.get("name", "")
             # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): `entry`
             # already carries `content_type` when a catalog row backs this
@@ -388,4 +397,5 @@ def sweep_expired(client: HttpVectorClient, *, dry_run: bool = False) -> ExpireR
     return ExpireReport(
         total, 0 if dry_run else notes, tuple(failures), unattributed, tuple(ttl_stale),
         retired=tuple(retired), orphan_chunks=orphans, candidate_chunks=candidates, dry_run=dry_run,
+        retired_collections_skipped=retired_skipped,
     )
