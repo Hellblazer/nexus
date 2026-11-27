@@ -71,7 +71,7 @@ class _Wire:
         self.sent: list[dict[str, Any]] = []
         #: The rows a descending read of the owner subspace answers, newest first.
         self.rows: list[dict[str, Any]] = []
-        self.store = HttpTupleStore(base_url="http://mock.test")
+        self.store = HttpTupleStore(base_url="https://mock.test")
         self.store._client = httpx.Client(transport=httpx.MockTransport(self._handle))
         self.store._invalidate_and_reresolve = lambda: None  # type: ignore[method-assign]
 

@@ -283,8 +283,9 @@ def _catalog(monkeypatch: pytest.MonkeyPatch, row: dict | None) -> HttpCatalogCl
         return httpx.Response(200, json={})
 
     monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
-    client = HttpCatalogClient(base_url="http://mock.test")
-    client._client = httpx.Client(base_url="http://mock.test", transport=httpx.MockTransport(handler))
+    # A loopback origin: a bearer is not sent over plain http to another host (nexus-ec37o).
+    client = HttpCatalogClient(base_url="http://127.0.0.1:4599")
+    client._client = httpx.Client(base_url="http://127.0.0.1:4599", transport=httpx.MockTransport(handler))
     return client
 
 

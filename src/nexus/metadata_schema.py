@@ -337,6 +337,21 @@ def ttl_listing_label(ttl_days: Any, indexed_at: str) -> str:
         return f"ttl {days}d"
 
 
+def chunk_row_expires_at(metadata: dict[str, Any]) -> datetime | None:
+    """The instant a chunk row's own TTL runs out (``indexed_at + ttl_days``), the instant :func:`is_expired`
+    tests against; ``None`` for a row with no TTL, no stamp, an unparseable stamp, or a TTL past datetime's
+    range. Quiet where :func:`is_expired` logs a legacy ``0``: it only dates a row, it never judges one.
+    For ``nx store expire`` to name when a keyless legacy note lapsed."""
+    days = chunk_ttl_days(metadata.get("ttl_days"))
+    indexed_at = metadata.get("indexed_at", "")
+    if days is None or not indexed_at:
+        return None
+    try:
+        return datetime.fromisoformat(indexed_at) + timedelta(days=days)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
     """Return ``True`` when *metadata* has elapsed its TTL.
 

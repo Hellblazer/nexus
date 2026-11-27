@@ -1513,7 +1513,8 @@ class TitleReap:
     must leave alone (no other path may reap a document this one refused);
     *stale* ``(tumbler, title)`` of each lapsed note the TTL sweep left alone
     because a chunk row of its own records a later put than its catalog TTL
-    keys do (nexus-6pfgb.30). Their chunks are in *held* too.
+    keys do (nexus-6pfgb.30). Their chunks are in *held* too. *expiries* are
+    ``(tumbler, ISO-8601 instant)`` of each document the TTL sweep retired: when its own TTL ran out.
     """
 
     documents: tuple[tuple[str, str], ...]
@@ -1521,6 +1522,7 @@ class TitleReap:
     failures: tuple[tuple[str, str], ...]
     held: tuple[str, ...] = ()
     stale: tuple[tuple[str, str], ...] = ()
+    expiries: tuple[tuple[str, str], ...] = ()
 
 
 def _is_title_reap_candidate(entry, title: str, collection: str) -> bool:
@@ -1631,6 +1633,7 @@ def _reap_documents(
     reader, writer, entries, collection: str, *, title: str = "",
     still_due: Callable[[Any], bool] | None = None,
     guard: Callable[[Any, list[str]], tuple[str, str] | None] | None = None,
+    dry_run: bool = False,
 ) -> TitleReap:
     """Tombstone each of *entries*, retracting its own manifest first; the one note delete path
     behind ``nx store delete --title`` and the TTL sweep (nexus-6pfgb.15).
@@ -1650,8 +1653,13 @@ def _reap_documents(
     that records a later put than the catalog's TTL keys, nexus-6pfgb.30) is reported in ``stale``;
     any other kind (``"unreadable"``: the rows could not be read, so the answer is unknown) is a
     failure. Either way the document stays live and its chunks are held.
+
+    *dry_run* takes every decision above and writes nothing (*writer* may then be ``None``): each document
+    that would be reaped is returned as if it had been, so ``nx store expire --dry-run`` judges by this
+    code and not a copy of it.
     """
     documents: list[tuple[str, str]] = []
+    expiries: list[tuple[str, str]] = []
     reaped_chashes: dict[str, None] = {}
     failures: list[tuple[str, str]] = []
     held: dict[str, None] = {}
@@ -1675,6 +1683,11 @@ def _reap_documents(
                 else:
                     failures.append((tumbler, detail))
                 continue
+        if dry_run:
+            documents.append((tumbler, getattr(entry, "title", "") or title))
+            reaped_chashes.update(dict.fromkeys(r["chash"] for r in original))
+            expiries.append((tumbler, _expiry_of(fresh)))
+            continue
         row_collection = entry.physical_collection or collection
         try:
             if original:
@@ -1703,7 +1716,18 @@ def _reap_documents(
             continue
         documents.append((tumbler, getattr(entry, "title", "") or title))
         reaped_chashes.update(dict.fromkeys(r["chash"] for r in original))
-    return TitleReap(tuple(documents), tuple(reaped_chashes), tuple(failures), tuple(held), tuple(stale))
+        expiries.append((tumbler, _expiry_of(fresh)))
+    return TitleReap(
+        tuple(documents), tuple(reaped_chashes), tuple(failures), tuple(held), tuple(stale), tuple(expiries))
+
+
+def _expiry_of(entry) -> str:
+    """When *entry*'s own TTL ran out (ISO-8601), ``""`` for a document with none: a delete by title has no
+    TTL and the sweep only reaps documents that have lapsed."""
+    from nexus.catalog import note_ttl  # noqa: PLC0415 — sibling module, deferred like the other catalog imports here
+
+    at = note_ttl.expires_at(getattr(entry, "meta", None), getattr(entry, "indexed_at", "") or "")
+    return at.isoformat() if at is not None else ""
 
 
 def lapsed_note_documents(reader, collection: str, *, now: datetime) -> list:
@@ -1728,6 +1752,7 @@ def lapsed_note_documents(reader, collection: str, *, now: datetime) -> list:
 def reap_lapsed_note_documents(
     collection: str, *, now: datetime,
     row_reader: Callable[[list[str]], dict[str, dict]] | None = None,
+    dry_run: bool = False,
 ) -> TitleReap | None:
     """Tombstone every note in *collection* whose own TTL has lapsed, each through the note delete
     path of ``nx store delete --title`` (manifest retracted, then the document tombstoned; all or
@@ -1743,6 +1768,9 @@ def reap_lapsed_note_documents(
     (:func:`~nexus.catalog.note_ttl.catalog_ttl_stale`, nexus-6pfgb.30: a re-put by an older client, or a
     writer that bypasses the catalog hook, leaves the catalog entry stale). If the rows cannot be read
     the note is not retired and is reported as a failure: no read, no deletion.
+
+    *dry_run* judges every note the same way and tombstones none (no catalog writer is opened): the returned
+    ``documents`` are the notes a real run would retire (``nx store expire --dry-run``).
     """
     from nexus.catalog import note_ttl  # noqa: PLC0415 — sibling module, deferred like the other catalog imports here
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
@@ -1755,11 +1783,12 @@ def reap_lapsed_note_documents(
         entries = lapsed_note_documents(reader, collection, now=now)
         if not entries:
             return TitleReap((), (), ())
-        writer = make_catalog_writer()
+        writer = None if dry_run else make_catalog_writer()
         return _reap_documents(
             reader, writer, entries, collection,
             still_due=lambda e: note_ttl.lapsed(e.meta, e.indexed_at, now=now),
             guard=None if row_reader is None else _row_guard(row_reader),
+            dry_run=dry_run,
         )
     finally:
         if writer is not None:

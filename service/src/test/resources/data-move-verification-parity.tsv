@@ -41,6 +41,7 @@ accept	quoted-name-without-a-placeholder	SELECT 1 AS "a b" FROM {VTAB} WHERE a =
 accept	chr-63-and-an-escaped-question-mark	SELECT 1 FROM {VTAB} WHERE a LIKE '%' || chr(63) || '%' AND b LIKE E'%\\x3f%' AND c = $1
 accept	e-string-with-an-escaped-backslash-in-the-literal	SELECT 1 FROM {VTAB} WHERE a LIKE E'%\\\\%' AND c = $1
 accept	tenant-or-null	SELECT 1 FROM {VTAB} WHERE tenant_id = $1 OR $1 IS NULL
+accept	table-wide-only-comment-led	/* nexus:table-wide-only */\nSELECT 1 FROM {VTAB} WHERE $1 IS NULL AND a = 'q'
 accept	placeholder-in-punctuation	SELECT count(*) FROM {VTAB} WHERE (tenant_id = $1) AND a IN ($1, 'x') AND b = coalesce($1,'y')
 accept	no-placeholder-table-wide	SELECT 1 FROM {VTAB} WHERE a IS NULL
 

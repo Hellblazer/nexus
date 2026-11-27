@@ -10,6 +10,7 @@ import pytest
 from voyageai.object.embeddings import EmbeddingsObject
 
 from nexus.indexer import CredentialsMissingError, index_repository
+from tests._fake_credentials import SAVED_FAKE_CREDENTIALS, fake_credential
 from tests.conftest import catalog_row_for_collection_name, make_vector_test_client
 from tests._module_seam import module_time
 
@@ -146,7 +147,8 @@ def _patches(db, *, cfg=None, extra=None):
     patches = {
         "nexus.frecency.batch_frecency": {"return_value": {}},
         "nexus.config.load_config": {"return_value": cfg or _DEFAULT_CONFIG},
-        "nexus.config.get_credential": {"return_value": "fake-key"},
+        "nexus.config.get_credential": {"side_effect": fake_credential},
+        "nexus.config.persisted_credentials": {"return_value": SAVED_FAKE_CREDENTIALS},
         "nexus.db.make_t3": {"return_value": db},
         "voyageai.Client": {},
         # Catalog seam (nexus-i711w, see module header): the stubbed config

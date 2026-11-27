@@ -31,7 +31,11 @@ _RES = Path(__file__).resolve().parents[1] / "service" / "src" / "main" / "resou
 OWN = ("db/changelog/vectors-077-rdr229-p35b-readers-both.xml", "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml")
 # Changelogs after P3.5b that redefine objects P3.5b redefined (vectors-083, RDR-229 P3.7, nexus-p2m1x.27): not "before P3.5b", so they are not a last
 # definer here. Their own rollbacks restore the vectors-077 text, which this test does not judge.
-LATER = ("db/changelog/vectors-083-restore-by-origin-id.xml",)
+# vectors-085 (nexus-p2m1x.28) redefines gc_quarantine_orphans, gc_quarantine_orphans_bounded, reaper_quarantine_chunks, gc_restore_rereferenced and
+# gc_restore_rereferenced_bounded the same way: not "before P3.5b", so not a last definer here, and its own rollbacks are not judged by this test.
+# vectors-086 (nexus-p2m1x.28) is the same kind: it redefines the two reaper expiries once more, and its rollbacks restore vectors-077-55's and vectors-083-7's text.
+LATER = ("db/changelog/vectors-083-restore-by-origin-id.xml", "db/changelog/vectors-085-quarantine-tuple-guards.xml",
+         "db/changelog/vectors-086-reaper-expiry-by-origin-id.xml")
 # vectors-084 ADDS overloads (nexus.taxonomy_ann_query_<dim> with a trailing p_collection_id bigint) and redefines nothing: it is not a
 # definer of the object the 078 rollbacks restore, and its own rollback drops exactly the overload it added.
 OVERLOADS = ("db/changelog/vectors-084-rdr229-ann-query-by-id.xml",)

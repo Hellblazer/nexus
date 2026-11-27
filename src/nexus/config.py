@@ -1681,6 +1681,31 @@ def persisted_credentials(config_dir: Path) -> dict[str, str]:
     }
 
 
+def _checked_network_value(dotted_key: str, value: str | bool) -> str:
+    """The value ``nx config set network.<key>`` stores, or ``ValueError`` (nexus-ec37o).
+
+    ``network.https_proxy`` and ``network.ca_bundle`` are the one place a proxy and an extra CA for a
+    bearer-carrying request come from: a typo'd key would be silently inert, and a missing bundle would
+    fail every such request, so both are checked when set."""
+    key = dotted_key.removeprefix("network.")
+    if key not in ("https_proxy", "ca_bundle"):
+        raise ValueError(f"unknown network setting {dotted_key!r}; known: network.https_proxy, network.ca_bundle")
+    text = value.strip() if isinstance(value, str) else ""
+    if not text:
+        raise ValueError(f"{dotted_key} needs a value (nx config unset {dotted_key} removes it)")
+    if key == "https_proxy":
+        from urllib.parse import urlsplit  # noqa: PLC0415 — deferred: only this check needs it
+
+        parts = urlsplit(text)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(f"{dotted_key} must be a URL like http://proxy.example:3128, got {text!r}")
+        return text
+    path = Path(text).expanduser()
+    if not path.exists():
+        raise ValueError(f"{dotted_key}: {text} does not exist (a PEM file, or a directory of hashed certificates)")
+    return str(path.resolve())
+
+
 def set_config_value(dotted_key: str, value: str | bool) -> None:
     """Persist a dotted config key in ``~/.config/nexus/config.yml``.
 
@@ -1698,6 +1723,8 @@ def set_config_value(dotted_key: str, value: str | bool) -> None:
     if dotted_key == "credentials.service_url" and isinstance(value, str):
         # The dotted spelling reaches the same key set_credential guards.
         require_no_userinfo(value.strip(), source="the service_url value")
+    if dotted_key.startswith("network."):
+        value = _checked_network_value(dotted_key, value)
     if dotted_key == "sensitivity.mcp_output" and (not isinstance(value, str) or value.strip().lower() not in ("withhold", "flag")):
         raise ValueError(f"sensitivity.mcp_output must be 'withhold' or 'flag', got {value!r}")
     path = _global_config_path()
@@ -1806,6 +1833,44 @@ def unset_credential(name: str) -> bool:
         try:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
                 restrict_to_owner(tmp_path)  # before any secret byte is written; os.replace keeps this file's ACL
+                fh.write(content)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass  # intentional: cleanup after re-raise
+            raise
+    return True
+
+
+def unset_config_value(dotted_key: str) -> bool:
+    """Remove a dotted setting (``network.https_proxy``) from ``config.yml``, pruning a section it
+    leaves empty. ``True`` when it was present, ``False`` when already absent (nexus-ec37o)."""
+    path = _global_config_path()
+    if not path.exists():
+        return False
+    parts = dotted_key.split(".")
+    with _config_write_lock(path):
+        data: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        chain: list[dict[str, Any]] = [data]
+        for part in parts[:-1]:
+            nxt = chain[-1].get(part)
+            if not isinstance(nxt, dict):
+                return False
+            chain.append(nxt)
+        if parts[-1] not in chain[-1]:
+            return False
+        del chain[-1][parts[-1]]
+        for depth in range(len(parts) - 1, 0, -1):
+            if chain[depth]:
+                break
+            del chain[depth - 1][parts[depth - 1]]
+        content = yaml.dump(data, default_flow_style=False)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+                restrict_to_owner(tmp_path)
                 fh.write(content)
             os.replace(tmp_path, path)
         except Exception:

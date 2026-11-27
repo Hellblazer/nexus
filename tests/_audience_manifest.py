@@ -9,8 +9,8 @@ way the manifest and the code disagree, and the lint test and the behaviour leg 
 
 The checks, each a way a rule can reach the wrong audience unnoticed:
 
-* every ``hooks.json`` registration has an entry, keyed on event plus argv (24 registrations, 23 distinct argv: auto-approve
-  is registered for PreToolUse and PermissionRequest with one argv), and an entry names a registration that exists;
+* every ``hooks.json`` registration has an entry, keyed on event plus argv (23 registrations, 23 distinct argv: auto-approve
+  is registered on PreToolUse only), and an entry names a registration that exists;
 * every value is in its vocabulary, and an audience agrees with its gate (``SETTING:<key>`` <-> ``setting``, EVERY-USER <->
   none or a gate on the user's data);
 * a declared constant exists, and every module-level string constant of 40 characters or more in a hook module is declared
@@ -95,7 +95,7 @@ AUDIENCE_MODULE_NAMES = ("_audience", "nexus.hooks._audience")
 CENSUS_MIN_CHARS = 40
 HOOK_DIRS = ("conexus/hooks/scripts", "src/nexus/hooks")
 EXTRA_MODULES = ("src/nexus/session_start_guidance.py",)
-MIN_REGISTRATIONS = 23
+MIN_REGISTRATIONS = 22
 MAX_DECISION = 13
 
 _ENTRY_FIELDS = ("audience", "gate", "evidence", "target_state", "phase")

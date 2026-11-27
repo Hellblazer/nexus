@@ -59,6 +59,14 @@ class CascadeCounts:
     #: a re-embed job in a non-terminal state holds the collection, and nothing was removed (RDR-229 P3.5a row 14,
     #: engine 0.1.202). Set with ``service_delete_failed``; a caller that can say why reads this one.
     collection_busy: dict[str, str] | None = None
+    #: The typed refusal (nothing removed) when the engine answered a delete with 404 ``unknown_collection_id``, 409
+    #: ``collection_superseded`` or 409 ``collection_label_ambiguous`` (RDR-229 P3.12; :mod:`nexus.catalog.engine_writes.collection_delete`).
+    #: Set with ``service_delete_failed``; ``nx collection delete`` raises it, ``prune`` and ``reindex`` keep the failure answer.
+    refusal: Exception | None = None
+    #: A delete by ``collection_id`` (RDR-229 P3.12) reports what the engine's 200 named: the label the id resolved to (the key the
+    #: pipeline purge uses) and the id. ``""`` / None for a delete by label.
+    name: str = ""
+    collection_id: int | None = None
     failures: list[str] = field(default_factory=list)
 
 
@@ -118,7 +126,7 @@ def _purge_pipeline_db(name: str, counts: CascadeCounts) -> CascadeCounts:
 
 
 def purge_collection_cascade(
-    db: object, name: str, *, keep_quarantine: bool = False,
+    db: object, name: str = "", *, keep_quarantine: bool = False, collection_id: int | None = None,
 ) -> CascadeCounts:
     """Delete T3 collection *name* and cascade-purge all derived state.
 
@@ -133,8 +141,12 @@ def purge_collection_cascade(
     (``nx collection reindex``), where taking the rows would destroy
     restorable data for nothing. It also keeps the empty retired rows that
     name the collection as successor (rename redirects, nexus-s80u9).
+
+    ``collection_id`` (RDR-229 P3.12) deletes by id instead of *name* (leave *name* empty): the engine's 200 names the label, and the
+    pipeline purge runs under that label. The id is never looked up to a label here. A refusal the engine types (unknown id,
+    superseded, label clash) lands in ``refusal``.
     """
-    counts = CascadeCounts()
+    counts = CascadeCounts(collection_id=collection_id)
 
     # RDR-164 P2: the entire in-Postgres cascade (T3 chunks,
     # chash index, taxonomy topics/assignments/centroids, aspect family, and
@@ -149,7 +161,13 @@ def purge_collection_cascade(
         if client is None:  # service mode always returns a client; guard for a clear error
             raise RuntimeError("catalog service client unavailable")
         # The field is sent only when true (additive: an engine or client that predates it is unchanged).
-        if keep_quarantine:
+        if collection_id is not None:
+            from nexus.catalog.engine_writes.collection_delete import delete_by_id  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+            answer = delete_by_id(client, collection_id)
+            deleted = answer.get("deleted") or {}
+            name = counts.name = str(answer.get("name") or "")
+        elif keep_quarantine:
             deleted = client.delete_collection(name, keep_quarantine=True)  # type: ignore[attr-defined]
         else:
             deleted = client.delete_collection(name)  # type: ignore[attr-defined]
@@ -183,8 +201,15 @@ def purge_collection_cascade(
         _log.warning("purge_cascade_service_failed", collection=name, error=str(exc))
         counts.failures.append(f"service deleteCollection failed: {exc}")
         counts.collection_busy = collection_busy_of(exc, name)
+        from nexus.catalog.engine_writes.collection_delete import CollectionDeleteRefusedError, refusal_of  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        counts.refusal = exc if isinstance(exc, CollectionDeleteRefusedError) else refusal_of(exc)
         counts.service_delete_failed = True
         # The delete is unconfirmed (it may not have committed), so the pipeline buffer of what may still be a
         # live collection is left alone; a re-run of the delete takes it once the service confirms (nexus-69n4q).
+        return counts
+    if not name:
+        # an id delete whose 200 named no label (an engine defect): the pipeline buffer is keyed by label, so it cannot be swept
+        counts.failures.append("pipeline-state cleanup skipped: the engine's answer named no label")
         return counts
     return _purge_pipeline_db(name, counts)

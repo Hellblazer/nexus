@@ -16,7 +16,7 @@ Two files, read by the plugin's hooks: a project's tracked `.nexus/project.json`
 
 The two older markers, `.nexus/dev-process.json` (the Phase 2 file) and `scripts/agent-worktree-preflight.sh` (the Phase 1 file), are gone: a checkout with no `.nexus/project.json` reads plain (the seatbelt) whatever those files say. A project that relied on `.nexus/dev-process.json` for the strict guard writes `.nexus/project.json` with `"subagent_git": "strict"`.
 
-The default for every key is the same for everyone: the seatbelt, neutral text, no blocked advice row, no telemetry, the T1 nudge on. The seven destructive and other-party tools (`memory_delete`, `answer_plan_delete` and its old name, `memory_consolidate`, `nx_tidy`, `tuple_in`, `mailbox_send`) are auto-approved for every user; a user who wants a prompt adds an `ask` rule in their own Claude Code settings, and the plugin's approver answers on PreToolUse only, so Claude Code's own rule decides. (Depends on the PermissionRequest registration's removal, nexus-sby49.14.)
+The default for every key is the same for everyone: the seatbelt, neutral text, no blocked advice row, no telemetry, the T1 nudge on. The seven destructive and other-party tools (`memory_delete`, `answer_plan_delete` and its old name, `memory_consolidate`, `nx_tidy`, `tuple_in`, `mailbox_send`) are auto-approved for every user; a user who wants a prompt adds an `ask` rule in their own Claude Code settings, and the plugin's approver answers on PreToolUse only, so Claude Code's own rule decides.
 
 ## The helper
 
@@ -32,7 +32,7 @@ Invariants, each of which is a test:
 
 ## Declaring a rule: `conexus/hooks/audience.yaml`
 
-Every `hooks.json` registration, every module that carries text or reads a setting, every injected constant and every rule that is not a constant has an entry, with `audience` (`EVERY-USER`, `SETTING:<key>` or `REMOVE`), `gate` (`none`, `setting` or `data`), `evidence` (the ledger row, the incident or the decision of record), `target_state` and `phase`. A registration is keyed on event plus argv: 23 registrations, 22 distinct argv, because auto-approve is registered for PreToolUse and PermissionRequest with one argv.
+Every `hooks.json` registration, every module that carries text or reads a setting, every injected constant and every rule that is not a constant has an entry, with `audience` (`EVERY-USER`, `SETTING:<key>` or `REMOVE`), `gate` (`none`, `setting` or `data`), `evidence` (the ledger row, the incident or the decision of record), `target_state` and `phase`. A registration is keyed on event plus argv: 23 registrations, 23 distinct argv; auto-approve is registered on PreToolUse only (8.5.8).
 
 `tests/test_plugin_audience_lint.py` (checker: `tests/_audience_manifest.py`) fails on:
 

@@ -378,12 +378,24 @@ def test_info_prints_the_rows_model_not_the_local_embedder(runner, env_creds, mo
 # ── delete ──────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture
+def registry_without_rows():
+    """``nx collection delete LABEL`` reads the registry listing before it asks (RDR-229 P3.12: the superseded-label and label-clash
+    check). These tests patch the cascade, so the read gets an empty registry rather than touching a service."""
+    cat = MagicMock()
+    cat.list_collections.return_value = []
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=cat):
+        yield cat
+
+
+@pytest.mark.usefixtures("registry_without_rows")
 def test_delete_aborts_without_confirmation(runner, env_creds, mock_db) -> None:
     result = _invoke(runner, mock_db, ["delete", "old"], input="n\n")
     assert result.exit_code != 0
     mock_db.delete_collection.assert_not_called()
 
 
+@pytest.mark.usefixtures("registry_without_rows")
 def test_delete_surfaces_cascade_failures(runner, env_creds, mock_db) -> None:
     """nexus-prgf4 follow-up: a cascade-step failure must reach the CLI user
     on stderr, not vanish into structlog (the silence regression)."""
@@ -400,6 +412,7 @@ def test_delete_surfaces_cascade_failures(runner, env_creds, mock_db) -> None:
     assert "catalog cascade failed: boom" in result.output
 
 
+@pytest.mark.usefixtures("registry_without_rows")
 def test_delete_with_failed_service_cascade_is_unconfirmed_and_exits_nonzero(
     runner, env_creds, mock_db,
 ) -> None:
@@ -421,6 +434,7 @@ def test_delete_with_failed_service_cascade_is_unconfirmed_and_exits_nonzero(
     assert "service deleteCollection failed" in result.output
 
 
+@pytest.mark.usefixtures("registry_without_rows")
 def test_delete_reports_the_quarantine_rows_the_engine_took_with_the_origin(runner, env_creds, mock_db) -> None:
     """nexus-wbfpw.68/.71: deleting an origin takes its quarantine rows in the same engine
     transaction, one gc_audit row per sibling. The user must see that they went."""
@@ -435,6 +449,7 @@ def test_delete_reports_the_quarantine_rows_the_engine_took_with_the_origin(runn
     assert "collection_delete_quarantine" in result.output
 
 
+@pytest.mark.usefixtures("registry_without_rows")
 def test_delete_prints_the_chunk_count_it_removed(runner, env_creds, mock_db) -> None:
     from nexus.db.collection_purge import CascadeCounts
 
@@ -448,6 +463,7 @@ def test_delete_prints_the_chunk_count_it_removed(runner, env_creds, mock_db) ->
     assert "41 chunks" in result.output
 
 
+@pytest.mark.usefixtures("registry_without_rows")
 def test_delete_does_not_ask_to_keep_quarantine_rows(runner, env_creds, mock_db) -> None:
     """nexus-wbfpw.71: `nx collection delete` takes the origin's quarantine rows (audited); only
     reindex, which re-registers the same name, opts out."""
@@ -462,6 +478,7 @@ def test_delete_does_not_ask_to_keep_quarantine_rows(runner, env_creds, mock_db)
     assert "keep_quarantine" not in str(cascade.call_args)
 
 
+@pytest.mark.usefixtures("registry_without_rows")
 def test_delete_of_a_quarantine_collection_prints_the_rows_it_removed_once(runner, env_creds, mock_db) -> None:
     """nexus-wbfpw.71: the audited manual route for rows whose origin is gone must tell the operator
     how many went and which gc_audit operation recorded it (the engine reports the rows under both
@@ -477,6 +494,7 @@ def test_delete_of_a_quarantine_collection_prints_the_rows_it_removed_once(runne
     assert result.output.count("294") == 1
 
 
+@pytest.mark.usefixtures("registry_without_rows")
 def test_delete_says_nothing_about_quarantine_when_none_went(runner, env_creds, mock_db) -> None:
     from nexus.db.collection_purge import CascadeCounts
 

@@ -218,7 +218,7 @@ from nexus.db.t2._refreshable_client import _resolve_token_only
 def test_peeks_from_src():
     _service_t2_is_env_pinned()                       # get_credential(service_url) via the helper
     try:
-        _resolve_token_only()                         # get_credential(service_token) + discover_lease
+        _resolve_token_only('http://127.0.0.1:9')      # get_credential(service_token) + discover_lease
     except Exception:
         pass
 

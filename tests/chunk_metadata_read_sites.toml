@@ -227,6 +227,10 @@ tags = 1
 title = 1
 ttl_days = 1
 
+[sites."src/nexus/metadata_schema.py::chunk_row_expires_at"]
+indexed_at = 1
+ttl_days = 1
+
 [sites."src/nexus/metadata_schema.py::is_expired"]
 indexed_at = 1
 ttl_days = 1

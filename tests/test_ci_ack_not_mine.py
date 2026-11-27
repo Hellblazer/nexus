@@ -46,7 +46,7 @@ class _Wire:
         #: When set, a read answers only the rows of the subspace it names (a board with none answers nothing).
         self.by_subspace: dict[str, list[dict[str, Any]]] | None = None
         self.reads: list[str] = []
-        self.store = HttpTupleStore(base_url="http://mock.test")
+        self.store = HttpTupleStore(base_url="https://mock.test")
         self.store._client = httpx.Client(transport=httpx.MockTransport(self._handle))
         self.store._invalidate_and_reresolve = lambda: None  # type: ignore[method-assign]
 

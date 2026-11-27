@@ -466,6 +466,7 @@ _NOT_SENDERS: dict[str, str] = {
     "nexus/db/managed_endpoint.py": "engine probe: GET /version",
     "nexus/db/serving_engine_version.py": "engine probe: GET /version (the one probe; mcp/channel delegates to it and makes no call of its own), RDR-231 note-write guard",
     "nexus/db/pooled_http.py": "connection-pool transport of http_vector_client; the sender is that module's _request_once",
+    "nexus/db/t2/bearer_transport.py": "builds the client kwargs and urllib opener a bearer request goes through (nexus-ec37o); the callers send the headers",
     "nexus/health.py": "probes: PyPI, GET /v1/_whoami, health",
     "nexus/upgrade_ladder/provisioning.py": "engine probes: GET /version, /health",
     # test seams over an in-process fake: no engine
