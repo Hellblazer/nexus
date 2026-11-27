@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Red-run report over a snapshot of develop CI runs (RDR-258 Phase 0 step 2, nexus-2jomg.1).
 
-    red_run_report.py extract --snapshot DIR --repo . --out scripts/red-run-extraction-2026-09-23_2026-11-23.jsonl.gz
-    red_run_report.py report  --extraction FILE [--top 15] [--repo .]
+    red_run_report.py fetch-green-jobs --snapshot DIR --out GREENDIR
+    red_run_report.py extract --snapshot DIR --green-jobs GREENDIR --repo . --out scripts/red-run-extraction-2026-09-23_2026-11-23.jsonl.gz
+    red_run_report.py report  --extraction FILE [--top 15] [--repo .] [--sample RULE N --seed S]
     red_run_report.py mvv     --extraction FILE
+    red_run_report.py candidates --extraction FILE --out FILE.json [--repo .]
 
 ``extract`` reads the Phase 0 step 1 snapshot (``runs.jsonl``, ``jobs/<run>.json``,
 ``logs/<run>/<job>.log``) and the git history, and writes one compressed jsonl file with four
@@ -20,23 +22,39 @@ snapshot ``failure`` gives 789 runs and 788 with the jobless one dropped, agains
 (258-research-1); ``cancelled`` (440) and ``startup_failure`` (1) are not red runs. Strand B's own
 scope is not recorded, so the option exists to make the choice explicit, not to fit the figure.
 
-Fix signal. The next green run of the same workflow ends the red episode; the commits in
-``<red sha>..<green sha>`` are the fix range. For an item: ``touched_test`` is whether a commit in
-the range touched the failing test's file, ``fix_touched_product`` whether one of the commits that
-touched it also touched ``src/`` or ``service/src/main/`` (the 258-research-15 reading). A run whose
-next green ran on the same sha is a rerun-green. ``fix_product_commit`` on the run is the range-wide
-form (a ``fix``-typed commit anywhere in the range touched product code), kept as a record.
+Resolution. A red run is resolved only by a later run of the same workflow, on the red sha or a
+descendant of it, in which a job of the same name (the matrix-expanded name included) succeeded,
+for every job that failed in the red run. A later run that skipped the job, or that has no job of
+that name, does not resolve it; a doc-only green that skipped every pytest shard once closed a red
+and hid the real fix. The jobs of those later runs are not in the snapshot: ``fetch-green-jobs``
+fetches them (``gh api``, read-only) into a directory that ``extract --green-jobs`` reads. A red run
+not resolved within its next ``GREEN_CANDIDATES_MAX`` successful runs is unresolved-unverified.
 
-Categories (strand B's six) are assigned by the ordered rules in ``label_item``: build step, infra
-signature, accounting (lint-bucket jobs, ratchet and floor steps, repo-text-pin file names and
-messages), harness (``tests/scripts/``, tooling file names), then for what is left a rerun-green or
-a green with no fix to the test is flake, a fix commit that changed the test and product code is
-a product defect, and a test edited to go green is stale or ambient-coupled. A step with no named
-test falls back to the pytest failed-count (Windows: portability) or to "the log shows no failure".
-A run takes the category of the majority of its non-derived items (ties by ``PRIORITY``). Strand B's
-classifier is gone; the rules are rebuilt from 258-research-1, -2 and -15, and each item records the
-rule that labelled it so a category that moves against strand B can be explained by rule. They are
-not fitted to strand B's counts.
+Fix signal. The commits in ``<red sha>..<resolving green sha>`` are the fix range, so the range ends
+at the first run that passed the failing job, not at the first success. For an item the fix is the
+FIRST commit in that range that touched the failing test's file, at whatever distance: the range is
+already bounded by the job passing, so no commit-count window is applied (an earlier 10-commit
+window missed census fixes at distance 11 to 15). ``fix_distance`` records how far it is.
+``fix_touched_product`` says whether that commit also touched ``src/`` or ``service/src/main/``
+(the 258-research-15 reading), ``fix_is_fix`` whether its subject is ``fix``-typed, and
+``fix_table_only`` whether its diff to the file is only table-like lines. A run whose resolving
+green ran on the same sha is a rerun-green. ``fix_product_commit`` on the run is the range-wide form.
+
+Categories. The six of strand B plus ``unattributed``, assigned by the ordered rules in
+``label_item``: build step, infra signature (``##[error]`` lines of a step with no named test),
+accounting (lint-bucket jobs, ratchet and floor steps, census and pin messages, repo-text-pin file
+names, count pins on an entries dict), harness, then for a named test a timing message is flake, a
+fix commit that changed the test and product code is a product defect, a test edited to go green is
+stale or ambient-coupled, and a test that went green with no commit touching it, or that no later
+run verifiably resolved, is ``unattributed``: the record cannot say whether it was flaky, ambient,
+or fixed in ``src/`` without touching the test. ``unattributed`` is counted in none of strand B's six;
+the MVV prints it beside flake and stale with the bracket each implies. A step with no named test
+falls back to the pytest failed-count (Windows: portability). A run takes the category of the
+majority of its non-derived items (ties by ``PRIORITY``). Strand B's classifier is gone; the rules
+are rebuilt from 258-research-1, -2 and -15, hand-sampled, and each item records the rule that
+labelled it. They are not fitted to strand B's counts.
+
+``candidates`` writes the flake and unattributed named tests as JSON (one row per test).
 
 Check headers (wren's ``check_headers.py``) are not read here. ``guard_catches`` takes a
 ``check -> guard paths`` mapping so the header parser plugs in later.
@@ -47,13 +65,18 @@ from __future__ import annotations
 import argparse
 import collections
 import gzip
+import hashlib
 import json
+import os
 import random
 import re
 import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -80,10 +103,11 @@ NON_GUARD_FILES: tuple[str, ...] = (
 )
 #: Data files (not code) whose name marks them as a ledger, ceiling or allowlist.
 NON_GUARD_RE: re.Pattern[str] = re.compile(
-    r"(allowlist|ceiling|exceptions|pending)[^/]*\.(toml|txt|md|json|ya?ml|csv)$", re.I)
-#: A fix commit this many commits (or fewer) after the red sha, and touching the failing file, is
-#: read as the fix of that failure; a touch further out is read as an unrelated edit.
-FIX_DISTANCE_MAX: int = 10
+    r"(allowlist|ceiling|exceptions)[^/]*\.(toml|txt|md|json|ya?ml|csv)$", re.I)
+#: A red run not resolved within its next this-many successful runs of the workflow is unresolved.
+GREEN_CANDIDATES_MAX: int = 60
+#: The Phase 0 step 1 archive (T2 nexus/rdr258-phase0-baseline-snapshot), for the candidates header.
+PHASE0_ARCHIVE_SHA256: str = "520722bfbf0a9e75b566093f5ab19078ef3e3c41f39af4a356714d07b7f8a968"
 PLACEHOLDER_JOB: str = "(jobs file missing)"
 
 # --- categories ----------------------------------------------------------------------------
@@ -94,9 +118,10 @@ FLAKE: str = "flake_infra"
 STALE: str = "stale_ambient"
 HARNESS: str = "harness"
 BUILD: str = "build_ruff"
+UNATTRIBUTED: str = "unattributed"
 UNLABELLED: str = "unlabelled"
-#: Order of the six, for tables and for breaking a majority tie.
-PRIORITY: tuple[str, ...] = (PRODUCT, ACCOUNTING, STALE, HARNESS, BUILD, FLAKE)
+#: Order of the categories, for tables and for breaking a majority tie.
+PRIORITY: tuple[str, ...] = (PRODUCT, ACCOUNTING, STALE, HARNESS, BUILD, FLAKE, UNATTRIBUTED)
 
 #: Strand B's figures (258-research-1, -2); the MVV compares against these.
 STRAND_B_TOTAL: int = 787
@@ -180,6 +205,8 @@ META_MSG_RE: re.Pattern[str] = re.compile(
 TIMING_MSG_RE: re.Pattern[str] = re.compile(
     r"(predicate not satisfied|within \d+(\.\d+)?\s?s\b|timed out|timeout|deadline|\bp9\d\b|"
     r"starv|deadlock|status=50\d|\b5xx\b|recycled|EBUSY|were served while)", re.I)
+#: A count pin on an entries dict: the assertion message is just ``{'name': 18, 'other': 4}``.
+COUNT_PIN_RE: re.Pattern[str] = re.compile(r"^(AssertionError: )?(assert )?\{('[\w./ -]+': \d+(, )?)+\}")
 HARNESS_FILE_RE: re.Pattern[str] = re.compile(
     r"(watched_pytest|lab_run|lab_remote|select_affected|push_check|git_push|worktree|xdist|"
     r"suite_lease|check_headers|ci_gate|ci_junit|ci_shared|ci_wait|ci_board|ci_cmd|"
@@ -229,11 +256,11 @@ def parse_log(lines: Iterable[str]) -> dict[str, Any]:
     sections: dict[str, str] = {}
     for raw in lines:
         line = _ANSI_RE.sub("", _TS_RE.sub("", raw.rstrip("\n"))).rstrip()
-        if INFRA_LOG_RE.search(line):
-            infra = True
         if line.startswith("##[error]"):
             if len(errors) < 20:
                 errors.append(line[9:200])
+            if INFRA_LOG_RE.search(line):
+                infra = True
             continue
         sm = _SUMMARY_RE.match(line)
         if sm:
@@ -416,12 +443,105 @@ def is_table_line(line: str) -> bool:
     return not _LOGIC_RE.match(line) and bool(_TABLE_RE.match(line))
 
 
-def next_green(red: Row, later_green: Sequence[Row], hist: History) -> Row | None:
-    """First later success run of the workflow whose sha is the red sha or descends from it."""
-    for g in later_green:
-        if g["head_sha"] == red["head_sha"] or hist.is_ancestor(red["head_sha"], g["head_sha"]):
-            return g
-    return None
+GH_SLUG: str = "Hellblazer/nexus"
+
+
+def _load_green_jobs(green_dir: Path | None, run_id: int) -> list[Row] | None:
+    """The jobs of a later successful run (name, conclusion), or None when the file is absent."""
+    if green_dir is None:
+        return None
+    path = green_dir / f"{run_id}.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
+def job_names_passed(jobs: Sequence[Row], names: Iterable[str]) -> bool:
+    """Whether every name has a job of that exact (matrix-expanded) name that succeeded."""
+    passed = {j["name"] for j in jobs if j.get("conclusion") == "success"}
+    return all(n in passed for n in names)
+
+
+def _gh_run_jobs(run_id: int, slug: str = GH_SLUG) -> list[Row]:
+    """Jobs of a run's latest attempt through ``gh api`` (read-only, one call per page)."""
+    for attempt in range(4):
+        out = subprocess.run(
+            ["gh", "api", f"repos/{slug}/actions/runs/{run_id}/jobs?per_page=100&filter=latest",
+             "--paginate", "--jq", ".jobs[] | {id, name, conclusion, run_attempt}"],
+            capture_output=True, text=True, check=False)
+        if out.returncode == 0:
+            return [json.loads(line) for line in out.stdout.splitlines() if line.strip()]
+        time.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"gh api jobs of run {run_id} failed: {out.stderr.strip()[:200]}")
+
+
+def fetch_green_jobs(snapshot: Path, out: Path, *, conclusions: Sequence[str] = DEFAULT_CONCLUSIONS,
+                     since: str = "0000", until: str = "9999", workers: int = 4, max_candidates: int = GREEN_CANDIDATES_MAX,
+                     fetch: Callable[[int], list[Row]] = _gh_run_jobs) -> Row:
+    """Fetch the jobs of the later successful runs a red run needs to be resolved.
+
+    For each red run it walks the later successful runs of the same workflow, oldest first, and
+    fetches each one's jobs until one has every failed job's name succeeded (or ``max_candidates``
+    are tried). The snapshot holds jobs only for red-scope runs, so this is the one network step the
+    resolution needs; files already in ``out`` are not fetched again.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    runs = [r for r in _load_runs(snapshot) if since <= r["created_at"][:10] <= until]
+    by_wf: dict[str, list[Row]] = collections.defaultdict(list)
+    for r in sorted(runs, key=lambda r: (r["created_at"], r["id"])):
+        by_wf[r["name"]].append(r)
+    count = {"fetched": 0}
+    lock = threading.Lock()
+
+    def jobs_of(g: Row) -> list[Row]:
+        cached = _load_green_jobs(out, g["id"])
+        if cached is not None:
+            return cached
+        got = fetch(g["id"])
+        tmp = out / f"{g['id']}.json.{threading.get_ident()}.tmp"
+        tmp.write_text(json.dumps(got), encoding="utf-8")
+        os.replace(tmp, out / f"{g['id']}.json")
+        with lock:
+            count["fetched"] += 1
+        return got
+
+    def walk(red: Row) -> None:
+        jobs = _load_jobs(snapshot, red["id"])
+        names = [j["name"] for j in _failed_jobs(red, jobs or [])]
+        if not names:
+            return
+        later = [g for g in by_wf[red["name"]] if g["conclusion"] == "success"
+                 and (g["created_at"], g["id"]) > (red["created_at"], red["id"])]
+        for g in later[:max_candidates]:
+            if job_names_passed(jobs_of(g), names):
+                return
+
+    reds = [r for r in runs if r["conclusion"] in conclusions]
+    with ThreadPoolExecutor(workers) as pool:
+        list(pool.map(walk, reds))
+    return {"reds": len(reds), "fetched": count["fetched"]}
+
+
+def resolve_green(red: Row, later: Sequence[Row], names: Sequence[str], hist: History,
+                  green_dir: Path | None) -> tuple[Row | None, list[int]]:
+    """The first later run that passed every failed job of ``red``, and the later runs it skipped.
+
+    A candidate must be on the red sha or a descendant of it. A run is skipped when it is such a
+    candidate but one of the names did not succeed in it. With no failed job names (a run whose jobs
+    list is missing) nothing can be verified and the run stays unresolved.
+    """
+    skipped: list[int] = []
+    if not names:
+        return None, skipped
+    for g in later[:GREEN_CANDIDATES_MAX]:
+        if g["head_sha"] != red["head_sha"] and not hist.is_ancestor(red["head_sha"], g["head_sha"]):
+            continue
+        jobs = _load_green_jobs(green_dir, g["id"])
+        if jobs is None:
+            raise RuntimeError(f"no jobs file for later run {g['id']} in {green_dir}: "
+                               "run fetch-green-jobs, then pass --green-jobs")
+        if job_names_passed(jobs, names):
+            return g, skipped
+        skipped.append(g["id"])
+    return None, skipped
 
 
 # --- extraction ----------------------------------------------------------------------------
@@ -562,7 +682,8 @@ def _fix_signal(it: Row, rng: Sequence[str], green: Row | None, hist: History) -
 
 def extract(snapshot: Path, repo: Path, *, conclusions: Sequence[str] = DEFAULT_CONCLUSIONS,
             include_jobless: bool = False, since: str = WINDOW_START,
-            until: str = WINDOW_END, extra_logs: Sequence[Path] = ()) -> list[Row]:
+            until: str = WINDOW_END, extra_logs: Sequence[Path] = (),
+            green_jobs: Path | None = None) -> list[Row]:
     """Build the extraction records (see the module docstring) from a snapshot and a repo."""
     runs = [r for r in _load_runs(snapshot) if since <= r["created_at"][:10] <= until]
     by_wf: dict[str, list[Row]] = collections.defaultdict(list)
@@ -592,7 +713,8 @@ def extract(snapshot: Path, repo: Path, *, conclusions: Sequence[str] = DEFAULT_
         gaps.extend(c["gaps"])
         later = [g for g in by_wf[red["name"]] if g["conclusion"] == "success"
                  and (g["created_at"], g["id"]) > (red["created_at"], red["id"])]
-        green = next_green(red, later, hist)
+        names = [j["name"] for j in _failed_jobs(red, jobs)] if jobs is not None else []
+        green, skipped = resolve_green(red, later, names, hist, green_jobs)
         rng = hist.range(red["head_sha"], green["head_sha"]) if green else []
         hist.load(rng)
         rec: Row = {"t": "run", "id": red["id"], "sha": red["head_sha"], "workflow": red["name"],
@@ -602,7 +724,7 @@ def extract(snapshot: Path, repo: Path, *, conclusions: Sequence[str] = DEFAULT_
                     "green_run": green["id"] if green else None,
                     "green_sha": green["head_sha"] if green else None,
                     "green_ended": green["updated_at"] if green else None,
-                    "unresolved": green is None,
+                    "unresolved": green is None, "green_skipped": skipped,
                     "rerun_green": bool(green and green["head_sha"] == red["head_sha"]),
                     "fix_commits": [c[:12] for c in rng], "range_len": len(rng),
                     "range_ledger_edit": any(is_ledger_file(f) for c in rng for f in hist.files(c)),
@@ -647,15 +769,20 @@ def read_extraction(path: Path) -> list[Row]:
 # --- labelling -----------------------------------------------------------------------------
 
 #: What a named test with no tied fix, no rerun and no timing message is: it went green again and
-#: nothing in the record says whether it was flaky, ambient or fixed elsewhere (a hand sample of
-#: 14 runs under the earlier "flake" label agreed on 6).
-RESIDUAL: tuple[str, str] = (STALE, "stale:resolved-without-test-fix")
+#: nothing in the record says whether it was flaky, ambient or fixed in src/ (hand samples of the
+#: runs under the earlier stale and flake labels agreed on 6 of 14 and 11 of 14, each a different
+#: reading of the same runs).
+RESIDUAL: tuple[str, str] = (UNATTRIBUTED, "unattributed:resolved-without-test-fix")
 
 
 def is_ledger_file(path: str) -> bool:
     """A ledger, ceiling or allowlist data file (an edit to one is not a guard catch)."""
     return path in NON_GUARD_FILES or bool(NON_GUARD_RE.search(path))
 
+
+
+def _accounting_msg(msg: str) -> bool:
+    return bool(META_MSG_RE.search(msg) or COUNT_PIN_RE.search(msg))
 
 
 def label_item(item: Row, run: Row) -> tuple[str, str]:
@@ -680,7 +807,7 @@ def label_item(item: Row, run: Row) -> tuple[str, str]:
         if item.get("failed_count"):
             if TIMING_MSG_RE.search(item["msg"]):
                 return FLAKE, "flake:timing-message"
-            if META_MSG_RE.search(item["msg"]):
+            if _accounting_msg(item["msg"]):
                 return ACCOUNTING, "accounting:meta-msg"
             if item["venue"] == "windows":
                 return STALE, "stale:windows-venue-failed-count"
@@ -690,7 +817,7 @@ def label_item(item: Row, run: Row) -> tuple[str, str]:
         return UNLABELLED, "unlabelled:no-rule" if item["has_log"] else "unlabelled:no-log"
     if TIMING_MSG_RE.search(item.get("msg", "")):
         return FLAKE, "flake:timing-message"
-    if META_MSG_RE.search(item.get("msg", "")):
+    if _accounting_msg(item.get("msg", "")):
         return ACCOUNTING, "accounting:meta-msg"
     func = re.split(r"\[", item["item"].rsplit(".", 1)[-1])[0]
     if META_FILE_RE.search(stem) or ALLOWLISTED_FUNC_RE.search(func):
@@ -699,16 +826,16 @@ def label_item(item: Row, run: Row) -> tuple[str, str]:
         return HARNESS, "harness:file"
     if run["rerun_green"]:
         return FLAKE, "flake:rerun-green"
+    if not item["file"] and item["venue"] == "windows":
+        return STALE, "stale:windows-venue"
     if run["unresolved"]:
-        return STALE, "stale:no-green"
-    if item["fix_distance"] is not None and item["fix_distance"] <= FIX_DISTANCE_MAX:
+        return UNATTRIBUTED, "unattributed:no-verified-green"
+    if item["fix_distance"] is not None:
         if item["fix_table_only"]:
             return ACCOUNTING, "accounting:fix-table-edit"
         if item["fix_touched_product"] and item["fix_is_fix"]:
             return PRODUCT, "product:fix-touched-src"
         return STALE, "stale:fix-touched-test"
-    if item["venue"] == "windows":
-        return STALE, "stale:windows-venue"
     return RESIDUAL
 
 
@@ -862,16 +989,38 @@ def snapshot_banner(meta: Mapping[str, Any]) -> str | None:
 
 
 def accounting_caveat(an: Mapping[str, Any]) -> str:
-    """The product-catch caveat that travels with the accounting share (258-research-15)."""
-    acc = [i for i in an["items"] if i["category"] == ACCOUNTING and not i["derived"]]
-    tied = [i for i in acc if i.get("fix_distance") is not None]
+    """The accounting share as a range, with the product-catch caveat (258-research-15)."""
+    cats = category_counts(an)
+    total = len(an["runs"])
+    attributed = total - cats.get(UNATTRIBUTED, 0) - cats.get(UNLABELLED, 0)
+    acc = cats.get(ACCOUNTING, 0)
+    items = [i for i in an["items"] if i["category"] == ACCOUNTING and not i["derived"]]
+    tied = [i for i in items if i.get("fix_distance") is not None]
     prod = [i for i in tied if i.get("fix_touched_product")]
-    share = _pct(category_counts(an).get(ACCOUNTING, 0), len(an["runs"]))
-    return (f"accounting share {share} of red runs. Caveat (258-research-15): accounting is what a "
-            f"check guards, not whether a given red was a product defect; {len(acc)} accounting items, "
+    return (f"accounting share {_pct(acc, total)} of all {total} red runs (floor) to {_pct(acc, attributed)} "
+            f"of the {attributed} attributed runs (unattributed and unlabelled runs left out); where the "
+            "unattributed runs fall is not known. Caveat (258-research-15): accounting is what a check "
+            f"guards, not whether a given red was a product defect; {len(items)} accounting items, "
             f"{len(tied)} followed by a fix commit that touched the failing file, {len(prod)} of those "
             "by a commit that also touched src/ or service/src/main/ (research-15 found 3 real "
             "product catches among 18 such items)")
+
+
+def unattributed_caveat(an: Mapping[str, Any]) -> str:
+    """What the unattributed runs are, and what bracket they put on flake and stale."""
+    cats = category_counts(an)
+    runs = [r for r in an["runs"].values() if r["category"] == UNATTRIBUTED]
+    n = len(runs)
+    rules = collections.Counter(r for run in runs for r in run["rules"])
+    product = sum(1 for r in runs if r["fix_product_commit"])
+    short = sum(1 for r in runs if r["range_len"] <= 1)
+    return (f"unattributed {n} runs {dict(sorted(rules.items()))}: no commit touched the failing test "
+            "before a later run verifiably passed its job, or no such run exists in the window. The "
+            "record cannot say whether each was flaky, ambient-coupled or fixed in src/ without touching "
+            f"the test; {product} have a fix-typed commit touching src/ or service/src/main in their fix "
+            f"range (product candidates), {short} a fix range of one commit or none. Counted in none of "
+            f"strand B's six; flake is {cats.get(FLAKE, 0)}..{cats.get(FLAKE, 0) + n} and stale "
+            f"{cats.get(STALE, 0)}..{cats.get(STALE, 0) + n} by that bracket")
 
 
 def render_report(an: Mapping[str, Any], top: int = 15, repo: Path | None = None) -> str:
@@ -892,7 +1041,8 @@ def render_report(an: Mapping[str, Any], top: int = 15, repo: Path | None = None
     lines += ["", "by category"]
     for c in (*PRIORITY, UNLABELLED):
         lines.append(f"  {c:16s} {cats.get(c, 0):5d}  {_pct(cats.get(c, 0), total)}")
-    lines += ["", accounting_caveat(an), "", "by rule (runs whose category rested on the rule)"]
+    lines += ["", accounting_caveat(an), "", unattributed_caveat(an), "",
+              "by rule (runs whose category rested on the rule)"]
     rules = collections.Counter(r for run in an["runs"].values() for r in run["rules"])
     lines += [f"  {k:40s} {v:5d}" for k, v in sorted(rules.items())]
     hrs = red_hours(an)
@@ -961,6 +1111,11 @@ def mvv_lines(an: Mapping[str, Any]) -> list[tuple[bool | None, str]]:
                                         for r in run["rules"])
             line += f"  rules: {dict(rules.most_common(6))}"
         out.append((ok, line))
+    n_un = cats.get(UNATTRIBUTED, 0)
+    out.append((None, f"unattributed {n_un} runs, counted in none of strand B's six: flake "
+                      f"{cats.get(FLAKE, 0)}..{cats.get(FLAKE, 0) + n_un} (strand B {STRAND_B_CATEGORIES[FLAKE]}), "
+                      f"stale {cats.get(STALE, 0)}..{cats.get(STALE, 0) + n_un} (strand B "
+                      f"{STRAND_B_CATEGORIES[STALE]}); see the unattributed caveat in the report"))
     unl = [run for run in an["runs"].values() if run["category"] == UNLABELLED]
     gaps = [r for r in unl if set(r["rules"]) <= {"unlabelled:jobs-missing", "unlabelled:no-log"}]
     out.append((None, f"unlabelled runs: {len(unl)}; {len(gaps)} are gaps the MANIFEST lists, "
@@ -975,6 +1130,47 @@ def render_mvv(an: Mapping[str, Any]) -> tuple[str, bool]:
     body = [f"{'INFO' if ok is None else 'PASS' if ok else 'FAIL'}  {text}" for ok, text in lines]
     return ("\n".join(([banner] if banner else []) + body),
             all(ok is not False for ok, _ in lines) and banner is None)
+
+
+# --- candidates ----------------------------------------------------------------------------
+
+
+def _test_rows(an: Mapping[str, Any], category: str) -> list[Row]:
+    rows: dict[str, Row] = {}
+    for it in an["items"]:
+        if it["derived"] or it["category"] != category or it["kind"] == "step":
+            continue
+        nodeid = f"{it['file']}::{it['item']}" if it["file"] else it["item"]
+        row = rows.setdefault(nodeid, {"kind": it["kind"], "runs": set(), "dates": [],
+                                       "venues": set(), "rules": set()})
+        row["runs"].add(it["run"])
+        row["dates"].append(an["runs"][it["run"]]["created"][:10])
+        row["venues"].add(it["venue"])
+        row["rules"].add(it["rule"])
+    return [{"nodeid": k, "kind": v["kind"], "red_runs": len(v["runs"]), "first_red": min(v["dates"]),
+             "last_red": max(v["dates"]), "venues": sorted(v["venues"]), "rule": "|".join(sorted(v["rules"])),
+             "run_ids": sorted(v["runs"])} for k, v in sorted(rows.items())]
+
+
+def candidates_report(an: Mapping[str, Any], header: Row) -> Row:
+    """The named tests labelled flake_infra, and those labelled unattributed, as one JSON-able dict.
+
+    One row per test (a pytest node id with Windows paths normalised, or ``Class::method`` for Java;
+    a Windows test named only by its section header has no file part). A failing step that names no
+    test has no row. ``unattributed`` is a separate array so the reader can decide whether it counts.
+    """
+    flake, unattributed = _test_rows(an, FLAKE), _test_rows(an, UNATTRIBUTED)
+    header = {**header, "red_runs": len(an["runs"]), "candidate_tests": len(flake),
+              "unattributed_tests": len(unattributed)}
+    return {"header": header, "candidates": flake, "unattributed": unattributed}
+
+
+def candidates_header(an: Mapping[str, Any], extraction: Path, repo: Path, archive_sha256: str) -> Row:
+    meta = an["meta"]
+    return {"window": meta.get("window"), "snapshot_final": bool(meta.get("final")),
+            "archive_sha256": archive_sha256, "extraction": extraction.name,
+            "extraction_sha256": hashlib.sha256(extraction.read_bytes()).hexdigest(),
+            "script_commit": _git(repo, "log", "-n1", "--format=%H", "--", "scripts/red_run_report.py").strip()}
 
 
 # --- cli -----------------------------------------------------------------------------------
@@ -993,8 +1189,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="keep red runs that have no failed job record")
     ex.add_argument("--extra-logs", type=Path, action="append", default=[],
                     help="fallback log root (same <run>/<job>.log layout); repeatable")
+    ex.add_argument("--green-jobs", type=Path, default=None,
+                    help="directory of <run>.json jobs of later successful runs (see fetch-green-jobs)")
     ex.add_argument("--since", default=WINDOW_START)
     ex.add_argument("--until", default=WINDOW_END)
+    fg = sub.add_parser("fetch-green-jobs", help="fetch the jobs of the later successful runs")
+    fg.add_argument("--snapshot", type=Path, required=True)
+    fg.add_argument("--out", type=Path, required=True)
+    fg.add_argument("--workers", type=int, default=4)
+    fg.add_argument("--since", default=WINDOW_START)
+    fg.add_argument("--until", default=WINDOW_END)
     rp = sub.add_parser("report")
     rp.add_argument("--extraction", type=Path, required=True)
     rp.add_argument("--top", type=int, default=15)
@@ -1002,18 +1206,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     rp.add_argument("--sample", nargs=2, metavar=("RULE", "N"),
                     help="print a deterministic draw of N runs labelled by RULE for hand checking")
     rp.add_argument("--seed", type=int, default=1, help="seed for --sample")
+    cd = sub.add_parser("candidates", help="write the flake and unattributed named tests as JSON")
+    cd.add_argument("--extraction", type=Path, required=True)
+    cd.add_argument("--out", type=Path, required=True)
+    cd.add_argument("--repo", type=Path, default=Path("."))
+    cd.add_argument("--archive-sha256", default=PHASE0_ARCHIVE_SHA256)
     mv = sub.add_parser("mvv")
     mv.add_argument("--extraction", type=Path, required=True)
     args = ap.parse_args(argv)
     if args.cmd == "extract":
         recs = extract(args.snapshot, args.repo, conclusions=tuple(args.conclusions.split(",")),
                        include_jobless=args.include_jobless, since=args.since, until=args.until,
-                       extra_logs=args.extra_logs)
+                       extra_logs=args.extra_logs, green_jobs=args.green_jobs)
         write_extraction(recs, args.out)
         sys.stdout.write(f"wrote {args.out}: {recs[0]}\n")
         return EXIT_OK
+    if args.cmd == "fetch-green-jobs":
+        res = fetch_green_jobs(args.snapshot, args.out, workers=args.workers, since=args.since,
+                               until=args.until)
+        sys.stdout.write(f"fetched {res['fetched']} runs' jobs for {res['reds']} red runs\n")
+        return EXIT_OK
     an = analyze(read_extraction(args.extraction))
+    if args.cmd == "candidates":
+        report = candidates_report(an, candidates_header(an, args.extraction, args.repo, args.archive_sha256))
+        args.out.write_text(json.dumps(report, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        h = report["header"]
+        sys.stdout.write(f"wrote {args.out}: {h['candidate_tests']} flake tests, "
+                         f"{h['unattributed_tests']} unattributed tests\n")
+        return EXIT_OK
     if args.cmd == "report" and args.sample:
+        if not sample_runs(an, args.sample[0], 1, args.seed):
+            known = sorted({r for run in an["runs"].values() for r in run["rules"]})
+            sys.stderr.write(f"no run is labelled by rule {args.sample[0]!r}; rules: {known}\n")
+            return EXIT_FAIL
         sys.stdout.write(render_sample(an, args.sample[0], int(args.sample[1]), args.seed) + "\n")
         return EXIT_OK
     if args.cmd == "report":

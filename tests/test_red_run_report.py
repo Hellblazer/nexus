@@ -3,10 +3,15 @@
 
 No network, no tenant fixture: the snapshot is files in ``tmp_path`` and the history is a repo
 ``git init``-ed there. The MVV tolerance math is tested on counts, not on the real snapshot.
+
+Run it with ``NX_TEST_T2_SUBSTRATE=none uv run pytest tests/test_red_run_report.py`` after ``uv sync``:
+the conftest refuses to start the engine substrate in a worktree whose service jar is not built, and
+this file needs no engine.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -70,12 +75,9 @@ def _run(rid: int, name: str, sha: str, conclusion: str, minute: int, attempt: i
 
 
 def _job(jid: int, name: str, steps: list[tuple[str, str]], labels: list[str] | None = None,
-         conclusion: str = "failure", attempt: int | None = None) -> dict:
-    job = {"id": jid, "name": name, "conclusion": conclusion, "labels": labels or ["ubuntu-latest"],
-           "steps": [{"name": n, "conclusion": c} for n, c in steps]}
-    if attempt is not None:
-        job["run_attempt"] = attempt
-    return job
+         conclusion: str = "failure", attempt: int = 1) -> dict:
+    return {"id": jid, "name": name, "conclusion": conclusion, "labels": labels or ["ubuntu-latest"],
+            "steps": [{"name": n, "conclusion": c} for n, c in steps], "run_attempt": attempt}
 
 
 def _shard(jid: int, n: int = 1, step: str | None = None) -> dict:
@@ -170,6 +172,16 @@ def snapshot(tmp_path: Path, history: tuple[Path, dict[str, str]]) -> Path:
     }
     for rid, js in jobs.items():
         (snap / "jobs" / f"{rid}.json").write_text(json.dumps(js))
+    # the later successful runs: every job any red run of their workflow failed in, succeeded
+    wf_of = {r["id"]: r["name"] for r in runs}
+    greens = snap / "green_jobs"
+    greens.mkdir()
+    for r in runs:
+        if r["conclusion"] == "success":
+            names = sorted({j["name"] for rid, js in jobs.items() if wf_of[rid] == r["name"] for j in js})
+            ok = [{"id": r["id"] * 100 + n, "name": name, "conclusion": "success", "run_attempt": 1}
+                  for n, name in enumerate(names)]
+            (greens / f"{r['id']}.json").write_text(json.dumps(ok))
     java = ("2026-10-01T10:00:00Z [ERROR] Failures: \n"
             "2026-10-01T10:00:00Z [ERROR]   {cls}.{method}:12 expected 1\n"
             "2026-10-01T10:00:00Z [ERROR] \n"
@@ -210,9 +222,25 @@ def snapshot(tmp_path: Path, history: tuple[Path, dict[str, str]]) -> Path:
     return snap
 
 
+def _extract(snapshot: Path, repo: Path, **kw: object) -> list[dict]:
+    kw.setdefault("since", "2026-10-01")
+    kw.setdefault("until", "2026-10-01")
+    kw.setdefault("green_jobs", snapshot / "green_jobs")
+    return rrr.extract(snapshot, repo, **kw)
+
+
+def _set_green(snapshot: Path, run_id: int, conclusions: dict[str, str]) -> None:
+    """Rewrite one later run's jobs: the named jobs get the given conclusion."""
+    path = snapshot / "green_jobs" / f"{run_id}.json"
+    jobs = json.loads(path.read_text())
+    for j in jobs:
+        j["conclusion"] = conclusions.get(j["name"], j["conclusion"])
+    path.write_text(json.dumps(jobs))
+
+
 @pytest.fixture
 def extraction(snapshot: Path, history: tuple[Path, dict[str, str]]) -> list[dict]:
-    return rrr.extract(snapshot, history[0], since="2026-10-01", until="2026-10-01")
+    return _extract(snapshot, history[0])
 
 
 # --- log parsing ----------------------------------------------------------------------------
@@ -260,9 +288,11 @@ def test_parse_log_marks_a_bare_exit_status_as_no_evidence() -> None:
     assert rrr.parse_log(["##[error]the real-PID tests did not pass\n"])["evidence"] is True
 
 
-def test_infra_signature_is_found_on_any_line_not_only_error_annotations() -> None:
-    got = rrr.parse_log(["UserWarning: PG-bundle self-provisioning failed (failed to download x)\n"])
-    assert got["infra"] is True
+def test_an_infra_signature_counts_only_on_error_annotations() -> None:
+    noise = ["UserWarning: PG-bundle self-provisioning failed (failed to download x)\n",
+             "WARN Voyage rate limit exceeded, HTTP 500 retrying\n"]
+    assert rrr.parse_log(noise)["infra"] is False          # test-output noise is not the failure
+    assert rrr.parse_log(["##[error]failed to download x\n"])["infra"] is True
 
 
 @pytest.mark.parametrize(("labels", "want"), [
@@ -328,16 +358,16 @@ def test_labels_name_the_rule_that_moved_each_run(extraction: list[dict]) -> Non
     assert got[3] == (rrr.ACCOUNTING, ["accounting:job"])       # accounting wins over the rerun-green
     assert got[5] == (rrr.ACCOUNTING, ["accounting:step"])
     assert got[7] == (rrr.FLAKE, ["flake:infra-signature"])
-    assert got[9] == (rrr.STALE, ["stale:resolved-without-test-fix"])   # green on c6, no commit touched it
+    assert got[9] == (rrr.UNATTRIBUTED, ["unattributed:resolved-without-test-fix"])   # no commit touched it
     assert got[10] == (rrr.BUILD, ["build:step-name"])
     assert got[13] == (rrr.UNLABELLED, ["unlabelled:no-log"])  # no log: stays visible
-    assert got[14] == (rrr.STALE, ["stale:resolved-without-test-fix"])
+    assert got[14] == (rrr.UNATTRIBUTED, ["unattributed:resolved-without-test-fix"])
     assert got[16] == (rrr.STALE, ["stale:windows-venue-failed-count"])
     assert got[17] == (rrr.UNLABELLED, ["unlabelled:no-rule"])   # a log, but no name, count or reason
     assert got[18] == (rrr.ACCOUNTING, ["accounting:fix-table-edit"])
     assert got[20] == (rrr.STALE, ["stale:fix-touched-test"])
     assert got[22] == (rrr.PRODUCT, ["product:fix-touched-src"])         # product on a Java test
-    assert got[24] == (rrr.STALE, ["stale:no-green"])
+    assert got[24] == (rrr.UNATTRIBUTED, ["unattributed:no-verified-green"])
     assert got[25] == (rrr.ACCOUNTING, ["accounting:meta-msg"])          # a named Windows test, "budget"
     assert got[26] == (rrr.FLAKE, ["flake:timing-message"])
     assert got[27] == (rrr.FLAKE, ["flake:rerun-green"])
@@ -346,7 +376,7 @@ def test_labels_name_the_rule_that_moved_each_run(extraction: list[dict]) -> Non
     assert got[31] == (rrr.ACCOUNTING, ["accounting:meta-msg"])
     assert got[32] == (rrr.FLAKE, ["flake:infra-step"])
     assert got[33] == (rrr.STALE, ["stale:unnamed-test-failures"])
-    assert got[36] == (rrr.FLAKE, ["flake:infra-signature"])    # the signature is not on an ##[error] line
+    assert got[36] == (rrr.UNLABELLED, ["unlabelled:no-rule"])  # the signature is not on an ##[error] line
 
 
 def _item(**kw: object) -> dict:
@@ -361,13 +391,26 @@ def _item(**kw: object) -> dict:
 _RUN = {"rerun_green": False, "unresolved": False}
 
 
-def test_fix_distance_bound_decides_whether_a_touch_is_the_fix() -> None:
-    near = rrr.label_item(_item(fix_distance=rrr.FIX_DISTANCE_MAX, touched_test=True,
-                                fix_touched_product=False), _RUN)
-    far = rrr.label_item(_item(fix_distance=rrr.FIX_DISTANCE_MAX + 1, touched_test=True,
-                               fix_touched_product=False), _RUN)
-    assert near == (rrr.STALE, "stale:fix-touched-test")
-    assert far == (rrr.STALE, "stale:resolved-without-test-fix")      # an unrelated, later edit
+def test_a_touch_at_any_distance_is_the_fix_because_the_range_ends_at_the_verified_green() -> None:
+    far = rrr.label_item(_item(fix_distance=40, touched_test=True, fix_touched_product=False), _RUN)
+    assert far == (rrr.STALE, "stale:fix-touched-test")      # an earlier 10-commit window missed d=11..15
+
+
+def test_a_test_with_no_verified_green_and_no_other_rule_is_unattributed() -> None:
+    item = _item()
+    assert rrr.label_item(item, {"rerun_green": False, "unresolved": True}) == (
+        rrr.UNATTRIBUTED, "unattributed:no-verified-green")
+    assert rrr.label_item(item, _RUN) == (rrr.UNATTRIBUTED, "unattributed:resolved-without-test-fix")
+
+
+def test_a_count_pin_on_an_entries_dict_is_accounting_by_what_it_checks() -> None:
+    pin = _item(file="", item="TestRealWindows.test_the_walk_finds_the_uv_entries", venue="windows",
+                msg="AssertionError: {'conexus': 18, 'sn': 4}")
+    other = _item(file="", item="TestRealWindows.test_x", venue="windows", msg="AssertionError: {0: 2, 1: 3}")
+    assert rrr.label_item(pin, _RUN) == (rrr.ACCOUNTING, "accounting:meta-msg")
+    assert rrr.label_item(other, _RUN) == (rrr.STALE, "stale:windows-venue")
+    assert rrr.COUNT_PIN_RE.search("assert {'a': 1} == {'a': 2}")
+    assert not rrr.COUNT_PIN_RE.search("AssertionError: {'a': [1, 2]}")
 
 
 def test_a_product_fix_needs_a_fix_subject_and_a_table_edit_is_accounting() -> None:
@@ -482,7 +525,7 @@ def test_extra_log_roots_are_searched_after_the_snapshot(tmp_path: Path) -> None
 def test_a_run_with_no_jobs_file_stays_visible_and_is_a_gap(
         snapshot: Path, history: tuple[Path, dict[str, str]]) -> None:
     (snapshot / "jobs" / "26.json").unlink()
-    recs = rrr.extract(snapshot, history[0], since="2026-10-01", until="2026-10-01")
+    recs = _extract(snapshot, history[0], since="2026-10-01", until="2026-10-01")
     assert recs[0]["runs_missing_jobs_file"] == 1 and recs[0]["red_runs"] == 23
     assert recs[0]["gaps"] == 6                      # the five log gaps and r26's missing jobs list
     assert rrr.analyze(recs)["runs"][26]["rules"] == ["unlabelled:jobs-missing"]
@@ -490,11 +533,10 @@ def test_a_run_with_no_jobs_file_stays_visible_and_is_a_gap(
 
 def test_extraction_is_deterministic_independent_of_input_order_and_round_trips(
         snapshot: Path, history: tuple[Path, dict[str, str]], tmp_path: Path) -> None:
-    kw = {"since": "2026-10-01", "until": "2026-10-01"}
-    first = rrr.extract(snapshot, history[0], **kw)
+    first = _extract(snapshot, history[0])
     runs = snapshot / "runs.jsonl"
     runs.write_text("".join(reversed(runs.read_text().splitlines(keepends=True))))
-    second = rrr.extract(snapshot, history[0], **kw)
+    second = _extract(snapshot, history[0])
     a, b = tmp_path / "a.jsonl.gz", tmp_path / "b.jsonl.gz"
     rrr.write_extraction(first, a)
     rrr.write_extraction(second, b)
@@ -505,10 +547,10 @@ def test_extraction_is_deterministic_independent_of_input_order_and_round_trips(
 def test_scope_options_are_explicit(snapshot: Path, history: tuple[Path, dict[str, str]]) -> None:
     kw = {"since": "2026-10-01", "until": "2026-10-01"}
     # a cancelled run has no failed job record, so widening the conclusions alone adds nothing
-    assert rrr.extract(snapshot, history[0], conclusions=("failure", "cancelled"), **kw)[0]["red_runs"] == 23
-    wide = rrr.extract(snapshot, history[0], conclusions=("failure", "cancelled"), include_jobless=True, **kw)[0]
+    assert _extract(snapshot, history[0], conclusions=("failure", "cancelled"), **kw)[0]["red_runs"] == 23
+    wide = _extract(snapshot, history[0], conclusions=("failure", "cancelled"), include_jobless=True, **kw)[0]
     assert wide["red_runs"] == 25 and wide["dropped_jobless"] == 0
-    assert rrr.extract(snapshot, history[0], since="2026-10-02", until="2026-10-03")[0]["red_runs"] == 0
+    assert _extract(snapshot, history[0], since="2026-10-02", until="2026-10-03")[0]["red_runs"] == 0
 
 
 # --- git failures are not empty histories ----------------------------------------------------
@@ -521,12 +563,11 @@ def test_a_bad_repo_raises_instead_of_reading_as_an_empty_history(snapshot: Path
         rrr.commit_mix(tmp_path / "no-such-repo", "2026-10-01", "2026-10-02")
 
 
-def test_an_extraction_that_read_no_commit_is_refused(snapshot: Path, tmp_path: Path) -> None:
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    _git(empty, "init", "-q", "-b", "develop")
-    with pytest.raises(RuntimeError):
-        rrr.extract(snapshot, empty, since="2026-10-01", until="2026-10-01")
+def test_an_extraction_that_read_no_commit_is_refused_by_the_guard_not_by_git(
+        snapshot: Path, history: tuple[Path, dict[str, str]], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rrr.History, "load", lambda self, shas: None)     # git works; no commit is read
+    with pytest.raises(RuntimeError, match="no commit was read"):
+        _extract(snapshot, history[0])
 
 
 def test_commit_mix_counts_the_fixture_history(history: tuple[Path, dict[str, str]]) -> None:
@@ -600,16 +641,42 @@ def test_the_accounting_caveat_counts_items_fixes_and_product_touching_fixes(ext
     text = rrr.accounting_caveat(rrr.analyze(extraction))
     assert "258-research-15" in text and "accounting items" in text
     assert "followed by a fix commit that touched the failing file" in text
+    assert "of all 23 red runs (floor) to" in text and "attributed runs" in text
+
+
+def test_the_unattributed_caveat_states_the_bracket(extraction: list[dict]) -> None:
+    an = rrr.analyze(extraction)
+    cats = rrr.category_counts(an)
+    n = cats[rrr.UNATTRIBUTED]
+    text = rrr.unattributed_caveat(an)
+    assert n == 3 and f"unattributed {n} runs" in text
+    assert f"flake is {cats[rrr.FLAKE]}..{cats[rrr.FLAKE] + n}" in text
+    assert f"stale {cats[rrr.STALE]}..{cats[rrr.STALE] + n}" in text
+    assert "product candidates" in text and "unattributed:no-verified-green" in text
 
 
 def test_sample_is_deterministic_bounded_and_drawn_from_the_rule(extraction: list[dict]) -> None:
     an = rrr.analyze(extraction)
-    a = rrr.sample_runs(an, "accounting:meta-msg", 1, 7)
-    assert a == rrr.sample_runs(an, "accounting:meta-msg", 1, 7) and len(a) == 1
     both = rrr.sample_runs(an, "accounting:meta-msg", 5, 7)
     assert sorted(r["run"] for r in both) == [25, 31] and {r["rule"] for r in both} == {"accounting:meta-msg"}
     assert both[0]["candidates"] == 2 and rrr.sample_runs(an, "no:such-rule", 3, 1) == []
     assert "accounting:meta-msg" in rrr.render_sample(an, "accounting:meta-msg", 2, 7)
+
+
+def _population(n: int) -> dict:
+    runs = {i: {"rules": ["r"], "range_len": 1} for i in range(n)}
+    items = {i: [{"rule": "r", "derived": False, "workflow": "CI", "job": "j", "item": f"t{i}", "file": "f",
+                  "msg": ""}] for i in range(n)}
+    return {"runs": runs, "by_run": items, "commits": {}}
+
+
+def test_the_sample_depends_on_the_seed_and_only_on_the_seed() -> None:
+    an = _population(60)
+    draw = lambda seed: [r["run"] for r in rrr.sample_runs(an, "r", 6, seed)]   # noqa: E731
+    assert draw(1) == draw(1) and draw(2) == draw(2)
+    assert draw(1) != draw(2)                                   # a draw that ignored the seed would not
+    assert len(set(draw(1))) == 6 and set(draw(1)) <= set(range(60))
+    assert draw(1) == sorted(draw(1))                           # reported in run order
 
 
 # --- guard-catch seam -------------------------------------------------------------------------
@@ -700,6 +767,7 @@ def test_report_prints_buckets_events_rules_and_the_caveat(extraction: list[dict
     text = rrr.render_report(rrr.analyze(extraction))
     assert "by event (information): push" in text and "snapshot scope buckets (information)" in text
     assert "Caveat (258-research-15)" in text and "stale:fix-touched-test" in text
+    assert "unattributed " in text and "Counted in none of strand B's six" in text
     assert text.splitlines()[1].startswith("PARTIAL")
 
 
@@ -707,10 +775,146 @@ def test_cli_extract_report_sample_and_mvv(snapshot: Path, history: tuple[Path, 
                                            tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out = tmp_path / "x.jsonl.gz"
     assert rrr.main(["extract", "--snapshot", str(snapshot), "--repo", str(history[0]), "--out", str(out),
+                     "--green-jobs", str(snapshot / "green_jobs"),
                      "--since", "2026-10-01", "--until", "2026-10-01"]) == rrr.EXIT_OK
     assert rrr.main(["report", "--extraction", str(out)]) == rrr.EXIT_OK
     assert "PARTIAL" in capsys.readouterr().out
     assert rrr.main(["report", "--extraction", str(out), "--sample", "accounting:job", "5",
                      "--seed", "3"]) == rrr.EXIT_OK
     assert "sample of 1 runs for rule accounting:job" in capsys.readouterr().out
+    assert rrr.main(["report", "--extraction", str(out), "--sample", "no:such-rule", "5"]) == rrr.EXIT_FAIL
+    assert "no run is labelled by rule 'no:such-rule'" in capsys.readouterr().err
     assert rrr.main(["mvv", "--extraction", str(out)]) == rrr.EXIT_FAIL   # 23 red runs is not 787
+
+
+def test_cli_mvv_exits_zero_when_every_line_passes_on_a_final_snapshot(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(rrr, "read_extraction", lambda path: [])
+    monkeypatch.setattr(rrr, "analyze", lambda records: _fake(*_strand_b()))
+    assert rrr.main(["mvv", "--extraction", str(tmp_path / "x.gz")]) == rrr.EXIT_OK
+    assert "FAIL" not in capsys.readouterr().out
+    monkeypatch.setattr(rrr, "analyze", lambda records: _fake(*_strand_b(), final=False))
+    assert rrr.main(["mvv", "--extraction", str(tmp_path / "x.gz")]) == rrr.EXIT_FAIL
+
+
+def test_mvv_prints_the_unattributed_line_with_both_brackets() -> None:
+    wf, cats, checks = _strand_b()
+    cats = {**cats, rrr.FLAKE: 113, rrr.UNATTRIBUTED: 5}      # 787 runs
+    text, ok = rrr.render_mvv(_fake(wf, cats, checks))
+    assert ok, text
+    line = next(ln for ln in text.splitlines() if "unattributed 5 runs" in ln)
+    assert line.startswith("INFO") and "flake 113..118 (strand B 119)" in line
+    assert "stale 86..91 (strand B 86)" in line and "counted in none of strand B's six" in line
+
+
+# --- resolution by a passing job ------------------------------------------------------------
+
+
+def test_job_names_passed_needs_every_exact_name_to_have_succeeded() -> None:
+    jobs = [{"name": "pytest (Python 3.12, shard 1/6)", "conclusion": "success"},
+            {"name": "pytest (Python 3.12, shard 2/6)", "conclusion": "skipped"},
+            {"name": "pytest-gate", "conclusion": "success"}]
+    assert rrr.job_names_passed(jobs, ["pytest (Python 3.12, shard 1/6)", "pytest-gate"])
+    assert not rrr.job_names_passed(jobs, ["pytest (Python 3.12, shard 2/6)"])        # skipped
+    assert not rrr.job_names_passed(jobs, ["pytest (Python 3.12, shard 1/4)"])        # no such name
+    assert not rrr.job_names_passed([], ["x"])
+
+
+def test_a_later_run_that_skipped_the_failing_job_does_not_resolve_the_red(
+        snapshot: Path, history: tuple[Path, dict[str, str]]) -> None:
+    _set_green(snapshot, 2, {"pytest (Python 3.12, shard 1/6)": "skipped"})     # r1's first later success
+    runs = {r["id"]: r for r in _extract(snapshot, history[0]) if r["t"] == "run"}
+    assert runs[1]["green_run"] == 4 and runs[1]["green_skipped"] == [2]
+    assert runs[1]["range_len"] == 2                           # c1..c3, not c1..c2
+
+
+def test_a_red_with_no_later_run_that_passed_its_job_is_unresolved(
+        snapshot: Path, history: tuple[Path, dict[str, str]]) -> None:
+    for rid in (19, 21, 28):                                  # every later success on a descendant of r18's sha
+        _set_green(snapshot, rid, {"pytest (Python 3.12, shard 1/6)": "skipped"})
+    recs = _extract(snapshot, history[0])
+    run = next(r for r in recs if r["t"] == "run" and r["id"] == 18)
+    assert run["unresolved"] and run["green_run"] is None and run["green_skipped"] == [19, 21, 28]
+    assert rrr.analyze(recs)["runs"][18]["rules"] == ["unattributed:no-verified-green"]
+
+
+def test_a_missing_green_jobs_file_is_an_error_not_a_silent_skip(
+        snapshot: Path, history: tuple[Path, dict[str, str]]) -> None:
+    (snapshot / "green_jobs" / "2.json").unlink()
+    with pytest.raises(RuntimeError, match="no jobs file for later run 2"):
+        _extract(snapshot, history[0])
+
+
+def test_fetch_green_jobs_walks_until_a_job_passes_and_caches(snapshot: Path, tmp_path: Path) -> None:
+    asked: list[int] = []
+
+    def fake(run_id: int) -> list[dict]:
+        asked.append(run_id)
+        return [{"name": "pytest (Python 3.12, shard 1/6)", "conclusion": "skipped" if run_id == 2 else "success"},
+                {"name": "pytest-gate", "conclusion": "success"}]
+
+    out = tmp_path / "gj"
+    got = rrr.fetch_green_jobs(snapshot, out, since="2026-10-01", until="2026-10-01", workers=1, fetch=fake)
+    assert got["fetched"] == len(asked) == len(list(out.glob("*.json")))
+    assert {2, 4} <= set(asked)                                 # r1 skipped at r2, then passed at r4
+    again = rrr.fetch_green_jobs(snapshot, out, since="2026-10-01", until="2026-10-01", workers=1, fetch=fake)
+    assert again["fetched"] == 0                                # cached
+
+
+# --- candidates -----------------------------------------------------------------------------
+
+
+def test_candidates_list_named_flake_tests_and_keep_unattributed_apart(
+        extraction: list[dict], tmp_path: Path) -> None:
+    an = rrr.analyze(extraction)
+    report = rrr.candidates_report(an, {"archive_sha256": "abc"})
+    flake = {r["nodeid"]: r for r in report["candidates"]}
+    assert sorted(flake) == ["tests/test_r.py::test_r", "tests/test_t.py::test_t"]      # steps have no row
+    row = flake["tests/test_t.py::test_t"]
+    assert (row["red_runs"], row["first_red"], row["last_red"], row["venues"], row["rule"]) == (
+        1, "2026-10-01", "2026-10-01", ["hosted"], "flake:timing-message")
+    assert flake["tests/test_r.py::test_r"]["rule"] == "flake:rerun-green"
+    assert [r["nodeid"] for r in report["unattributed"]] == [
+        "BarTest::m", "FooIntegrationTest::bar", "tests/test_b.py::test_flaky"]
+    assert report["unattributed"][0]["rule"] == "unattributed:no-verified-green"
+    assert report["header"]["candidate_tests"] == 2 and report["header"]["unattributed_tests"] == 3
+    assert {r["nodeid"] for r in report["candidates"]}.isdisjoint(r["nodeid"] for r in report["unattributed"])
+
+
+def test_candidates_count_distinct_red_runs_and_dates_across_runs() -> None:
+    def item(run: int, rule: str = "flake:timing-message") -> dict:
+        return {"kind": "test", "file": "tests/test_t.py", "item": "test_t", "run": run, "derived": False,
+                "category": rrr.FLAKE, "rule": rule, "venue": "windows" if run == 3 else "hosted"}
+
+    an = {"runs": {1: {"created": "2026-10-05T10:00:00Z"}, 2: {"created": "2026-10-01T23:59:59Z"},
+                   3: {"created": "2026-11-02T00:00:01Z"}},
+          "items": [item(1), item(1), item(2), item(3, "flake:rerun-green")], "meta": {}}
+    row = rrr.candidates_report(an, {})["candidates"][0]
+    assert (row["red_runs"], row["first_red"], row["last_red"]) == (3, "2026-10-01", "2026-11-02")
+    assert row["venues"] == ["hosted", "windows"] and row["rule"] == "flake:rerun-green|flake:timing-message"
+    assert row["run_ids"] == [1, 2, 3]
+
+
+def test_cli_candidates_writes_a_json_header_with_the_hashes(
+        snapshot: Path, history: tuple[Path, dict[str, str]], tmp_path: Path,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    extraction_file, out = tmp_path / "x.jsonl.gz", tmp_path / "c.json"
+    rrr.write_extraction(_extract(snapshot, history[0]), extraction_file)
+    repo_root = Path(__file__).resolve().parent.parent
+    assert rrr.main(["candidates", "--extraction", str(extraction_file), "--out", str(out),
+                     "--repo", str(repo_root)]) == rrr.EXIT_OK
+    got = json.loads(out.read_text())
+    header = got["header"]
+    assert header["archive_sha256"] == rrr.PHASE0_ARCHIVE_SHA256 == (
+        "520722bfbf0a9e75b566093f5ab19078ef3e3c41f39af4a356714d07b7f8a968")
+    assert header["extraction_sha256"] == hashlib.sha256(extraction_file.read_bytes()).hexdigest()
+    assert len(header["script_commit"]) == 40 and header["window"] == ["2026-10-01", "2026-10-01"]
+    assert header["snapshot_final"] is False and set(got) == {"header", "candidates", "unattributed"}
+    assert "2 flake tests, 3 unattributed tests" in capsys.readouterr().out
+    assert out.read_text().endswith("\n") and json.loads(out.read_text()) == got
+
+
+def test_the_ledger_regex_no_longer_takes_a_pending_name_for_a_ledger() -> None:
+    assert not rrr.is_ledger_file("tests/test_pending_jobs.py")
+    assert not rrr.is_ledger_file("docs/notes/pending-items.md")
+    assert rrr.is_ledger_file("docs/wire-contract-pending.md") and rrr.is_ledger_file("tests/x_ceiling.toml")
