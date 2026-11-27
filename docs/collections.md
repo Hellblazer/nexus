@@ -102,7 +102,7 @@ two-segment name's type prefix), and a minted `c<id>` label carries
 neither. A few checks still compare a model token read from a name: the
 `nx collection rename` guards compare the new name's type prefix, and its
 model (the token it carries, or the one its prefix implies), with the
-source's; the engine
+source's (for a minted `c<id>` source, its row's type and no model); the engine
 refuses a conformant new name whose token disagrees with the source row's
 model; and the re-embed job's foreign-origin check reads a source's name
 when that source's row is gone.
