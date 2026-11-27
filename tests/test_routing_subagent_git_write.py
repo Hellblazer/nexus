@@ -36,6 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from tests.hooks.audience_harness import write_user_settings, strict_home, mark_strict
+from tests._git_bash import bash, put_stubs_first, shell_path
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 ROUTING = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing"
@@ -1147,7 +1148,7 @@ _DENY_FAMILIES: dict[str, list[str]] = {
 
 @pytest.mark.parametrize("family", sorted(_DENY_FAMILIES))
 def test_subagent_is_denied_in_the_shared_tree(family, shared_repo):
-    cmds = [c.replace("{repo}", str(shared_repo)) for c in _DENY_FAMILIES[family]]
+    cmds = [c.replace("{repo}", shell_path(shared_repo)) for c in _DENY_FAMILIES[family]]
     leaked = _not_denied(cmds, shared_repo)
     assert not leaked, f"[{family}] subagent command(s) were NOT denied in the shared tree: {leaked!r}"
 
@@ -1541,7 +1542,7 @@ _ALLOW_FAMILIES: dict[str, list[str]] = {
 
 @pytest.mark.parametrize("family", sorted(_ALLOW_FAMILIES))
 def test_subagent_is_allowed_in_the_shared_tree(family, shared_repo):
-    cmds = [c.replace("{repo}", str(shared_repo)) for c in _ALLOW_FAMILIES[family]]
+    cmds = [c.replace("{repo}", shell_path(shared_repo)) for c in _ALLOW_FAMILIES[family]]
     blocked = _denied_among(cmds, shared_repo)
     assert not blocked, f"[{family}] command(s) were wrongly denied: {blocked!r}"
 
@@ -1922,7 +1923,7 @@ def test_a_config_write_that_reaches_shared_state_is_denied_in_a_linked_worktree
     common file, and `--file` stays denied everywhere. The deny names config
     only, never the exempt verb that shares the line."""
     cmds = [
-        c.replace("{primary}", str(shared_repo)) for c in _SHARED_CONFIG_WRITES
+        c.replace("{primary}", shell_path(shared_repo)) for c in _SHARED_CONFIG_WRITES
     ]
     leaked = _not_denied(cmds, linked_worktree)
     assert not leaked, f"worktree subagent config write(s) NOT denied: {leaked!r}"
@@ -2151,10 +2152,10 @@ def test_every_config_deny_family_command_really_writes_config(tmp_path):
                 (main / name).mkdir()
                 subprocess.run(["git", "init", "-q"], cwd=main / name, check=True, env=env)
                 watched.append(main / name / ".git" / "config")
-            cmd = template.replace("{repo}", str(main))
+            cmd = template.replace("{repo}", shell_path(main))
             before = _config_snapshot(watched)
             run = subprocess.run(
-                ["bash", "-c", cmd], cwd=main, env=env, capture_output=True, text=True,
+                [bash(), "-c", cmd], cwd=main, env=env, capture_output=True, text=True,
                 check=False, timeout=20,
             )
             wrote = _config_snapshot(watched) != before
@@ -2186,7 +2187,7 @@ def test_the_config_alias_through_a_variable_really_writes_and_denies(tmp_path):
         subprocess.run(["git", "init", "-q"], cwd=main, check=True, env=env)
         cfg = main / ".git" / "config"
         before = cfg.read_text()
-        subprocess.run(["bash", "-c", cmd], cwd=main, env=env, capture_output=True, text=True, timeout=20)
+        subprocess.run([bash(), "-c", cmd], cwd=main, env=env, capture_output=True, text=True, timeout=20)
         assert cfg.read_text() != before, f"{cmd!r} did not write"
         assert _denied(cmd, main), cmd
 
@@ -2206,7 +2207,7 @@ def test_a_quoted_command_a_consumer_runs_really_writes_and_denies(tmp_path):
     stubs.mkdir(parents=True)
     (stubs / "ssh").write_text('#!/bin/sh\nshift\nexec sh -c "$*"\n')
     (stubs / "ssh").chmod(0o755)
-    env["PATH"] = f"{stubs}{os.pathsep}{env['PATH']}"
+    put_stubs_first(env, stubs)
     sub = box / "sub"
     main = box / "main"
     for repo in (sub, main):
@@ -2222,7 +2223,7 @@ def test_a_quoted_command_a_consumer_runs_really_writes_and_denies(tmp_path):
     watched = [main / ".git" / "modules" / "s" / "config", main / ".git" / "config"]
     control = "ssh builder 'echo git config user.name via-ssh'"
     before = _config_snapshot(watched)
-    subprocess.run(["bash", "-c", control], cwd=main / "s", env=env, check=True, capture_output=True)
+    subprocess.run([bash(), "-c", control], cwd=main / "s", env=env, check=True, capture_output=True)
     assert _config_snapshot(watched) == before, "the control wrote"
     assert not _denied(control.replace("echo git config user.name via-ssh", "echo ok"), main)
     for cmd in (
@@ -2233,7 +2234,7 @@ def test_a_quoted_command_a_consumer_runs_really_writes_and_denies(tmp_path):
         "ssh builder \"gi''t config user.name via-split3\"",
     ):
         before = _config_snapshot(watched)
-        subprocess.run(["bash", "-c", cmd], cwd=main / "s", env=env, check=True, capture_output=True)
+        subprocess.run([bash(), "-c", cmd], cwd=main / "s", env=env, check=True, capture_output=True)
         assert _config_snapshot(watched) != before, f"{cmd!r} did not write"
         assert _denied(cmd, main), cmd
 
@@ -2255,7 +2256,7 @@ def test_a_backslash_in_a_double_quoted_consumer_string_really_writes_and_denies
     (stubs / "watch").write_text('#!/bin/sh\nexec sh -c "$*"\n')
     for name in ("ssh", "watch"):
         (stubs / name).chmod(0o755)
-    env["PATH"] = f"{stubs}{os.pathsep}{env['PATH']}"
+    put_stubs_first(env, stubs)
     sub = box / "sub"
     main = box / "main"
     for repo in (sub, main):
@@ -2293,14 +2294,14 @@ def test_a_backslash_in_a_double_quoted_consumer_string_really_writes_and_denies
     for cmd, where, watched in cases:
         before = _config_snapshot([watched])
         subprocess.run(
-            ["bash", "-c", cmd], cwd=where, env=env, capture_output=True, text=True,
+            [bash(), "-c", cmd], cwd=where, env=env, capture_output=True, text=True,
             check=False, timeout=60,
         )
         assert _config_snapshot([watched]) != before, f"{cmd!r} did not write"
         assert _denied(cmd, wt), f"{cmd!r} was not denied in a linked worktree"
     control = "ssh h " + dq.format(v="x").replace("config user.name x", "config --get user.name")
     before = _config_snapshot([common])
-    subprocess.run(["bash", "-c", control], cwd=wt, env=env, capture_output=True, check=False)
+    subprocess.run([bash(), "-c", control], cwd=wt, env=env, capture_output=True, check=False)
     assert _config_snapshot([common]) == before, "the control wrote"
     assert not _denied(control, wt), control
 
@@ -2321,7 +2322,7 @@ def _env_s_window_cmd(between: int) -> str:
 def _env_chdir_window_cmd(between: int, primary: pathlib.Path) -> str:
     """`env <between words> -C '<primary>' git config --worktree user.name x`."""
     words = ["-u", "V"] * (between // 2) + (["X=1"] if between % 2 else [])
-    return "env " + " ".join(words) + f" -C '{primary}' git config --worktree user.name x"
+    return "env " + " ".join(words) + f" -C '{shell_path(primary)}' git config --worktree user.name x"
 
 
 def test_the_twelve_word_window_of_env_chdir_is_a_pinned_limit(shared_repo, linked_worktree):
@@ -2375,7 +2376,7 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
     (stubs / "docker").write_text('#!/bin/sh\nshift 2\nexec "$@"\n')
     for name in ("ssh", "git-config", "docker"):
         (stubs / name).chmod(0o755)
-    env["PATH"] = f"{stubs}{os.pathsep}{env['PATH']}"
+    put_stubs_first(env, stubs)
     main = box / "main"
     main.mkdir(parents=True)
     subprocess.run(["git", "init", "-q"], cwd=main, check=True, env=env)
@@ -2416,7 +2417,7 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
     for cmd in writes:
         before = _config_snapshot([common])
         run = subprocess.run(
-            ["bash", "-c", cmd], cwd=wt, env=env, capture_output=True, text=True,
+            [bash(), "-c", cmd], cwd=wt, env=env, capture_output=True, text=True,
             check=False, timeout=60,
         )
         if _config_snapshot([common]) == before and _env_s_could_not_run(cmd, run.stderr):
@@ -2434,7 +2435,7 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
     for cmd in controls:
         before = _config_snapshot([common])
         subprocess.run(
-            ["bash", "-c", cmd], cwd=wt, env=env, capture_output=True, text=True,
+            [bash(), "-c", cmd], cwd=wt, env=env, capture_output=True, text=True,
             check=False, timeout=60,
         )
         assert _config_snapshot([common]) == before, f"control {cmd!r} wrote"
@@ -2446,7 +2447,7 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
     )
     before = _config_snapshot([common])
     cmd = "git config --worktree -- user.name via-dashdash"
-    subprocess.run(["bash", "-c", cmd], cwd=wt, env=env, check=True, capture_output=True)
+    subprocess.run([bash(), "-c", cmd], cwd=wt, env=env, check=True, capture_output=True)
     assert _config_snapshot([common]) == before, "`--worktree --` wrote the common config"
     out = subprocess.run(
         ["git", "config", "--worktree", "--get", "user.name"], cwd=wt, env=env,
@@ -2456,32 +2457,32 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
     assert not _denied(cmd, wt), cmd
     # `cd` into the primary: the quoted forms deny. The unquoted form is the
     # documented limit (the tool call's cwd, not the text, names the checkout).
-    for quoted in (f"cd '{main}' && git config --worktree user.name via-cd",
-                   f'cd "{main}" && git config --worktree user.name via-cd'):
+    for quoted in (f"cd '{shell_path(main)}' && git config --worktree user.name via-cd",
+                   f'cd "{shell_path(main)}" && git config --worktree user.name via-cd'):
         assert _denied(quoted, wt), quoted
-    assert not _denied(f"cd {main} && git config --worktree user.name via-cd", wt)
+    assert not _denied(f"cd {shell_path(main)} && git config --worktree user.name via-cd", wt)
     # After a keyword or a prefix word, and through `env -C` / `--chdir`, the write
     # lands in the primary's per-worktree file all the same. The quoted `cd` forms
     # and `env`'s own directory options deny; the unquoted `cd` stays the limit.
     primary_file = main / ".git" / "config.worktree"
     for redirected in (
-        f"if true; then cd '{main}' && git config --worktree user.name via-if; fi",
-        f"for d in a; do cd '{main}'; git config --worktree user.name via-do; done",
-        f"time cd '{main}' && git config --worktree user.name via-time",
-        f"! cd '{main}' || git config --worktree user.name via-not",
-        f"env -C '{main}' git config --worktree user.name via-envc",
-        f"env -C {main} git config --worktree user.name via-envc2",
+        f"if true; then cd '{shell_path(main)}' && git config --worktree user.name via-if; fi",
+        f"for d in a; do cd '{shell_path(main)}'; git config --worktree user.name via-do; done",
+        f"time cd '{shell_path(main)}' && git config --worktree user.name via-time",
+        f"! cd '{shell_path(main)}' || git config --worktree user.name via-not",
+        f"env -C '{shell_path(main)}' git config --worktree user.name via-envc",
+        f"env -C {shell_path(main)} git config --worktree user.name via-envc2",
     ):
         before = _config_snapshot([primary_file])
         subprocess.run(
-            ["bash", "-c", redirected], cwd=wt, env=env, capture_output=True, text=True,
+            [bash(), "-c", redirected], cwd=wt, env=env, capture_output=True, text=True,
             check=False, timeout=60,
         )
         assert _config_snapshot([primary_file]) != before, f"{redirected!r} did not write the primary"
         assert _denied(redirected, wt), f"{redirected!r} was not denied from a linked worktree"
     # GNU env spells the same option `--chdir` (BSD env on macOS has only `-C`, so
     # it is not run here): it denies as `-C` does.
-    assert _denied(f"env --chdir={main} git config --worktree user.name via-chdir", wt)
+    assert _denied(f"env --chdir={shell_path(main)} git config --worktree user.name via-chdir", wt)
     # A read through `--` is a read: it writes nothing and passes.
     for read in ("git config --worktree --get -- user.name", "git config --get -- user.name"):
         assert not _denied(read, wt), read
@@ -2496,7 +2497,7 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
         name = f"g{n + 1}"
         (main / name).write_text("y")
         run = subprocess.run(
-            ["bash", "-c", verb], cwd=main, env=env, capture_output=True, text=True,
+            [bash(), "-c", verb], cwd=main, env=env, capture_output=True, text=True,
             check=False, timeout=60,
         )
         staged = subprocess.run(
@@ -2537,16 +2538,16 @@ def test_a_git_dir_assignment_really_redirects_a_worktree_write_into_the_primary
     )
     primary_file = shared_repo / ".git" / "config.worktree"
     control = "git config --worktree user.zzcontrol 1"
-    subprocess.run(["bash", "-c", control], cwd=linked_worktree, env=env, check=True)
+    subprocess.run([bash(), "-c", control], cwd=linked_worktree, env=env, check=True)
     assert not primary_file.exists(), "the control reached the primary"
     assert not _denied(control, linked_worktree), control
     for cmd in (
-        f"GIT_DIR={shared_repo}/.git git config --worktree user.name x",
-        f"env GIT_DIR={shared_repo}/.git git config --worktree user.name x",
-        f"GIT_WORK_TREE={shared_repo} GIT_DIR={shared_repo}/.git git config --worktree user.name x",
+        f"GIT_DIR={shell_path(shared_repo)}/.git git config --worktree user.name x",
+        f"env GIT_DIR={shell_path(shared_repo)}/.git git config --worktree user.name x",
+        f"GIT_WORK_TREE={shell_path(shared_repo)} GIT_DIR={shell_path(shared_repo)}/.git git config --worktree user.name x",
     ):
         primary_file.unlink(missing_ok=True)
-        subprocess.run(["bash", "-c", cmd], cwd=linked_worktree, env=env, check=False)
+        subprocess.run([bash(), "-c", cmd], cwd=linked_worktree, env=env, check=False)
         assert primary_file.is_file() and "user" in primary_file.read_text(), cmd
         assert _denied(cmd, linked_worktree), cmd
 
@@ -2769,12 +2770,12 @@ def _sidefx_run(cmd: str, setup: str, where: str, tmp: pathlib.Path):
     """Run *cmd* for real; return (names changed, denied in cwd, the box)."""
     env, main, cwd = _sidefx_box(tmp / "box", where)
     box = tmp / "box"
-    real = cmd.replace(_BOX, str(box)).replace(_SUB, str(box / "subrepo"))
+    real = cmd.replace(_BOX, shell_path(box)).replace(_SUB, shell_path(box / "subrepo"))
     if setup:
-        subprocess.run(["bash", "-c", setup], cwd=cwd, env=env, check=True, capture_output=True)
+        subprocess.run([bash(), "-c", setup], cwd=cwd, env=env, check=True, capture_output=True)
     before = _sidefx_state(main, cwd)
     subprocess.run(
-        ["bash", "-c", real], cwd=cwd, env=env, capture_output=True, text=True,
+        [bash(), "-c", real], cwd=cwd, env=env, capture_output=True, text=True,
         check=False, timeout=60,
     )
     after = _sidefx_state(main, cwd)
@@ -3282,7 +3283,7 @@ def test_a_worktree_upstream_form_passes_in_every_plain_wrapper_and_denies_in_a_
 def _other_repo_upstream_cmds(primary: pathlib.Path) -> list[str]:
     """A worktree push, fetch or pull that sets an upstream while the command names
     the primary (or any other repository) by option, variable, `cd` or `env -C`."""
-    p = str(primary)
+    p = shell_path(primary)
     return [
         f"git -C {p} push -u origin HEAD",
         f"git -C{p} push -u origin HEAD",
@@ -3332,7 +3333,7 @@ def _foreign_upstream_cmds(primary: pathlib.Path) -> list[str]:
     carries an option naming a repository or a program to run. Each one writes a
     shared branch's upstream to an arbitrary place, or runs a program (the
     first-positional-only check let all of them through)."""
-    p = str(primary)
+    p = shell_path(primary)
     return [
         # a path or URL as the remote
         "git push -u /tmp/evil.git develop",
@@ -3470,11 +3471,11 @@ def test_a_worktree_upstream_form_that_writes_a_shared_branch_or_a_path_really_d
     subprocess.run(["git", "push", "-q", "bare", "main"], cwd=main, env=env, check=True, capture_output=True)
     real = (
         cmd.replace("{g}", "git push").replace("{f}", "git fetch").replace("{bare}", "bare")
-        .replace("{path}", str(bare)).replace("{url}", "file://" + str(bare))
+        .replace("{path}", shell_path(bare)).replace("{url}", bare.as_uri())
     )
     common = main / ".git" / "config"
     before = _config_keys(common, env)
-    proc = subprocess.run(["bash", "-c", real], cwd=cwd, env=env, capture_output=True, timeout=60, check=False)
+    proc = subprocess.run([bash(), "-c", real], cwd=cwd, env=env, capture_output=True, timeout=60, check=False)
     assert proc.returncode == 0, proc.stderr
     after = _config_keys(common, env)
     changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
@@ -3552,11 +3553,11 @@ def test_a_worktree_upstream_form_really_writes_only_branch_keys_in_the_common_c
     subprocess.run(["git", "init", "-q", "--bare", str(bare)], env=env, check=True, capture_output=True)
     subprocess.run(["git", "remote", "add", "bare", str(bare)], cwd=main, env=env, check=True)
     if setup:
-        subprocess.run(["bash", "-c", setup], cwd=cwd, env=env, check=True, capture_output=True)
+        subprocess.run([bash(), "-c", setup], cwd=cwd, env=env, check=True, capture_output=True)
     common = main / ".git" / "config"
     before = _config_keys(common, env)
     assert not _denied(cmd, cwd), f"{cmd!r} was denied from a linked worktree"
-    subprocess.run(["bash", "-c", cmd], cwd=cwd, env=env, check=True, capture_output=True, timeout=60)
+    subprocess.run([bash(), "-c", cmd], cwd=cwd, env=env, check=True, capture_output=True, timeout=60)
     after = _config_keys(common, env)
     changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
     assert changed == {"branch.wtb.remote", "branch.wtb.merge"}, sorted(changed)
@@ -3730,7 +3731,7 @@ def test_help_autocorrect_in_git_config_parameters_past_a_long_entry_really_runs
     for i, cmd in enumerate(_autocorrect_params_cmds()[:1] + _autocorrect_params_cmds()[4:5]):
         env, main, _ = _sidefx_box(tmp_path / f"p{i}", "main")
         before = _sidefx_state(main, main)
-        subprocess.run(["bash", "-c", cmd], cwd=main, env=env, capture_output=True, text=True, check=False, timeout=30)
+        subprocess.run([bash(), "-c", cmd], cwd=main, env=env, capture_output=True, text=True, check=False, timeout=30)
         assert _sidefx_state(main, main) != before, cmd
         assert _denied(cmd, main), cmd
 

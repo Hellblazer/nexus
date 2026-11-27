@@ -26,6 +26,7 @@ import sys
 import pytest
 
 from tests.hooks.audience_harness import strict_home
+from tests._git_bash import bash, shell_path
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 SCRIPT = (
@@ -110,7 +111,7 @@ def _allowed(cmd: str, cwd: pathlib.Path) -> bool:
 
 def test_an_agent_in_the_primary_cwd_commits_in_its_sessions_worktree(primary, worktree):
     """The shapes a developer agent needs, run from the primary cwd."""
-    wt = str(worktree)
+    wt = shell_path(worktree)
     allowed = [
         f"git -C {wt} add f.txt",
         f"git -C {wt} add -- src/a.py tests/test_a.py",
@@ -139,15 +140,15 @@ def test_an_agent_in_the_primary_cwd_commits_in_its_sessions_worktree(primary, w
 def test_the_same_shapes_aimed_at_the_primary_still_deny(primary, worktree):
     """-C naming the primary, a non-repo, a relative path, a subdirectory or a
     worktree's administrative git dir proves nothing."""
-    p = str(primary)
+    p = shell_path(primary)
     cmds = [
         f"git -C {p} commit -m msg",
         f"git -C {p} add f.txt",
-        f"git -C {worktree}/../primary commit -m msg",
-        f"git -C {primary.parent / 'nowhere'} commit -m msg",
+        f"git -C {shell_path(worktree)}/../primary commit -m msg",
+        f"git -C {shell_path(primary.parent / 'nowhere')} commit -m msg",
         "git -C wt commit -m msg",
         "git -C . commit -m msg",
-        f"git -C {worktree}/sub commit -m msg",
+        f"git -C {shell_path(worktree)}/sub commit -m msg",
         f"git -C {p}/.git/worktrees/wt commit -m msg",
     ]
     passed = [c for c in cmds if _allowed(c, primary)]
@@ -158,7 +159,7 @@ def test_git_option_prefixes_cannot_reach_a_refused_flag(primary, worktree):
     """Review round 1's ship-blocker: git reads `--exe`, `--ex=` and `--e` as
     `--exec`. No git text sits in these commands, so only the flag allowlist
     can deny them."""
-    wt = str(worktree)
+    wt = shell_path(worktree)
     cmds = [
         f"git -C {wt} rebase --exe 'touch /tmp/x' abc1234",
         f"git -C {wt} rebase --ex='touch /tmp/x' abc1234",
@@ -184,7 +185,7 @@ def test_discarding_work_and_shared_refs_are_never_admitted(primary, worktree):
     """The carve-out cannot prove the worktree is the agent's own session's, so
     nothing it admits discards uncommitted work or moves refs every worktree
     shares (review round 1: stash pop took the primary's stash entry)."""
-    wt = str(worktree)
+    wt = shell_path(worktree)
     cmds = [
         f"git -C {wt} reset --hard abc1234",
         f"git -C {wt} checkout .",
@@ -218,7 +219,7 @@ def test_discarding_work_and_shared_refs_are_never_admitted(primary, worktree):
 def test_anything_beyond_one_literal_invocation_falls_through(primary, worktree):
     """A second command, an expansion, a redirect, a second repository or a git
     write named inside an argument is never admitted by the carve-out."""
-    wt, p = str(worktree), str(primary)
+    wt, p = shell_path(worktree), shell_path(primary)
     cmds = [
         f"git -C {wt} commit -m x && git commit -m y",
         f"git -C {wt} commit -m x && touch /tmp/y",
@@ -254,7 +255,7 @@ def test_anything_beyond_one_literal_invocation_falls_through(primary, worktree)
 
 
 def test_the_deny_message_gives_the_working_shape(primary):
-    reason = _verdict(f"git -C {primary} commit -m x", primary)["permissionDecisionReason"]
+    reason = _verdict(f"git -C {shell_path(primary)} commit -m x", primary)["permissionDecisionReason"]
     allowed = next(line for line in reason.splitlines() if line.startswith("Allowed shape"))
     assert "git -C <absolute worktree root>" in allowed, allowed
     assert "'HEAD~1'" in allowed and "-F <file>" in allowed, allowed
@@ -263,5 +264,5 @@ def test_the_deny_message_gives_the_working_shape(primary):
 
 def test_reads_are_untouched(primary, worktree):
     """Control: read-only git passes without the carve-out, as before."""
-    assert _allowed(f"git -C {worktree} status --short", primary)
-    assert _allowed(f"git -C {worktree} log --oneline -3", primary)
+    assert _allowed(f"git -C {shell_path(worktree)} status --short", primary)
+    assert _allowed(f"git -C {shell_path(worktree)} log --oneline -3", primary)

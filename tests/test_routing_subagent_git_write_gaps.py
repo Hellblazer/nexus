@@ -36,6 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from tests.hooks.audience_harness import strict_home
+from tests._git_bash import bash, shell_path
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 SCRIPT = (
@@ -145,7 +146,7 @@ class Sandbox:
 
     def run(self, cmd: str, cwd: pathlib.Path | None = None) -> None:
         subprocess.run(
-            ["bash", "-c", cmd], cwd=cwd or self.main, env=self.env, capture_output=True, text=True,
+            [bash(), "-c", cmd], cwd=cwd or self.main, env=self.env, capture_output=True, text=True,
             timeout=60, check=False,
         )
 
@@ -659,7 +660,7 @@ def test_the_dash_c_carve_out_admits_revert_continue_only_and_none_of_the_new_fo
     (not `--abort`/`--skip`/`--quit`, which discard a stopped revert's work);
     `branch` is create-only, `tag`, `pull` and `fetch` are not listed, and
     `foreach` / `--output` are refused by the side-effect rule inside the carve-out."""
-    wt = str(sandbox.wt)
+    wt = shell_path(sandbox.wt)
     assert not _denied(f"git -C {wt} revert --continue", sandbox.main)
     assert not _denied(f"git -C {wt} revert HEAD", sandbox.main)
     denied = [
@@ -736,7 +737,7 @@ _REAL_WRITES = [
 
 @pytest.mark.parametrize("cmd", _REAL_WRITES, ids=[c.replace(" ", "_")[:48] for c in _REAL_WRITES])
 def test_each_denied_form_really_changes_state(cmd, sandbox):
-    real = cmd.replace("{out}", str(sandbox.box / "out.txt"))
+    real = cmd.replace("{out}", shell_path(sandbox.box / "out.txt"))
     before = sandbox.state()
     sandbox.run(real)
     assert sandbox.state() != before, f"{real!r} changed nothing in the sandbox"
@@ -755,7 +756,7 @@ def test_foreach_really_runs_a_command_in_a_submodule_and_denies(sandbox):
     )
     for i, verb in enumerate(("submodule foreach", "submodule--helper foreach")):
         marker = sandbox.box / f"ran{i}.txt"
-        cmd = f"git {verb} 'touch {marker}'"
+        cmd = f"git {verb} 'touch {shell_path(marker)}'"
         sandbox.run(cmd)
         assert marker.exists(), f"{verb} did not run the command"
         for cwd in (sandbox.main, sandbox.wt):
@@ -815,7 +816,7 @@ _REAL_CONTROLS = [
 
 @pytest.mark.parametrize("cmd", _REAL_CONTROLS, ids=[c.replace(" ", "_")[:48] for c in _REAL_CONTROLS])
 def test_each_control_changes_nothing_and_passes(cmd, sandbox):
-    cmd = cmd.replace("{out}", str(sandbox.box / "out.txt"))
+    cmd = cmd.replace("{out}", shell_path(sandbox.box / "out.txt"))
     before = sandbox.state()
     sandbox.run(cmd)
     assert sandbox.state() == before, f"control {cmd!r} changed the sandbox"
@@ -828,9 +829,9 @@ def test_git_really_takes_only_the_exact_output_spelling(sandbox):
     error, not an abbreviation. Measured on git, not assumed."""
     target = sandbox.box / "abbrev.txt"
     for flag in ("--outp", "--out", "--ou"):
-        sandbox.run(f"git diff {flag}={target}")
+        sandbox.run(f"git diff {flag}={shell_path(target)}")
         assert not target.exists(), flag
-    sandbox.run(f"git diff --output {target}")
+    sandbox.run(f"git diff --output {shell_path(target)}")
     assert target.exists()
 
 
