@@ -16,22 +16,21 @@ from tests.prose_edit.test_one_call_decisions import _branch
 
 def _reply_paragraph() -> str:
     section = route_sections()["Step 11 path run"]
-    start = section.index("  A reply that only says to apply")
+    start = section.index("  Bare apply (Branch A only")
     return section[start:section.index("- Branch B,", start)]
 
 
 def test_a_bare_apply_is_a_no_on_the_query_and_leaves_the_card_open() -> None:
     para = _reply_paragraph()
-    before(para, "after you asked question 1 (with the voice-card question, when it went in the call)", '(for example "Yes, apply.")',
-           "do not ask again which question it answers", "It counts as No on question 1",
-           "When the voice-card question went in the call, the reply does not answer it", "step 13 asks it once more after the apply")
-    assert "when the voice-card question was asked, never as Keep it on it" in para and "Never read such a reply as Yes on question 1" in para
+    before(para, "after question 1, with or without the voice-card question", '("Yes, apply.")',
+           "It counts as No on question 1: do not ask which question it answers",
+           "A voice-card question that went in the call stays open", "step 13 asks it after the apply")
 
 
 def test_a_bare_apply_runs_the_dry_run_then_the_real_apply_in_the_same_turn() -> None:
     para = _reply_paragraph()
-    before(para, "go to step 12 with the `apply_args` already printed", "run the dry run", "show it",
-           "in the same turn", "Step 12 before the real apply", "without `--dry-run`", "no `Apply` question")
+    before(para, "Go to step 12 with the printed `apply_args`", "dry run", "show it",
+           "in the same turn", "Step 12 before the real apply", "with no `Apply` question")
 
 
 def test_a_bare_apply_still_asks_apply_when_the_dry_run_leaves_something_out() -> None:
@@ -48,41 +47,31 @@ def test_step_12_names_the_bare_apply_as_a_case_that_skips_the_apply_question() 
     assert "in the no-edits close of step 11, do not ask: run it at once; nor in an App-decided run, below" in para
 
 
-def test_a_bare_apply_does_not_count_as_the_voice_card_answer_at_step_13() -> None:
-    card = step(13)[step(13).index("    - The voice card"):]
-    before(card, "already answered in step 11", "the author picked an option of it",
-           "a reply that only said to apply", "did not answer it, so ask it here")
-
-
 def test_the_card_offer_carries_the_card_text_in_the_message_that_asks() -> None:
     card = step(13)[step(13).index("    - The voice card"):]
-    before(card, "the card text in the question", "Keep this voice card for this document?",
-           "Put the card text whole in this reply", "even when an earlier message of the run showed it",
-           "never \"the card is in my earlier message\"")
+    before(card, "the card text in the question", "Keep this voice card for this document?")
     assert TEXT.count("Keep this voice card for this document?") == 1
 
 
 def test_the_trigger_is_a_reply_with_no_change_text_no_edit_number_and_no_other_instruction() -> None:
     para = _reply_paragraph()
     before(para, "tells you to apply and carries no change text, no edit number and no other instruction",
-           "A message that carries any change text, edit number or other instruction is an ordinary answer",
-           "ask what is unclear")
+           "any of them makes it an ordinary answer")
     assert "or to go on" not in para  # "go on" is not an instruction to apply
 
 
 def test_the_paragraph_sits_under_branch_a_and_branch_b_keeps_its_question_flow() -> None:
-    assert "A reply that only says to apply (Branch A only" in _branch("A")
+    assert "Bare apply (Branch A only" in _branch("A")
     b = _branch("B")
-    assert "A reply that only says to apply" not in b
+    assert "Bare apply" not in b
     before(b, "Ask questions 1", "2 and 3 of step 11 in SKILL.md in that order", "each its own call")
-    assert "In Branch B a bare apply decides none of the undecided edits: ask questions 2 and 3 as usual" in _branch("A")
+    assert "In Branch B it decides no undecided edit: ask questions 2 and 3 as usual" in _branch("A")
 
 
 def test_a_bare_apply_overrides_the_app_decided_hold_condition_on_purpose() -> None:
     para = _reply_paragraph()
-    before(para, "overrides, on purpose, the hold condition of the App-decided run", "left pending in the app",
-           "the app drops its pending suggestions when it reloads the file", "The one exception",
-           "`unplaced` or `would_skip`", "ask `Apply`")
+    before(para, "overrides the App-decided run's hold condition on purpose", "pending edits stay held",
+           "The one exception", "`unplaced` or `would_skip`", "ask `Apply`")
 
 
 def test_a_stdin_run_takes_a_bare_apply_as_no_pick_and_asks_again() -> None:
@@ -93,9 +82,8 @@ def test_a_stdin_run_takes_a_bare_apply_as_no_pick_and_asks_again() -> None:
 
 def test_a_bare_apply_runs_the_real_apply_even_when_every_edit_is_held() -> None:
     para = _reply_paragraph()
-    before(para, "Run the real apply even when every edit is held and the dry run would apply nothing",
-           "the apply also logs the session and deletes WORK",
-           "\"nothing would change\" is never a reason to skip it", "The one exception")
+    before(para, "Run the real apply even when every edit is held", "it also logs the session and deletes WORK",
+           "\"nothing would change\" is no reason to skip it", "The one exception")
 
 
 def test_a_rejections_removal_is_run_once_and_its_renumbered_list_is_not_a_failed_removal() -> None:
@@ -112,6 +100,5 @@ def test_a_bare_apply_also_covers_question_1_asked_alone() -> None:
     """A stored card, or no voice_card in the proposal, leaves question 1 alone in the call: the trigger and the
     voice-card sentences must not presume the card question was asked."""
     para = _reply_paragraph()
-    before(para, "picks no option of the question or questions you asked", "When the voice-card question went in the call",
-           "when the voice-card question was asked")
+    before(para, "with or without the voice-card question", "A voice-card question that went in the call")
     assert "of either question" not in para

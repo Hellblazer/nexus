@@ -54,6 +54,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/commands/nx-preflight.md`: the summary reads a check printed as SKIP (nx doctor outlasting its bound, nx not installed) as a WARN, GH #1689.
 - `conexus/hooks/scripts/compact_checkpoint.py`: a docstring only; it names the one-line placeholder the continuation's in-progress-beads subsection now carries where it used to say "bd unavailable or no results", GH #1689.
+- `prose-edit/skills/prose-edit/SKILL.md`: the rejections row says `--remove N` prints the renumbered list that is left and is run once, a stdin run takes "Yes, apply." as no pick, and the apply-question exception names a bare apply, nexus-scmcs.
+- `prose-edit/skills/prose-edit/markup-route.md`: a bare "Yes, apply." after a held query counts as No on the query, applies in the same turn (even when every edit is held), and leaves the voice-card question to step 13, nexus-scmcs.
 
 
 ## Deferred to the next client release
