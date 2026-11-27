@@ -1,3 +1,0 @@
-### Added
-
-- **`nx collection delete --id N` deletes a collection by its ID.** `N` is the `ID` column of `nx collection list`; give a label or `--id`, never both and never neither (a usage error). The ID goes to the engine as it is, with no lookup from ID to label, so a rename cannot redirect the delete. It needs an engine that advertises `catalog_collection_delete_by_id_supported` (engine-service 0.1.203 or later; 0.1.202 has the flag in source but its native binaries lack the `db/rdr229/` resources); without it, or when `GET /version` cannot be read, the command refuses before the prompt and sends nothing. `Deleted:` names the label and the ID. An unknown ID is `no collection with id N`, never a silent no-op.

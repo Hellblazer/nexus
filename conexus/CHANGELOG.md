@@ -1,5 +1,16 @@
 # Changelog
 
+## [8.5.9] - 2026-11-27
+
+Plugin version aligned with conexus 8.5.9. These plugin changes become live at this pin; the list below is the ledger `conexus/PENDING_RELEASE.md` carried, grouped.
+
+- `conexus/hooks/scripts/_audience.py`, `conexus/hooks/audience.yaml` -- the settings reader (RDR-259): one table of settings, `.nexus/project.json` (tighten-only) and `~/.config/nexus/conexus.json`, each checked and bounded, every problem reported, the strictness keys also read from `HEAD`; the audience manifest declares every hook registration, module and injected text as for every user, behind a named setting, or removed, nexus-sby49.3, nexus-sby49.14, nexus-sby49.18.
+- `conexus/hooks/scripts/settings_notice.py`, `conexus/hooks/hooks.json` -- new UserPromptSubmit hook: the first prompt of a session says when a settings file has a problem, nexus-sby49.12.
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`, `routing/_git_admit.py`, `routing/_user_git_seatbelt.py`, `routing/registry.yaml`, `routing/README.md` -- the full subagent git guard is the `subagent_git: strict` setting and the short deny list is the default; read-only git and text that spells a verb are admitted, a few more worktree shapes pass, the deny text is shorter, nexus-5y47c, nexus-sby49.3, nexus-sby49.4.
+- `conexus/hooks/scripts/routing/_lib.py`, `conexus/hooks/scripts/_endpoint_resolve.py`, `conexus/hooks/scripts/mailbox_drain.py` -- the routing events and the dispatch record are sent only when `telemetry` is true, to the engine the account names; a saved token or lease token goes only to the service it was issued for, so a repository's `NX_SERVICE_URL` or `NX_SERVICE_PORT` no longer carries it elsewhere, nexus-sby49.3, nexus-sby49.10, nexus-ec37o.
+- `conexus/hooks/scripts/routing/destructive_action_advice.py`, `routing/credential_print_guard.py`, `stop_wake_guard.py`, `compact_checkpoint.py`, `_session_facts.py`, `version_lockstep_action.py`, `version_lockstep_hook.py` -- text neutral for users; advice rows warn and block only when listed; the compaction text and the unlanded-work count follow the project's settings and default branch, nexus-sby49.4, nexus-sby49.11.
+- `conexus/agents/*.md`, `conexus/skills/*`, `conexus/commands/*`, `conexus/resources/*` -- internal RDR and bead ids removed from the text a session loads, meaning kept; the plan-library tool is named `answer_plan_search` and a saved plan is a retrieval plan; the relay's Bead field takes a tracking id; the orchestration reference gains a section on git in an implementer brief; `conexus/README.md` names the settings notice, nexus-sby49.3, nexus-sby49.4, nexus-5y47c, nexus-p2m1x.30.
+
 ## [8.5.8] - 2026-11-26
 
 Plugin version aligned with conexus 8.5.8. This plugin change becomes live at this pin.

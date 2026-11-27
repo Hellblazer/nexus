@@ -1,3 +1,0 @@
-### Changed
-
-- **Telemetry goes only to the engine your account names.** When you turn `telemetry` on, the routing events and the agent-dispatch counts are sent to the engine in `~/.config/nexus/config.yml` (or the local supervisor's lease), never to one a repository names through `NX_SERVICE_URL`, `NX_SERVICE_HOST`, `NX_SERVICE_PORT` or a proxy variable in its settings. Both senders start their child process without the endpoint, token, mint, config-directory and proxy variables, with `HOME` and the config directory set to your account's. If telemetry is on and no engine is configured there, nothing is sent and one entry in the dropped-writes meter (`nx doctor`) says why. (nexus-sby49.10)
