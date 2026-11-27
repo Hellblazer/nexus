@@ -206,7 +206,11 @@ def bearer_opener(url: str | None = None) -> urllib.request.OpenerDirector:
 def probe_httpx_kwargs(url: str) -> dict[str, Any]:
     """Keyword arguments for an ``httpx.get`` that reads ``/version`` or ``/health`` of the service at *url*:
     :func:`bearer_httpx_kwargs`, under the name that says what it is for. No bearer is sent, but the answer is
-    trusted, so no proxy or CA is read from the environment."""
+    trusted, so no proxy or CA is read from the environment. A plain-http URL (the loopback service) gets
+    ``trust_env=False`` and no TLS context at all: it needs no trust store, so an unloadable ``network.ca_bundle``
+    cannot read as "service not responding" for it."""
+    if not url.lower().startswith("https:"):
+        return {"trust_env": False}
     return bearer_httpx_kwargs(url)
 
 

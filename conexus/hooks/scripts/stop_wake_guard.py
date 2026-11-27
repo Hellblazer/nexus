@@ -87,10 +87,19 @@ cost is paid on every turn (``tests/hooks/test_stop_wake_guard.py`` pins the imp
 """
 from __future__ import annotations
 
-import json
+# nexus-ec37o: a repository's settings env reaches every hook. OpenSSL reads OPENSSL_CONF when it initialises (any import of
+# hashlib, ssl, http.client or urllib.request starts it; a configuration can load an engine or provider, which is code) and
+# ssl opens the file SSLKEYLOGFILE names. Both are dropped here, before any import beyond os and sys
+# (tests/test_ec37o_hook_openssl_env.py reads the first statements of every script hooks.json launches).
 import os
-import re
 import sys
+
+for _openssl_name in ("SSLKEYLOGFILE", "OPENSSL_CONF"):
+    os.environ.pop(_openssl_name, None)
+del _openssl_name
+
+import json
+import re
 import time
 from collections.abc import Callable
 from typing import NamedTuple

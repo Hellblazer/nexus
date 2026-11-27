@@ -619,12 +619,21 @@ still allows, since a broken guard must not brick every agent's Bash.
 """
 from __future__ import annotations
 
-import functools
+# nexus-ec37o: a repository's settings env reaches every hook. OpenSSL reads OPENSSL_CONF when it initialises (any import of
+# hashlib, ssl, http.client or urllib.request starts it; a configuration can load an engine or provider, which is code) and
+# ssl opens the file SSLKEYLOGFILE names. Both are dropped here, before any import beyond os and sys
+# (tests/test_ec37o_hook_openssl_env.py reads the first statements of every script hooks.json launches).
 import os
+import sys
+
+for _openssl_name in ("SSLKEYLOGFILE", "OPENSSL_CONF"):
+    os.environ.pop(_openssl_name, None)
+del _openssl_name
+
+import functools
 import re
 import shlex
 import subprocess
-import sys
 from collections.abc import Callable
 from typing import Any, NamedTuple
 

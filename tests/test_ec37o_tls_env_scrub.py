@@ -58,15 +58,6 @@ def test_a_process_that_imports_nexus_survives_a_repo_set_ssl_key_log_file(tmp_p
     assert not (tmp_path / "keys.log").exists()
 
 
-def test_the_nx_cli_survives_the_same_environment(tmp_path: Path) -> None:
-    proc = subprocess.run(
-        [sys.executable, "-c", "import sys; from nexus.cli import main; sys.argv = ['nx', '--version']; main()"],
-        capture_output=True, text=True, env=_env(tmp_path), timeout=120, encoding="utf-8", errors="replace",
-    )
-    assert proc.returncode == 0, (proc.returncode, proc.stdout[-300:], proc.stderr[-300:])
-    assert not (tmp_path / "keys.log").exists()
-
-
 def test_a_non_bearer_https_request_survives_a_repo_set_ssl_key_log_file(tmp_path: Path) -> None:
     """The request path the residual named: httpx with its own default context (what a request that is not a nexus
     bearer or probe builds, a model download or a bibliographic lookup), made against a closed port so it fails to
@@ -130,3 +121,11 @@ def test_the_telemetry_child_is_started_without_them_whatever_the_case(audience)
     assert env is not None
     assert not {k.upper() for k in env} & set(NAMES), env
     assert env["PATH"] == "/bin"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="on Windows a process that honours SSLKEYLOGFILE dies (no OPENSSL_Applink): that is residual 2 itself")
+def test_the_control_a_process_that_honours_the_variable_writes_the_key_log(tmp_path: Path) -> None:
+    """Non-vacuity of every ``keys.log`` absence above: a default TLS context in a process that never imported ``nexus`` opens it."""
+    proc = _run("import ssl; ssl.create_default_context()", _env(tmp_path))
+    assert proc.returncode == 0, proc.stderr[-300:]
+    assert (tmp_path / "keys.log").exists()

@@ -50,9 +50,29 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/_audience.py`: `show` labels a missing project file "(no checkout)" outside a git checkout, instead of "(no account home)", nexus-sby49; `telemetry_child_env` also drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from the telemetry child's environment (a project's settings can set them; on Windows the first kills a process that makes a default TLS context), nexus-ec37o.
 
 - `conexus/hooks/scripts/_endpoint_resolve.py`: the bearer TLS context sets TLS 1.2 as an explicit floor (`minimum_version`), matching the CLI's `bearer_transport`; behaviour is unchanged (Python's client default is already TLS 1.2), the floor is now stated, nexus-ec37o. The module also drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from the hook process's environment at import, before it builds a TLS context (nexus-ec37o).
-- `conexus/launch/nx_setup.py`: the `nx setup` service check opens its requests through `_endpoint_resolve.bearer_opener` (the proxy and extra CA of `config.yml`, nothing from the environment), nexus-ec37o.
+- `conexus/launch/nx_setup.py`: the `nx setup` check's tokenless `GET /version` takes the proxy and extra CA of `config.yml` (`_endpoint_resolve.bearer_opener`); the two requests that carry the token take no proxy, no redirect and the trust store with no environment in it, nexus-ec37o.
 
-- `conexus/hooks/scripts/mailbox_drain.py`: the ask-answer frame says "the user" instead of a person's name and fences the relayed words with `user-words` in place of `sam-words`; nonce, record-sourced words and one-option authorization are unchanged (RDR-259 S6, nexus-sby49). The check also reads the relayed words from the answer record's `user_words`, falling back to `sam_words` for a record an older client wrote (the fallback, with the client's dual-write and `--sam-words` alias, is removed in the second client release after the one that first ships `user_words`).
+- `conexus/hooks/scripts/compact_checkpoint.py`: drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from the process environment before its first import (a project's settings can set them; OpenSSL reads the second when it starts and the first kills a Windows process), nexus-ec37o.
+
+- `conexus/hooks/scripts/nx_hook_shim.py`: drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from the process environment before its first import (a project's settings can set them; OpenSSL reads the second when it starts and the first kills a Windows process), nexus-ec37o.
+
+- `conexus/hooks/scripts/nx_setup_notice.py`: drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from the process environment before its first import (a project's settings can set them; OpenSSL reads the second when it starts and the first kills a Windows process), nexus-ec37o.
+
+- `conexus/hooks/scripts/routing/credential_print_guard.py`: drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from the process environment before its first import (a project's settings can set them; OpenSSL reads the second when it starts and the first kills a Windows process), nexus-ec37o.
+
+- `conexus/hooks/scripts/routing/destructive_action_advice.py`: drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from the process environment before its first import (a project's settings can set them; OpenSSL reads the second when it starts and the first kills a Windows process), nexus-ec37o.
+
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`: drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from the process environment before its first import (a project's settings can set them; OpenSSL reads the second when it starts and the first kills a Windows process), nexus-ec37o.
+
+- `conexus/hooks/scripts/settings_notice.py`: drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from the process environment before its first import (a project's settings can set them; OpenSSL reads the second when it starts and the first kills a Windows process), nexus-ec37o.
+
+- `conexus/hooks/scripts/stop_wake_guard.py`: drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from the process environment before its first import (a project's settings can set them; OpenSSL reads the second when it starts and the first kills a Windows process), nexus-ec37o.
+
+- `conexus/hooks/scripts/version_lockstep_hook.py`: drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from the process environment before its first import (a project's settings can set them; OpenSSL reads the second when it starts and the first kills a Windows process), nexus-ec37o.
+
+- `conexus/launch/nx_launch.py`: drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from the process environment before its first import (a project's settings can set them; OpenSSL reads the second when it starts and the first kills a Windows process), nexus-ec37o.
+
+- `conexus/hooks/scripts/mailbox_drain.py`: the ask-answer frame says "the user" instead of a person's name and fences the relayed words with `user-words` in place of `sam-words`; nonce, record-sourced words and one-option authorization are unchanged (RDR-259 S6, nexus-sby49). The script also drops `SSLKEYLOGFILE` and `OPENSSL_CONF` from its environment before its first import, nexus-ec37o.
 
 - `conexus/commands/nx-preflight.md`: the summary reads a check printed as SKIP (nx doctor outlasting its bound, nx not installed) as a WARN, GH #1689.
 - `conexus/hooks/scripts/compact_checkpoint.py`: a docstring only; it names the one-line placeholder the continuation's in-progress-beads subsection now carries where it used to say "bd unavailable or no results", GH #1689.

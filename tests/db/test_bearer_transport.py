@@ -216,6 +216,15 @@ class TestProbeTransport:
         assert bt.probe_httpx_kwargs("https://svc.example")["proxy"] == "http://proxy.corp:3128"
         assert "proxy" not in bt.probe_httpx_kwargs("http://127.0.0.1:9")
 
+    def test_a_plain_http_probe_builds_no_tls_context(self, config_dir, monkeypatch) -> None:
+        """A loopback probe needs no trust store: a network.ca_bundle that cannot be loaded must not read as "service not responding"."""
+        monkeypatch.setenv("HTTP_PROXY", "http://evil.example:3128")
+        _write_network(config_dir, ca_bundle=str(config_dir / "missing.pem"), https_proxy="http://proxy.corp:3128")
+        kwargs = bt.probe_httpx_kwargs("http://127.0.0.1:9")
+        assert kwargs == {"trust_env": False}
+        with pytest.raises(OSError):
+            bt.probe_httpx_kwargs("https://svc.example")  # the https probe does read it, and names the bundle
+
     def test_a_plain_http_opener_has_no_proxy_and_follows_no_redirect(self, config_dir, monkeypatch) -> None:
         import urllib.request
 

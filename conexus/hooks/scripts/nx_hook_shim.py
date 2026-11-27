@@ -41,12 +41,21 @@ their own subprocess work.
 """
 from __future__ import annotations
 
-import errno
+# nexus-ec37o: a repository's settings env reaches every hook. OpenSSL reads OPENSSL_CONF when it initialises (any import of
+# hashlib, ssl, http.client or urllib.request starts it; a configuration can load an engine or provider, which is code) and
+# ssl opens the file SSLKEYLOGFILE names. Both are dropped here, before any import beyond os and sys
+# (tests/test_ec37o_hook_openssl_env.py reads the first statements of every script hooks.json launches).
 import os
+import sys
+
+for _openssl_name in ("SSLKEYLOGFILE", "OPENSSL_CONF"):
+    os.environ.pop(_openssl_name, None)
+del _openssl_name
+
+import errno
 import re
 import signal
 import subprocess
-import sys
 
 # The launcher's lookup (RDR-228): the generation layout, then PATH alone (finding
 # A, nexus-f9bgu.36). Never spawn a bare name, or a planted nx-hook.exe in the

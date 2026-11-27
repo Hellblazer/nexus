@@ -1145,7 +1145,8 @@ def check_pair(url: str, token: str, tenant: str = "", *, deadline_s: float | No
     its tenant by minting ONE data token (``POST`` :data:`MINT_ROUTE`, the call the CLI itself makes, with a
     :data:`MINT_TTL_SECONDS` lifetime; the minted token is dropped unread): 200 accepts it as a mint credential,
     403 says the token belongs to another tenant, 429 says to try again in a moment. A redirect is never
-    followed, so the token goes only to the address typed, and no proxy is used. The whole check gives up after
+    followed, so the token goes only to the address typed, and no proxy and no CA from a config directory is used for the
+    token calls (a repository's env can name one); the tokenless ``/version`` takes the proxy and CA of ``config.yml``. The whole check gives up after
     *deadline_s* (default :data:`CHECK_DEADLINE_SECONDS`), however slowly the service answers.
     """
     import urllib.parse  # noqa: PLC0415 -- lazy, see _normal_address
@@ -1184,9 +1185,15 @@ def _probe(base: str, host: str, token: str, tenant: str, end: float) -> CheckRe
     import urllib.error  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415
 
-    # The token goes to the address typed, never to a proxy or a CA the environment names: the proxy and extra CA of
-    # config.yml only, no redirect followed (nexus-ec37o).
-    opener = _endpoint_resolve.bearer_opener(base)
+    # The two calls that carry the token go to the address typed and nowhere else (nexus-ec37o): no proxy (an empty
+    # ProxyHandler reads no variable), no redirect, and the trust store with no environment in it. A repository's env can
+    # name NEXUS_CONFIG_DIR and so plant a config.yml with a proxy and a CA, so the token calls read neither. The
+    # tokenless GET /version, whose answer is trusted, takes the transport of config.yml like every other such probe.
+    token_opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=_endpoint_resolve.bearer_ssl_context("")),
+        _endpoint_resolve.no_redirect_handler(),
+    )
+    version_opener = _endpoint_resolve.bearer_opener(base)
 
     def call(route: str, bearer: str | None = None, body: dict[str, Any] | None = None) -> tuple[int, bytes]:
         headers = {"Accept": "application/json", "User-Agent": "conexus-setup"}
@@ -1199,7 +1206,7 @@ def _probe(base: str, host: str, token: str, tenant: str, end: float) -> CheckRe
             request.add_header("Authorization", f"Bearer {bearer}")
         timeout = max(0.1, min(CHECK_TIMEOUT_SECONDS, end - time.monotonic()))
         try:
-            with opener.open(request, timeout=timeout) as response:
+            with (token_opener if bearer is not None else version_opener).open(request, timeout=timeout) as response:
                 return response.status, response.read(65536)
         except urllib.error.HTTPError as exc:
             try:

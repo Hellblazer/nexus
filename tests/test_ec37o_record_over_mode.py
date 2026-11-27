@@ -1,13 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-ec37o residual 1, belt and braces: ``GET /version``'s ``embedding_mode`` never overrides a collection's own record.
+"""nexus-ec37o residual 1: what ``GET /version``'s ``embedding_mode`` can and cannot change for a collection with a record.
 
-The probe's transport now comes from ``config.yml`` (``tests/test_ec37o_probe_transport.py``). A client that still
-reaches an engine a repository's env URL named would read an ``embedding_mode`` the engine chose. ``embedding_mode`` is an
-engine-wide string; every decision it feeds that is made PER COLLECTION already takes the collection's recorded model
-(the catalog row's ``embedding_model``, the name's token only when no row backs the name) over the string, and these tests
-pin that: a mode that says "voyage" cannot put a Voyage-calibrated threshold on a bge-recorded collection, nor widen its
-upsert batch past the memory-bound cap, nor lift its byte budget. (A mode that says ``onnx-local`` makes the same decisions
-more cautious, never less: a smaller batch, no threshold.)
+The probe's transport now comes from ``config.yml`` (``tests/test_ec37o_probe_transport.py``). A client that still reaches an engine
+a repository's env URL named (an accepted limit) would read an ``embedding_mode`` that engine chose. ``embedding_mode`` is an
+engine-wide string. What it feeds, per decision:
+
+* The Voyage-calibrated distance threshold: decided PER COLLECTION by the collection's recorded model, in every mode. A forged
+  ``voyage`` or ``dual`` cannot put a Voyage threshold on a bge collection. Pinned here.
+* The upsert chunk cap: a forged ``voyage`` or ``dual`` cannot widen a bge-recorded collection's batch (pinned here). A forged
+  ``onnx-local`` narrows every batch to the memory cap: slower, never less cautious. That engine-wide rule is a pinned design
+  (``tests/db/test_cap_and_budget_follow_the_collection_model.py``).
+* The upsert byte budget: a forged ``voyage`` or ``dual`` cannot lift a voyage-recorded code collection's budget, but a forged
+  ``onnx-local`` does, because ``onnx-local`` is engine-wide by the same pinned design (a real onnx-local engine embeds locally,
+  and has no Voyage token ceiling). The last test below records that as known, not as a guarantee: the consequence is a request
+  the Voyage side may refuse, never a disclosure, and reaching it takes the accepted env-URL limit.
 """
 from __future__ import annotations
 
@@ -46,3 +52,13 @@ def test_a_forged_mode_cannot_put_a_voyage_threshold_on_a_bge_recorded_collectio
     voyage_looking = "docs__1-1__voyage-context-3__v1"
     assert _threshold_for_collection_model(voyage_looking, CFG, dual=dual, model_of=lambda _n: "bge-base-en-v15-768", **docs) is None
     assert _threshold_for_collection_model(voyage_looking, CFG, dual=dual, model_of=lambda _n: "voyage-context-3", **docs) == pytest.approx(0.65)
+
+
+def test_known_a_forged_onnx_local_lifts_the_byte_budget_of_a_voyage_recorded_collection(monkeypatch):
+    """Characterisation of the accepted limit above: the engine-wide ``onnx-local`` rule is not overridden by the record."""
+    monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: "onnx-local")
+    code_name = "code__1-1__voyage-code-3__v1"
+    row = {"embedding_model": "voyage-code-3", "content_type": "code"}
+    assert hvc._upsert_byte_budget(code_name, row_resolver=lambda _n: row) is None
+    monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: "voyage")
+    assert hvc._upsert_byte_budget(code_name, row_resolver=lambda _n: row) == hvc._CODE_UPSERT_BYTE_BUDGET

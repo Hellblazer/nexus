@@ -359,11 +359,16 @@ for _path, _qual, _kind in (
     _allow(PROBE_ALLOWED, _path, _qual, _MINERU, _NO_PROBE.format(_kind))
 
 
+def _probe_routes_named(node: ast.AST) -> set[str]:
+    """The routes of :data:`PROBE_ROUTES` that a string constant inside *node* names."""
+    return {
+        route for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        for route in PROBE_ROUTES if route in n.value
+    }
+
+
 def _mentions_probe_route(node: ast.AST) -> bool:
-    for n in ast.walk(node):
-        if isinstance(n, ast.Constant) and isinstance(n.value, str) and any(route in n.value for route in PROBE_ROUTES):
-            return True
-    return False
+    return bool(_probe_routes_named(node))
 
 
 class _Probe(_Scope):
@@ -388,10 +393,22 @@ class _Probe(_Scope):
             return any(kw.arg is None and isinstance(kw.value, ast.Call) and _name(kw.value.func) in PROBE_SPLATS for kw in call.keywords)
         return any(_mentions(call, word) for word in PROBE_OPENERS) or any(_mentions(f, word) for f in self.functions[-1:] for word in PROBE_OPENERS)
 
+    def __init__(self, rel: str) -> None:
+        super().__init__(rel)
+        #: (path, function, route) of every call that IS decided, one entry per function and route it names
+        self.decided_probes: set[tuple[str, str, str]] = set()
+
     def visit_Call(self, node: ast.Call) -> None:
         kind = self._kind(node)
-        if kind is not None and any(_mentions_probe_route(f) for f in self.functions) and not self._decided(node, kind):
-            self.site(_NO_PROBE.format(kind), node)
+        enclosing = set().union(*(_probe_routes_named(f) for f in self.functions)) if self.functions else set()
+        if _name(node.func) in PROBE_OPENERS:  # ``probe_opener(url).open(...)``: the decision itself, counted for the floors
+            self.decided_probes.update((self.rel, self.qual(), route) for route in enclosing)
+        routes = enclosing if kind is not None else set()
+        if routes:
+            if self._decided(node, kind):
+                self.decided_probes.update((self.rel, self.qual(), route) for route in routes)
+            else:
+                self.site(_NO_PROBE.format(kind), node)
         self.generic_visit(node)
 
 
@@ -425,19 +442,34 @@ def test_every_trusted_probe_takes_the_probe_transport(probe_scan) -> None:
     _check(sites, PROBE_ALLOWED, "probe transport")
 
 
+#: the decided probes the tree holds, per route, with a floor under each: the floors are spelled here and not read from
+#: PROBE_ROUTES, so a detector that stopped seeing ``/version`` (or ``/health``) fails this, whatever the other routes still find
+PROBE_FLOORS = {"/version": 6, "/health": 3}
+
+
+def _decided_probes() -> set[tuple[str, str, str]]:
+    found: set[tuple[str, str, str]] = set()
+    for root in SCAN_ROOTS:
+        for path in sorted(root.rglob("*.py")):
+            walker = _Probe(path.relative_to(ROOT).as_posix())
+            walker.visit(ast.parse(path.read_text(encoding="utf-8")))
+            found |= walker.decided_probes
+    return found
+
+
 def test_the_probe_walk_is_not_vacuous(probe_scan) -> None:
     sites, files, _in_scope = probe_scan
     assert files >= 500, files
-    decided = 0
-    for root in SCAN_ROOTS:
-        for path in sorted(root.rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            walker = _Probe(path.relative_to(ROOT).as_posix())
-            walker.visit(tree)
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Call) and any(kw.arg is None and isinstance(kw.value, ast.Call) and _name(kw.value.func) in PROBE_SPLATS for kw in node.keywords):
-                    decided += 1
-                if isinstance(node, ast.Call) and _name(node.func) in PROBE_OPENERS:
-                    decided += 1
-    assert decided >= 9, f"only {decided} probes carry the probe transport; the detector or the sweep stopped matching"
+    decided = _decided_probes()
+    per_route = {route: len({(p, q) for p, q, r in decided if r == route}) for route in PROBE_FLOORS}
+    for route, floor in PROBE_FLOORS.items():
+        assert per_route[route] >= floor, f"only {per_route[route]} decided probes name {route} (floor {floor}); the detector stopped matching: {sorted(decided)}"
     assert len(sites) == len(PROBE_ALLOWED), "the allowlisted MinerU probes are the only undecided ones: if one is missing the detector stopped matching"
+
+
+@pytest.mark.parametrize("dropped", ["/version", "/health"])
+def test_a_detector_that_lost_a_route_fails_the_floor(monkeypatch, dropped: str) -> None:
+    """Mutation: with a route removed from the detector the floor for it is missed, so the non-vacuity check above can fail."""
+    monkeypatch.setattr(sys.modules[__name__], "PROBE_ROUTES", tuple(r for r in ("/version", "/health", "/livez") if r != dropped))
+    decided = _decided_probes()
+    assert len({(p, q) for p, q, r in decided if r == dropped}) < PROBE_FLOORS[dropped]

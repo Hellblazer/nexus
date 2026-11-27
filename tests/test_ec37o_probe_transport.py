@@ -49,6 +49,9 @@ class Probe:
     name: str
     code: str
     https: bool = True
+    #: False when the child's printed value cannot say whether the answer was read (``check_pair`` also sends token
+    #: requests that fail by design here): the assertion is then on what the origin and the proxies saw
+    prints_read: bool = True
 
 
 _PRELUDE = "import json, sys\nURL, HOST, PORT = sys.argv[1], sys.argv[2], int(sys.argv[3])\n"
@@ -67,6 +70,35 @@ PROBES = (
           "print(json.dumps(fetch_service_version(HOST, PORT, scheme='https')))\n"),
     Probe("fetch_service_version_http", "from nexus.daemon.binary_lifecycle import fetch_service_version\n"
           "print(json.dumps(fetch_service_version(HOST, PORT)))\n", https=False),
+    Probe("doctor_trim_version",
+          "import contextlib, io\n"
+          "import nexus.db.service_endpoint as se\n"
+          "import nexus.engine_version as ev\n"
+          "se.resolve_service_endpoint_with_evidence_gate = lambda *a, **k: (URL, 'tok')\n"
+          "ev.REQUIRED_ENGINE_VERSION = (0, 0, 1)  # the dry-run guard probes /version only on an engine floor below the trim floor\n"
+          "from nexus.commands.doctor import _run_trim_telemetry\n"
+          "err = io.StringIO()\n"
+          "with contextlib.redirect_stderr(err):\n"
+          "    try:\n"
+          "        _run_trim_telemetry(30, dry_run=True)\n"
+          "    except BaseException:\n"
+          "        pass\n"
+          "print(json.dumps('unprobeable' not in err.getvalue()))\n"),
+    Probe("verify_service_version", "from nexus.upgrade_ladder.provisioning import verify_service_version\n"
+          "print(json.dumps(verify_service_version(URL).ok))\n"),
+    Probe("verify_voyage_capability", "from nexus.upgrade_ladder.provisioning import verify_voyage_capability\n"
+          "print(json.dumps('could not reach' not in (verify_voyage_capability(URL).reason or '')))\n"),
+    Probe("nx_setup_check",
+          "import sys\n"
+          "sys.path.insert(0, " + repr(str(Path(__file__).resolve().parents[1] / "conexus" / "launch")) + ")\n"
+          "import nx_setup\n"
+          "print(json.dumps(nx_setup.check_pair(URL, 'setup-token').ok))\n", prints_read=False),
+    Probe("storage_service_health",
+          "import pathlib, tempfile\n"
+          "from nexus.health import _check_storage_service_health\n"
+          "creds = pathlib.Path(tempfile.mkdtemp()) / 'pg_credentials'\n"
+          "creds.write_text('x')\n"
+          "print(json.dumps(_check_storage_service_health(creds_path=creds, endpoint=(HOST, PORT))[0].ok))\n", https=False),
     Probe("registry_health_identity", "from nexus.daemon.service_registry import _probe_health_identity\n"
           "print(json.dumps(_probe_health_identity(HOST, PORT, timeout=5.0)))\n", https=False),
     Probe("daemon_probe_health", "from nexus.commands.daemon import _probe_health\n"
@@ -213,13 +245,13 @@ def test_an_https_probe_takes_its_proxy_and_ca_from_config_only(tmp_path, pki, o
     assert not mitm.touched, context  # the repository's proxy never saw the probe
     if leg == "env_attack":
         assert any(path == "/version" for path, _auth in origin.requests), context
-        assert value, context  # and its answer came from the origin, over the CA of config.yml
+        assert value or not probe.prints_read, context  # and its answer came from the origin, over the CA of config.yml
     elif leg == "env_trust_only":
         assert origin.requests == [] and not value, context  # an environment CA adds no root: the answer was never read
     else:
         assert any(c.startswith(f"CONNECT 127.0.0.1:{origin.port}") for c in tunnel.connects), context
         assert any(path == "/version" for path, _auth in origin.requests), context
-        assert value, context
+        assert value or not probe.prints_read, context
 
 
 @pytest.mark.parametrize("probe", PLAIN_PROBES, ids=lambda p: p.name)
@@ -236,12 +268,48 @@ def test_the_harness_is_not_vacuous(tmp_path, pki, origin):
     every https probe reaches the origin and reads its answer."""
     for probe in HTTPS_PROBES:
         proc, value = _run(probe, tmp_path, origin.url, {}, ca_bundle=str(pki[0].pem))
-        assert value, (probe.name, proc.returncode, proc.stdout[-400:], proc.stderr[-400:])
+        assert value or not probe.prints_read, (probe.name, proc.returncode, proc.stdout[-400:], proc.stderr[-400:])
     assert {path for path, _auth in origin.requests} == {"/version"}
 
 
-def test_the_probe_table_covers_the_probes_the_client_trusts() -> None:
-    names = {p.name for p in PROBES}
-    assert {"managed_service_probe", "serving_engine_version", "t2_schema_fingerprint", "fetch_service_version"} <= names
-    assert len(HTTPS_PROBES) >= 4 and len(PLAIN_PROBES) >= 4
+#: the production functions each probe above exercises: ``path::qualified name``, as the lint's census names them
+COVERS: dict[str, tuple[str, ...]] = {
+    "managed_service_probe": ("src/nexus/db/managed_endpoint.py::probe_managed_service.http_get",),
+    "serving_engine_version": ("src/nexus/db/serving_engine_version.py::probe_serving_engine_version",),
+    "t2_schema_fingerprint": ("src/nexus/health.py::probe_t2_schema_fingerprint",),
+    "fetch_service_version": ("src/nexus/daemon/binary_lifecycle.py::fetch_service_version",),
+    "fetch_service_version_http": ("src/nexus/daemon/binary_lifecycle.py::fetch_service_version",),
+    "doctor_trim_version": ("src/nexus/commands/doctor.py::_run_trim_telemetry",),
+    "verify_service_version": ("src/nexus/upgrade_ladder/provisioning.py::verify_service_version._get",),
+    "verify_voyage_capability": ("src/nexus/upgrade_ladder/provisioning.py::verify_voyage_capability._get",),
+    "nx_setup_check": ("conexus/launch/nx_setup.py::_probe",),
+    "storage_service_health": ("src/nexus/health.py::_check_storage_service_health",),
+    "registry_health_identity": ("src/nexus/daemon/service_registry.py::_probe_health_identity",),
+    "daemon_probe_health": ("src/nexus/commands/daemon.py::_probe_health",),
+    "supervisor_probe_health": (
+        "src/nexus/daemon/storage_service_daemon.py::StorageServiceSupervisor._probe_service_health",
+        "src/nexus/daemon/storage_service_daemon.py::StorageServiceSupervisor._probe_service_liveness",
+    ),
+}
 
+#: decided probes the table does not run, with the reason: these send a bearer, so the bearer matrix
+#: (``tests/test_ec37o_netcfg_suite.py``) is where they are held to the transport
+NOT_IN_TABLE: dict[str, str] = {
+    "src/nexus/upgrade_ladder/provisioning.py::wait_for_service_health._get": "its /health request may carry the bearer (bearer_httpx_kwargs)",
+    "src/nexus/db/http_engine_status.py::fetch_engine_status": "its /v1/status request carries the bearer (bearer_httpx_kwargs)",
+}
+
+
+def test_the_probe_table_names_every_probe_the_tree_decides_and_nothing_stale() -> None:
+    """Derived from the source, not a hand count: the lint's census (``tests/test_ec37o_bearer_transport_lint.py``) finds every
+    function that names ``/version``, ``/health`` or ``/livez`` and carries the probe transport. Each is either run by a probe
+    above or listed in ``NOT_IN_TABLE`` with its reason, so a new probe is a red here until it has a behaviour case, and an
+    entry for a function that no longer exists is a red too."""
+    from tests.test_ec37o_bearer_transport_lint import _decided_probes
+
+    in_tree = {f"{path}::{qual}" for path, qual, _route in _decided_probes()}
+    covered = {c for p in PROBES for c in COVERS.get(p.name, ())}
+    assert {p.name for p in PROBES} == set(COVERS), sorted({p.name for p in PROBES} ^ set(COVERS))
+    assert not in_tree - covered - set(NOT_IN_TABLE), f"decided probes with no behaviour case: {sorted(in_tree - covered - set(NOT_IN_TABLE))}"
+    assert not (covered | set(NOT_IN_TABLE)) - in_tree, f"table entries naming a function that is not a decided probe: {sorted((covered | set(NOT_IN_TABLE)) - in_tree)}"
+    assert len(HTTPS_PROBES) >= 8 and len(PLAIN_PROBES) >= 5
