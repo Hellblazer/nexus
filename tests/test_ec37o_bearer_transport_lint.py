@@ -444,7 +444,7 @@ def test_every_trusted_probe_takes_the_probe_transport(probe_scan) -> None:
 
 #: the decided probes the tree holds, per route, with a floor under each: the floors are spelled here and not read from
 #: PROBE_ROUTES, so a detector that stopped seeing ``/version`` (or ``/health``) fails this, whatever the other routes still find
-PROBE_FLOORS = {"/version": 6, "/health": 3}
+PROBE_FLOORS = {"/version": 6, "/health": 3, "/livez": 1}
 
 
 def _decided_probes() -> set[tuple[str, str, str]]:
@@ -467,7 +467,7 @@ def test_the_probe_walk_is_not_vacuous(probe_scan) -> None:
     assert len(sites) == len(PROBE_ALLOWED), "the allowlisted MinerU probes are the only undecided ones: if one is missing the detector stopped matching"
 
 
-@pytest.mark.parametrize("dropped", ["/version", "/health"])
+@pytest.mark.parametrize("dropped", ["/version", "/health", "/livez"])
 def test_a_detector_that_lost_a_route_fails_the_floor(monkeypatch, dropped: str) -> None:
     """Mutation: with a route removed from the detector the floor for it is missed, so the non-vacuity check above can fail."""
     monkeypatch.setattr(sys.modules[__name__], "PROBE_ROUTES", tuple(r for r in ("/version", "/health", "/livez") if r != dropped))

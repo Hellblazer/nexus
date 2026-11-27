@@ -5,8 +5,11 @@ The probe's transport now comes from ``config.yml`` (``tests/test_ec37o_probe_tr
 a repository's env URL named (an accepted limit) would read an ``embedding_mode`` that engine chose. ``embedding_mode`` is an
 engine-wide string. What it feeds, per decision:
 
-* The Voyage-calibrated distance threshold: decided PER COLLECTION by the collection's recorded model, in every mode. A forged
-  ``voyage`` or ``dual`` cannot put a Voyage threshold on a bge collection. Pinned here.
+* The Voyage-calibrated distance threshold: ``_voyage_thresholds_active`` gates on the mode BEFORE any record is read
+  (``search_engine.py``): only ``voyage`` and ``dual`` switch thresholds on, so a forged ``onnx-local``, or a mode the client
+  cannot read, switches them OFF for every collection, voyage-recorded ones included (a filter dropped, never a disclosure).
+  Once on, the record decides per collection: a forged ``voyage`` or ``dual`` cannot put a Voyage threshold on a bge-recorded
+  collection. That second half is what is pinned here.
 * The upsert chunk cap: a forged ``voyage`` or ``dual`` cannot widen a bge-recorded collection's batch (pinned here). A forged
   ``onnx-local`` narrows every batch to the memory cap: slower, never less cautious. That engine-wide rule is a pinned design
   (``tests/db/test_cap_and_budget_follow_the_collection_model.py``).
@@ -62,3 +65,14 @@ def test_known_a_forged_onnx_local_lifts_the_byte_budget_of_a_voyage_recorded_co
     assert hvc._upsert_byte_budget(code_name, row_resolver=lambda _n: row) is None
     monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: "voyage")
     assert hvc._upsert_byte_budget(code_name, row_resolver=lambda _n: row) == hvc._CODE_UPSERT_BYTE_BUDGET
+
+
+@pytest.mark.parametrize(("mode", "active"), [("voyage", True), ("dual", True), ("onnx-local", False), (None, False)])
+def test_known_the_mode_alone_switches_thresholds_on_or_off_before_any_record_is_read(mode, active):
+    """Characterisation of the first bullet of the module docstring: ``_voyage_thresholds_active`` reads only the mode."""
+    from nexus.search_engine import _voyage_thresholds_active
+
+    client = hvc.HttpVectorClient.__new__(hvc.HttpVectorClient)
+    client._embedding_mode_memo = mode
+    client._embedding_mode_probe_failures = hvc.HttpVectorClient._EMBEDDING_MODE_MAX_PROBES  # an unread mode is not probed again
+    assert _voyage_thresholds_active(client) is active
