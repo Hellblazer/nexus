@@ -16,7 +16,7 @@ from nexus.plans.scope import _infer_scope_tags, _normalize_scope_string, normal
 
 #: One label per problem class, each legal under the RDR-229 label rule.
 PROBLEM_LABELS = ["all", "notes*", "notes-*", "notes-deadbeef", "notes-5AF9BFE0", "$topic", "*", "-*"]
-OTHER_NAMES = ["code__repo__voyage-code-3__v1", "plain"]
+OTHER_NAMES = ["code__repo__minilm-l6-v2__v1", "plain"]
 
 
 @pytest.mark.parametrize("label", PROBLEM_LABELS)
@@ -56,7 +56,7 @@ def test_a_lone_quote_or_a_one_sided_quote_is_not_a_quoted_part() -> None:
 
 @pytest.fixture
 def corpus_names(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    names = ["all", "notes*", "notes-*", "notes-deadbeef", "$topic", "code__repo__voyage-code-3__v1", "plain"]
+    names = ["all", "notes*", "notes-*", "notes-deadbeef", "$topic", "code__repo__minilm-l6-v2__v1", "plain"]
     monkeypatch.setattr(mcp_core, "_get_collection_names", lambda: names)
     monkeypatch.setattr(mcp_core, "_get_collection_counts", lambda: dict.fromkeys(names, 100))
     return names
@@ -67,20 +67,23 @@ def test_the_corpus_reader_names_exactly_a_quoted_label(corpus_names: list[str],
     assert mcp_core._resolve_corpus_target(f'"{label}"', t3=None) == [label]
 
 
+@pytest.mark.t2_tenant
 def test_the_corpus_reader_keeps_the_unquoted_all_wildcard(corpus_names: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
     """Unquoted ``all`` still fans out; it does not name the label ``all``."""
     target = mcp_core._resolve_corpus_target("all", t3=None)
     assert "all" not in target or len(target) > 1
 
 
+@pytest.mark.t2_tenant
 def test_the_corpus_reader_reads_an_unquoted_glob_label_by_exact_name_as_before(corpus_names: list[str]) -> None:
     for label in ("notes*", "notes-*", "notes-deadbeef", "$topic"):
         assert mcp_core._resolve_corpus_target(label, t3=None) == [label]
 
 
+@pytest.mark.t2_tenant
 def test_a_quoted_part_in_a_list_is_one_label_beside_ordinary_parts(corpus_names: list[str]) -> None:
-    target = mcp_core._resolve_corpus_target('"all",plain,code__repo__voyage-code-3__v1', t3=None)
-    assert target == ["all", "plain", "code__repo__voyage-code-3__v1"]
+    target = mcp_core._resolve_corpus_target('"all",plain,code__repo__minilm-l6-v2__v1', t3=None)
+    assert target == ["all", "plain", "code__repo__minilm-l6-v2__v1"]
 
 
 def test_a_quoted_label_names_no_collection_that_merely_starts_with_it(corpus_names: list[str]) -> None:
@@ -88,8 +91,9 @@ def test_a_quoted_label_names_no_collection_that_merely_starts_with_it(corpus_na
     assert mcp_core._resolve_corpus_target('"notes"', t3=None) == []
 
 
+@pytest.mark.t2_tenant
 def test_a_quoted_dunder_label_resolves_as_the_same_name_unquoted(corpus_names: list[str]) -> None:
-    name = "code__repo__voyage-code-3__v1"
+    name = "code__repo__minilm-l6-v2__v1"
     assert mcp_core._resolve_corpus_target(f'"{name}"', t3=None) == mcp_core._resolve_corpus_target(name, t3=None) == [name]
 
 
