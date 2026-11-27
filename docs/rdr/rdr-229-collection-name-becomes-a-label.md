@@ -4193,7 +4193,11 @@ None.
   returned before the cut, and the
   engine reads by the id once gate 3 has latched (`Gate3.java:6-11`), with no
   restart beyond the boot after the stamp moves complete, which gate 3 waits
-  for (P3.5).
+  for (P3.5). Until the restart that applies P3.5b's changesets, a rename is
+  refused with the typed error that names the restart (`rename_missing`
+  `restart`) and the `rdr229-restart` `boot_work` entry is present; after
+  that restart the rename succeeds. A fresh install reaches the same state at
+  its first boot, its stamp moves completing on empty tables.
 - **Scenario**: an engine with P4.0 boots on a store with only half its
   chunks stamped — **Verify**: it serves migration-only, refusing
   collection-scoped routes with an error that names the floor, the stamp
@@ -4202,7 +4206,11 @@ None.
   staying `none`, and after that restart it reaches gate 3, the
   name-key drop move and the floor in one process and serves by the id.
 - **Scenario**: rename a collection that has chunk and `canary_query_ring`
-  rows after P3.7 — **Verify**: one registry
+  rows after P3.7, on a store that has had its restart: a rename test on a
+  fresh or half-stamped fixture first boots, waits for the restart signal
+  (the `rdr229-restart` `boot_work` entry; the helper reads the engine's
+  `RenameReadiness`, `Rdr229RenameRestartPrecondition`), restarts, and then
+  renames — **Verify**: one registry
   row changes; chunk, manifest, taxonomy and history rows and the
   per-collection index are untouched; search by the new label returns the
   same results.
@@ -4769,3 +4777,4 @@ large, and moved under a ratchet.
 - 2026-11-26: citations to landed, reviewed code (grant 3), nexus-p2m1x.48, the two boot_work warm-up commits of the next engine cut: the `MoveBootWork.java` and `MoveBootWorkTest.java` line cites (the announce and retainAnnounced block, the validation-in-flight block, the entry publisher, the restarted-engine builds line and its test) follow the sampler's new warm-up code, which shifted them; no wording changes.
 - 2026-11-26: the delete's lock modes follow the quarantine lane's fix round (grant 3, nexus-p2m1x.23 and .27; the commits of feature/rdr229-nextcut-quarantine, unpublished until the stack lands; T2 `nexus/nextcut-quarantine-lane-2026-11-26`): a delete by id takes the origin's row and its quarantine siblings' rows FOR UPDATE in one `collection_id`-ordered statement, a delete by label the siblings FOR UPDATE and the origin FOR KEY SHARE in the same order, and a rename's retag key-shares each sibling's row before it reads the rows; the `CollectionDeleteFence.java` cites are re-read from that tree.
 - 2026-11-26: the reaper's two expiry functions guard a quarantine row by its own origin id (grant 3, nexus-p2m1x.28; Sam's ruling, T2 `nexus/sam-ruling-rdr229-nextcut-ddl-cap-2961-2026-11-26`): `vectors-086` redefines `reaper_expire_quarantine` and `reaper_expire_client_quarantine`; after a one-row rename a move that commits after the retag leaves a row tagged with the old label, which the label-resolved guard missed; the I8 census's basis for the two reaper rows no longer says the call was ruled safe.
+- 2026-11-27: the Test Plan's two rename scenarios state the restart precondition (grant 3, nexus-p2m1x.48 step 2): a rename test on a fresh or half-stamped fixture against the P3.5/P3.7 cut boots, waits for the restart signal, restarts, then renames; until that restart the rename is refused naming it. No decision or criterion changed.
