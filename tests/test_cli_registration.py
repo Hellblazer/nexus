@@ -18,9 +18,11 @@ COMMANDS_DIR = Path(__file__).parent.parent / "src" / "nexus" / "commands"
 # another group registers: service_pg_upgrade.py is `nx daemon service pg-upgrade`, added to daemon.py's
 # service group, which tests/test_service_pg_upgrade.py invokes by that path; nexus-j738q; likewise
 # service_note_uri_pairs.py is `nx daemon service note-uri-pairs`, pinned below and by
-# tests/test_service_note_uri_pairs.py; nexus-bivz3.28)
+# tests/test_service_note_uri_pairs.py; nexus-bivz3.28; preflight_doctor.py and claude_md_language.py are blocks of
+# `nx command-context nx-preflight`, split out of command_context.py to keep it under its size ceiling, GH #1689)
 _NOT_COMMANDS = {
     "_helpers.py", "_provision.py", "__init__.py", "__pycache__", "service_pg_upgrade.py", "service_note_uri_pairs.py",
+    "preflight_doctor.py", "claude_md_language.py",
 }
 
 
