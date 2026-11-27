@@ -26,6 +26,12 @@ import sys
 from pathlib import Path
 from tests._child_encoding import PYTHON_CHILD_ENCODING
 from tests.hooks.audience_harness import SRC_SEAM_PRELUDE, src_seam_env
+from tests.hooks.budget_caps_harness import (
+    _assert_every_subagent_start_text_is_labelled,
+    _project_repo,
+    _user_at_caps,
+    _worktree_of,
+)
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -330,6 +336,20 @@ def test_combined_subagent_start_total_under_budget(tmp_path) -> None:
     assert conexus_bytes > 1000, "nexus.hooks.subagent_start produced suspiciously little content"
     assert sn_bytes > 100, "sn subagent_start.py produced suspiciously little content"
 
+    # RDR-259 Decision 2 (nexus-sby49.11): the same hook with every settings key at its cap, in this tenant so the count holds.
+    repo = _project_repo(tmp_path)
+    caps_payload = json.dumps({**json.loads(_REAL_SHAPE_PAYLOAD), "cwd": str(repo)})
+    caps_ctx = _run_conexus(home=tmp_path / "home-caps", cwd=str(repo), payload=caps_payload, user_settings=_user_at_caps())
+    _assert_seeds_reached(caps_ctx)
+    _assert_every_subagent_start_text_is_labelled(caps_ctx)
+    caps_conexus_bytes = len(caps_ctx.encode("utf-8"))
+    caps_sn_bytes = len(_run_sn().encode("utf-8"))
+    caps_total = caps_conexus_bytes + caps_sn_bytes
+    assert caps_total < _SUBAGENT_START_BUDGET_BYTES, (
+        f"every key at its cap: combined SubagentStart total {caps_total}B (conexus {caps_conexus_bytes}B + sn {caps_sn_bytes}B) "
+        f">= budget {_SUBAGENT_START_BUDGET_BYTES}B; the caps shrink, the budget does not rise"
+    )
+
 
 @pytest.mark.t2_tenant
 def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> None:
@@ -394,4 +414,23 @@ def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> N
         f"combined SubagentStart worktree-mode total {total}B (conexus "
         f"{conexus_bytes}B + sn {sn_bytes}B) >= budget "
         f"{_SUBAGENT_START_WORKTREE_BUDGET_BYTES}B"
+    )
+
+    # RDR-259 Decision 2 (nexus-sby49.11): the same worktree dispatch with every settings key at its cap, in this tenant so the
+    # count holds. Its own repo and worktree, committed with the project file at its caps.
+    caps_worktree = _worktree_of(_project_repo(tmp_path), tmp_path)
+    caps_payload = json.dumps({**json.loads(_REAL_SHAPE_PAYLOAD), "cwd": str(caps_worktree)})
+    caps_ctx = _run_conexus(
+        home=tmp_path / "home-caps", cwd=str(caps_worktree), payload=caps_payload, user_settings=_user_at_caps(),
+    )
+    _assert_seeds_reached(caps_ctx)
+    _assert_every_subagent_start_text_is_labelled(caps_ctx)
+    caps_sn_ctx = _run_sn(payload=caps_payload)
+    assert "worktree" in caps_sn_ctx.lower(), "the worktree path did not fire, so this would measure the smaller case"
+    caps_conexus_bytes = len(caps_ctx.encode("utf-8"))
+    caps_sn_bytes = len(caps_sn_ctx.encode("utf-8"))
+    caps_total = caps_conexus_bytes + caps_sn_bytes
+    assert caps_total < _SUBAGENT_START_WORKTREE_BUDGET_BYTES, (
+        f"every key at its cap, worktree: combined total {caps_total}B (conexus {caps_conexus_bytes}B + sn {caps_sn_bytes}B) "
+        f">= budget {_SUBAGENT_START_WORKTREE_BUDGET_BYTES}B; the caps shrink, the budget does not rise"
     )
