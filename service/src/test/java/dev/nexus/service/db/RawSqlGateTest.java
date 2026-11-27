@@ -470,8 +470,9 @@ class RawSqlGateTest {
             // concatenates nothing into them. The verification is a SELECT with the tenant as its one bind parameter and
             // runs in a READ ONLY transaction; on_complete is DDL (VALIDATE CONSTRAINT, DROP COLUMN, renames) that has no
             // typed jOOQ form and runs in the one transaction that also sets completed_at. Single-homed: MoveSql, called
-            // from VerifyingFinisher only.
-            "countRows", Map.of(".prepareStatement(sql)", 1),
+            // from VerifyingFinisher only. countRows delegates to countRowsTimed (nexus-p2m1x.21: the re-check's budget charges the
+            // execute alone), which holds the one prepareStatement.
+            "countRowsTimed", Map.of(".prepareStatement(sql)", 1),
             "runOnComplete", Map.of(".execute(sql)", 1))),
         Map.entry("PgContainerHelper.java", Map.of(
             // SANCTIONED RAW (nexus-cbo4a batch 10): replayPart is the one site of the changeset-replay idiom
