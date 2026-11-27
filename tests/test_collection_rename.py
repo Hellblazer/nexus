@@ -304,18 +304,31 @@ class TestRenameCLI:
             # A real prefixed name is guarded as before, plain target included.
             ("code__foo", None, "plain-label", True),
             ("knowledge__foo", None, "plain-label", True),
+            # nexus-a7o92 (folded from nexus-llbgu): a prefix-free name is a knowledge
+            # collection, minted or not, so two plain labels compare as knowledge.
+            ("foo", "knowledge", "bar", False),
+            ("foo", "code", "bar", True),
+            ("foo", "docs", "bar", True),
+            ("foo", "rdr", "bar", True),
+            # No readable row: nothing to compare, as before.
+            ("foo", None, "bar", False),
+            # A plain source and a prefixed target still compare the row's type.
+            ("foo", "knowledge", "docs__bar", True),
             # A minted source and a prefixed target of the row's own type.
             ("c4812", "code", "code__foo", False),
-            # Not the minted form (letters, no digits, a suffix): no exemption.
-            ("cabc", "knowledge", "plain-label", True),
-            ("c4812x", "knowledge", "plain-label", True),
+            # Not the minted form (letters, no digits, a suffix): no exemption from the
+            # name-derived model guard, which a plain `foo` still meets for a prefixed target.
+            ("cabc", "knowledge", "knowledge__x", True),
+            ("c4812x", "knowledge", "knowledge__x", True),
         ],
     )
     def test_rename_prefix_guard_skips_minted_labels(
         self, old: str, row_type: str | None, new: str, expect_reject: bool, env_creds,
     ) -> None:
-        """nexus-a7o92: a minted ``c<id>`` source renames to a plain label
-        without ``--force-prefix-change``; a real prefixed name does not."""
+        """nexus-a7o92: a source whose type comes from its row (a minted ``c<id>``
+        or any prefix-free label) renames to a plain label as a knowledge
+        collection, without ``--force-prefix-change``; a real prefixed name does
+        not, and a row of another type is still refused."""
         from nexus.commands.collection import rename_cmd
 
         fake_counts = {

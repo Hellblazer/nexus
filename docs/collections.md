@@ -154,7 +154,9 @@ because a plain label is a knowledge collection. Three things to know first:
   no type and no model, so the guards read neither from it: it compares its
   row's type with the new name's (a label with no type prefix is a
   `knowledge` collection), and a `knowledge` row renames to a plain label
-  without the flag. A minted collection with no rows yet has no type to
+  without the flag. So does any label with no type prefix: `foo` to `bar`
+  passes for a `knowledge` row, and a `code`, `docs` or `rdr` row still
+  stops. A minted collection with no rows yet has no type to
   compare and is not checked; if its row cannot be read at all, the rename
   stops and asks for the flag. A named label such as `code__foo` still stops
   with a prefix or model mismatch when the new name reads as another type

@@ -944,9 +944,9 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
 
     Cross-prefix renames (e.g. ``code__`` ↔ ``docs__``) change the
     embedding-model space and are rejected unless ``--force-prefix-change``
-    is set; otherwise search hits would be garbage. A minted ``c<id>`` label
-    names no type or model, so its row's type is compared instead (a plain
-    new label is a ``knowledge`` collection).
+    is set; otherwise search hits would be garbage. A label with no type
+    prefix (a minted ``c<id>``, or a plain one) names no type, so its row's
+    type is compared instead (a plain new label is a ``knowledge`` collection).
 
     A conformant new name is also checked against the source collection's
     catalog-row ``embedding_model``: the engine keeps the
@@ -967,8 +967,10 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     new_prefix = split_candidate_collection_name(new)[0]
     # nexus-a7o92: a label the engine minted (c<id>) carries no type and no model, so the guards below infer
     # neither from it. The rename sends a plain target as a knowledge collection (collection_type_and_owner), so a
-    # minted source is compared with that type when its row is readable; a prefixed target keeps its own prefix.
+    # source whose type came from its row (a minted label, or any prefix-free one) is compared with that type
+    # when the row is readable; a prefixed target keeps its own prefix.
     minted = _MINTED_LABEL_RE.fullmatch(old) is not None
+    type_from_row = not old_prefix
     if not old_prefix:
         # RDR-229 P3.8: a label the engine minted (c<id>), or any prefix-free label, names no content type; its
         # row holds it, so renaming such a collection to a conformant name of its own type is not a prefix change.
@@ -986,7 +988,7 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
                     f"--force-prefix-change to rename without the check."
                 ) from exc
             old_prefix = ""
-    if minted and old_prefix and not new_prefix:
+    if type_from_row and old_prefix and not new_prefix:
         new_prefix = "knowledge"
     if old_prefix != new_prefix and not force_prefix_change:
         raise click.ClickException(
