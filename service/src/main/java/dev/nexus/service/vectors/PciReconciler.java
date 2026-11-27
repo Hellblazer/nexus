@@ -435,8 +435,7 @@ public final class PciReconciler {
                                        PgVectorRepository repository,
                                        dev.nexus.service.db.TenantScope scope, Gate3 gate3) {
         var ring = new PciQueryRingReader(Objects.requireNonNull(scope, "scope"), gate3);
-        // The canary's id statements (and, through Main, the ring's admission) follow the latch this reconciler's retire reads (gate 3 latched,
-        // the id readers present), bound below. The ring reader reads by id on gate 3 itself, as the serving path does (P3.5c).
+        // The canary's id statements (and the ring's admission, through Main) follow the latch this reconciler's retire reads (gate 3 latched, the id readers present), bound below; the ring reader reads by id on gate 3 itself (P3.5c).
         var latch = new PciCanaryLatch();
         var runner = new PciCanary(ring::load, Objects.requireNonNull(repository, "repository").canaryStatements(latch));
         var reconciler = new PciReconciler(new PciCatalog(ds)::read,
@@ -446,6 +445,7 @@ public final class PciReconciler {
             RandomGenerator.getDefault(), ringExpiry, new PciCanarySchedule(runner), gate3);
         latch.follow(reconciler.idBuilds::gate3Holds);
         reconciler.canaryLatch = latch;
+        runner.diagnoseRedWith(PciCanaryEfDiagnosis.anchors(reconciler.ledger));   // nexus-enew7: a red run of a red_unfixed index records its recall at the serving and the widest ef
         return reconciler;
     }
 

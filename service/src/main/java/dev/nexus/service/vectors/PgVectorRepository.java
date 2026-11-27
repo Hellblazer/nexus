@@ -1962,7 +1962,7 @@ public final class PgVectorRepository {
                     CanaryHook hook = new CanaryHook(explain, planCheck, target.index(), target.collection());
                     ArmPhases phases = new ArmPhases();
                     Result<? extends Record> result = canaryStatement(target, query, k, false, phases, hook, latched);
-                    return new PciCanary.Leg(canaryHits(result), hook.plan, phases.exact);
+                    return new PciCanary.Leg(canaryHits(result), hook.plan, phases.exact, phases.efSearch, phases.walkedWide);
                 });
             }
 

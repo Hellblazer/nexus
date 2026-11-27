@@ -713,7 +713,7 @@ public final class PgSession {
     }
 
     /** Sizing against the env-resolved floor, or the test pin when set. */
-    static int efSearchFor(int nResults) {
+    public static int efSearchFor(int nResults) {
         Integer o = efSearchFloorOverride;
         return efSearchFor(nResults, o != null ? o : EF_SEARCH_FLOOR);
     }

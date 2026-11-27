@@ -1187,4 +1187,34 @@ class PciPlanAndRecallIntegrationTest {
         assertThat(r.minRecall()).as("the canary's min is the counted one")
             .isCloseTo(low, org.assertj.core.data.Offset.offset(1.0 / KS[0]));
     }
+
+    /**
+     * nexus-enew7: a canary statement reports the ef its settings batch set, and the ef diagnosis relies on it. On a real
+     * indexed collection a page of 120 runs at the serving ef and a page of 1000 at the widest, with a plan that names the
+     * index; the same collection with no valid index in the router's set walks at the widest ef whatever the page size, and
+     * says so ({@code walkedWide}), which is what the diagnosis refuses to label as the serving ef.
+     */
+    @Test
+    @Order(20)
+    void canaryStatements_reportTheEfTheStatementRanWith() throws Exception {
+        ensureTargetIndex();
+        PciCanary.Target target = canaryTarget(TARGET, targetIndex);
+
+        PciCanary.Statements statements = canaryRepo().canaryStatements();
+        PciCanary.Leg serving = statements.hnsw(target, queries.get(0), 120, false);
+        PciCanary.Leg wide = statements.hnsw(target, queries.get(0), PciCanaryEfDiagnosis.WIDE_PAGE, true);
+
+        assertThat(serving.routedExact()).isFalse();
+        assertThat(serving.efSearch()).as("the serving floor, not the widest").isEqualTo(PgSession.efSearchFor(120));
+        assertThat(serving.walkedWide()).isFalse();
+        assertThat(wide.routedExact()).isFalse();
+        assertThat(wide.efSearch()).isEqualTo(PgSession.EF_SEARCH_WIDEST);
+        assertThat(wide.plan()).as("the wide statement's plan names the collection's index").contains(targetIndex);
+
+        PciCanary.Leg unindexed = new PgVectorRepository(scope, embedder, embedder, (m, t, c) -> false,
+            new PciPlanCheck(Integer.MAX_VALUE, (ctx, q) -> ctx.explain(q).plan()))
+            .canaryStatements().hnsw(target, queries.get(0), 120, false);
+        assertThat(unindexed.walkedWide()).as("no valid index in the router's set: the single-collection rule").isTrue();
+        assertThat(unindexed.efSearch()).as("a page of 120 at the widest ef: not the serving ef").isEqualTo(PgSession.EF_SEARCH_WIDEST);
+    }
 }

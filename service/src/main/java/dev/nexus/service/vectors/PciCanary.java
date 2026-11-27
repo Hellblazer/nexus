@@ -13,6 +13,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
 
 /**
@@ -88,8 +89,17 @@ final class PciCanary implements PciCanarySchedule.Runner {
      * @param plan        the statement's plan text when it was explained, else {@code null}; {@code null} also when the
      *                    explain failed (the caller asked for one, so that is an error)
      * @param routedExact whether the router sent the statement exact: it then walked no index
+     * @param efSearch    the {@code hnsw.ef_search} the statement's settings batch set, as the serving path reports it
+     *                    ({@code ArmPhases#efSearch}); -1 when the statement source does not say
+     * @param walkedWide  whether the statement ran at the widest ef by the single-collection rule (the router's set held no
+     *                    valid index for the collection: before the sweep's first read, or after it expired), whatever page size
      */
-    record Leg(List<Hit> hits, String plan, boolean routedExact) { }
+    record Leg(List<Hit> hits, String plan, boolean routedExact, int efSearch, boolean walkedWide) {
+        /** A leg whose ef is not reported (a scripted statement source). */
+        Leg(List<Hit> hits, String plan, boolean routedExact) {
+            this(hits, plan, routedExact, -1, false);
+        }
+    }
 
     /** The statements of a run. */
     interface Statements {
@@ -159,6 +169,8 @@ final class PciCanary implements PciCanarySchedule.Runner {
     private final Statements statements;
     private final Clock clock;
     private final LongSupplier nanos;
+    /** The anchor the engine last read of a target's index, or null when it has not: the gate of the ef diagnosis (nexus-enew7); null here means no diagnosis. */
+    private volatile Function<Target, PciCatalog.Anchor> anchorOf;
 
     PciCanary(RingSource ring, Statements statements) {
         this(ring, statements, Clock.systemUTC(), System::nanoTime);
@@ -169,6 +181,16 @@ final class PciCanary implements PciCanarySchedule.Runner {
         this.statements = Objects.requireNonNull(statements, "statements");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.nanos = Objects.requireNonNull(nanos, "nanos");
+    }
+
+    /**
+     * A red run of an index whose anchor (as {@code anchors} returns it; null when the engine has read none) carries
+     * {@code red_unfixed} also logs the verdict's own recall and the recall at the widest ef, per query
+     * ({@link PciCanaryEfDiagnosis}). A red run that is not diagnosed logs one {@code event=pci_canary_ef_diag_skipped}.
+     * Diagnostic output only; it changes no result.
+     */
+    void diagnoseRedWith(Function<Target, PciCatalog.Anchor> anchors) {
+        this.anchorOf = Objects.requireNonNull(anchors, "anchors");
     }
 
     /** Run the canary on {@code target}. Never throws: a failure is an unmeasured result. */
@@ -201,6 +223,8 @@ final class PciCanary implements PciCanarySchedule.Runner {
         }
         long startedNanos = nanos.getAsLong();
         List<Scored> scored = new ArrayList<>(n);
+        List<List<Hit>> exacts = new ArrayList<>(n);
+        List<List<Leg>> legs = new ArrayList<>(n);
         try {
             for (int qi = 0; qi < n; qi++) {
                 if (qi > 0 && nanos.getAsLong() - startedNanos > PciCanaryPolicy.RUN_LIMIT.toNanos()) {
@@ -210,6 +234,7 @@ final class PciCanary implements PciCanarySchedule.Runner {
                 }
                 float[] q = queries.get(qi);
                 List<List<Hit>> pages = new ArrayList<>(PciCanaryPolicy.KS.size());
+                List<Leg> queryLegs = new ArrayList<>(PciCanaryPolicy.KS.size());
                 for (int ki = 0; ki < PciCanaryPolicy.KS.size(); ki++) {
                     boolean explain = qi == 0 && ki == 0;
                     Leg leg = statements.hnsw(target, q, PciCanaryPolicy.KS.get(ki), explain);
@@ -227,8 +252,11 @@ final class PciCanary implements PciCanarySchedule.Runner {
                         }
                     }
                     pages.add(leg.hits());
+                    queryLegs.add(leg);
                 }
+                legs.add(queryLegs);
                 List<Hit> exact = statements.exact(target, q, PciCanaryPolicy.EXACT_K);
+                exacts.add(exact);
                 scored.add(score(exact, pages));
             }
         } catch (RuntimeException e) {
@@ -236,7 +264,34 @@ final class PciCanary implements PciCanarySchedule.Runner {
                 target.collection(), describe(e));
             return unmeasured(target, trigger, ERROR, n, "statement " + e.getClass().getSimpleName());
         }
-        return verdict(target, trigger, n, queries, scored);
+        Result result = verdict(target, trigger, n, queries, scored);
+        if (result.state() == State.RED) {
+            diagnose(target, new PciCanaryEfDiagnosis.Evidence(queries, legs, scored, exacts), startedNanos);
+        }
+        return result;
+    }
+
+    /**
+     * nexus-enew7: the ef readings of a red run of an index recorded {@code red_unfixed}; a red run it does not reach says
+     * why in one line. Never throws, and changes no result.
+     */
+    private void diagnose(Target target, PciCanaryEfDiagnosis.Evidence evidence, long startedNanos) {
+        Function<Target, PciCatalog.Anchor> anchors = anchorOf;
+        if (anchors == null) {
+            return;
+        }
+        try {
+            PciCatalog.Anchor anchor = anchors.apply(target);
+            if (anchor == null || anchor.redUnfixed() == null) {
+                log.info("event=pci_canary_ef_diag_skipped index={} collection={} tenant={} reason={}", target.index(),
+                    target.collection(), target.tenant(), anchor == null ? "no_reading" : "not_red_unfixed");
+                return;
+            }
+            PciCanaryEfDiagnosis.run(statements, target, evidence, anchor.redUnfixed().queries(), startedNanos, nanos);
+        } catch (RuntimeException e) {
+            log.warn("event=pci_canary_ef_diag_failed index={} collection={} stage=gate error={}", target.index(),
+                target.collection(), describe(e));
+        }
     }
 
     // -- scoring ---------------------------------------------------------------------------------------------
@@ -269,36 +324,43 @@ final class PciCanary implements PciCanarySchedule.Runner {
         }
         double[] recalls = new double[pages.size()];
         boolean top1Miss = false;
-        Hit nearest = exact.get(0);
         for (int ki = 0; ki < pages.size(); ki++) {
-            int k = PciCanaryPolicy.KS.get(ki);
-            List<Hit> page = pages.get(ki);
-            int denominator = Math.min(k, exact.size());
-            Set<String> topK = new HashSet<>();
-            for (int i = 0; i < denominator; i++) {
-                topK.add(exact.get(i).id());
-            }
-            double kth = exact.get(denominator - 1).distance();
-            int hits = 0;
-            boolean sawNearest = false;
-            Set<String> seen = new HashSet<>();
-            for (Hit h : page) {
-                if (!seen.add(h.id())) {
-                    continue;
-                }
-                if (topK.contains(h.id()) || h.distance() <= kth + PciCanaryPolicy.TIE_EPSILON) {
-                    hits++;
-                }
-                if (h.id().equals(nearest.id()) || h.distance() <= nearest.distance() + PciCanaryPolicy.TIE_EPSILON) {
-                    sawNearest = true;
-                }
-            }
-            recalls[ki] = Math.min(1.0, (double) hits / denominator);
-            if (!sawNearest) {
+            PageScore s = scorePage(exact, pages.get(ki), PciCanaryPolicy.KS.get(ki));
+            recalls[ki] = s.recall();
+            if (!s.sawNearest()) {
                 top1Miss = true;
             }
         }
         return new Scored(recalls, top1Miss, true);
+    }
+
+    /** One page's recall at k and whether the exact nearest row (or one as near) is on it. */
+    record PageScore(double recall, boolean sawNearest) { }
+
+    /** Score one HNSW {@code page} of size {@code k} against {@code exact}, which must not be empty: the rule of {@link #score}. */
+    static PageScore scorePage(List<Hit> exact, List<Hit> page, int k) {
+        Hit nearest = exact.get(0);
+        int denominator = Math.min(k, exact.size());
+        Set<String> topK = new HashSet<>();
+        for (int i = 0; i < denominator; i++) {
+            topK.add(exact.get(i).id());
+        }
+        double kth = exact.get(denominator - 1).distance();
+        int hits = 0;
+        boolean sawNearest = false;
+        Set<String> seen = new HashSet<>();
+        for (Hit h : page) {
+            if (!seen.add(h.id())) {
+                continue;
+            }
+            if (topK.contains(h.id()) || h.distance() <= kth + PciCanaryPolicy.TIE_EPSILON) {
+                hits++;
+            }
+            if (h.id().equals(nearest.id()) || h.distance() <= nearest.distance() + PciCanaryPolicy.TIE_EPSILON) {
+                sawNearest = true;
+            }
+        }
+        return new PageScore(Math.min(1.0, (double) hits / denominator), sawNearest);
     }
 
     private Result verdict(Target target, String trigger, int n, List<float[]> queries, List<Scored> scored) {
