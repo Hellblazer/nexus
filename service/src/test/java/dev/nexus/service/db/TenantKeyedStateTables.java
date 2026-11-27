@@ -865,6 +865,21 @@ final class TenantKeyedStateTables {
             "PciReindexPhase.idCanary")) {
             notKeyed.put(f, PCI_OFF);
         }
+        // nexus-enew7: the canary's ef diagnosis of an index recorded red_unfixed. The gate is a function bound once at boot
+        // over the reconciler's anchor ledger (whose own readings are listed above); the evidence and the row are values of
+        // one red run, held in locals of that run's thread and dropped when its diagnosis returns.
+        notKeyed.put("PciCanary.anchorOf", "a function bound once at boot over the reconciler's anchor ledger "
+            + "(listed above); it holds no tenant state of its own, and the ledger's readings are what it reads");
+        for (String f : List.of(
+            "PciCanaryEfDiagnosis.Evidence.queries",
+            "PciCanaryEfDiagnosis.Evidence.legs",
+            "PciCanaryEfDiagnosis.Evidence.scored",
+            "PciCanaryEfDiagnosis.Evidence.exacts",
+            "PciCanaryEfDiagnosis.Row.missRanks")) {
+            notKeyed.put(f, "a component of an immutable record of one red canary run (the sample, its legs, scores, "
+                + "exact pages, or a query's missed ranks), held in locals of that run and dropped when its ef "
+                + "diagnosis returns; no field outlives the run, so a reset has nothing to clear");
+        }
         // nexus-4lnn1.1.5 (RDR-230 Technical Design 7): the maintenance snapshot (counts on /v1/status, entries on
         // the operator-only /v1/admin/chunks-leaves). A per-read list of at
         // most 64 entries keyed by the opaque pci_ index name, built from the reconciler's memory for one response
