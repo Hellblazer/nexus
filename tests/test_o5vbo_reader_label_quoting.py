@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from nexus.corpus import validate_collection_name
-from nexus.label_quote import is_quoted, label_needs_quote, quote_label, unquote_label
+from nexus.label_quote import is_quoted, label_needs_quote, quote_corpus_label, unquote_label
 from nexus.mcp import core as mcp_core
 from nexus.plans.scope import _infer_scope_tags, _normalize_scope_string, normalize_scope_tags
 
@@ -27,22 +27,30 @@ def test_each_problem_label_passes_the_label_rule(label: str) -> None:
 # --- the helper ------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("label", PROBLEM_LABELS)
-def test_quote_label_wraps_a_problem_label_and_unquote_returns_it(label: str) -> None:
-    quoted = quote_label(label)
-    assert quoted == f'"{label}"'
-    assert unquote_label(quoted) == (label, True)
+def test_a_problem_label_wrapped_in_quotes_unquotes_to_itself(label: str) -> None:
+    assert label_needs_quote(label)
+    assert unquote_label(f'"{label}"') == (label, True)
 
 
 @pytest.mark.parametrize("label", OTHER_NAMES)
-def test_quote_label_leaves_an_unproblematic_label_alone(label: str) -> None:
+def test_an_unproblematic_label_needs_no_quote(label: str) -> None:
     assert not label_needs_quote(label)
-    assert quote_label(label) == label
     assert unquote_label(label) == (label, False)
+
+
+@pytest.mark.parametrize(("label", "part"), [
+    ("all", '"all"'), ('"x"', '""x""'),                                   # the corpus reader misreads these
+    ("notes*", "notes*"), ("notes-deadbeef", "notes-deadbeef"), ("$topic", "$topic"),  # it reads these as names
+    ("legacy__repo-5af9bfe0", "legacy__repo-5af9bfe0"), ("plain", "plain"),
+])
+def test_a_corpus_part_is_quoted_only_where_the_corpus_reader_would_misread_the_label(label: str, part: str) -> None:
+    assert quote_corpus_label(label) == part
+    assert unquote_label(part)[0] == label
 
 
 def test_a_label_that_starts_and_ends_with_a_quote_is_named_by_wrapping_it_again() -> None:
     assert label_needs_quote('"x"')
-    assert quote_label('"x"') == '""x""'
+    assert quote_corpus_label('"x"') == '""x""'
     assert unquote_label('""x""') == ('"x"', True)
 
 

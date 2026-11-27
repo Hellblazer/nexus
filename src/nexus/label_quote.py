@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["HASH_SUFFIX_RE", "WILDCARD_WORDS", "is_quoted", "label_needs_quote", "quote_label", "unquote_label"]
+__all__ = ["HASH_SUFFIX_RE", "WILDCARD_WORDS", "is_quoted", "label_needs_quote", "quote_corpus_label", "unquote_label"]
 
 _QUOTE = '"'
 HASH_SUFFIX_RE: re.Pattern[str] = re.compile(r"-[0-9a-fA-F]{8}$")
@@ -54,6 +54,9 @@ def label_needs_quote(label: str) -> bool:
     )
 
 
-def quote_label(label: str) -> str:
-    """The form that names *label* exactly: *label* itself when no reader misreads it, else wrapped in quotes."""
-    return f"{_QUOTE}{label}{_QUOTE}" if label_needs_quote(label) else label
+def quote_corpus_label(label: str) -> str:
+    """*label* as one part of an MCP corpus list: the wildcard word and a quote-wrapped label are wrapped in quotes,
+    because the corpus reader would otherwise fan out or strip them; every other label is returned bare, since that
+    reader reads a glob, a hash suffix or a leading ``$`` as part of the name (the scope-tag reader is the one that
+    strips them, and it takes :func:`label_needs_quote`)."""
+    return f"{_QUOTE}{label}{_QUOTE}" if label in WILDCARD_WORDS or is_quoted(label) else label
