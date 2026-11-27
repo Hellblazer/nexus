@@ -162,13 +162,17 @@ META_FILE_RE: re.Pattern[str] = re.compile(
     r"changelog|file_size|folder_shape|storage_touch|tmp_root|ddl_|wal_(ceiling|ratchet)|"
     r"sleep_ratchet|_pin\b|pinned|forbidden|verb_rot|_rot\b|gate_test|SourceScan|GateTest|"
     r"Census|Ratchet|Lint\b|Drift|Ledger|Tripwire|CodegenDrift|ScanTest|(skip|junit|executed)_floor)")
+#: A test that asserts a set of sites "is/are allowlisted" is a census of repository text. Only this
+#: phrase is matched on a function name: ``drift``, ``ledger`` and ``scrub`` also name product
+#: behaviour (DocCountDrift, a hook payload scrub) and matched wrongly in a hand sample.
+ALLOWLISTED_FUNC_RE: re.Pattern[str] = re.compile(r"(is|are)_allowlisted")
 #: An assertion message that names a census, floor, pin, ceiling or a scan of repository text.
 META_MSG_RE: re.Pattern[str] = re.compile(
     r"(StorageTouchError|not allowlisted|skip ceiling|do not resolve|undeclared|unregistered|"
     r"ceiling|ratchet|census|\bcall sites?\b|\ba file other than\b|\bpinned\b|source[- ]scan|"
     r"is not in the report|floor (is|of)\b|exceeds? the .{0,30}(limit|budget|cap)|"
     r"stale (entry|declaration)|pending ledger|no longer .{0,20}declared|\bbudget\b|"
-    r"\bsanctioned\b|\bstill (says|names|mentions)\b|\bbypass(es|ing)?\b|"
+    r"\bsanctioned|\bdrifted\b|\bstill (says|names|mentions)\b|\bbypass(es|ing)?\b|"
     r"explicitly (excluded|exempt|listed))", re.I)
 #: A message of a timing or concurrency failure: a test that waits or races, which goes green again
 #: without anyone changing it. A missing file or permission error on the host ("[Errno ...]") is
@@ -688,7 +692,8 @@ def label_item(item: Row, run: Row) -> tuple[str, str]:
         return FLAKE, "flake:timing-message"
     if META_MSG_RE.search(item.get("msg", "")):
         return ACCOUNTING, "accounting:meta-msg"
-    if META_FILE_RE.search(stem):
+    func = re.split(r"\[", item["item"].rsplit(".", 1)[-1])[0]
+    if META_FILE_RE.search(stem) or ALLOWLISTED_FUNC_RE.search(func):
         return ACCOUNTING, "accounting:meta-file"
     if item["file"].startswith("tests/scripts/") or HARNESS_FILE_RE.search(stem):
         return HARNESS, "harness:file"

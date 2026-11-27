@@ -390,6 +390,20 @@ def test_the_name_regex_no_longer_swallows_product_tests() -> None:
         assert rrr.META_FILE_RE.search(stem), stem
 
 
+def test_a_test_function_name_and_a_drift_message_can_mark_an_accounting_check() -> None:
+    by_name = _item(file="tests/daemon/test_lifecycle_gate.py", item="test_flock_acquire_sites_are_allowlisted")
+    drifted = _item(msg="AssertionError: MCP wire schema drifted from the committed snapshot")
+    sanctioned = _item(kind="java", file="ExtensionBootstrapSiteConformanceTest",
+                       msg="[CREATE EXTENSION string literal outside SANCTIONED_JAVA_FILES]")
+    assert rrr.label_item(by_name, _RUN) == (rrr.ACCOUNTING, "accounting:meta-file")
+    behaviour = _item(item="test_the_jvm_env_allowlist_does_not_carry_the_password")
+    drift_name = _item(kind="java", file="TaxonomyRepositoryTest", item="getDocCountDrift_namesOnlyTopics")
+    assert rrr.label_item(behaviour, _RUN)[0] != rrr.ACCOUNTING          # an env allowlist is behaviour
+    assert rrr.label_item(drift_name, _RUN)[0] != rrr.ACCOUNTING         # DocCountDrift is a feature
+    assert rrr.label_item(drifted, _RUN) == (rrr.ACCOUNTING, "accounting:meta-msg")
+    assert rrr.label_item(sanctioned, _RUN) == (rrr.ACCOUNTING, "accounting:meta-msg")
+
+
 def test_message_rules_for_census_and_timing_come_before_the_file_rule() -> None:
     census = _item(msg="AssertionError: HTTP call sites that neither send the header nor say why")
     timing = _item(file="tests/test_x_census.py", msg="AssertionError: predicate not satisfied within 5.0s")
