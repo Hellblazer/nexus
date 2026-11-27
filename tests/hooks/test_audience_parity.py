@@ -286,7 +286,10 @@ def _drive(
         expect["problems"] = sorted(expect["problems"])
         expect["advice_blocked"] = sorted(expect["advice_blocked"])
         if previous:
-            got = {"strict": mod.nexus_repo(payload)}
+            # Releases before 8.5.9 carry nexus_repo(); from 8.5.9 the helper answers through guard_mode() (RDR-259).
+            # Either way the previous release is asked only what it can know: is the guard strict for this payload.
+            strict = mod.nexus_repo(payload) if hasattr(mod, "nexus_repo") else mod.guard_mode(payload) == "strict"
+            got = {"strict": strict}
             want = {"strict": expect["project"].get("subagent_git") == "strict"}
         else:
             got = _answers(mod, payload, bool(row.get("head")))
