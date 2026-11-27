@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Red-run report over a snapshot of develop CI runs (RDR-258 Phase 0 step 2, nexus-2jomg.1).
 
-    red_run_report.py extract --snapshot DIR --repo . --out scripts/red-run-extraction-2026-09-23.jsonl.gz
+    red_run_report.py extract --snapshot DIR --repo . --out scripts/red-run-extraction-2026-09-23_2026-11-23.jsonl.gz
     red_run_report.py report  --extraction FILE [--top 15] [--repo .]
     red_run_report.py mvv     --extraction FILE
 
@@ -24,14 +24,19 @@ Fix signal. The next green run of the same workflow ends the red episode; the co
 ``<red sha>..<green sha>`` are the fix range. For an item: ``touched_test`` is whether a commit in
 the range touched the failing test's file, ``fix_touched_product`` whether one of the commits that
 touched it also touched ``src/`` or ``service/src/main/`` (the 258-research-15 reading). A run whose
-next green ran on the same sha is a rerun-green (flake signal). ``fix_product_commit`` on the run
-is whether a ``fix``-typed commit in the range touched product code.
+next green ran on the same sha is a rerun-green. ``fix_product_commit`` on the run is the range-wide
+form (a ``fix``-typed commit anywhere in the range touched product code), kept as a record.
 
-Categories (strand B's six) are assigned by the ordered rules in ``label_item`` and a run takes the
-category of the majority of its non-derived items (ties by ``PRIORITY``). Strand B's classifier is
-gone; these rules are rebuilt from 258-research-1, -2 and -15 and each item records the rule that
-labelled it, so a category that moves against strand B can be explained by rule. They are not fitted
-to strand B's counts.
+Categories (strand B's six) are assigned by the ordered rules in ``label_item``: build step, infra
+signature, accounting (lint-bucket jobs, ratchet and floor steps, repo-text-pin file names and
+messages), harness (``tests/scripts/``, tooling file names), then for what is left a rerun-green or
+a green with no fix to the test is flake, a fix commit that changed the test and product code is
+a product defect, and a test edited to go green is stale or ambient-coupled. A step with no named
+test falls back to the pytest failed-count (Windows: portability) or to "the log shows no failure".
+A run takes the category of the majority of its non-derived items (ties by ``PRIORITY``). Strand B's
+classifier is gone; the rules are rebuilt from 258-research-1, -2 and -15, and each item records the
+rule that labelled it so a category that moves against strand B can be explained by rule. They are
+not fitted to strand B's counts.
 
 Check headers (wren's ``check_headers.py``) are not read here. ``guard_catches`` takes a
 ``check -> guard paths`` mapping so the header parser plugs in later.
@@ -111,7 +116,6 @@ JOB_CHECKS: tuple[tuple[str, str], ...] = (
     ("pinned-tag freshness", "plugin drift ledger"),
     ("Every develop commit since the last code-exercised", "commit coverage audit"),
     ("write-seam behavioural gate", "write-seam gate"),
-    ("pytest (docs readers)", "docs readers"),
 )
 #: Step-level checks (a ratchet or floor step has no failing test to name).
 STEP_CHECKS: tuple[tuple[str, str], ...] = (
@@ -148,7 +152,7 @@ META_FILE_RE: re.Pattern[str] = re.compile(
     r"forbidden|_guard|verb_rot|_rot\b|gate_test|SourceScan|GateTest|Census|Ratchet|Lint|"
     r"Drift|Ledger|Tripwire|Floor|CodegenDrift|Coverage)")
 META_MSG_RE: re.Pattern[str] = re.compile(
-    r"(not allowlisted|do not resolve|undeclared|ceiling|ratchet|census|exceeds? the .{0,30}"
+    r"(StorageTouchError|not allowlisted|skip ceiling|do not resolve|undeclared|ceiling|ratchet|census|exceeds? the .{0,30}"
     r"(limit|budget|cap)|stale (entry|declaration)|pending ledger|no longer .{0,20}declared)", re.I)
 HARNESS_FILE_RE: re.Pattern[str] = re.compile(
     r"(watched_pytest|lab_run|lab_remote|select_affected|push_check|git_push|worktree|xdist|"
@@ -174,7 +178,8 @@ DERIVED_STEP_RE: re.Pattern[str] = re.compile(
 
 _TS_RE = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-_PYTEST_RE = re.compile(r"^(FAILED|ERROR) ([\w./-]+\.py)(?:::(.*?))?(?: - (.*))?$")
+_PYTEST_RE = re.compile(r"^(FAILED|ERROR) ([\w./\\-]+\.py)(?:::(.*?))?(?: - (.*))?$")
+_FAILED_COUNT_RE = re.compile(r"^(?:=+ )?(\d+) failed\b")
 _JAVA_ROW_RE = re.compile(r"^\[ERROR\]\s{2,}([\w$.]+)\.(\w+)(?::\d+)?\s*(.*)$")
 
 
@@ -182,6 +187,7 @@ def parse_log(lines: Iterable[str]) -> dict[str, Any]:
     """Failing tests and infra evidence from one job log. Streams; never holds the log."""
     tests: dict[tuple[str, str, str], str] = {}
     errors: list[str] = []
+    failed_count = 0
     infra = False
     in_java = False
     for raw in lines:
@@ -194,9 +200,14 @@ def parse_log(lines: Iterable[str]) -> dict[str, Any]:
             continue
         if "Unable to download" in line or "Unexpected HTTP response: 5" in line:
             infra = True
+        fc = _FAILED_COUNT_RE.match(line)
+        if fc:
+            failed_count = max(failed_count, int(fc.group(1)))
+            continue
         m = _PYTEST_RE.match(line)
         if m:
-            tests.setdefault(("pytest", m.group(2), (m.group(3) or "")), (m.group(4) or "")[:120])
+            tests.setdefault(("pytest", m.group(2).replace("\\", "/"), (m.group(3) or "")),
+                             (m.group(4) or "")[:120])
             continue
         if line.startswith("[ERROR] Failures:") or line.startswith("[ERROR] Errors:"):
             in_java = True
@@ -212,16 +223,23 @@ def parse_log(lines: Iterable[str]) -> dict[str, Any]:
         "tests": [{"kind": k, "file": f, "name": n, "msg": m} for (k, f, n), m in tests.items()],
         "errors": errors,
         "infra": infra,
+        "failed_count": failed_count,
     }
 
 
-def read_log(snapshot: Path, run_id: int, job_id: int) -> dict[str, Any] | None:
-    """Parsed log for a job, or None when the snapshot has no usable log (empty, or only a .err)."""
-    path = snapshot / "logs" / str(run_id) / f"{job_id}.log"
-    if not path.is_file() or path.stat().st_size == 0:
-        return None
-    with path.open(encoding="utf-8", errors="replace") as fh:
-        return parse_log(fh)
+def read_log(snapshot: Path, run_id: int, job_id: int,
+             extra: Sequence[Path] = ()) -> dict[str, Any] | None:
+    """Parsed log for a job, or None when no directory has a usable log (empty, or only a .err).
+
+    ``extra`` are fallback log roots of the same ``<run>/<job>.log`` layout, searched after the
+    snapshot's own ``logs/``.
+    """
+    for root in (snapshot / "logs", *extra):
+        path = root / str(run_id) / f"{job_id}.log"
+        if path.is_file() and path.stat().st_size > 0:
+            with path.open(encoding="utf-8", errors="replace") as fh:
+                return {**parse_log(fh), "extra": root != snapshot / "logs"}
+    return None
 
 
 # --- venue, checks, paths ------------------------------------------------------------------
@@ -343,21 +361,24 @@ def _load_jobs(snapshot: Path, run_id: int) -> list[Row] | None:
     return data["jobs"] if isinstance(data, dict) else data
 
 
-def _items_for_run(run: Row, jobs: Sequence[Row], snapshot: Path) -> tuple[list[Row], Row]:
+def _items_for_run(run: Row, jobs: Sequence[Row], snapshot: Path,
+                   extra_logs: Sequence[Path] = ()) -> tuple[list[Row], Row]:
     """Failing items of a run, plus log coverage counts."""
     failed = [j for j in jobs if j.get("conclusion") == "failure"]
-    cov = {"jobs": len(failed), "logs": 0}
+    cov = {"jobs": len(failed), "logs": 0, "extra": 0}
     items: list[Row] = []
     any_other_failure = len(failed) > 1 or any(
         sum(1 for s in j.get("steps", []) if s.get("conclusion") == "failure") > 1 for j in failed)
     for job in failed:
         steps = [s["name"] for s in job.get("steps", []) if s.get("conclusion") == "failure"]
-        parsed = read_log(snapshot, run["id"], job["id"])
+        parsed = read_log(snapshot, run["id"], job["id"], extra_logs)
         if parsed is not None:
             cov["logs"] += 1
+            cov["extra"] += int(parsed["extra"])
         base = {"t": "item", "run": run["id"], "sha": run["head_sha"], "workflow": run["name"],
                 "job": job["name"], "venue": venue(job.get("labels", [])), "job_id": job["id"],
-                "infra": bool(parsed and parsed["infra"]), "errors": (parsed or {}).get("errors", [])[:2]}
+                "infra": bool(parsed and parsed["infra"]), "errors": (parsed or {}).get("errors", [])[:2],
+                "has_log": parsed is not None, "failed_count": (parsed or {}).get("failed_count", 0)}
         emitted_tests = False
         if parsed and parsed["tests"]:
             first = steps[0] if steps else job["name"]
@@ -378,7 +399,8 @@ def _items_for_run(run: Row, jobs: Sequence[Row], snapshot: Path) -> tuple[list[
 def _placeholder_item(run: Row) -> Row:
     return {"t": "item", "run": run["id"], "sha": run["head_sha"], "workflow": run["name"],
             "job": "(jobs file missing)",
-            "venue": "unknown", "job_id": 0, "infra": False, "errors": [], "kind": "step",
+            "venue": "unknown", "job_id": 0, "infra": False, "errors": [], "has_log": False,
+            "failed_count": 0, "kind": "step",
             "step": "(jobs file missing)", "file": "", "item": "(jobs file missing)", "msg": "",
             "derived": False}
 
@@ -391,7 +413,7 @@ def _decided(runs: Sequence[Row]) -> list[Row]:
 
 def extract(snapshot: Path, repo: Path, *, conclusions: Sequence[str] = DEFAULT_CONCLUSIONS,
             include_jobless: bool = False, since: str = WINDOW_START,
-            until: str = WINDOW_END) -> list[Row]:
+            until: str = WINDOW_END, extra_logs: Sequence[Path] = ()) -> list[Row]:
     """Build the extraction records (see the module docstring) from a snapshot and a repo."""
     runs = [r for r in _load_runs(snapshot)
             if since <= r["created_at"][:10] <= until]
@@ -401,7 +423,7 @@ def extract(snapshot: Path, repo: Path, *, conclusions: Sequence[str] = DEFAULT_
     hist = History(repo)
     out_runs: list[Row] = []
     out_items: list[Row] = []
-    cov = {"jobs": 0, "logs": 0}
+    cov = {"jobs": 0, "logs": 0, "extra": 0}
     dropped_jobless = 0
     missing_jobs = 0
     for red in [r for r in runs if r["conclusion"] in conclusions]:
@@ -409,14 +431,15 @@ def extract(snapshot: Path, repo: Path, *, conclusions: Sequence[str] = DEFAULT_
         if jobs is None:
             # No jobs file yet (a snapshot still being fetched): keep the run, visibly unlabelled.
             missing_jobs += 1
-            items, c = [_placeholder_item(red)], {"jobs": 0, "logs": 0}
+            items, c = [_placeholder_item(red)], {"jobs": 0, "logs": 0, "extra": 0}
         else:
-            items, c = _items_for_run(red, jobs, snapshot)
+            items, c = _items_for_run(red, jobs, snapshot, extra_logs)
         if not items and not include_jobless:
             dropped_jobless += 1
             continue
         cov["jobs"] += c["jobs"]
         cov["logs"] += c["logs"]
+        cov["extra"] += c["extra"]
         later = [g for g in by_wf[red["name"]]
                  if g["conclusion"] == "success" and (g["created_at"], g["id"]) > (red["created_at"], red["id"])]
         green = next_green(red, later, hist)
@@ -448,7 +471,7 @@ def extract(snapshot: Path, repo: Path, *, conclusions: Sequence[str] = DEFAULT_
             "include_jobless": include_jobless, "runs_in_window": len(runs),
             "red_runs": len(out_runs), "dropped_jobless": dropped_jobless,
             "runs_missing_jobs_file": missing_jobs, "failed_jobs": cov["jobs"],
-            "failed_jobs_with_log": cov["logs"], "manifest": (snapshot / "MANIFEST.json").is_file()}
+            "failed_jobs_with_log": cov["logs"], "logs_from_extra_roots": cov["extra"], "manifest": (snapshot / "MANIFEST.json").is_file()}
     return ([meta] + sorted(out_runs, key=lambda r: r["id"]) + out_items + commits
             + _decided(runs))
 
@@ -487,19 +510,25 @@ def label_item(item: Row, run: Row) -> tuple[str, str]:
         return ACCOUNTING, "accounting:meta-file"
     if item["kind"] != "step" and META_MSG_RE.search(item.get("msg", "")):
         return ACCOUNTING, "accounting:meta-msg"
-    if item["kind"] != "step" and HARNESS_FILE_RE.search(stem):
+    if item["kind"] != "step" and (item["file"].startswith("tests/scripts/") or HARNESS_FILE_RE.search(stem)):
         return HARNESS, "harness:file"
     if run["rerun_green"]:
         return FLAKE, "flake:rerun-green"
     if item["kind"] == "step":
+        if item.get("failed_count"):
+            if item["venue"] == "windows":
+                return STALE, "stale:windows-portability"
+            return STALE, "stale:unnamed-test-failures"
+        if item.get("has_log") and not item["errors"]:
+            return FLAKE, "flake:no-failure-evidence"
         return UNLABELLED, "unlabelled:step-without-log"
     if run["unresolved"]:
         return STALE, "stale:no-green"
-    if run["fix_product_commit"] and (item["touched_test"] is False or item["fix_touched_product"]):
-        return PRODUCT, "product:fix-commit-touched-src"
+    if item["fix_touched_product"]:
+        return PRODUCT, "product:fix-touched-src"
     if item["touched_test"]:
         return STALE, "stale:fix-touched-test"
-    return STALE, "stale:ambient-no-test-fix"
+    return FLAKE, "flake:green-without-fix"
 
 
 def label_run(items: Sequence[Row]) -> tuple[str, collections.Counter[str]]:
@@ -722,6 +751,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="comma list of run conclusions that count as red (default: failure)")
     ex.add_argument("--include-jobless", action="store_true",
                     help="keep red runs that have no failed job record")
+    ex.add_argument("--extra-logs", type=Path, action="append", default=[],
+                    help="fallback log root (same <run>/<job>.log layout); repeatable")
     ex.add_argument("--since", default=WINDOW_START)
     ex.add_argument("--until", default=WINDOW_END)
     rp = sub.add_parser("report")
@@ -733,7 +764,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.cmd == "extract":
         recs = extract(args.snapshot, args.repo, conclusions=tuple(args.conclusions.split(",")),
-                       include_jobless=args.include_jobless, since=args.since, until=args.until)
+                       include_jobless=args.include_jobless, since=args.since, until=args.until,
+                       extra_logs=args.extra_logs)
         write_extraction(recs, args.out)
         sys.stdout.write(f"wrote {args.out}: {recs[0]}\n")
         return EXIT_OK

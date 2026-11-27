@@ -98,6 +98,12 @@ def snapshot(tmp_path: Path, history: tuple[Path, dict[str, str]]) -> Path:
         _run(12, "ci.yml", c["c4"], "failure", 12),
         # r13: Windows rehearsal, test red with no log yet
         _run(13, "windows-pg-bundle-rehearsal", c["c3"], "failure", 13),
+        # r14: test red at c2 whose next green (c3) never touched the test or product: green without a fix
+        _run(14, "CI", c["c2"], "failure", 14),
+        _run(15, "CI", c["c3"], "success", 15),
+        # r16: Windows run with a failed-count summary but no failing test names; r17: a job that died silently
+        _run(16, "windows-pg-bundle-rehearsal", c["c4"], "failure", 16),
+        _run(17, "CI", c["c4"], "failure", 17),
     ]
     (snap / "runs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in runs))
     jobs = {
@@ -112,12 +118,18 @@ def snapshot(tmp_path: Path, history: tuple[Path, dict[str, str]]) -> Path:
         11: [_job(1101, "pytest (Python 3.12, shard 1/6)", [("Run tests (shard 1/6)", "cancelled")], conclusion="cancelled")],
         12: [],
         13: [_job(1301, "Windows test set (win-release)", [("Windows test set", "failure")], labels=["win-release"])],
+        14: [_job(1401, "pytest (Python 3.12, shard 1/6)", [("Run tests (shard 1/6)", "failure")])],
+        16: [_job(1601, "Windows test set (win-release)", [("Windows test set", "failure")], labels=["win-release"])],
+        17: [_job(1701, "pytest (Python 3.12, shard 3/6)", [("Run tests (shard 3/6)", "failure")])],
     }
     for rid, js in jobs.items():
         (snap / "jobs" / f"{rid}.json").write_text(json.dumps(js))
     logs = {
         (1, 101): _PYTEST_FAIL.format(node="tests/test_a.py::test_x[a b]"),
         (3, 301): _PYTEST_FAIL.format(node="tests/test_docs_reference_rot.py::test_cited"),
+        (14, 1401): _PYTEST_FAIL.format(node="tests/test_b.py::test_flaky"),
+        (16, 1601): "2026-10-01T10:00:00Z ==== 40 failed, 1139 passed, 45 skipped in 94.24s ====\n",
+        (17, 1701): "2026-10-01T10:00:00Z Cleaning up orphan processes\n",
         (7, 701): "2026-10-01T10:00:00Z ##[error]The Unable to download CodeQL: Unexpected HTTP response: 504\n",
         (9, 901): ("2026-10-01T10:00:00Z [ERROR] Failures: \n"
                    "2026-10-01T10:00:00Z [ERROR]   FooIntegrationTest.bar:12 expected 1\n"
@@ -149,11 +161,12 @@ def test_parse_log_reads_pytest_java_and_infra() -> None:
         "2026-10-01T10:00:01Z [ERROR] \n",
         "2026-10-01T10:00:01Z [ERROR]   NotATest.after:1 \n",
         "2026-10-01T10:00:02Z ##[error]Unexpected HTTP response: 504\n",
+        "2026-10-01T10:00:03Z FAILED tests\\daemon\\test_w.py::test_win - OSError\n",   # Windows path
     ]
     got = rrr.parse_log(lines)
     assert [(t["kind"], t["file"], t["name"]) for t in got["tests"]] == [
         ("pytest", "tests/test_x.py", "test_a[p q]"), ("pytest", "tests/test_y.py", "test_b"),
-        ("java", "FooTest", "bar")]
+        ("java", "FooTest", "bar"), ("pytest", "tests/daemon/test_w.py", "test_win")]
     assert got["infra"] is True and got["errors"] == ["Unexpected HTTP response: 504"]
 
 
@@ -168,9 +181,9 @@ def test_venue_from_runner_labels(labels: list[str], want: str) -> None:
 def test_extract_scope_rows_and_coverage(extraction: list[dict]) -> None:
     meta = extraction[0]
     assert meta["t"] == "meta"
-    # r1 r3 r5 r7 r9 r10 r13 are red; r11 is cancelled, r12 has no failed job record
-    assert meta["red_runs"] == 7 and meta["dropped_jobless"] == 1
-    assert meta["failed_jobs"] == 8 and meta["failed_jobs_with_log"] == 4
+    # r1 r3 r5 r7 r9 r10 r13 r14 r16 r17 are red; r11 is cancelled, r12 has no failed job record
+    assert meta["red_runs"] == 10 and meta["dropped_jobless"] == 1
+    assert meta["failed_jobs"] == 11 and meta["failed_jobs_with_log"] == 7
     assert meta["manifest"] is False
     items = [r for r in extraction if r["t"] == "item"]
     by = {(i["run"], i["item"]): i for i in items}
@@ -192,20 +205,24 @@ def test_extract_scope_rows_and_coverage(extraction: list[dict]) -> None:
 def test_labels_name_the_rule_that_moved_each_run(extraction: list[dict]) -> None:
     an = rrr.analyze(extraction)
     got = {rid: (r["category"], r["rules"]) for rid, r in an["runs"].items()}
-    assert got[1] == (rrr.PRODUCT, ["product:fix-commit-touched-src"])
+    assert got[1] == (rrr.PRODUCT, ["product:fix-touched-src"])
     assert got[3] == (rrr.ACCOUNTING, ["accounting:job"])       # accounting wins over the rerun-green
     assert got[5] == (rrr.ACCOUNTING, ["accounting:step"])
     assert got[7] == (rrr.FLAKE, ["flake:infra-signature"])
     assert got[9] == (rrr.STALE, ["stale:no-green"])             # a behavioural test, never fixed
     assert got[10] == (rrr.BUILD, ["build:step-name"])
     assert got[13] == (rrr.UNLABELLED, ["unlabelled:step-without-log"])  # no log: stays visible
+    assert got[14] == (rrr.FLAKE, ["flake:green-without-fix"])
+    assert got[16] == (rrr.STALE, ["stale:windows-portability"])
+    assert got[17] == (rrr.FLAKE, ["flake:no-failure-evidence"])
 
 
 def test_checks_are_named_and_derived_items_do_not_count(extraction: list[dict]) -> None:
     an = rrr.analyze(extraction)
     assert rrr.check_counts(an) == {
         "storage-touch ratchet": 1, "docs_reference_rot": 1, "a": 1, "FooIntegrationTest": 1,
-        "Lint src/ with ruff": 1, "Windows test set": 1, "Run tests (shard 2/6)": 1}
+        "Lint src/ with ruff": 1, "Windows test set": 2, "Run tests (shard 2/6)": 1, "b": 1,
+        "Run tests (shard 3/6)": 1}
 
 
 def test_extraction_is_deterministic_and_round_trips(extraction: list[dict], tmp_path: Path) -> None:
@@ -219,10 +236,10 @@ def test_extraction_is_deterministic_and_round_trips(extraction: list[dict], tmp
 def test_scope_options_are_explicit(snapshot: Path, history: tuple[Path, dict[str, str]]) -> None:
     kw = {"since": "2026-10-01", "until": "2026-10-01"}
     # a cancelled run has no failed job record, so widening the conclusions alone adds nothing
-    assert rrr.extract(snapshot, history[0], conclusions=("failure", "cancelled"), **kw)[0]["red_runs"] == 7
+    assert rrr.extract(snapshot, history[0], conclusions=("failure", "cancelled"), **kw)[0]["red_runs"] == 10
     wide = rrr.extract(snapshot, history[0], conclusions=("failure", "cancelled"),
                        include_jobless=True, **kw)[0]
-    assert wide["red_runs"] == 9 and wide["dropped_jobless"] == 0
+    assert wide["red_runs"] == 12 and wide["dropped_jobless"] == 0
     assert rrr.extract(snapshot, history[0], **{"since": "2026-10-02", "until": "2026-10-03"})[0]["red_runs"] == 0
 
 
