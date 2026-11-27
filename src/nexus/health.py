@@ -12350,12 +12350,12 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
     try:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
         from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred, matches make_t3
+        from nexus.db.retired_rows import skip_retired_rows  # noqa: PLC0415 — deferred, matches make_t3
 
         t3 = make_t3()
-        # RDR-229 P2.9: the listing row's own content_type picks the collections, never the name. A
-        # quarantine sibling's row carries its origin's content type, so it is left out by its state
-        # (the name test left it out by its ``quarantine-`` prefix).
-        listing = list(t3.list_collections())
+        # RDR-229 P2.9: the row's own content_type picks the collections, never the name; a quarantine sibling is left
+        # out by its state. R7: a retired row (no live successor) is refused by label, so it is skipped and logged.
+        listing, _ = skip_retired_rows(t3.list_collections(), site="doctor_pdf_stub_metadata")
         names = sorted(
             str(c.get("name", "")) for c in listing
             if c.get("content_type") in _PDF_STUB_SCAN_CONTENT_TYPES and c.get("lifecycle_state") != "quarantine"

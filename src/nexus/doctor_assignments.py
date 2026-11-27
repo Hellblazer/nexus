@@ -128,6 +128,7 @@ from typing import Any
 import click
 import structlog
 
+from nexus.db.retired_rows import skip_retired_rows
 from nexus.doctor_embeddings import default_seed, window_offsets
 
 _log = structlog.get_logger(__name__)
@@ -567,12 +568,20 @@ def run_check_assignments(*, sample: int, collections: tuple[str, ...], seed: in
     run_seed = default_seed() if seed is None else seed
     try:
         t3 = make_t3()
-        listed = {str(c.get("name", "")): int(c.get("count", 0) or 0) for c in t3.list_collections()}
+        # RDR-229 R7: a retired collection with no live successor is refused by label, so it is not sampled.
+        rows, retired_skipped = skip_retired_rows(t3.list_collections(), site="doctor_check_assignments")
+        listed = {str(c.get("name", "")): int(c.get("count", 0) or 0) for c in rows}
     except Exception as exc:  # noqa: BLE001 — boundary: an unreadable tenant is a hard failure here
         click.echo(f"[✗] Assignment drift: T3 UNREADABLE ({type(exc).__name__}: {exc})")
         raise SystemExit(1) from exc
 
+    if retired_skipped:
+        click.echo(f"[-] Assignment drift: skipped {len(retired_skipped)} retired collection(s) with no live successor: {', '.join(retired_skipped)}")
     if collections:
+        retired_named = [c for c in collections if c in retired_skipped]
+        if retired_named:
+            click.echo(f"[✗] Assignment drift: retired with no live successor, so it cannot be read by label: {', '.join(retired_named)}")
+            raise SystemExit(1)
         unknown = [c for c in collections if c not in listed]
         if unknown:
             click.echo(f"[✗] Assignment drift: no such collection(s): {', '.join(unknown)}")

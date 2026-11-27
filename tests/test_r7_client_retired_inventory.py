@@ -16,6 +16,8 @@ import pytest
 from click.testing import CliRunner
 from structlog.testing import capture_logs
 
+import nexus.doctor_assignments as da
+import nexus.doctor_embeddings as de
 import nexus.doctor_search as ds
 from nexus.commands.catalog_cmds import doctor
 from nexus.commands.store import expire_cmd, export_cmd
@@ -290,3 +292,77 @@ def test_catalog_doctor_text_names_the_retired_collections_it_skipped(capsys, pr
     getattr(doctor, printer)(report)
 
     assert "skipped 1 retired collection" in capsys.readouterr().out
+
+
+# ── nx doctor --check-embeddings / --check-assignments ──────────────────────────────────────────────────────────────
+
+class _ListingT3:
+    def list_collections(self, *a, **k):
+        return [{"name": RETIRED_NAME, "superseded_by": RETIRED_NAME, "count": 3},
+                {"name": LIVE_NAME, "count": 4}]
+
+
+def test_check_embeddings_probes_only_live_collections_and_names_the_retired_skip(monkeypatch, capsys):
+    probed: list[dict] = []
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _ListingT3())
+    monkeypatch.setattr(de, "probe_collections", lambda t3, sizes, **kw: probed.append(dict(sizes)) or [])
+    monkeypatch.setattr(de, "format_report", lambda results, **kw: ([], True))
+
+    de.run_check_embeddings(sample=5, collections=(), seed=1)
+
+    assert probed == [{LIVE_NAME: 4}]
+    assert "skipped 1 retired collection" in capsys.readouterr().out
+
+
+def test_check_embeddings_says_a_named_retired_collection_is_retired_not_that_it_does_not_exist(monkeypatch, capsys):
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _ListingT3())
+    with pytest.raises(SystemExit) as exc:
+        de.run_check_embeddings(sample=5, collections=(RETIRED_NAME,), seed=1)
+    out = capsys.readouterr().out
+    assert exc.value.code == 1 and "retired" in out and "no such collection" not in out
+
+
+def test_check_assignments_probes_only_live_collections_and_names_the_retired_skip(monkeypatch, capsys):
+    probed: list[dict] = []
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _ListingT3())
+    monkeypatch.setattr(da, "probe_collections", lambda taxo, t3, sizes, **kw: probed.append(dict(sizes)) or [])
+    monkeypatch.setattr(da, "format_report", lambda results, **kw: ([], True))
+
+    class _Taxo:
+        def close(self):
+            pass
+
+    monkeypatch.setattr("nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore", _Taxo)
+
+    da.run_check_assignments(sample=5, collections=(), seed=1)
+
+    assert probed == [{LIVE_NAME: 4}]
+    assert "skipped 1 retired collection" in capsys.readouterr().out
+
+
+# ── nx doctor: the PDF chunk metadata scan ──────────────────────────────────────────────────────────────────────────
+
+def test_doctor_pdf_stub_scan_does_not_read_a_retired_collection(monkeypatch):
+    from nexus import health
+
+    scanned: list[str] = []
+
+    class _Listing:
+        def list_collections(self, *a, **k):
+            return [{"name": RETIRED_NAME, "content_type": "knowledge", "superseded_by": RETIRED_NAME},
+                    {"name": LIVE_NAME, "content_type": "knowledge"}]
+
+    def scan(t3, name, limit):
+        scanned.append(name)
+        return {}, health._StubScanCoverage()
+
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _Listing())
+    monkeypatch.setattr(health, "_pdf_stub_route", lambda: None)
+    monkeypatch.setattr(health, "_pdf_stubs_in_collection", scan)
+
+    with capture_logs() as logs:
+        [result] = health._check_pdf_stub_metadata()
+
+    assert scanned == [LIVE_NAME], "the retired collection is not read by label"
+    assert "could not be read" not in result.detail
+    assert any(e["event"] == "retired_collection_skipped" and e["site"] == "doctor_pdf_stub_metadata" for e in logs)
