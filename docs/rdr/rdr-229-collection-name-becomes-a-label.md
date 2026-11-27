@@ -1103,7 +1103,13 @@ The key moves table by table in strangler order:
     (fk-002:240-246). Inferred, not read: the label it copies into
     `source_collection` then fails `topic_assignments_chunk_fk`, which
     references the chunks' name key (vectors-030:1032-1036), because the
-    chunks keep the old name; so it refuses the rename too;
+    chunks keep the old name; so it refuses the rename too. The key
+    `topic_assignments_chunk_fk` is not dropped: the `vectors-079` trigger
+    stamps a child row's `source_collection` from the chunk it references, so
+    the key stays satisfied after a one-row rename and the "Inferred, not
+    read" failure above does not occur (`Rdr229P37OneRowRenameTest`, one-row
+    rename after the latch with the key in place); it goes with the name
+    columns in P4.1;
   - `aspect_extraction_queue_collection_fk` is `ON DELETE CASCADE ON
     UPDATE CASCADE` (aspects-005:103-107), and the queue's only other key
     references `catalog_documents`, so it refuses nothing.
@@ -4787,3 +4793,4 @@ large, and moved under a ratchet.
 - 2026-11-26: the reaper's two expiry functions guard a quarantine row by its own origin id (grant 3, nexus-p2m1x.28; Sam's ruling, T2 `nexus/sam-ruling-rdr229-nextcut-ddl-cap-2961-2026-11-26`): `vectors-086` redefines `reaper_expire_quarantine` and `reaper_expire_client_quarantine`; after a one-row rename a move that commits after the retag leaves a row tagged with the old label, which the label-resolved guard missed; the I8 census's basis for the two reaper rows no longer says the call was ruled safe.
 - 2026-11-27: the Test Plan's two rename scenarios state the restart precondition (grant 3, nexus-p2m1x.48 step 2): once gate 3 holds, until the restart that applies P3.5b's changesets a rename is refused (409 `rename_refused`, `missing` = `restart`), and a rename test on a fresh or half-stamped fixture boots, waits for the restart signal, restarts, waits for readiness `NONE`, then renames; before gate 3 holds a rename is the name path and is not refused. Two Test Plan Verify clauses gain a sentence each (the amendment bead nexus-p2m1x.48 asked for); no decision changed.
 - 2026-11-27: the mint class does not empty at Phase 3 (Sam's ruling, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`, ask `rdr229-mint-pin`, option 1; grant 3, nexus-p2m1x.28): item 12's census paragraph and the routing paragraph's "all empty at P3.8" now say the class keeps the parsers of the names a user types and the names `nx` is about to register, is pinned at 129 (`tests/test_collection_name_parse_census.py:418`) so it cannot grow, and retires with the Phase 4 parsers (P4.3).
+- 2026-11-27: item 6's list says `topic_assignments_chunk_fk` is not dropped in Phase 3 (linda; matching P3.7's `vectors-079` trigger and `Rdr229P37OneRowRenameTest`; nexus-p2m1x.27): the trigger stamps a child row's `source_collection` from its chunk, so the key stays satisfied after a one-row rename; it goes with the name columns in P4.1. Committed locally; lands with the P3.7 lane's clean stacked review (grant 3).
