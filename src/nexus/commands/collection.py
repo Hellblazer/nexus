@@ -939,8 +939,8 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     ``missing: name_key_drop_move`` while the engine runs its name-key drop
     move: about 10 s on an empty store, longer while the move waits behind
     an index build. Run the rename again then; if it still refuses after
-    several minutes, run ``nx doctor`` and report the "RDR-229 collection
-    rename" row, since a stalled move gives the same refusal. Before the
+    several minutes, run ``nx doctor`` and report its collection rename row,
+    since a stalled move gives the same refusal. Before the
     latch a rename is the name path and is not refused. ``missing:
     restart`` appears only when a listed changeset failed to apply on its
     own; the restart is then the operator's to order.
