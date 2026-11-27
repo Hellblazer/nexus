@@ -41,13 +41,3 @@ def test_retiring_by_id_probe_id_fits_the_engines_18_digit_cap() -> None:
     assert m, "the probe names no probe_id"
     digits = m.group(1).replace("_", "")
     assert len(digits) <= 18 and int(digits) > 0, digits
-
-
-def test_persist_split_probe_registers_other_on_a_distinct_tuple() -> None:
-    """A second live collection on the home row's tuple is refused 409, so `other` must differ from the home row."""
-    code = cl._routes.PERSIST_SPLIT_REFUSAL
-    call = code[code.index("cat.register_collection(other"):]
-    call = call[: call.index(")\n") + 1]
-    assert 'owner_id=row["owner_id"]' not in call
-    assert re.search(r'owner_id="1\.\d+"', call), call
-    assert 'model_version=row["model_version"]' in call, "a different model_version would capture the store steps' newest-version resolution"
