@@ -75,17 +75,19 @@ def test_a_rename_refused_for_a_restart_says_renames_open_after_the_next_restart
 
 
 def test_a_rename_refused_while_the_name_key_drop_move_runs_says_to_run_it_again_in_a_minute_or_two() -> None:
-    """RDR-229 P3.7, the real fresh-install and half-stamped window (measured on chas, nexus-p2m1x.48): after the restart that
-    latches gate 3 the engine refuses a rename with ``missing: name_key_drop_move`` for a minute or two while it runs a short
-    background step. Nothing is wrong and nothing needs fixing, so the generic "Fix the error and retry" would send the person
-    looking for a fault, and a restart is not the remedy either."""
+    """RDR-229 P3.7, the real fresh-install and half-stamped window (measured on chas, nexus-p2m1x.48): from the latch of gate 3
+    (not from the restart before it) until the name-key drop move completes, the engine refuses a rename with ``missing:
+    name_key_drop_move``. The window is the move's length: about 10 s on an empty store, longer while it waits behind a running
+    index build. Nothing is wrong and nothing needs fixing, so the generic "Fix the error and retry" would send the person
+    looking for a fault, and a restart is not the remedy either. A stalled move gives the same 409, so the message also says
+    what to do when the refusal outlasts a few minutes."""
     body = (b'{"error":"a collection rename is refused until the name-key drop move completes",'
             b'"reason":"rename_refused","missing":"name_key_drop_move"}')
     msg = _message(_refusal(409, body))
-    assert "short background step" in msg, msg
-    assert "after an upgrade or restart" in msg, msg
+    assert "background step" in msg, msg
     assert "again in a minute or two" in msg, msg
-    assert "nx doctor" in msg, msg
+    assert "still refuses after several minutes" in msg, "a stalled move gives the same 409, so the person is told what to do then"
+    assert "nx doctor" in msg and "RDR-229 collection rename" in msg, msg
     assert "unchanged" in msg and "nothing was renamed" in msg, msg
     assert "Fix the error and retry" not in msg, "a retry in a minute is the remedy, not a fix"
     assert "operator orders" not in msg and "restart the engine" not in msg, "no restart is needed for this wait"
