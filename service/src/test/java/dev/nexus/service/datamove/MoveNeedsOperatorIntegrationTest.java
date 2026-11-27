@@ -826,6 +826,40 @@ class MoveNeedsOperatorIntegrationTest extends DataMoveIntegrationBase {
         assertThat(flag(status(w))).as("and /v1/status lists the move again").isTrue();
     }
 
+    /**
+     * The production handler never throws out of {@code onFailure}: a failure while it records the retry count (a lost admin connection here) is caught
+     * and answered as a BLOCKED disposition that counted nothing and carries no page. The page a counted failure latched must survive it (nexus-p2m1x.27).
+     */
+    @Test
+    void aRealHandlerThatCannotRecordTheCount_keepsTheLatchedPage_andLogsNoSecondOne() throws Exception {
+        registerMove("kept-unrecorded", CHUNK_FAMILY_ON_COMPLETE);
+        var finisher = new AtomicReference<MoveFinisher>(onCompleteFailing("57014"));
+        var w = workerOn(c -> finisher.get().finish(c));
+        assertThat(w.runCycle()).isEqualTo(1);
+        cycle(w);
+        cycle(w);
+        assertThat(retries("kept-unrecorded")).as("non-vacuity: three counted failures").isEqualTo(3);
+        assertThat(flag(status(w))).as("non-vacuity: the third latched the page").isTrue();
+
+        var props = new Properties();
+        props.setProperty("user", ADMIN);
+        props.setProperty("password", ADMIN_PASSWORD);
+        org.jooq.DSLContext dead;
+        try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), props)) {
+            dead = DSL.using(c, SQLDialect.POSTGRES);
+        }   // closed: every statement on it raises
+        finisher.set(c -> MoveFinisher.Result.report(new FailureHandler.Failure(c.move(), FailureHandler.Stage.ON_COMPLETE, null,
+            "dm_test", "tenant_plain", null, 0, new SQLException("canceling statement due to statement timeout", "57014"),
+            "on_complete of " + c.move().label() + " did not complete: sqlstate=57014", dead, true)));
+        List<Event> next = capture(() -> cycle(w));
+
+        assertThat(retries("kept-unrecorded")).as("the count could not be written: it is still 3").isEqualTo(3);
+        assertThat(stateOf(w, "kept-unrecorded").reason()).as("non-vacuity: the handler could not record").contains("could not be recorded");
+        assertThat(stateOf(w, "kept-unrecorded").needsOperator()).as("a failure that counted nothing keeps the latched page").isTrue();
+        assertThat(next).as("and the kept page is not announced again").isEmpty();
+        assertThat(flag(status(w))).as("/v1/status still pages the move").isTrue();
+    }
+
     private static String shape(JsonNode n) {
         return n.getNodeType().toString();
     }

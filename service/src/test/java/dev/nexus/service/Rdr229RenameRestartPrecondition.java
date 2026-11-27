@@ -10,22 +10,24 @@ import java.util.Optional;
 
 /**
  * RDR-229 residual R9 (nexus-p2m1x.48): the precondition every rename test takes on a fresh or half-stamped fixture against the
- * P3.5/P3.7 cut. On such a store the stamp moves complete during boot 1 (a fresh store's tables are empty), gate 3 can hold in that
- * process, and P3.5b's CONTINUE changesets were skipped at boot 1, so they apply only at boot 2; until then the engine refuses every
- * rename and says it needs a restart (RDR item 6, "the one restart the chain from a half-stamped store needs"). So: boot; wait until
- * the stamp moves have {@code completed_at} and {@link RenameReadiness} reports {@link Missing#P35B_RESTART}; restart the engine on
- * the same database; wait until gate 3 holds and readiness reports {@link Missing#NONE}; then hand the engine back.
+ * P3.5/P3.7 cut, as the engine really walks it (measured on chas 2026-11-27 with the production {@code IdUniqueIndexPass} as gate 3's extra):
+ * <ol>
+ * <li><b>Boot 1.</b> The stamp moves complete (a fresh store's tables are empty), but gate 3 cannot hold: its runtime-built id unique indexes need
+ *     changesets {@code vectors-078-8} and {@code vectors-084-1..3}, which are CONTINUE-gated on every stamp move being complete at walk time, so
+ *     the boot-1 walk skipped them. No latch, no drop move. A rename in this process is the name path and succeeds (a new id); the engine only
+ *     asks for a restart ({@code rdr229-restart} in {@code boot_work}, which nx doctor shows).</li>
+ * <li><b>The restart (boot 2).</b> Its walk applies those changesets and every P3.5b CONTINUE changeset together. Gate 3 latches once the id-index
+ *     pass has built what it waits for, an engine pass registers the name-key drop move, the worker completes it, and the readiness reads none.
+ *     Until then a rename is refused naming {@code name_key_drop_move}.</li>
+ * <li>Only then does a rename run the one-row path.</li>
+ * </ol>
+ * So {@link #reach}: boot; wait for the stamp moves; restart; wait for gate 3 to latch and readiness {@link Missing#NONE}; hand the engine back.
+ * The wire view of the readiness is {@code GET /v1/status} {@code rdr229_completion.rename_missing}. Gate 3's PCI-coverage clause stays simulated
+ * at its input ({@link Rdr229RenameEngine}): the harness has no vector repository, and a store with nothing to index satisfies it in production too.
  *
- * <p><b>Readiness is observed in process</b>, through {@code CompletionBootWork#renameReadiness()}, the object the engine hands the
- * rename primitive (so the wait and the refusal read one signal); the wire view of it is {@code GET /v1/status}
- * {@code rdr229_completion.rename_missing}, which {@code Rdr229FreshInstallRenameRestartTest} asserts. Until P3.7 the accessor is a
- * stub that says ready, so {@link #reach} never sees the restart signal.
- *
- * <p><b>What a wait that times out means.</b> The stamp wait is hard: the stamp moves run today, so a timeout there is a fixture
- * fault and fails with the incomplete labels. The two readiness waits are bounded and soft, and return {@link Reached#note()} saying
- * which step did not happen and why (a state that never came). A caller puts that note in the
- * description of its first rename assertion, so a red before P3.7 fails on the rename's behaviour and says why the precondition was
- * not met, instead of failing in the fixture. A caller that must not run without the precondition calls {@link Reached#require}.
+ * <p><b>What a wait that times out means.</b> The stamp wait is hard: the stamp moves run, so a timeout there is a fixture fault and fails with the
+ * incomplete labels. The readiness wait is bounded and soft, and returns {@link Reached#note()} saying which state never came. A caller puts that note
+ * in the description of its first assertion, or calls {@link Reached#require}.
  */
 final class Rdr229RenameRestartPrecondition {
 
@@ -33,6 +35,8 @@ final class Rdr229RenameRestartPrecondition {
     static final Duration STAMP_WAIT = Duration.ofMinutes(3);
     /** How long a readiness state may take to appear after the event that causes it (a completion event re-reads the check at once). */
     static final Duration SIGNAL_WAIT = Duration.ofSeconds(30);
+    /** How long the second boot may take to latch gate 3 and finish the drop move (the harness ticks the id-index pass every 200 ms; the move sleeps 8 s a chunk). */
+    static final Duration LATCH_WAIT = Duration.ofSeconds(120);
 
     private Rdr229RenameRestartPrecondition() { /* static */ }
 
@@ -55,20 +59,21 @@ final class Rdr229RenameRestartPrecondition {
     record Env(Rdr229RenameEngine engine, Reached reached) { }
 
     /**
-     * Boots {@code engine} (not yet booted), waits for the stamp moves and for the restart signal, restarts, and waits for readiness
-     * NONE with gate 3 holding. The engine's gate 3 input must be open.
+     * Boots {@code engine} (not yet booted), waits for the stamp moves, restarts, and waits for readiness NONE with gate 3 latched: the state a
+     * one-row rename needs. The engine's simulated PCI input must be open.
      */
     static Env reach(Rdr229RenameEngine engine) throws Exception {
+        return reach(engine, Missing.NONE);
+    }
+
+    /** As {@link #reach(Rdr229RenameEngine)} but waits, after the restart, for readiness {@code wanted} with gate 3 latched (a test of a refusal window). */
+    static Env reach(Rdr229RenameEngine engine, Missing wanted) throws Exception {
         engine.boot();
         awaitStampMovesComplete(engine);
-        StringBuilder note = new StringBuilder();
-
-        boolean sawRestart = awaitReadiness(engine, Missing.P35B_RESTART, note, "boot 1");
         engine.restart();
-        boolean ready = awaitGate3AndReadiness(engine, Missing.NONE, note, "boot 2");
-
-        boolean met = sawRestart && ready;
-        return new Env(engine, new Reached(met, met ? "" : note.toString().strip()));
+        StringBuilder note = new StringBuilder();
+        boolean ready = awaitLatchedReadiness(engine, wanted, note, "boot 2");
+        return new Env(engine, new Reached(ready, ready ? "" : note.toString().strip()));
     }
 
     /**
@@ -89,27 +94,15 @@ final class Rdr229RenameRestartPrecondition {
         }
     }
 
-    private static boolean awaitReadiness(Rdr229RenameEngine engine, Missing wanted, StringBuilder note, String step)
+    private static boolean awaitLatchedReadiness(Rdr229RenameEngine engine, Missing wanted, StringBuilder note, String step)
             throws InterruptedException {
-        boolean ok = Rdr229RenameEngine.await(SIGNAL_WAIT, () -> engine.readiness().filter(wanted::equals).isPresent());
+        boolean ok = Rdr229RenameEngine.await(LATCH_WAIT,
+            () -> engine.completion().gate3Latched() && engine.readiness().filter(wanted::equals).isPresent());
         if (!ok) {
-            note.append(step).append(": readiness never reported ").append(wanted).append(" within ").append(SIGNAL_WAIT)
-                .append(" (last ").append(engine.readiness().map(Object::toString).orElse("?")).append(", gate 3 ")
-                .append(engine.completion().gate3() ? "holds" : "does not hold").append("). ");
-        }
-        return ok;
-    }
-
-    private static boolean awaitGate3AndReadiness(Rdr229RenameEngine engine, Missing wanted, StringBuilder note, String step)
-            throws InterruptedException {
-        Optional<Missing> last = Optional.empty();
-        boolean ok = Rdr229RenameEngine.await(SIGNAL_WAIT,
-            () -> engine.completion().gate3() && engine.readiness().filter(wanted::equals).isPresent());
-        if (!ok) {
-            last = engine.readiness();
-            note.append(step).append(": gate 3 ").append(engine.completion().gate3() ? "holds" : "does not hold")
-                .append(" and readiness is ").append(last.map(Object::toString).orElse("?")).append(", not ").append(wanted)
-                .append(" after ").append(SIGNAL_WAIT).append(". ");
+            Optional<Missing> last = engine.readiness();
+            note.append(step).append(": gate 3 ").append(engine.completion().gate3Latched() ? "is latched" : "is not latched").append(" [")
+                .append(engine.completion().gate3Why()).append("] and readiness is ").append(last.map(Object::toString).orElse("?"))
+                .append(", not ").append(wanted).append(" after ").append(LATCH_WAIT).append(". ");
         }
         return ok;
     }

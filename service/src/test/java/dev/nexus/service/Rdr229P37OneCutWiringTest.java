@@ -53,7 +53,6 @@ class Rdr229P37OneCutWiringTest {
 
         assertThat(refusal).as("Main hands the completion check's rename readiness to NexusService (the refusal)").isTrue();
         assertThat(registration).as("Main starts NameKeyDropPass from the completion check's latest read (the registration)").isTrue();
-        assertThat(refusal).as("one engine cut: the refusal and the drop move's registration are both present or both absent").isEqualTo(registration);
     }
 
     @Test

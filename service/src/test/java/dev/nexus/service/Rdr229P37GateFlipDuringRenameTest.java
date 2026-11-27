@@ -14,7 +14,8 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * RDR-229 P3.7 (nexus-p2m1x.27), the RDR's name-path rename that is open when gate 3 flips in process (fix check 50164fafab10, A O-5), on a
- * booted engine over HTTP. A name-path rename is held at its source registry row by a session of the test, after it has taken
+ * booted engine over HTTP, in boot 2 (the boot in which gate 3 can latch: boot 1's walk skipped the changesets its id indexes wait for) with the PCI
+ * input of gate 3 closed and no data-move worker. A name-path rename is held at its source registry row by a session of the test, after it has taken
  * {@code RenameLatchLock} shared. Gate 3's input then opens and the completion check's latch write queues for the lock exclusive. The latch
  * row must not exist while the rename is in flight (the rename is one transaction that decided from the row it read under the lock), the rename
  * must finish on the name path (200, a new registry id), and only then does the latch row land, after which the next rename is refused.
@@ -44,6 +45,13 @@ class Rdr229P37GateFlipDuringRenameTest {
         try (var engine = new Rdr229RenameEngine().gate3(false)) {
             engine.boot();
             Rdr229RenameRestartPrecondition.awaitStampMovesComplete(engine);
+            // boot 2, the boot in which gate 3 can latch, with the PCI input closed and no worker: everything gate 3 needs but that input is in place
+            engine.workerAtBoot(false);
+            engine.restart();
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(60), () -> engine.completion().gate2()))
+                .as("non-vacuity: gates 1 and 2 hold in boot 2").isTrue();
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(90), () -> engine.<Boolean>su(dev.nexus.service.datamove.IdUniqueIndexPass::allValid)))
+                .as("non-vacuity: the id-unique-index pass built what gate 3 waits for, so only the closed PCI input keeps gate 3 from holding").isTrue();
             String tenant = "p37-flip";
             String token = engine.newTenant(tenant);
             String old = coll("p37flip", 1);
@@ -76,7 +84,12 @@ class Rdr229P37GateFlipDuringRenameTest {
 
                     engine.gate3(true);
                     flip = CompletableFuture.supplyAsync(() -> {
-                        engine.completionCheck().refresh();   // the latch write runs in this call (Gate3LatchWriter.IMMEDIATE)
+                        // the latch write runs inside refresh() (Gate3LatchWriter.IMMEDIATE) and queues on RenameLatchLock; the loop covers a sample
+                        // that ran before the input read open
+                        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+                        while (latchRows(engine) == 0 && System.nanoTime() < deadline) {
+                            engine.completionCheck().refresh();
+                        }
                         return null;
                     });
                     assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(8), () -> advisoryOn(engine, "ExclusiveLock", false) >= 1))
@@ -98,7 +111,7 @@ class Rdr229P37GateFlipDuringRenameTest {
 
             var refused = engine.rename(token, next, coll("p37flip2", 2));
             assertThat(refused.refused()).as("from the latch on, a rename is refused 409 rename_refused: " + refused).isTrue();
-            assertThat(refused.missing()).as("naming a condition: the move or the restart").isIn("name_key_drop_move", "restart");
+            assertThat(refused.missing()).as("naming the move: it is registered and no worker runs it").isEqualTo("name_key_drop_move");
             assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, next))).as("and wrote nothing").isNotNull();
         }
     }

@@ -10,6 +10,7 @@ import dev.nexus.service.datamove.CompletionBootWork;
 import dev.nexus.service.datamove.CompletionCheck;
 import dev.nexus.service.datamove.DataMoveWorker;
 import dev.nexus.service.datamove.Gate3;
+import dev.nexus.service.datamove.IdUniqueIndexPass;
 import dev.nexus.service.datamove.NameKeyDropMove;
 import dev.nexus.service.datamove.NameKeyDropPass;
 import dev.nexus.service.datamove.P35bChangesets;
@@ -43,27 +44,23 @@ import java.util.function.Function;
 /**
  * RDR-229 P3.7 / residual R9 (nexus-p2m1x.27, nexus-p2m1x.48): a booted engine on a database that survives a restart, for the
  * rename tests. It is {@code Main}'s boot in one JVM: the schema walk (as the migrating role, on the pg_background image),
- * {@link NexusService} over the same database, the real {@link DataMoveWorker} and the real {@link CompletionBootWork}. A
- * {@link #restart} stops all of them and boots again on the same database, so a CONTINUE changeset that the first walk skipped
- * (its precondition read an incomplete stamp move) is applied by the second walk, as on an install.
+ * {@link NexusService} over the same database, the real {@link DataMoveWorker}, the real {@link CompletionBootWork} (built with
+ * {@link IdUniqueIndexPass#allValid} as gate 3's extra, as {@code Main.startCompletionBootWork} builds it), the production
+ * {@link IdUniqueIndexPass} (ticked every 200 ms here; production ticks it every 60 s after 30 s), the production {@link NameKeyDropPass} (every 100 ms)
+ * and the engine's LeafIndexPass, which registers the swaps gate 2 waits for. A {@link #restart} stops all of them and boots again on the same
+ * database, so a CONTINUE changeset that the first walk skipped (its precondition read an incomplete stamp move) is applied by the second walk, as on
+ * an install. The P3.5b changeset list is the real resource ({@code db/rdr229/p35b-continue-changesets.txt}).
  *
- * <p><b>Gate 3 is simulated at its input.</b> {@code Main} builds the completion check with {@code Gate3Source.NOT_INSTALLED}
- * because P3.4's id-index builds do not exist yet, so on a real boot gate 3 never holds. Here the check reads a
- * {@link CompletionCheck.Gate3Source} that answers "P3.4 is complete" the way P3.4 will: every live registry row is planned and has a
- * VALID id index ({@link CompletionCheck.IdIndexCoverage}). Nothing else is faked: the stamp moves, the FK validation moves and the
- * name-key drop move run through the real worker, and the completion check reads the real registry, CHECKs and databasechangelog.
- * {@link #gate3(boolean)} closes and opens that input, so a test can stand before gate 3.
+ * <p><b>Known limit: the PCI-coverage clause of gate 3 is simulated at its input.</b> The harness engine has no vector repository and no PCI
+ * reconciler, so the check reads a {@link CompletionCheck.Gate3Source} that answers "every live registry row is planned and has a VALID id index"
+ * ({@link CompletionCheck.IdIndexCoverage}). On a store with nothing to index that is what production reports; a store with collections large enough
+ * to build per-collection indexes adds PCI build time before the latch in production, which this harness does not model. Nothing else of gate 3 is
+ * faked: the stamp moves, the FK validation moves, the swaps, the id-unique-index pass and its vectors-084 changesets, and the name-key drop move run
+ * for real, and the check reads the real registry, CHECKs and databasechangelog. {@link #gate3(boolean)} closes and opens the simulated input, so a
+ * test can hold the engine just before the latch.
  *
- * <p><b>One more input is stood in for until the code that owns it is on this branch:</b> P3.5b's CONTINUE changesets and its list
- * ({@value #P35B_LIST}) are not on this branch. While the resource is absent the engine's list is {@link #P35B_FIXTURE_ID}, a changeset
- * that no walk applies, and {@link #restart} records it in {@code databasechangelog} as P3.5b's second walk will record the real ones; when
- * P3.5b's list exists the harness reads it and records nothing. The name-key drop move is registered by the production {@link NameKeyDropPass},
- * every 100 ms, and runs through the real worker; the engine's LeafIndexPass registers the swaps gate 2 waits for.
- *
- * <p>The engine is built through {@code NexusService}'s package-private constructor that takes {@link Gate3} and
- * {@link RenameReadiness} (both read per call), fed from {@link CompletionBootWork#gate3()} and
- * {@link CompletionBootWork#renameReadiness()}. Until P3.7 the readiness is a stub that always says ready, so the rename stays the
- * name path.
+ * <p>The engine is built through {@code NexusService}'s package-private constructor that takes {@link Gate3} and {@link RenameReadiness} (both
+ * read per call), fed from {@link CompletionBootWork#gate3Latched()} and {@link CompletionBootWork#renameReadiness()}.
  */
 final class Rdr229RenameEngine implements AutoCloseable {
 
@@ -71,10 +68,6 @@ final class Rdr229RenameEngine implements AutoCloseable {
     static final String ROOT = "tok-root-rdr229-rename-0123456789abcdefghij";
     /** The name-key drop move's label (P3.7). */
     static final String DROP_LABEL = "rdr229-name-key-drop";
-    /** The resource P3.5b's code commit writes: the CONTINUE changesets the completion check waits to see applied. */
-    static final String P35B_LIST = P35bChangesets.RESOURCE;
-    /** The changeset id the harness lists while P3.5b's list is absent (see the class comment). */
-    static final String P35B_FIXTURE_ID = "p37-harness-p35b-continue-fixture";
 
     final PostgreSQLContainer<?> pg;
     final AdminConnection admin;
@@ -146,7 +139,7 @@ final class Rdr229RenameEngine implements AutoCloseable {
         scope = new TenantScope(ds);
         bootWork = new BootWorkRegistry(Clock.systemUTC());
         // as Main wires it: the latch row is written by the check's own writer (RenameLatchLock exclusive, in its own transaction)
-        check = new CompletionBootWork(bootWork, admin, CompletionCheck.ReadSet.boot(), this::simulatedGate3, java.util.List.of(),
+        check = new CompletionBootWork(bootWork, admin, CompletionCheck.ReadSet.boot(), this::simulatedGate3, java.util.List.of(IdUniqueIndexPass::allValid),
             CompletionCheck.Gate3LatchWriter.IMMEDIATE, dev.nexus.service.datamove.Gate3Latch.readAtBoot(admin), Duration.ZERO,
             this::p35bList);   // ZERO: the coverage is read every sample, so a test can dip the live gate 3 after the latch
         // the one-row regime is exercised here, and this base has no id readers (IdReaders.PRESENT is false until P3.5c): the test-only seam says they are present
@@ -170,6 +163,36 @@ final class Rdr229RenameEngine implements AutoCloseable {
         }, ENGINE_VERSION);
         leafPass.start();
         startRegistrar();
+        startIdUniquePass();
+    }
+
+    private dev.nexus.service.datamove.IdUniqueIndexPass idPass;
+    private java.util.concurrent.ScheduledExecutorService idPassTicker;
+
+    /**
+     * The production {@link dev.nexus.service.datamove.IdUniqueIndexPass} (gate 3 requires its indexes and the vectors-084 changesets,
+     * {@code IdUniqueIndexPass#allValid}), gated on gate 2 of the check's latest read as {@code Main.startIdUniqueIndexPass} gates it. Production
+     * ticks it every 60 s after 30 s; here {@code runOnce()} is called every 200 ms, so the chain is the same and a test does not wait minutes.
+     */
+    private void startIdUniquePass() {
+        CompletionBootWork watched = check;
+        idPass = new dev.nexus.service.datamove.IdUniqueIndexPass(admin, bootWork, () -> {
+            var latest = watched.latest();
+            return latest != null && latest.gate2();
+        });
+        idPassTicker = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "rename-engine-id-unique-pass");
+            t.setDaemon(true);
+            return t;
+        });
+        var pass = idPass;
+        idPassTicker.scheduleWithFixedDelay(() -> {
+            try {
+                pass.runOnce();
+            } catch (RuntimeException e) {
+                // the pass logs its own failures; a tick that throws is tried again
+            }
+        }, 200, 200, java.util.concurrent.TimeUnit.MILLISECONDS);
     }
 
     private dev.nexus.service.vectors.LeafIndexPass leafPass;
@@ -190,46 +213,9 @@ final class Rdr229RenameEngine implements AutoCloseable {
             DSL.field(DSL.name("label"), String.class).eq(label)));
     }
 
-    /**
-     * The P3.5b changeset ids the engine waits for: the real list when the resource exists (even if it names nothing: an empty list
-     * is refused, never papered over), else the harness's one fixture id.
-     */
+    /** The P3.5b changeset ids the engine waits for: the real list ({@code db/rdr229/p35b-continue-changesets.txt}). */
     static java.util.Set<String> p35bIds() {
-        return usingFixtureList() ? java.util.Set.of(P35B_FIXTURE_ID) : P35bChangesets.fromResource();
-    }
-
-    /** True only while P3.5b's list resource is ABSENT and {@link #P35B_FIXTURE_ID} stands in for it. A present list, empty or not, is never replaced. */
-    static boolean usingFixtureList() {
-        return P35bChangesets.resourceAbsent();
-    }
-
-    /** What P3.5b's second walk does to {@code databasechangelog}, for the fixture id only: one EXECUTED row. */
-    private void recordFixtureChangeset() {
-        recordChangeset(P35B_FIXTURE_ID, "EXECUTED");
-    }
-
-    /** A {@code databasechangelog} row for {@code id} with {@code execType} (EXECUTED, FAILED, SKIPPED, RERAN, MARK_RAN), unless the id has one. */
-    void recordChangeset(String id, String execType) {
-        su(ctx -> {
-            var log = DSL.table(DSL.name("public", "databasechangelog"));
-            var idF = DSL.field(DSL.name("id"), String.class);
-            if (!ctx.fetchExists(log, idF.eq(id))) {
-                Integer next = ctx.select(DSL.coalesce(DSL.max(DSL.field(DSL.name("orderexecuted"), Integer.class)), 0).plus(1))
-                    .from(log).fetchOne(0, Integer.class);
-                ctx.insertInto(log, idF, DSL.field(DSL.name("author"), String.class), DSL.field(DSL.name("filename"), String.class),
-                        DSL.field(DSL.name("dateexecuted"), java.time.OffsetDateTime.class),
-                        DSL.field(DSL.name("orderexecuted"), Integer.class), DSL.field(DSL.name("exectype"), String.class))
-                    .values(id, "p37-harness", "p37-harness-fixture.xml", java.time.OffsetDateTime.now(), next, execType)
-                    .execute();
-            }
-            return null;
-        });
-    }
-
-    /** Removes the {@code databasechangelog} rows of {@code id} that {@link #recordChangeset} wrote. */
-    void forgetChangeset(String id) {
-        su(ctx -> ctx.deleteFrom(DSL.table(DSL.name("public", "databasechangelog")))
-            .where(DSL.field(DSL.name("id"), String.class).eq(id)).and(DSL.field(DSL.name("author"), String.class).eq("p37-harness")).execute());
+        return P35bChangesets.fromResource();
     }
 
     /** The list the next boot hands the completion check instead of {@link #p35bIds()}; null (the default) keeps that. */
@@ -255,9 +241,6 @@ final class Rdr229RenameEngine implements AutoCloseable {
     /** Stops the engine, the worker and the check, and boots again on the same database (the engine's restart). */
     void restart() throws Exception {
         stopEngine();
-        if (usingFixtureList()) {
-            recordFixtureChangeset();
-        }
         boot();
     }
 
@@ -284,6 +267,14 @@ final class Rdr229RenameEngine implements AutoCloseable {
     }
 
     private void stopEngine() {
+        if (idPassTicker != null) {
+            idPassTicker.shutdownNow();
+            idPassTicker = null;
+        }
+        if (idPass != null) {
+            idPass.close();
+            idPass = null;
+        }
         if (leafPass != null) {
             leafPass.close();
             leafPass = null;

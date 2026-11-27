@@ -14,10 +14,10 @@ import java.time.Duration;
 
 /**
  * RDR-229 residual S-7 (nexus-p2m1x.45, R6): the rename route's {@code ids_stable} is true exactly when the rename that answered it was the one-row
- * rename (the id survived), and false when it was the name path (a new id). Walked through the stages on the rename harness's engine with REAL renames,
- * read from the route's own answer: before gate 3 the name path says false; latched with the move or a P3.5b changeset missing the rename is refused
- * (there is no answer); after the restart that applies the changesets the one-row rename says true, and a live dip of gate 3 (an id index going INVALID)
- * does not turn it back, because the rename path follows the latch row.
+ * rename (the id survived), and false when it was the name path (a new id). Walked through the stages the engine really reaches on the rename harness's
+ * engine, with REAL renames, read from the route's own answer: in boot 1 (before gate 3 can hold) the name path says false; after the restart, from the
+ * latch until the drop move completes, the rename is refused (there is no answer); after the move the one-row rename says true, and a live dip of gate 3
+ * (an id index going INVALID) does not turn it back, because the rename path follows the latch row.
  *
  * <p>The pairing with {@code catalog_epoch}: every rename answer that carries {@code ids_stable} carries {@code catalog_epoch} where {@code /v1/status}
  * says {@code catalog_epoch_available}, and where it does not carries {@code ids_stable} with no {@code catalog_epoch} key (omitted, never null).
@@ -29,7 +29,7 @@ class Rdr229P37IdsStableTest {
 
     @BeforeAll
     void boot() throws Exception {
-        engine = new Rdr229RenameEngine().gate3(false);
+        engine = new Rdr229RenameEngine();
         engine.boot();
         Rdr229RenameRestartPrecondition.awaitStampMovesComplete(engine);
     }
@@ -62,9 +62,9 @@ class Rdr229P37IdsStableTest {
         assertThat(engine.body(before).path("ids_stable").asBoolean(true)).as("a new id: not stable").isFalse();
         assertThat(engine.body(before).has("collection_id")).as("the route still names the renamed row").isTrue();
 
-        engine.stopWorker();   // gate 3 latches, the drop move registers but cannot run
-        engine.gate3(true);
-        assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> engine.completion().gate3Latched())).as("gate 3 latched [" + engine.completion().gate3Why() + "]").isTrue();
+        engine.workerAtBoot(false);
+        engine.restart();   // boot 2: gate 3 latches, the drop move registers, and with no worker it cannot run
+        assertThat(Rdr229RenameEngine.await(Rdr229RenameRestartPrecondition.LATCH_WAIT, () -> engine.completion().gate3Latched())).as("gate 3 latched [" + engine.completion().gate3Why() + "]").isTrue();
         assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> engine.moveRows(Rdr229RenameEngine.DROP_LABEL) == 1)).as("the move registered").isTrue();
         engine.completion();
         assertThat(engine.readiness().orElseThrow()).isEqualTo(Missing.NAME_KEY_DROP_MOVE);
@@ -72,12 +72,8 @@ class Rdr229P37IdsStableTest {
         assertThat(waiting.refused()).as("latched, the drop move incomplete: refused, so there is no ids_stable at all: " + waiting).isTrue();
         assertThat(waiting.missing()).isEqualTo("name_key_drop_move");
 
-        engine.startWorker();   // the move completes; P3.5b's changesets still wait for the restart
+        engine.startWorker();   // the move completes; every P3.5b changeset applied in the boot-2 walk, so nothing else is missing
         assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(60), () -> engine.moveCompleted(Rdr229RenameEngine.DROP_LABEL))).isTrue();
-        engine.completion();
-        assertThat(engine.readiness().orElseThrow()).isEqualTo(Missing.P35B_RESTART);
-
-        engine.restart();   // the restart applies P3.5b's changesets
         assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(60), () -> engine.readiness().filter(Missing.NONE::equals).isPresent())).isTrue();
         var stable = renameOne("ids-c", "idsc");
         assertThat(stable.status()).as("the one-row regime holds: " + stable).isEqualTo(200);
