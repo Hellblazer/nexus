@@ -214,7 +214,7 @@ print("no rows under the probe source")
 try:
     store.rename_collection(old=source, new="c42")
 except httpx.HTTPStatusError as exc:
-    print("minted target answered", exc.response.status_code, "reason", _reason_of(exc))
+    print("result: minted target answered", exc.response.status_code, "reason", _reason_of(exc))
     assert exc.response.status_code == 400, f"a minted-form target answered {exc.response.status_code}, not 400"
     print("minted target refused 400")
 else:
@@ -227,18 +227,18 @@ else:
 status = fetch_engine_status(timeout=20.0) or {}
 completion = status.get("rdr229_completion")
 latched = completion.get("gate3_latched") if isinstance(completion, dict) else None
-print("gate3_latched:", "unknown" if latched is None else latched)
+gate = "gate3_latched=" + ("unknown" if latched is None else str(latched))
 try:
     moved = store.rename_collection(old=source, new=source + "-renamed")
 except httpx.HTTPStatusError as exc:
     reason = _reason_of(exc)
-    print("legal rename answered", exc.response.status_code, "reason", reason)
+    print("result: legal rename answered", exc.response.status_code, "reason", reason, gate)
     assert exc.response.status_code == 409 and reason == "rename_not_in_registry", (
         f"the legal rename answered {exc.response.status_code} reason {reason!r}, not 200 or 409 rename_not_in_registry")
 else:
     assert latched is not True, f"gate 3 has latched and the legal rename was accepted ({moved}), not refused 409 rename_not_in_registry"
     assert all(v == 0 for v in moved.values()), f"the probe's legal rename moved rows: {moved}"
-    print("legal rename answered 200", moved)
+    print("result: legal rename answered 200", moved, gate)
 """
 
 CHASH_RENAME_REFUSAL = r"""
@@ -315,7 +315,7 @@ if not ids:
 try:
     store.persist_split({"topic_id": ids[0], "collection_name": home, "child_specs": []})
 except httpx.HTTPStatusError as exc:
-    print("persist_split answered", exc.response.status_code, "reason", _reason_of(exc))
+    print("result: persist_split answered", exc.response.status_code, "reason", _reason_of(exc))
     assert exc.response.status_code == 400, f"persist_split of another collection's topic answered {exc.response.status_code}, not 400"
     print("persist_split refused 400")
 else:

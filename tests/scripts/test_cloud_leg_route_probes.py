@@ -76,7 +76,7 @@ def test_persist_split_probe_registers_other_without_a_name_and_uses_the_answere
 def test_persist_split_probe_prints_the_refusals_reason() -> None:
     code = cl._routes.PERSIST_SPLIT_REFUSAL
     assert "def _reason_of(exc)" in code
-    assert 'print("persist_split answered", exc.response.status_code, "reason", _reason_of(exc))' in code
+    assert 'print("result: persist_split answered", exc.response.status_code, "reason", _reason_of(exc))' in code
     assert "persist_split refused 400" in code  # the line the step's expect_stdout waits for
 
 
@@ -88,7 +88,7 @@ def test_telemetry_rename_probe_sends_the_minted_target_before_the_legal_pair() 
     assert "minted target refused 400" in code  # the line the step's expect_stdout waits for
     assert 'reason == "rename_not_in_registry"' in code and "exc.response.status_code == 409" in code
     assert "gate3_latched" in code and "rdr229_completion" in code
-    assert 'print("legal rename answered"' in code and "_reason_of(exc)" in code
+    assert 'print("result: legal rename answered"' in code and "_reason_of(exc)" in code
     assert "moved no rows" not in code and "legal rename then moves zero" not in code
 
 
@@ -137,13 +137,13 @@ def test_telemetry_rename_probe_passes_a_pre_latch_200_with_zero_counts(monkeypa
     out, err, calls = _run_telemetry_probe(monkeypatch, latched=False, legal_answer={"search_telemetry": 0, "hook_failures": 0})
     assert err is None, err
     assert calls[0][1] == "c42" and calls[1][1].endswith("-renamed")
-    assert "minted target refused 400" in out and "legal rename answered 200" in out
+    assert "minted target refused 400" in out and "result: legal rename answered 200" in out and "gate3_latched=False" in out
 
 
 def test_telemetry_rename_probe_passes_a_latched_409_and_prints_its_reason(monkeypatch) -> None:
     out, err, _ = _run_telemetry_probe(monkeypatch, latched=True, legal_answer=(409, {"error": "e", "reason": "rename_not_in_registry"}))
     assert err is None, err
-    assert "legal rename answered 409 reason rename_not_in_registry" in out and "gate3_latched: True" in out
+    assert "result: legal rename answered 409 reason rename_not_in_registry gate3_latched=True" in out
 
 
 def test_telemetry_rename_probe_fails_a_409_with_another_reason_or_a_latched_200(monkeypatch) -> None:
@@ -153,3 +153,9 @@ def test_telemetry_rename_probe_fails_a_409_with_another_reason_or_a_latched_200
     assert isinstance(err, AssertionError) and "latched" in str(err)
     out, err, _ = _run_telemetry_probe(monkeypatch, latched="absent", legal_answer={"search_telemetry": 3, "hook_failures": 0})
     assert isinstance(err, AssertionError) and "moved rows" in str(err)
+
+
+def test_the_probes_mark_their_answers_for_the_step_record() -> None:
+    """The step record keeps only `result: ` lines (cloud_leg_result), so each probe prints its reason on one."""
+    for code in (cl._routes.TELEMETRY_RENAME, cl._routes.PERSIST_SPLIT_REFUSAL):
+        assert 'print("result: ' in code and "_reason_of(exc)" in code

@@ -375,6 +375,7 @@ def _load_ledger_module() -> Any:
 
 
 _engine = _load_sibling("cloud_leg_engine")
+_result = _load_sibling("cloud_leg_result")
 parse_engine_version, entry_engine, _ver = _engine.parse_engine_version, _engine.entry_engine, _engine.version_text
 
 
@@ -641,7 +642,7 @@ def run_slot(plan: dict[str, Any], *, runner: str, sandbox: Path, host: str, wor
     results: list[dict[str, Any]] = []
     for n, step in enumerate(plan["steps"]):
         res: dict[str, Any] = {"name": step["name"], "slot": slot, "exit": None, "taps": [], "tap_ready": False,
-                               "stdout_chars": 0, "error": "", "skipped": None, "blocked": None, "attempts": 0,
+                               "stdout_chars": 0, "result": "", "error": "", "skipped": None, "blocked": None, "attempts": 0,
                                "benign": bool(step.get("benign_refusal")), "host": host}
         missing = [v for v in step["needs"] if v not in variables]
         if missing:
@@ -676,6 +677,7 @@ def run_slot(plan: dict[str, Any], *, runner: str, sandbox: Path, host: str, wor
             res["taps"] = [[s, m, r] for s, m, r, h in all_rows if h == host]
             res["hosts"] = sorted({h for *_x, h in all_rows if h})
             res["stdout_chars"] = len(out)  # the output itself is not kept: it carries ids and may carry a token the scrub cannot know
+            res["result"] = _result.result_line(out, lambda t: _scrub(t, secrets))  # only the lines a probe marks `result: `, bounded
             first_err = next((ln for ln in reversed(err.strip().splitlines()) if ln.strip()), "")
             res["error"] = _scrub(first_err, secrets)[:160]
             res["expect_ok"] = True if want is None else (_fill(want, variables) in out)
