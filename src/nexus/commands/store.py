@@ -1144,8 +1144,12 @@ def export_cmd(
         out_dir = Path(output) if output else Path.cwd()
         if output and not out_dir.exists():
             out_dir.mkdir(parents=True, exist_ok=True)
-        collections_info = db.list_collections()
-        if not collections_info:
+        from nexus.db.retired_rows import skip_retired_rows  # noqa: PLC0415 — deferred: CLI startup cost
+
+        # RDR-229 R7: the engine refuses a by-label read of a retired collection that has no live successor, so
+        # a retired row is not exported (it is reported below), never an ERROR line per run.
+        collections_info, retired_skipped = skip_retired_rows(db.list_collections(), site="store_export_all")
+        if not collections_info and not retired_skipped:
             click.echo("No collections found.")
             return
         today = date.today().isoformat()
@@ -1170,6 +1174,13 @@ def export_cmd(
             except Exception as exc:  # noqa: BLE001 — per-collection export failure surfaced via click.echo, loop continues
                 click.echo(f"ERROR exporting {col_name}: {exc}", err=True)
         click.echo(f"\nTotal: {total_exported} records across {len(collections_info)} collections.")
+        if retired_skipped:
+            click.echo(
+                f"{len(retired_skipped)} retired collection{' was' if len(retired_skipped) == 1 else 's were'} "
+                f"not exported (the engine refuses a read of a retired collection that has no live successor): "
+                f"{', '.join(retired_skipped)}",
+                err=True,
+            )
     else:
         col_name = _resolve_bare_subject(collection, t3=db)
         out_path = Path(output) if output else Path(f"{safe_label_filename(col_name)}.nxexp")

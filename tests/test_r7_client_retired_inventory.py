@@ -113,3 +113,39 @@ def test_nx_store_expire_names_the_retired_collections_it_did_not_read(monkeypat
 
     assert result.exit_code == 0, result.output
     assert "1 retired collection was not swept" in result.output and RETIRED_NAME in result.output
+
+
+# ── nx store export --all ───────────────────────────────────────────────────────────────────────────────────────────
+
+def test_store_export_all_skips_a_retired_collection_and_exports_the_rest(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+    from unittest.mock import MagicMock
+
+    from nexus.commands.store import export_cmd
+
+    live = "knowledge__live__bge-base-en-v15-768__v1"
+    db = MagicMock()
+    db.list_collections.return_value = [
+        {"name": RETIRED_NAME, "superseded_by": RETIRED_NAME, "count": 3},
+        {"name": live, "count": 5},
+    ]
+    exported: list[str] = []
+
+    def export(*, db, collection_name, output_path, includes, excludes):
+        if collection_name == RETIRED_NAME:
+            raise _retired_409(RETIRED_NAME)
+        exported.append(collection_name)
+        return {"exported_count": 5}
+
+    monkeypatch.setattr("nexus.commands.store._t3", lambda: db)
+    monkeypatch.setattr("nexus.exporter.export_collection", export)
+
+    with capture_logs() as logs:
+        result = CliRunner().invoke(export_cmd, ["--all", "-o", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert exported == [live], "the retired collection is never exported by label"
+    assert "ERROR exporting" not in result.output, "a skipped retired collection is not a failure"
+    assert "1 retired collection was not exported" in result.output and RETIRED_NAME in result.output
+    assert "across 1 collections" in result.output
+    assert any(e["event"] == "retired_collection_skipped" and e["site"] == "store_export_all" for e in logs)
