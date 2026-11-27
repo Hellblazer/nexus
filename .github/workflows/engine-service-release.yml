@@ -153,8 +153,18 @@ jobs:
       # and both publish matrices need this job, so nothing is built or attached. The engine-release skill runs
       # the same check before the tag is pushed; this is the backstop for a tag pushed without it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          # The pairing check below names its range from the engine tags and scans the history between them.
+          # Tags outside a shallow history never materialise, and a shallow boundary reads as a root commit.
+          fetch-depth: 0
       - name: Refuse a tag that carries a held changeset
         run: python3 scripts/check_release_holds.py
+      # RDR-258 Phase 2 (nexus-2jomg.3): a both-halves wire change (engine tree and client wire surface in one commit)
+      # between the previous engine-service-v* tag and this one must be declared in docs/wire-contract-pending.md.
+      # The pairing check's own default range follows the client's v* tags, which do not match engine tags.
+      # Before create-release, so an undeclared change builds and publishes nothing.
+      - name: Refuse a tag that carries an undeclared both-halves wire change
+        run: python3 scripts/check_engine_release_pairing.py --tag "${GITHUB_REF_NAME}"
       - name: Create GitHub Release (idempotent)
         env:
           GH_TOKEN: ${{ github.token }}

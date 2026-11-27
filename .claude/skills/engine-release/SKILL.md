@@ -371,6 +371,14 @@ that names no release is not a go.
 
 **A shipped defect found during cut prep re-cuts.** The bar is "already shipped", not "this cut introduces it". After v0.1.110 was tagged (2026-09-09), deploy prep surfaced two defects already live in v0.1.109; recommending to ship around them as "not regressions this cut introduces" was wrong (Sam: "introduces is not the bar ... it is ALREADY SHIPPED"). Hold the tag, or the deploy if the tag is out, fix both on develop, and cut a successor. Source: memory `feedback_release_and_develop_ci` § engine_cut_discipline.
 
+**Run the wire-pairing check on the frozen commit before the tag exists** (RDR-258 Phase 2, nexus-2jomg.3). A tag that carries an undeclared both-halves change (a commit touching `service/` and the client wire surface, absent from `docs/wire-contract-pending.md`) fails `create-release`, so nothing builds or publishes, and a burned tag is not moved. The workflow runs the same script on the tag; run it first, on the full-history checkout (the frozen worktree of Step 1b has it):
+
+```bash
+uv run python scripts/check_engine_release_pairing.py --tag engine-service-vX.Y.Z --commit "$TAG_SHA"   # exit 0 = every both-halves commit since the previous engine tag is declared
+```
+
+It scans `<previous engine-service-v* tag>..TAG_SHA` through `check_wire_contract_pairing.py --rev-range`; the previous tag is the highest version below the one you name. Exit 1 names each undeclared commit (or stale ledger entry): declare it under `## Unshipped` in a reviewed commit and freeze a new `TAG_SHA` that carries it (Step 1b). A declared entry does not stop the tag, only an undeclared one does; Step 3b still decides the deploy. Exit 2 means the range could not be named (shallow checkout, no tags, a tag that is not `engine-service-vX.Y.Z`): fix the checkout and rerun, never tag on it.
+
 ```bash
 git tag -a engine-service-vX.Y.Z -m "engine-service X.Y.Z" <commit>   # <commit> must be on origin
 git push origin engine-service-vX.Y.Z
