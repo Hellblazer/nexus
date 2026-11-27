@@ -612,3 +612,19 @@ def test_the_bd_update_pitfall_applies_only_where_beads_exist_and_says_what_else
     gate = section[:first_command]
     assert ".beads/" in gate, "the section must name its data gate before its first bd command"
     assert re.search(r"\b(?:skip|hand-back|memory_put)\b", gate, re.IGNORECASE), "the gate must say what to do without .beads/"
+
+
+def test_the_only_exemption_for_a_persons_name_is_the_pinned_frame_literals() -> None:
+    """RDR-259 Stage 2 ship-when: the other four tables exempt generic terms and two product literals, none of them a name
+    (a person's name is what ``LEXICON_CS`` matches). ``_PINNED_FRAME_LITERALS`` is the one table that does, and the frame's S6
+    change empties it."""
+    others = {
+        "_CLI_VOCABULARY": list(_CLI_VOCABULARY),
+        "_HOOK_VOCABULARY": list(_HOOK_VOCABULARY),
+        "_PROCESS_VOCABULARY": list(_PROCESS_VOCABULARY),
+        "_PRODUCT_LITERALS": list(_PRODUCT_LITERALS),
+    }
+    assert sum(len(v) for v in others.values()) >= 6, "the check read the four tables"
+    named = {t: [e for e in entries if _leg.LEXICON_CS.search(e)] for t, entries in others.items()}
+    assert not any(named.values()), named
+    assert all(_leg.LEXICON_CS.search(e) for e in _PINNED_FRAME_LITERALS if e != "sam-words") and len(_PINNED_FRAME_LITERALS) == 2
