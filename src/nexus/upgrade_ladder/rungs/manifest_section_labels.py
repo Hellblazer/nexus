@@ -415,15 +415,23 @@ def _chunk_metadatas(t3: Any, collection: str, chashes: list[str], counts: Any =
     looked_up = not (isinstance(t3, CollectionMemo) and t3.holds(collection))
     if counts is not None and looked_up:
         counts.collection_lookups += 1
+    from nexus.collection_errors import RetiredNoSuccessorError  # noqa: PLC0415 — deferred, as above
+
     try:
-        col = t3.get_collection(collection)
-    except collection_not_found_errors() as exc:
-        if getattr(exc, "__cause__", None) is not None:
-            raise  # a service that could not be asked is not "the collection is absent"
+        try:
+            col = t3.get_collection(collection)
+        except collection_not_found_errors() as exc:
+            if getattr(exc, "__cause__", None) is not None:
+                raise  # a service that could not be asked is not "the collection is absent"
+            return {}
+        if counts is not None:
+            counts.chunk_gets += -(-len(chashes) // QUOTAS.MAX_RECORDS_PER_WRITE)
+        result = col.get(ids=list(chashes), include=["metadatas"], sensitivity="include")
+    except RetiredNoSuccessorError:
+        # RDR-229 R7: the engine refuses a by-label read of a retired collection with no live successor. Its rows
+        # count as 'chunk missing' (left legacy), visibly, rather than one such collection aborting the whole scan.
+        _log.warning("retired_collection_skipped", site="upgrade_chunk_metadatas", skipped=1, collections=[collection])
         return {}
-    if counts is not None:
-        counts.chunk_gets += -(-len(chashes) // QUOTAS.MAX_RECORDS_PER_WRITE)
-    result = col.get(ids=list(chashes), include=["metadatas"], sensitivity="include")
     ids: list[str] = result.get("ids") or []
     metas: list[Any] = result.get("metadatas") or []
     if len(metas) != len(ids):

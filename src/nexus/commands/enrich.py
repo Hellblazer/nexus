@@ -28,6 +28,7 @@ import click
 import structlog
 
 from nexus.catalog.membership import unknown_collection_message
+from nexus.collection_errors import RetiredNoSuccessorError
 from nexus.doc_sensitivity import SensitivityUnknown
 from nexus.sensitivity import SensitiveDocumentRefused, bound_to
 
@@ -4098,8 +4099,15 @@ def aspects_backfill_uri_cmd(collection: str, apply: bool, as_json: bool) -> Non
         per_collection: list[dict] = []
         applied = 0
         rejected: list[tuple[str, str]] = []
+        retired_skipped: list[str] = []
         for coll in collections:
-            rows = db.document_aspects.list_by_collection(coll)
+            try:
+                rows = db.document_aspects.list_by_collection(coll)
+            except RetiredNoSuccessorError:
+                # RDR-229 R7: refused by label (retired, no live successor); skipped and reported, not a traceback.
+                retired_skipped.append(coll)
+                _log.warning("retired_collection_skipped", site="enrich_aspects_backfill_uri", skipped=1, collections=[coll])
+                continue
             plan = plan_source_uri_backfill(rows)
             per_collection.append({
                 "collection": coll,
@@ -4126,6 +4134,7 @@ def aspects_backfill_uri_cmd(collection: str, apply: bool, as_json: bool) -> Non
         report = {
             "apply": apply,
             "collections": per_collection,
+            "retired_skipped": retired_skipped,
             "total_rows": sum(c["total"] for c in per_collection),
             "total_repairable": sum(c["repairable"] for c in per_collection),
             "total_refused": sum(c["refused"] for c in per_collection),
@@ -4152,6 +4161,8 @@ def aspects_backfill_uri_cmd(collection: str, apply: bool, as_json: bool) -> Non
         if len(c["refusals"]) > 5:
             click.echo(f"      … {len(c['refusals']) - 5} more refusal(s) (--json for all)")
 
+    if retired_skipped:
+        click.echo(f"Skipped {len(retired_skipped)} retired collection(s) (no live successor): {', '.join(retired_skipped)}")
     click.echo(
         f"Rows: {report['total_rows']}, repairable: {report['total_repairable']}, "
         f"refused: {report['total_refused']}"

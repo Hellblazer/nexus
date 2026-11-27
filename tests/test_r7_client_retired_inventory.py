@@ -9,13 +9,20 @@ are still read.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
 from structlog.testing import capture_logs
 
+from nexus import health
+from nexus.catalog.recovery_bundle import _collection_rows
+from nexus.commands import enrich
+from nexus.commands.enrich import aspects_backfill_uri_cmd
+from nexus.upgrade_ladder.rungs.manifest_section_labels import _chunk_metadatas
 import nexus.doctor_assignments as da
 import nexus.doctor_embeddings as de
 import nexus.doctor_search as ds
@@ -343,8 +350,6 @@ def test_check_assignments_probes_only_live_collections_and_names_the_retired_sk
 # ── nx doctor: the PDF chunk metadata scan ──────────────────────────────────────────────────────────────────────────
 
 def test_doctor_pdf_stub_scan_does_not_read_a_retired_collection(monkeypatch):
-    from nexus import health
-
     scanned: list[str] = []
 
     class _Listing:
@@ -366,3 +371,58 @@ def test_doctor_pdf_stub_scan_does_not_read_a_retired_collection(monkeypatch):
     assert scanned == [LIVE_NAME], "the retired collection is not read by label"
     assert "could not be read" not in result.detail
     assert any(e["event"] == "retired_collection_skipped" and e["site"] == "doctor_pdf_stub_metadata" for e in logs)
+
+
+# ── recovery bundle export ──────────────────────────────────────────────────────────────────────────────────────────
+
+def test_recovery_export_reads_a_retired_collection_as_holding_nothing_and_logs_it():
+    class _T3:
+        def chunk_rows(self, collection, chashes, sensitivity="include"):
+            raise _retired_409(collection)
+
+    with capture_logs() as logs:
+        rows = _collection_rows(_T3(), RETIRED_NAME, ["a" * 64])
+
+    assert rows == {}, "its notes count as ghosts, as for an unregistered collection, rather than stopping the export"
+    assert any(e["event"] == "recovery_export_collection_retired" and e["collection"] == RETIRED_NAME for e in logs)
+
+
+# ── the manifest-section-labels and span-fill rungs' chunk read ─────────────────────────────────────────────────────
+
+def test_the_rung_chunk_read_of_a_retired_collection_finds_no_chunk_and_logs_instead_of_aborting_the_scan():
+    class _T3:
+        def get_collection(self, name):
+            raise _retired_409(name)
+
+    with capture_logs() as logs:
+        got = _chunk_metadatas(_T3(), RETIRED_NAME, ["a" * 64])
+
+    assert got == {}, "the rows stay legacy as 'chunk missing'; a partial scan must not abort the whole rung"
+    assert any(e["event"] == "retired_collection_skipped" and e["site"] == "upgrade_chunk_metadatas" for e in logs)
+
+
+# ── nx enrich aspects backfill-uri ──────────────────────────────────────────────────────────────────────────────────
+
+def test_enrich_aspects_backfill_uri_skips_a_retired_collection_and_reports_it(monkeypatch):
+    class _Aspects:
+        def list_by_collection(self, coll):
+            if coll == RETIRED_NAME:
+                raise _retired_409(coll)
+            return []
+
+    @contextlib.contextmanager
+    def _t2(_path):
+        yield SimpleNamespace(document_aspects=_Aspects())
+
+    monkeypatch.setattr("nexus.db.t2.T2Database", _t2)
+    monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: "x")
+    monkeypatch.setattr(enrich, "_catalog_collections", lambda db: [RETIRED_NAME, LIVE_NAME])
+
+    with capture_logs() as logs:
+        result = CliRunner().invoke(aspects_backfill_uri_cmd, ["--json"])
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output[result.output.index("{"):])
+    assert report["retired_skipped"] == [RETIRED_NAME]
+    assert [c["collection"] for c in report["collections"]] == [LIVE_NAME]
+    assert any(e["event"] == "retired_collection_skipped" and e["site"] == "enrich_aspects_backfill_uri" for e in logs)

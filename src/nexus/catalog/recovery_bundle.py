@@ -397,8 +397,15 @@ def _collection_rows(t3: Any, collection: str, chashes: list[str]) -> dict[str, 
         is_unregistered_collection_error,
     )
 
+    from nexus.collection_errors import RetiredNoSuccessorError  # noqa: PLC0415 — deferred, as above
+
     try:
         return t3.chunk_rows(collection, chashes, sensitivity="include")
+    except RetiredNoSuccessorError:
+        # RDR-229 R7: the engine refuses a by-label read of a retired collection with no live successor. Its notes
+        # count as ghosts (logged here, counted in the summary), never a stopped export.
+        _log.warning("recovery_export_collection_retired", collection=collection, pieces=len(chashes))
+        return {}
     except VectorServiceError as exc:
         if not is_unregistered_collection_error(exc):
             raise
