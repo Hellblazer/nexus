@@ -126,9 +126,9 @@ def _mock_catalog_client(monkeypatch, *, registered_model: str | None):
         return httpx.Response(200, json={})
 
     monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
-    client = HttpCatalogClient(base_url="http://mock.test")
+    client = HttpCatalogClient(base_url="https://mock.test")
     client._client = httpx.Client(
-        base_url="http://mock.test",
+        base_url="https://mock.test",
         transport=httpx.MockTransport(handler),
     )
     return client, requests

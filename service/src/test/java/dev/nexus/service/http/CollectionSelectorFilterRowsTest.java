@@ -313,6 +313,37 @@ class CollectionSelectorFilterRowsTest {
         assertThat(handlerCalls).as("a refused request reaches no handler").isEqualTo(before);
     }
 
+    /**
+     * The per-reader twin of the sweep above for R7 (bead nexus-p2m1x.25): a tombstone that names no live successor (id 8: its successor has no
+     * row) is refused by id on every slot of every route with today's 409, whose body carries the retired label and id and none of the
+     * successor's fields. The sweep above only reads a live successor's. The real-engine complement, per store, is
+     * {@code CollectionRetiredNoSuccessorReadersTest}.
+     */
+    @Test
+    void r7_aRetiredIdWithNoSuccessorIs409WithNoSuccessorFieldsOnEveryRouteAndSlotOfTheTable_andNoHandlerRuns() throws Exception {
+        int before = handlerCalls;
+        int slots = 0;
+        for (Map.Entry<String, CollectionSelectors.Route> e : CollectionSelectors.ROUTES.entrySet()) {
+            for (CollectionSelectors.Slot slot : e.getValue().slots()) {
+                slots++;
+                Resp r;
+                if (e.getValue().where() == CollectionSelectors.Where.QUERY) {
+                    r = get(e.getKey() + "?" + slot.idField() + "=8");
+                } else if (slot.nested()) {
+                    r = post(e.getKey(), "{\"" + slot.nestedIn() + "\":[{\"" + slot.idField() + "\":8}]}");
+                } else if (slot.list()) {
+                    r = post(e.getKey(), "{\"" + slot.idField() + "\":[8]}");
+                } else {
+                    r = post(e.getKey(), "{\"" + slot.idField() + "\":8}");
+                }
+                assertThat(r.status()).as("%s slot %s: %s", e.getKey(), slot.idField(), r.body()).isEqualTo(409);
+                dev.nexus.service.NoSuccessorBodyAsserts.assertBareMarker(r.json(), e.getKey() + " slot " + slot.idField(), "retired-eight", 8);
+            }
+        }
+        assertThat(slots).as("non-vacuity: the table has its routes").isGreaterThanOrEqualTo(86);
+        assertThat(handlerCalls).as("a refused request reaches no handler").isEqualTo(before);
+    }
+
     // ---- F13 parity between a query and a body --------------------------------------------------------------------------------------
 
     @Test

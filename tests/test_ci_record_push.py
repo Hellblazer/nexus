@@ -174,7 +174,7 @@ def _wire_store(monkeypatch: pytest.MonkeyPatch, *, identity_held: bool, first_s
     held = {IDENTITY_HEADER: "identity-token-bbbb"} if identity_held else {}
     monkeypatch.setattr("nexus.identity.token_header.fenced_identity_headers", lambda method, path: dict(held))
     monkeypatch.setattr("nexus.identity.token_header.identity_headers", lambda: dict(held))
-    store = http_tuple_store.HttpTupleStore(base_url="http://mock.test")
+    store = http_tuple_store.HttpTupleStore(base_url="https://mock.test")
     store._client = httpx.Client(transport=httpx.MockTransport(handler))
     store._invalidate_and_reresolve = lambda: None  # type: ignore[method-assign]
     return store, seen
@@ -223,7 +223,7 @@ def test_a_fallback_whose_identity_token_is_dropped_on_its_own_resend_is_unstamp
     monkeypatch.setattr("nexus.identity.token_header.fenced_identity_headers", lambda method, path: dict(held))
     monkeypatch.setattr("nexus.identity.token_header.identity_headers", lambda: dict(held))
     monkeypatch.setattr("nexus.identity.token_header.current", lambda **kw: None)   # nothing newer to resend with
-    store = http_tuple_store.HttpTupleStore(base_url="http://mock.test")
+    store = http_tuple_store.HttpTupleStore(base_url="https://mock.test")
     store._client = httpx.Client(transport=httpx.MockTransport(handler))
     store._invalidate_and_reresolve = lambda: None  # type: ignore[method-assign]
     line = ci_push_record.write(store, "nexus-develop", FROM_SHA, TO_SHA, 1, "i5", None)

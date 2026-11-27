@@ -2725,13 +2725,12 @@ class StorageServiceSupervisor:
         headers = {"Authorization": f"Bearer {self._service_token}", "X-Nexus-Tenant": ROOT_TENANT}
 
         def _post(path: str, body: dict[str, Any]) -> dict[str, Any]:
-            # trust_env=False: the root bearer goes to the loopback engine only,
-            # never through an HTTP(S)_PROXY in the unit's environment.
-            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+            # The root bearer goes to the loopback engine only, never through an HTTP(S)_PROXY or an
+            # SSL_CERT_FILE in the unit's environment (trust_env=False, the bearer context; nexus-ec37o).
+            from nexus.db.t2.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred: the db package import is heavy for this module
 
             with httpx.Client(
-                base_url=base_url, headers=headers, timeout=_APPLIANCE_ADMIN_TIMEOUT_S,
-                trust_env=False, verify=get_shared_ssl_context(),  # read once per process: the daemon outlives installs
+                base_url=base_url, headers=headers, timeout=_APPLIANCE_ADMIN_TIMEOUT_S, **bearer_httpx_kwargs(base_url),
             ) as client:
                 resp = client.post(path, json=body)
             if resp.status_code >= 400:

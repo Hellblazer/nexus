@@ -119,6 +119,15 @@ final class MoveSql {
      *                      text has {@code $1} (one inside a literal or a comment)
      */
     static long countRows(Connection connection, String verification, String tenant, int cap) throws SQLException {
+        return countRowsTimed(connection, verification, tenant, cap, new long[1]);
+    }
+
+    /**
+     * {@link #countRows}, also storing in {@code executeNanos[0]} the time of the execute and the read of its rows alone, not the
+     * statement's preparation (which asks the server for the parameter count, one more round trip): what a time budget charges a run.
+     */
+    static long countRowsTimed(Connection connection, String verification, String tenant, int cap, long[] executeNanos)
+            throws SQLException {
         Optional<String> refused = refusal(verification);
         if (refused.isPresent()) {
             throw new Refused(refused.get());
@@ -140,10 +149,13 @@ final class MoveSql {
             }
             ps.setMaxRows(cap + 1);
             long rows = 0;
+            long began = System.nanoTime();
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     rows++;
                 }
+            } finally {
+                executeNanos[0] = System.nanoTime() - began;
             }
             return rows;
         }

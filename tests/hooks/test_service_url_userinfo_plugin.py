@@ -19,7 +19,7 @@ from types import ModuleType
 import pytest
 
 from nexus._log_safe_url import has_userinfo as cli_has_userinfo
-from tests._module_seam import setattr_in
+from tests.hooks._drain_opener import swap_opener
 
 PW = "SECRETPW-9f3a"
 BAD = f"https://user:{PW}@api.example.test"
@@ -132,7 +132,7 @@ def test_post_refuses_a_userinfo_base_url_before_any_request(drain: ModuleType, 
     def boom(*a, **k):
         raise AssertionError("a request was built for a userinfo URL")
 
-    setattr_in(monkeypatch, drain, "urllib.request.build_opener", boom)
+    swap_opener(monkeypatch, drain, boom)
     with pytest.raises(drain._Skip) as ei:
         drain._post(BAD, "tok", "/v1/tuples/rd", {}, is_local=False)
     assert PW not in str(ei.value)
@@ -154,7 +154,7 @@ def test_post_transport_error_text_does_not_echo_a_userinfo_url(drain: ModuleTyp
         def open(self, *a, **k):
             raise urllib.error.URLError(f"redirect to {BAD}/x refused")
 
-    setattr_in(monkeypatch, drain, "urllib.request.build_opener", lambda *a: Opener())
+    swap_opener(monkeypatch, drain, Opener)
     with pytest.raises(drain._Skip) as ei:
         drain._post(GOOD, "tok", "/v1/tuples/rd", {}, is_local=False)
     assert PW not in str(ei.value) and "user:" not in str(ei.value)
@@ -168,7 +168,7 @@ def test_post_transport_error_text_keeps_a_harmless_reason(drain: ModuleType, mo
         def open(self, *a, **k):
             raise urllib.error.URLError("connection refused")
 
-    setattr_in(monkeypatch, drain, "urllib.request.build_opener", lambda *a: Opener())
+    swap_opener(monkeypatch, drain, Opener)
     with pytest.raises(drain._Skip) as ei:
         drain._post(GOOD, "tok", "/v1/tuples/rd", {}, is_local=False)
     assert "connection refused" in str(ei.value)

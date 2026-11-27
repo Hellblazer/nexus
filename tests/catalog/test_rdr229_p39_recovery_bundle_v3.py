@@ -21,7 +21,8 @@ New ``ImportSummary`` fields, named like ``links_refused_span`` (a list of dicts
 ``collections_refused_label_clash``, ``collections_skipped_not_live``, ``collections_changed_model``. ``nx catalog
 import`` prints each only when it is nonzero.
 
-The v2 and legacy-name non-stranding tests stay in ``tests/catalog/test_recovery_bundle.py`` (not grown here).
+A bundle of format 1 or 2 (no registry rows, no ids) still imports by name: ``test_rdr229_p39_recovery_bundle_v2.py``
+(real engine); the fake-catalog unit tests of the old shapes stay in ``tests/catalog/test_recovery_bundle.py``.
 """
 from __future__ import annotations
 

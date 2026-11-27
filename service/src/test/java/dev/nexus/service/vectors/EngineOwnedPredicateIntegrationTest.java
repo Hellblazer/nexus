@@ -634,8 +634,10 @@ class EngineOwnedPredicateIntegrationTest {
         assertThat(writes).as("non-vacuity: vectors-024-1 writes both keys, vectors-030-1 (RDR-225) redefines that"
                 + " one write site to carry the model, vectors-069 (RDR-229 P3.1) redefines it again to carry the"
                 + " collection id, vectors-077-56 (RDR-229 P3.5b) redefines it for its reads and keeps the write word"
-                + " for word, and the scan saw all four")
-            .isEqualTo(8);
+                + " for word, and vectors-085 (RDR-229 P3.8, nexus-p2m1x.28) redefines reaper_quarantine_chunks for its"
+                + " tuple guard and keeps the write word for word: five definers, two pairs each. The pin that matters"
+                + " is the empty offenders list below: vectors-085's write is a write, not a read, so it is not one")
+            .isEqualTo(10);
         assertThat(removals).as("non-vacuity: vectors-025 removes both keys, and the scan saw it").isGreaterThanOrEqualTo(2);
         assertThat(offenders).isEmpty();
     }

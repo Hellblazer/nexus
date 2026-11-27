@@ -382,35 +382,53 @@ def test_a_connection_idle_for_the_limit_is_discarded_before_checkout(
 
 # ── L1 / L2: SSL context identity, fork-time locks ───────────────────────────
 
-def test_the_shared_ssl_context_follows_a_replaced_default_context_factory(
-    monkeypatch,
+def test_the_pooled_ssl_context_is_the_bearer_context_and_reads_no_trust_variable(
+    monkeypatch, tmp_path,
 ) -> None:
-    """``ssl._create_default_https_context`` is the documented override point
-    for a trust policy. A context built before the override must not keep
-    serving after it."""
+    """Every request through the pool may carry a bearer, so its context is the bearer one (nexus-ec37o):
+    one object while nothing changes, rebuilt when ``network.ca_bundle`` of config.yml changes, and
+    unmoved by SSL_CERT_FILE or a replaced ``ssl._create_default_https_context``, which a repository's env
+    or a loaded module could otherwise use to choose the trust store a bearer travels under."""
+    import certifi
+
+    from nexus.db.t2 import bearer_transport
+
+    monkeypatch.setattr(bearer_transport, "_slot", None)
+    monkeypatch.setattr(bearer_transport, "network_settings", lambda: bearer_transport.NetworkSettings("", ""))
     first = pooled_http._shared_ssl_context()
+    assert first is bearer_transport.bearer_ssl_context()
     assert pooled_http._shared_ssl_context() is first  # cached while nothing changes
 
-    custom = ssl.create_default_context()
-    monkeypatch.setattr(ssl, "_create_default_https_context", lambda: custom)
-    assert pooled_http._shared_ssl_context() is custom
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "attacker-ca.pem"))
+    monkeypatch.setattr(ssl, "_create_default_https_context", lambda: ssl.create_default_context())
+    assert pooled_http._shared_ssl_context() is first
+
+    bundle = tmp_path / "corp-ca.pem"
+    bundle.write_bytes(open(certifi.where(), "rb").read())
+    monkeypatch.setattr(bearer_transport, "network_settings", lambda: bearer_transport.NetworkSettings("", str(bundle)))
+    assert pooled_http._shared_ssl_context() is not first
 
 
-def test_the_fork_child_hook_replaces_every_module_lock() -> None:
+def test_the_fork_child_hooks_replace_every_module_lock() -> None:
     """A thread that does not exist in the child may have held any module lock
-    at fork time and will never release it; the child must not inherit one."""
-    held_ssl = pooled_http._ssl_context_lock
+    at fork time and will never release it; the child must not inherit one. The pool's locks are
+    pooled_http's; the bearer context's lock (taken by every bearer client build, nexus-ec37o)
+    is bearer_transport's own, registered at its own import."""
+    from nexus.db.t2 import bearer_transport
+
     held_handlers = pooled_http._handler_classes_lock
-    held_ssl.acquire()
+    held_bearer = bearer_transport._lock
     held_handlers.acquire()
+    held_bearer.acquire()
     try:
         pooled_http._after_fork_in_child()
-        assert pooled_http._ssl_context_lock is not held_ssl
+        bearer_transport._after_fork_in_child()
         assert pooled_http._handler_classes_lock is not held_handlers
-        assert pooled_http._ssl_context_lock.acquire(blocking=False)
-        pooled_http._ssl_context_lock.release()
+        assert bearer_transport._lock is not held_bearer
         assert pooled_http._handler_classes_lock.acquire(blocking=False)
         pooled_http._handler_classes_lock.release()
+        assert bearer_transport._lock.acquire(blocking=False)
+        bearer_transport._lock.release()
     finally:
-        held_ssl.release()
         held_handlers.release()
+        held_bearer.release()

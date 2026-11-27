@@ -129,7 +129,7 @@ def test_pdf_pipeline_stage_workers_see_the_bound_id(bound_id: str, monkeypatch:
 def test_aspect_enqueue_pool_workers_see_the_bound_id(bound_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
     monkeypatch.setattr("nexus.corpus.ensure_collection_registered", lambda *a, **k: None)
-    queue = HttpAspectQueue(base_url="http://mock.test")
+    queue = HttpAspectQueue(base_url="https://mock.test")
     rec = _Recorder()
     overlap = threading.Barrier(2)
 

@@ -1073,9 +1073,9 @@ The key moves table by table in strangler order:
   an `on_complete` can INSERT into `nexus.data_moves`. Four of these
   moves are chunk-family (`topic_assignments` twice, the manifest,
   `chunk_orphaned_at`), and such an `on_complete` ends the per-collection
-  index builders (`VerifyingFinisher.java:43-46`; a move with no statement
-  bound does it before its claim, `:461-474`, except a per-leaf validation of
-  the composite, `:452-457`, `:571-573`: it conflicts only with a build of
+  index builders (`VerifyingFinisher.java:44-47`; a move with no statement
+  bound does it before its claim, `:459-472`, except a per-leaf validation of
+  the composite, `:450-455`, `:569-571`: it conflicts only with a build of
   its own leaf, which its 5 s lock wait answers with 55P03). So P3.4's builds start
   only after every validation move has completed, read by the boot-time
   completion check (below). The
@@ -1134,9 +1134,9 @@ The key moves table by table in strangler order:
   by its `on_complete`, but a move with its label waits for builds
   (`waitsForIndexBuilds`), and the finisher ends builders only for a
   chunk-family move that does not wait (`ChunkFamily.java:59-66`;
-  `VerifyingFinisher.java:358`). It is not the only move that ends none:
-  the per-leaf validation moves end none either (`VerifyingFinisher.java:462`),
-  and the adoption move is skipped at `:358` and ends only the builders that
+  `VerifyingFinisher.java:356`). It is not the only move that ends none:
+  the per-leaf validation moves end none either (`VerifyingFinisher.java:460`),
+  and the adoption move is skipped at `:356` and ends only the builders that
   block its lock. The moves that do end builders are the bounded chunk-family
   moves other than the drop move and the adoption move. The move is registered only once gate 3
   has latched, and after that the PCI reconciler keeps making id indexes,
@@ -1153,7 +1153,7 @@ The key moves table by table in strangler order:
   no failure, pages no one, writes nothing to `nexus.data_moves` and ends
   nothing, and the worker
   tries the move again no sooner than 30 s later by default
-  (`VerifyingFinisher.java:312-324`; `BuildWait.java:96-118`;
+  (`VerifyingFinisher.java:310-322`; `BuildWait.java:96-118`;
   `DataMoveWorker.java:91`, `:404`;
   `NameKeyDropMoveWaitsForBuildsIntegrationTest.java:82-90`). A build that
   starts after that read makes the DDL wait for it, and the move's
@@ -1164,15 +1164,15 @@ The key moves table by table in strangler order:
   drop's wait then ends first, as a 55P03, before the deadlock check
   starts on it, so the check cannot pick the `CREATE INDEX CONCURRENTLY`
   as its victim, which would end the build (the code's reasoning, not
-  measured here; `VerifyingFinisher.java:91-111`; `NameKeyDropMove.java:32-38`,
+  measured here; `VerifyingFinisher.java:89-109`; `NameKeyDropMove.java:32-38`,
   `:85`).
   On that 55P03 the finisher reads the builders again, outside the
   rolled-back transaction: a build running makes it a deferral, none
   running leaves the ordinary counted transient
-  (`VerifyingFinisher.java:389-398`). A detector that cannot be read is
+  (`VerifyingFinisher.java:387-396`). A detector that cannot be read is
   never taken for a build: before the transaction it is a counted
   `PREFLIGHT` transient and nothing runs, after a 55P03 it leaves the
-  counted failure (`VerifyingFinisher.java:316-321`, `:392-397`). No bound
+  counted failure (`VerifyingFinisher.java:314-319`, `:390-395`). No bound
   ends a build or pages, however long the wait runs. A deferral never raises
   a page and never clears one already raised: a move that three counted
   55P03s latched needs-operator keeps its page (step, bound and
@@ -1185,7 +1185,7 @@ The key moves table by table in strangler order:
   (`DataMoveWorker.java:529`). The status sampler logs no second page
   either: the move is still listed, so `MoveBootWork.announce` finds it
   announced and `retainAnnounced` keeps that announcement
-  (`MoveBootWork.java:344-353`). Before commit 2809da38ee that report
+  (`MoveBootWork.java:385-394`). Before commit 2809da38ee that report
   carried no page and `MoveStates` cleared it, which dropped the page from
   the needs-operator list (`data_moves_need_operator_moves`) and the
   doctor's red row, while the move stayed in `boot_work` as
@@ -1214,7 +1214,7 @@ The key moves table by table in strangler order:
   worker tells the finisher to forget the move, so a later wait reports its
   own age and does not read overdue at once; a restart ends it too, since
   the start lives in memory only (`MoveFinisher.java:110-114`;
-  `VerifyingFinisher.java:139-141`; `DataMoveWorker.java:339-341`,
+  `VerifyingFinisher.java:137-139`; `DataMoveWorker.java:339-341`,
   `:491-500`, `:518`; `MoveStates.java:172-184`;
   `DataMoveWorkerDeferralForgetIntegrationTest.java`). Every other
   bounded chunk-family move keeps its termination, and the adoption move still
@@ -1245,10 +1245,13 @@ The key moves table by table in strangler order:
   stamped unlocked and exempt by ruling (`StrictWriterCensus.java:30-31`).
   The retiring verbs lock the row harder: supersede and
   rename FOR UPDATE, by the id when the request names one, and a delete by id
-  FOR UPDATE with its quarantine siblings' rows FOR KEY SHARE, where a delete
-  by label key-shares them until its own row delete
+  FOR UPDATE with its quarantine siblings' rows FOR UPDATE in one ordered
+  statement, where a delete by label takes the siblings FOR UPDATE and the
+  origin FOR KEY SHARE, in id order; a rename's retag key-shares each
+  sibling's row before it reads the rows
   (`CollectionSelectors.java:70-76`; `CollectionTombstones.java:58-95`;
-  `CollectionDeleteFence.java:30-42`, `:69-90`). The read-only routes
+  `CollectionDeleteFence.java:22-50`, `:69-98`; `QuarantineOrigin.java`,
+  `keyShareSiblings`). The read-only routes
   need no guard, and the code's exempt routes have nothing to guard
   (`CollectionSelectors.java:96-131`; T2 `229-research-311`,
   `229-research-335`).
@@ -1388,7 +1391,7 @@ while the engine serves:
   UPDATE EXCLUSIVE, carries `statement_timeout_ms` 2147483647, the largest
   value the column holds (its CHECK refuses 0), and the finisher reads that
   as `statement_timeout` 0, so no network timeout either, with a 5 s
-  `lock_timeout` (`DataMove.java:33-47`). `vectors-081-1` sets it on the
+  `lock_timeout` (`DataMove.java:33-64`). `vectors-081-1` sets it on the
   stamp moves and P3.3a validation moves that are not complete, the 16 and 7
   rows the two changesets register, no DDL
   (`vectors-081-rdr229-validation-bounds.xml:27-39`;
@@ -1398,8 +1401,8 @@ while the engine serves:
   in a transaction of its own that holds no row of `nexus.data_moves`, then
   claims with its re-check alone. The status shows how long the validation
   has run, a stop, a pause or a supersede cancels the statement, and a boot
-  ends any backend a dead engine left (`VerifyingFinisher.java:296-308`,
-  `:452-539`; `MoveBootWork.java:479-488`; `CompletionWatch.java:13-16`;
+  ends any backend a dead engine left (`VerifyingFinisher.java:294-306`,
+  `:450-537`; `MoveBootWork.java:520-529`; `CompletionWatch.java:13-16`;
   `DataMoveOrphans.java:86-105`; `Main.java:284-288`). A step that blocks
   writers keeps its tight bound. The move reports in
   `boot_work` as `data-move:<label>`, with `on_stop: "resumes from the last
@@ -1449,7 +1452,7 @@ while the engine serves:
   starts only once the boot-time completion check (below) reports every
   stamp move and every P3.3a move complete, because those moves'
   chunk-family `on_complete` ends builds in flight
-  (`VerifyingFinisher.java:43-46`). The pass is engine code, not a move,
+  (`VerifyingFinisher.java:44-47`). The pass is engine code, not a move,
   and it records its completion by registering the swap. Read
   (`LeafIndexPass.java:61-67`, origin/integration/rdr229-phase3-stack-r2
   at 6af903a5e3): the pass builds one valid unique index per leaf on the id
@@ -1511,7 +1514,7 @@ while the engine serves:
   `ADD ... USING INDEX`, which "is not currently supported on partitioned
   tables" but is on a leaf. P3.3c's swap does not add the key. Its
   `on_complete` refuses unless a valid unique key on the id columns is
-  already there (`Rdr229SwapMove.java:206-223`, SQLSTATE 55000; T2
+  already there (`Rdr229SwapMove.java:207-224`, SQLSTATE 55000; T2
   `229-research-102`). So P3.3c has, per table (`nexus.chunks`,
   `nexus.taxonomy_centroids`), a move that P3.3b's pass registers when
   that table's indexes are all valid and its parent key is attached (above), whose driving table is that
@@ -1562,7 +1565,7 @@ while the engine serves:
   `rdr229-fkvalidate-chunks-leaf-<leaf>`, and then one adoption move,
   `rdr229-fkadopt-chunks`. `registered_at` orders them leaves first, so the
   worker, which takes the oldest first, validates the leaves before the
-  adoption looks (`Rdr229SwapMove.java:293-305`; `Rdr229ChunksFk.java:38-42`,
+  adoption looks (`Rdr229SwapMove.java:294-306`; `Rdr229ChunksFk.java:38-42`,
   `:49-55`, `:144-200`, `:218-238`). Unlike the validation moves above, both
   kinds drive `nexus.catalog_collections` with the registry's own stamp move
   text (`vectors-070-1`) as template and verification, a walk of a small
@@ -1585,7 +1588,7 @@ while the engine serves:
   one leaf at a time, so a restart loses at most the leaf in flight. Its claim
   raises 55P03 unless the leaf's key is there, validated and an exact match,
   and a leaf that is gone fails the move with 42P01 (`:209-211`,
-  `:321-327`; `VerifyingFinisher.java:352-356`).
+  `:321-327`; `VerifyingFinisher.java:350-354`).
   The adoption move keeps the swap's 700 ms lock bound and 1400 ms statement
   bound (`Rdr229ChunksFk.java:236`; `Rdr229SwapMove.java:53`). Its
   `on_complete` looks before it locks: from the catalog it checks that every
@@ -1597,18 +1600,18 @@ while the engine serves:
   (`completed_at` NULL, `registered_at` now), which the finisher reads as no
   completion, with no event and no retry reset; when everything it needs is
   already queued it raises 55P03 and backs off like any move, 30 s doubling
-  to 15 min (`:259-282`; `VerifyingFinisher.java:412-416`). A leaf move that
+  to 15 min (`:260-283`; `VerifyingFinisher.java:410-414`). A leaf move that
   is failed or superseded fails the adoption with SQLSTATE 55000 and names
   it, and an operator re-arms the leaf move and then this one by clearing
   their `failed_at` and `failure`; a paused one blocks it with 55P03
-  (`:146-159`, `:270-274`). When every leaf looks ready it takes SHARE ROW
+  (`:144-157`, `:268-272`). When every leaf looks ready it takes SHARE ROW
   EXCLUSIVE on chunks and every leaf (`LOCK TABLE nexus.chunks IN SHARE ROW
   EXCLUSIVE MODE`) under a lock wait of its own, 200 ms, and a timeout backs
   off and retries. It checks the leaves again under the lock (a leaf is
   created with ACCESS EXCLUSIVE on its model partition, which that lock
   conflicts with, so none appears after the check), puts the lock wait back
-  to the move's 700 ms and adds the parent key (`:71`, `:74`, `:249-257`,
-  `:283-304`, `:312`). PostgreSQL adopts the leaf keys with no scan: 2 ms and
+  to the move's 700 ms and adds the parent key (`:72`, `:75`, `:247-255`,
+  `:281-302`, `:310`). PostgreSQL adopts the leaf keys with no scan: 2 ms and
   no tuple read on a table with a 2M-row leaf, measured on PG 17.11 (T3
   `pg17-partitioned-fk-adoption-measured-2026-11-23`, cited at `:14-16`; not
   re-run for this entry). The needs-an-operator latch counts any 55P03 or
@@ -1620,7 +1623,7 @@ while the engine serves:
   build that the latch does not count (item 6, "A blocked move"); the
   adoption move does not wait for builds, it ends the ones that block it, as
   follows. Its other wait, putting itself back while a leaf is not ready, is
-  read as REOPENED and is not counted either (`VerifyingFinisher.java:412-416`;
+  read as REOPENED and is not counted either (`VerifyingFinisher.java:410-414`;
   `DataMoveWorker.java:617`).
   When the lock on chunks times out, the finisher looks at who held it. If
   every session holding a lock that conflicts with SHARE ROW EXCLUSIVE on
@@ -1629,7 +1632,7 @@ while the engine serves:
   `event=rdr229_adoption_ended_builders`, and the failure stays the 55P03 it
   is, so the next attempt takes the lock. A blocker that is a writer,
   autovacuum or a person's session is never ended, and a pass that deferred
-  for a leaf ends nothing (`VerifyingFinisher.java:377-382`;
+  for a leaf ends nothing (`VerifyingFinisher.java:375-380`;
   `AdoptionBuilders.java:21-28`, `:79-141`; `Rdr229ChunksFk.java:308-309`).
   The parent ADD takes ACCESS EXCLUSIVE on the registry until it commits, so
   registry reads and the foreign-key check of every chunk insert queue behind
@@ -1643,7 +1646,7 @@ while the engine serves:
   `statement_timeout_ms` on `rdr229-fkadopt-chunks` in `nexus.data_moves` for
   one attempt in a quiet window, knowing it lengthens the write block on
   chunks and the registry by about that much, and then to set it back
-  (`VerifyingFinisher.java:383-388`, `:545-554`; `MoveReasons.java:262-264`).
+  (`VerifyingFinisher.java:381-386`, `:543-552`; `MoveReasons.java:262-264`).
   Three such timeouts in a row at `on_complete` latch the needs-an-operator
   state (item 6, "A blocked move").
 - *The name path keeps working after P3.3c.* Both writers name the name
@@ -1765,7 +1768,7 @@ while the engine serves:
     `DataMoveRegistry` reads open moves (`:39-46`) and failed moves
     (`:66-79`). `MoveBootWork` publishes a `data-move:<label>` entry only
     for an open or failed move and finishes it when the move leaves both
-    (`MoveBootWork.java:278-300`), so a missing entry does not tell a
+    (`MoveBootWork.java:319-341`), so a missing entry does not tell a
     completed move from an unregistered or superseded one. P3.1 adds the
     read: after `SchemaMigrator.migrate` (`Main.java:290`), on its own admin
     session (`CompletionBootWork`), the engine reads the rows of its read
@@ -1993,10 +1996,10 @@ while the engine serves:
 
     The check is not read only at boot. The move worker knows in process
     when a move completes: the completion transaction sets `completed_at`
-    and returns `Result.completed()` (`VerifyingFinisher.java:296-341`,
-    `:418`), except that a move whose on_complete put it back (the
+    and returns `Result.completed()` (`VerifyingFinisher.java:294-339`,
+    `:416`), except that a move whose on_complete put it back (the
     adoption move, while a leaf is not ready) returns `Result.reopened()`,
-    a non-completion with no event (`:412-416`), and the worker acts on
+    a non-completion with no event (`:410-414`), and the worker acts on
     either (`case COMPLETED -> ...`, `case REOPENED -> ...`,
     `DataMoveWorker.java:598`, `:617`). So the engine re-reads the check when the
     worker records a `completed_at`, and when a reconciler pass ends
@@ -2063,7 +2066,7 @@ while the engine serves:
     row at `on_complete` have latched it, which for the swaps, the adoption
     move and the name-key drop move are their 700 ms lock bound and 1400 ms
     statement bound (the adoption's 57014, its parent ADD outgrowing that
-    bound, is one of them: `VerifyingFinisher.java:383-388`,
+    bound, is one of them: `VerifyingFinisher.java:381-386`,
     `DataMoveFailureHandler.java:117`). The latch counts any 55P03 or 57014
     at `on_complete`, not only a miss of those two bounds
     (`MoveRetryPolicy.java:85-92`), so the adoption move's own waits count
@@ -2076,7 +2079,7 @@ while the engine serves:
     `data_moves_health.py:127-176`; commits
     6b7af9d83b, adbcceadf1, 67a0d4fc6a; T2 `229-research-333`). Two waits
     are not counted. The adoption move putting itself back while a leaf is
-    not ready is read as REOPENED (`VerifyingFinisher.java:412-416`;
+    not ready is read as REOPENED (`VerifyingFinisher.java:410-414`;
     `DataMoveWorker.java:617`). The name-key drop move's wait for an index
     build is a deferral, so it adds no failure, latches nothing and pages no one, and
     `/v1/status` and nx doctor show it as `reason_class`
@@ -2093,8 +2096,8 @@ while the engine serves:
     above), says the move ends no index builder: the
     restarted engine reads `terminates_index_builds` false for it by its
     definition, and true for another chunk-family move
-    (`MoveBootWork.java:326`; `MoveBootWorkTest.java:519-545`;
-    `VerifyingFinisher.java:389-398`).
+    (`MoveBootWork.java:367`; `MoveBootWorkTest.java:611-637`;
+    `VerifyingFinisher.java:387-396`).
 
 Whether any step needs a maintenance window is unverified (Critical
 Assumption 5). Inferred, not read: the swap's DDL holds ACCESS EXCLUSIVE on
@@ -3421,10 +3424,10 @@ its acceptance is that test green plus the census pin it lowers.
     level by `CollectionVerbsByIdGapTest`; T2 `229-research-327`); a 500 `collection_id_mismatch` marks a registry
     inconsistency. A delete by id takes the re-embed start guard shared
     first, then the origin's row FOR UPDATE with its quarantine siblings'
-    rows FOR KEY SHARE in one `collection_id` order and with no lock bound (a
+    rows FOR UPDATE in one `collection_id` order and with no lock bound (a
     bound would be a new wire answer), and only then runs the 404 and 409
-    checks of the row of that id (`CollectionDeleteFence.java:30-42`,
-    `:104-117`). A rename or supersede that cannot lock its registry row
+    checks of the row of that id (`CollectionDeleteFence.java:34-50`,
+    `:100-125`). A rename or supersede that cannot lock its registry row
     within 10 s answers 503 `rename_busy`, with nothing changed
     (`CollectionTombstones.java:41`, `:110`; `HttpUtil.java:661-669`; the
     one-row rename takes its rows in one ordered statement under the same
@@ -3453,10 +3456,10 @@ its acceptance is that test green plus the census pin it lowers.
     sibling take no gate (`PgVectorRepository.java:6962-8253`). A row
     renamed after its gate was taken rolls the transaction back, and it
     runs again under the new label's gate
-    (`GcCollectionReads.java:107-145`; `CatalogRepository.java:6098-6125`).
+    (`GcCollectionReads.java:112-150`; `CatalogRepository.java:6098-6125`).
     A route that sets no statement bound gets 25 s for the registry read,
     and a route that sets one keeps it (`GcCollectionReads.java:72`,
-    `:116-121`). Past the bound, a row a verb holds answers 503
+    `:121-126`). Past the bound, a row a verb holds answers 503
     `rename_busy` with Retry-After, except on `quarantine-restore`, which
     answers its own 503 `quarantine_restore_busy`, for a gate timeout too.
     A keyed `quarantine-orphans` or keyed bounded `expire-quarantine`
@@ -3515,7 +3518,7 @@ its acceptance is that test green plus the census pin it lowers.
     write goes ahead. A supersede re-homes no child row, so a child row
     stamped to a retired or gone collection persists, and no released route
     answers a new 409 or 404 for a child row; the collection a request names
-    keeps its refusal (`RegistryRowLocks.java:16-20`, `:35-67`;
+    keeps its refusal (`RegistryRowLocks.java:16-21`, `:36-81`;
     `AspectDocCollectionLocks.java:24-26`; `TaxonomyRegistryReads.java:38-42`).
     The one exception is the re-embed re-entry, which reads the ends of its
     job tolerantly and then refuses with 409 when one is gone or the target is
@@ -3550,8 +3553,8 @@ its acceptance is that test green plus the census pin it lowers.
     source or its target, matched by the locked row's id and, for an end
     whose stored id names no live row, by the label the job recorded; the
     re-embed runner's own delete of its source at cutover is not refused
-    (`CollectionDeleteRoute.java:62-73`; `CollectionDeleteFence.java:44-52`,
-    `:128-157`; `ReembedJobHold.java:41-47`; `ReembedJobRepository.java:55`;
+    (`CollectionDeleteRoute.java:62-73`; `CollectionDeleteFence.java:52-60`,
+    `:136-165`; `ReembedJobHold.java:41-47`; `ReembedJobRepository.java:55`;
     `HttpUtil.java:997-1001`; `CatalogRepository.java:10464-10466`;
     `ReembedRunner.java:647`). Second, a re-embed start that re-enters a kept
     source
@@ -3609,11 +3612,19 @@ its acceptance is that test green plus the census pin it lowers.
     latch), `gc_restore_rereferenced`, `gc_restore_rereferenced_bounded`,
     `quarantine_restore_chunks` and `quarantine_reattach_plan`
     (the test fails once `vectors-083` exists and a row is left). The
-    reaper's own expiry functions stay on the label to P4.1 (the reaper
-    ruling R1 of bead nexus-p2m1x.35); `vectors-083-7` adds to
-    `reaper_expire_client_quarantine` only an arm that, when the origin
-    label names no live knowledge collection, narrows the expiry to rows whose origin
-    id is JSON null. The ten
+    reaper's own expiry functions, `reaper_expire_quarantine` and
+    `reaper_expire_client_quarantine`, still select rows by the label tag
+    until P4.1 (the reaper ruling R1 of bead nexus-p2m1x.35), but from
+    `vectors-086` (nexus-p2m1x.28) each guards a row by its own
+    `origin_collection_id` as well as by the id the label resolves to: a
+    manifest row of that id protects the chunk whatever label the call
+    carried, and from the latch a quarantine row with no origin id is never
+    expired, is not counted as protected, and is not reported (stamping
+    such rows is owed to a later cut, recorded on nexus-p2m1x.28).
+    `vectors-083-7` had added to
+    `reaper_expire_client_quarantine` an arm that, when the origin label
+    names no live knowledge collection, narrows the expiry to rows whose
+    origin id is JSON null; `vectors-086-2` keeps it. The ten
     `TwinKeyUpsert` sites take the id key as their conflict target, among
     them the chunk and centroid upserts (`PgVectorRepository.java:1352`,
     `CatalogRepository.java:6863`, `TaxonomyCentroidRepository.java:197`).
@@ -3871,15 +3882,27 @@ its acceptance is that test green plus the census pin it lowers.
   per table, the live-label clash that names both ids, and the live-label
   index from `live_label_index_present` on `/v1/status`; tests
   `tests/test_collection_cmd.py:120`, `tests/test_health_collection_ids.py`).
-  Not shipped: `nx collection delete` by id. `delete_cmd` still takes only a
-  name (`@click.argument("name")`, `commands/collection.py:556-559`). Only
-  the engine's delete route takes an id: the route is
-  `CollectionDeleteRoute` (commit 80d3e73a85, P3.5a), and 1b740b8a65 is the
-  repository's delete by id behind it. The catalog client sends only `name`
-  and the optional `keep_quarantine`
-  (`catalog/http_catalog_client.py:813-815`). The by-id delete is deferred:
-  it is item 2 of bead nexus-p2m1x.32 ("delete by label or id", in
-  progress), which the RDR had not cited.
+  `nx collection delete` by label or id shipped later (commits 3c6833a3fd,
+  65b245534f and 4ddee8c813 on develop; item 2 of bead nexus-p2m1x.32).
+  `delete_cmd` takes a label or `--id N`, one of the two
+  (`commands/collection.py:567-572`). `--id` is sent only to an engine that
+  advertises `catalog_collection_delete_by_id_supported` on `/version`,
+  engine-service-v0.1.203 or later
+  (`catalog/engine_writes/collection_delete.py:89`): the flag is in
+  v0.1.202's source, but v0.1.202's native binaries lack `db/rdr229/`. The
+  engine route is `CollectionDeleteRoute` (commit 80d3e73a85, P3.5a), with
+  1b740b8a65 as the repository's delete by id behind it. The client refuses a
+  label held by two live rows and names their ids, and refuses a retired
+  label whose direct successor row is live, naming that successor
+  (`check_label_deletable`, `collection_delete.py:197`). Any other tombstone
+  goes to the engine, which deletes it. So the remedies `nx collection
+  re-embed` prints for a source whose target is retired or gone still work
+  (linda's ruling on the bead, 2026-11-26). The engine's 404
+  `unknown_collection_id`, 409 `collection_superseded` and 409
+  `collection_label_ambiguous` are typed errors on the client. A known
+  consequence, recorded on the bead: a `--keep-source` source whose target is
+  still live has no CLI delete, since the client refuses its label and the
+  engine refuses its id. Test: `tests/test_collection_delete_by_id.py`.
 - P3.R Review gate for Phase 3. The rest of Phase 3 ships as one engine
   cut: the -r13 reland and P3.3 through P3.12 (P3.7's rename refusal, the
   name-key drop move's registration and the one-row rename included) are
@@ -4133,7 +4156,7 @@ reference the registry's name (P4.1).
 | `nx taxonomy project --prune-below-threshold` | Prints the removed count per collection | Prints "N skipped" when the engine lacks exact mode (cloud, until the conexus edge allowlists the flag), "did not confirm exact matching; using the guarded prune" when the verification prune is not echoed, and "N refused" for a collection whose row cannot be read | N/A | `GET /version` reads `taxonomy_prune_exact_supported` | N/A |
 | `lifecycle_state` at registration | `nx collection list` | `nx catalog show` | Existing lifecycle verbs | `nx doctor` row versus name diagnostic | Recovery bundle |
 | RDR-229 completion state and the P3.1 down-step | `nx doctor` rows: the three gates, labels incomplete, CHECKs missing, VALIDATE waits, dangling and self-id tombstones | `/v1/status` `rdr229_completion` (no tenant numbers); the caller's own counts on `GET /v1/catalog/rdr229_completion_counts` | The down-step and re-add SQL, conexus-run inside the window (`docs/runbooks/rdr-229-p31-rollback.md`) | The runbook's verify query; `nexus.rdr229_restamp(table)` finishes an orphaned table | PITR outside the window |
-| `collection_id` and label | `nx collection list` (id, label, attributes; the id column is P3.12's) | `nx catalog show` | `nx collection delete` (by label; by id is deferred, P3.12) | `nx doctor` null-id and label-clash census (P3.12) | Recovery bundle (carries the row from P3.9); tenant backup, `nx backup` (exports the id from P3.1's cut; restores by id from P3.5+P3.7; P3.11) |
+| `collection_id` and label | `nx collection list` (id, label, attributes; the id column is P3.12's) | `nx catalog show` | `nx collection delete` (by label or `--id`, P3.12) | `nx doctor` null-id and label-clash census (P3.12) | Recovery bundle (carries the row from P3.9); tenant backup, `nx backup` (exports the id from P3.1's cut; restores by id from P3.5+P3.7; P3.11) |
 
 ### New Dependencies
 
@@ -4742,3 +4765,7 @@ large, and moved under a ratchet.
 - 2026-11-24: final citation and vocabulary pass (grant 3, nexus-p2m1x; T2 `229-research-339`): the engine and client cites re-read from develop 4e6824e6ae, the dropped `isFileRoutedCollection`, the for_tuple filters and the `quarantine-` prefix census restated as the code has them, the client id-trust trigger on one rule (the name-key drop move's `completed_at` and `ids_stable`), "gate 3" changed to "the latch" where a sentence means the latch, and the 400 list completed (an id over 18 digits, an id key given twice). No Test sentence changed.
 - 2026-11-24: the Versioning sentence on routes follows linda's ruling on nexus-p2m1x.23 (T2 `229-research-340`): a route takes a label or an id in each slot, one form per slot; an id and a label in one slot is a 400; the 409 `collection_id_mismatch` is an internal guard for an id and a label from different sources.
 - 2026-11-24: the fix checks' counted citations (grant 3, nexus-p2m1x; T2 `229-research-341`, from fix checks `229-fix-check-3de92acf1e` and `229-fix-check-6eec323c91`): the re-home pre-check calls `moveUriCollisions` itself (`CollectionRehomeScope.java:159-166`), not `requireCollectionUrisFree`; "gate 3" is "the latch" where the engine refuses a rename (and "once gate 3 has latched" where readers, writers and the drop move's registration read the latched value); item 4's header and Gap 2 separate the draft's counts from the current ones; the client's id trust names `ids_stable`; the Versioning sentence cites the bead's comments of 2026-11-22 11:25 and 2026-11-23 12:53 and the filter and refusal code. No Test sentence changed.
+- 2026-11-26: P3.12 landed in full (grant 3, nexus-p2m1x.32): `nx collection delete` by label or `--id`, 3c6833a3fd, 65b245534f and 4ddee8c813 (in no engine or client tag yet). P3.12's text and the Day 2 table now say what shipped, the 0.1.203 floor and why, the retired-label refusal as ruled on the bead (only a retired label with a live direct successor is refused), and the `--keep-source` consequence. The 2026-11-24 line above describing P3.12 in part stands as the record of that date.
+- 2026-11-26: citations to landed, reviewed code (grant 3), nexus-p2m1x.48, the two boot_work warm-up commits of the next engine cut: the `MoveBootWork.java` and `MoveBootWorkTest.java` line cites (the announce and retainAnnounced block, the validation-in-flight block, the entry publisher, the restarted-engine builds line and its test) follow the sampler's new warm-up code, which shifted them; no wording changes.
+- 2026-11-26: the delete's lock modes follow the quarantine lane's fix round (grant 3, nexus-p2m1x.23 and .27; the commits of feature/rdr229-nextcut-quarantine, unpublished until the stack lands; T2 `nexus/nextcut-quarantine-lane-2026-11-26`): a delete by id takes the origin's row and its quarantine siblings' rows FOR UPDATE in one `collection_id`-ordered statement, a delete by label the siblings FOR UPDATE and the origin FOR KEY SHARE in the same order, and a rename's retag key-shares each sibling's row before it reads the rows; the `CollectionDeleteFence.java` cites are re-read from that tree.
+- 2026-11-26: the reaper's two expiry functions guard a quarantine row by its own origin id (grant 3, nexus-p2m1x.28; Sam's ruling, T2 `nexus/sam-ruling-rdr229-nextcut-ddl-cap-2961-2026-11-26`): `vectors-086` redefines `reaper_expire_quarantine` and `reaper_expire_client_quarantine`; after a one-row rename a move that commits after the retag leaves a row tagged with the old label, which the label-resolved guard missed; the I8 census's basis for the two reaper rows no longer says the call was ruled safe.

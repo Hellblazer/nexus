@@ -43,7 +43,7 @@ Invariants, each of which is a test:
 
 ## Declaring a rule: `conexus/hooks/audience.yaml`
 
-Every `hooks.json` registration, every module that carries text or reads a setting, every injected constant and every rule that is not a constant has an entry, with `audience` (`EVERY-USER`, `SETTING:<key>` or `REMOVE`), `gate` (`none`, `setting` or `data`), `evidence` (the ledger row, the incident or the decision of record), `target_state` and `phase`. A registration is keyed on event plus argv: 23 registrations, 22 distinct argv, because auto-approve is registered for PreToolUse and PermissionRequest with one argv.
+Every `hooks.json` registration, every module that carries text or reads a setting, every injected constant and every rule that is not a constant has an entry, with `audience` (`EVERY-USER`, `SETTING:<key>` or `REMOVE`), `gate` (`none`, `setting` or `data`), `evidence` (the ledger row, the incident or the decision of record), `target_state` and `phase`. A registration is keyed on event plus argv: 23 registrations, 23 distinct argv; auto-approve is registered on PreToolUse only (8.5.8).
 
 `tests/test_plugin_audience_lint.py` (checker: `tests/_audience_manifest.py`) fails on:
 

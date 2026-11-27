@@ -12,6 +12,7 @@ from nexus.cli import main
 from nexus.commands.hooks import _stanza_for
 from nexus.db.http_vector_client import HttpVectorClient
 from tests._catalog_fixture_ops import ActiveCatalog, only_document
+from tests._fake_credentials import SAVED_FAKE_CREDENTIALS, fake_credentials
 from tests._module_seam import patch_in
 
 SENTINEL_BEGIN = "# >>> nexus managed begin >>>"
@@ -113,8 +114,12 @@ def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
         patches.append(patch("nexus.config.get_credential",
                              side_effect=cred))
     else:
+        # The service_url answers a loopback origin and the saved token is bound to it: a bare
+        # return_value paired the token with a "service_url" of the same string (nexus-ec37o).
         patches.append(patch("nexus.config.get_credential",
-                             return_value=cred))
+                             side_effect=fake_credentials(cred)))
+        patches.append(patch("nexus.config.persisted_credentials",
+                             return_value=SAVED_FAKE_CREDENTIALS))
     if callable(which):
         # nexus-l2ku5 round 2: _resolve_mcp_binary calls the real
         # shutil.which signature (``shutil.which(name, path=directory)``)
@@ -983,7 +988,8 @@ class TestCheckQuotas:
         with (
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.db.make_t3", return_value=MagicMock(spec=HttpVectorClient)),
-            patch("nexus.config.get_credential", return_value="sk-voyage-key"),
+            patch("nexus.config.get_credential", side_effect=fake_credentials("sk-voyage-key")),
+            patch("nexus.config.persisted_credentials", return_value=SAVED_FAKE_CREDENTIALS),
         ):
             result = runner.invoke(main, ["doctor", "--check-quotas"])
         assert result.exit_code == 0, result.output
@@ -1011,7 +1017,8 @@ class TestCheckQuotas:
         with (
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.db.make_t3", side_effect=_raise),
-            patch("nexus.config.get_credential", return_value="sk-voyage-key"),
+            patch("nexus.config.get_credential", side_effect=fake_credentials("sk-voyage-key")),
+            patch("nexus.config.persisted_credentials", return_value=SAVED_FAKE_CREDENTIALS),
         ):
             result = runner.invoke(main, ["doctor", "--check-quotas"])
         assert result.exit_code == 1, result.output
@@ -1063,7 +1070,8 @@ class TestCheckQuotas:
         with (
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.db.make_t3", return_value=MagicMock(spec=HttpVectorClient)),
-            patch("nexus.config.get_credential", return_value="sk-voyage-key"),
+            patch("nexus.config.get_credential", side_effect=fake_credentials("sk-voyage-key")),
+            patch("nexus.config.persisted_credentials", return_value=SAVED_FAKE_CREDENTIALS),
         ):
             result = runner.invoke(main, ["doctor", "--check-quotas"])
         assert result.exit_code == 0, result.output
@@ -1087,7 +1095,8 @@ class TestCheckQuotas:
         with (
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.db.make_t3", return_value=MagicMock(spec=HttpVectorClient)),
-            patch("nexus.config.get_credential", return_value="sk-voyage-key"),
+            patch("nexus.config.get_credential", side_effect=fake_credentials("sk-voyage-key")),
+            patch("nexus.config.persisted_credentials", return_value=SAVED_FAKE_CREDENTIALS),
         ):
             result = runner.invoke(
                 main, ["doctor", "--check-quotas", "--json"]

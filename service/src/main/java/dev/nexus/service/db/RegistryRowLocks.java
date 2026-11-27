@@ -14,7 +14,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 
 /**
  * The tolerant registry read of a maintenance or ledger write (RDR-229 P3.5a row 14, nexus-p2m1x.23): the rows of the collections
- * a write names BY ID, {@code FOR KEY SHARE} in {@code collection_id} order, with no refusal. {@link CollectionRegistry#requireIdsAndLabelsForWrite}
+ * a write names BY ID, {@code FOR KEY SHARE} in {@code collection_id} order ({@link #forUpdateIfPresent}: {@code FOR UPDATE}, for the quarantine
+ * siblings a delete removes rows from), with no refusal. {@link CollectionRegistry#requireIdsAndLabelsForWrite}
  * refuses a row that is gone (404) or retired (409), which is right for a client write and wrong where the id is only a record: a
  * job's stored end, a chunk's stored collection id. Here a row that is gone is simply not returned, and the caller decides (skip
  * the write, refuse its own way); a retired row is returned and carries {@link CollectionRow#isSuperseded}.
@@ -33,6 +34,19 @@ final class RegistryRowLocks {
      * @return the rows found, in {@code collection_id} order
      */
     static List<CollectionRow> keyShareIfPresent(DSLContext ctx, String tenant, Collection<Long> ids, Collection<String> labels) {
+        return lockIfPresent(ctx, tenant, ids, labels, false);
+    }
+
+    /**
+     * The rows of {@code ids}, {@code FOR UPDATE}, in {@code collection_id} order, tolerant as {@link #keyShareIfPresent}: a collection delete takes a
+     * quarantine sibling it will remove rows from this way (nexus-p2m1x.23 residual (b)). Two deletes whose origins share a sibling then serialise on
+     * the sibling's row, taken before either origin's, instead of both key-sharing it and meeting again in the sibling's registry delete.
+     */
+    static List<CollectionRow> forUpdateIfPresent(DSLContext ctx, String tenant, Collection<Long> ids) {
+        return lockIfPresent(ctx, tenant, ids, List.of(), true);
+    }
+
+    private static List<CollectionRow> lockIfPresent(DSLContext ctx, String tenant, Collection<Long> ids, Collection<String> labels, boolean forUpdate) {
         List<Long> idList = new ArrayList<>();
         for (Long id : ids) {
             if (id != null && !idList.contains(id)) idList.add(id);
@@ -47,13 +61,13 @@ final class RegistryRowLocks {
         Condition match = DSL.falseCondition();
         if (!idList.isEmpty()) match = match.or(CATALOG_COLLECTIONS.COLLECTION_ID.in(idList));
         if (!labelList.isEmpty()) match = match.or(CATALOG_COLLECTIONS.NAME.in(labelList));
-        List<CollectionRow> rows = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
+        var ordered = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
                 CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.SUPERSEDED_BY)
             .from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(match))
-            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID)
-            .forKeyShare().of(CATALOG_COLLECTIONS)
+            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID);
+        List<CollectionRow> rows = (forUpdate ? ordered.forUpdate().of(CATALOG_COLLECTIONS) : ordered.forKeyShare().of(CATALOG_COLLECTIONS))
             .fetch(r -> new CollectionRow(r.get(CATALOG_COLLECTIONS.CONTENT_TYPE), r.get(CATALOG_COLLECTIONS.OWNER_ID),
                 r.get(CATALOG_COLLECTIONS.EMBEDDING_MODEL),
                 // the dimension is not read by anything that holds one of these rows; a NULL is 0, never a guess

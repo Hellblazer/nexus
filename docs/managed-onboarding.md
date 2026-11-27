@@ -41,6 +41,25 @@ exported `NX_SERVICE_URL` overrides a persisted one. A static token is sent as
 `Authorization: Bearer <token>`. The CLI prefers a saved `service_token` over a
 mint credential when both are present. Treat every credential as a secret.
 
+A saved credential is sent only to the service it was issued for: the
+`service_url` saved beside it, or `https://api.conexus-nexus.com` when none is
+saved. If a project or your shell points `NX_SERVICE_URL` at another host, `nx`
+stops with `NX_SERVICE_URL names a service that the saved service_token was not
+issued for ...` instead of sending the credential there. For a staging or
+self-hosted service, run `nx config set service_url <its URL>` with its token,
+or export `NX_SERVICE_TOKEN` for it. Plain `http` to a host that is not this
+machine is refused with any token and has no opt-in, and a lease token never
+goes through a proxy. A request that carries a token follows no redirect, and reads no proxy or CA
+variable from the environment (`HTTPS_PROXY`, `SSL_CERT_FILE` and the rest: a
+project can set them); behind a corporate proxy or CA, run
+`nx config set network.https_proxy=<proxy URL>` and
+`nx config set network.ca_bundle=<CA file>` once
+([Configuration § A proxy or CA for the managed service](configuration.md#a-proxy-or-ca-for-the-managed-service)). Two limits stay, by design: a token you export yourself
+(with the identity and session tokens that ride beside it)
+travels with the URL you export, and a project can still name the host the
+unauthenticated probes (`/version`, `/health`) go to, and so steer what they report. Details:
+[Configuration § A saved credential goes only to the service it was issued for](configuration.md#a-saved-credential-goes-only-to-the-service-it-was-issued-for).
+
 `NX_STORAGE_BACKEND=service` is not needed: `service` is the default and only
 backend (RDR-158 retired the SQLite alternative — setting `sqlite` now hard-
 errors rather than selecting anything). There is no backend to select.
