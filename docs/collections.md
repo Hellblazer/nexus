@@ -143,7 +143,9 @@ OLD NEW`. A minted label has no route to a bare readable label without
   `distributed-systems-papers` (possible only with the flag below) makes `distributed-systems-papers` its
   subject, so a later write to `distributed-systems` no longer finds it and
   registers a second collection. Rename a subject's collection only to
-  change its subject.
+  change its subject. In the one-row rename, a `code`, `docs` or `rdr`
+  collection whose owner is already a tumbler segment (`1-15`) keeps it: a
+  slug from the new name never replaces it.
 - **The CLI guards compare the two names.** A minted `c<id>` label has no
   type prefix, so renaming it to a label without one, or to one the CLI
   reads as another embedding model (`knowledge__x` reads as
