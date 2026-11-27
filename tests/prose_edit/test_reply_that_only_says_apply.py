@@ -88,3 +88,20 @@ def test_a_stdin_run_takes_a_bare_apply_as_no_pick_and_asks_again() -> None:
     para = step(12)
     assert '"edit one", "no", "Yes, apply.")' in para
     before(para, "names no explicit numbers", "ask the author again for explicit numbers")
+
+
+def test_a_bare_apply_runs_the_real_apply_even_when_every_edit_is_held() -> None:
+    para = _reply_paragraph()
+    before(para, "Run the real apply even when every edit is held and the dry run would apply nothing",
+           "the apply also logs the session and deletes WORK",
+           "\"nothing would change\" is never a reason to skip it", "The one exception")
+
+
+def test_a_rejections_removal_is_run_once_and_its_renumbered_list_is_not_a_failed_removal() -> None:
+    """The b2 runs of 2026-11-27 (r1, r2): the skill read the renumbered list `--remove 1` prints as 'rejection 1 is
+    still stored', ran `--remove 1` again and deleted a second, wrong rejection (the verdict then saw two fewer)."""
+    row = step(2)[step(2).index("| `rejections` |"):]
+    row = row[:row.index("\n")]
+    before(row, "Run `MEMORY <memory_argv...>` once", "deletes entry N and prints the list that is left, renumbered from 1",
+           "the removal has happened", "Never run `--remove` again to check", "never read the script's source",
+           "Show the numbered rejections")

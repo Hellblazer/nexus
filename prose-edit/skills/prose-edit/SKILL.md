@@ -38,7 +38,7 @@ A document in another checkout (a git worktree, say) is named by its absolute pa
 
    | mode | Do |
    | --- | --- |
-   | `rejections` | Run `MEMORY <memory_argv...>`. Show the numbered rejections. Stop. |
+   | `rejections` | Run `MEMORY <memory_argv...>` once. With `--remove N` it deletes entry N and prints the list that is left, renumbered from 1: an entry numbered 1 in that list is not the one removed, and the removal has happened. Never run `--remove` again to check, and never read the script's source. Show the numbered rejections. Stop. |
    | `exemplar` | Run `MEMORY <memory_argv...>`. Show the stored passage and `duplicate`. Stop. |
    | `setup` | Follow the Setup run section below. Stop. |
    | `cut-only` | Not run here. Tell the author that cut-only runs through the `conexus-prose-edit:prose-cut` skill, which the site-page review gate calls, and stop. |
