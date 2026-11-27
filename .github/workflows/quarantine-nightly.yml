@@ -1,0 +1,210 @@
+name: Flake quarantine (nightly)
+
+# RDR-258 Phase 5 (nexus-2jomg.6). Runs only the tests listed in tests/quarantine.toml (`-m quarantine`),
+# once a day, and reports each one's pass or fail over the run plus its age and 14-day deadline
+# (scripts/quarantine_report.py). Sam's ruling, 2026-11-27: a quarantine lasts 14 days, then the test is
+# fixed or deleted. The job only reddens on the deadline rule, a broken registry, or a run that examined
+# nothing for a listed test; a quarantined test that fails is the expected state and shows in the report.
+# A test that passes is NOT released: remove its entry by hand.
+#
+# CI-cost discipline: schedule and dispatch only, never push or pull request (a nightly never re-tests a tree
+# CI tested); a concurrency group; every deterministic artifact cached as in local-service-gate-nightly.yml
+# (uv wheels, ONNX models, Maven repo, PG bundle).
+#
+# RUNNER: ubuntu-latest, as every scheduled workflow in this repo (the lab pool runs the push and PR jobs that
+# feed required checks, ci.yml; the nightlies are hosted, local-service-gate-nightly.yml is the model). A
+# quarantined test that flakes only under pool load will not show that here; the report would then read green
+# for it, and a pool venue is a follow-up for Sam if the candidates' `venues` say so.
+#
+# EMPTY REGISTRY (it ships empty): the first job prints "0 quarantined" and the second never starts, so pytest
+# is not run on an empty selection (it exits 5 there). With entries, exit 5 is a failure.
+#
+# `on.schedule` fires only from the default branch: it starts running when this file reaches main.
+
+on:
+  schedule:
+    - cron: "47 9 * * *"   # 09:47 UTC daily, after local-service-gate-nightly.yml's 09:17
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quarantine-nightly
+  cancel-in-progress: true
+
+jobs:
+  registry:
+    name: quarantine registry (count and check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      count: ${{ steps.count.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          # A DISPATCH gets the branch you picked; the schedule falls back to develop (see
+          # local-service-gate-nightly.yml and tests/test_workflow_dispatch_ref_lint.py).
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'develop' }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Count the registry (fails on a malformed registry)
+        id: count
+        shell: bash
+        run: |
+          # Standard library only: no project sync, so an empty registry costs a few seconds.
+          n="$(uv run --no-project python scripts/quarantine_report.py count)"
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+          if [ "$n" = "0" ]; then
+            echo "0 quarantined" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "$n quarantined; the run job follows" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  quarantine:
+    name: quarantined tests (-m quarantine)
+    needs: registry
+    # Not on an empty registry, and not when the count step failed (count is then empty).
+    if: ${{ !cancelled() && needs.registry.outputs.count != '' && needs.registry.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PG_VERSION: "17.5"
+      PGVECTOR_VERSION: "v0.8.7"
+      MANYLINUX_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
+      # Armed as in ci.yml's pytest job: an absent or stale service jar fails loudly instead of skipping the
+      # engine-substrate tests, so a listed test cannot go "green" by skipping.
+      NX_T2_SUBSTRATE_EXPECTED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'develop' }}
+          # Full depth and tags, as the sibling nightly: a quarantined test may read git history.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Cache ONNX model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            chromadb-onnx-${{ runner.os }}-
+
+      - name: Set up JDK 25 (service jar build)
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        with:
+          java-version: "25.0.3"
+          distribution: "graalvm"
+
+      - name: Restore the Maven cache and set Central retries (service jar build)
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: package
+
+      - name: Install ripgrep
+        run: scripts/ci_install_ripgrep.sh
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Restore compiled PG bundle cache
+        # Same key as ci.yml's CA-3 job and the sibling nightly (seeded on main by pg-bundle-cache-seed.yml).
+        id: pg-bundle-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: bundle
+          key: pg-bundle-linux-amd64-ubuntu-latest-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ env.MANYLINUX_IMAGE }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
+
+      - name: Build PG + pgvector bundle from source (cache miss only)
+        if: steps.pg-bundle-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          bundle="$GITHUB_WORKSPACE/bundle"
+          mkdir -p "$bundle"
+          docker run --rm \
+            -e PG_VERSION -e PGVECTOR_VERSION -e BUNDLE_PREFIX="$bundle" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            "$MANYLINUX_IMAGE" /bin/bash -c '
+              set -eux
+              bash "'"$GITHUB_WORKSPACE"'/scripts/build_pg_bundle.sh"
+            '
+
+      - name: Point provisioning at the bundle
+        run: |
+          set -euo pipefail
+          if [ ! -x "$GITHUB_WORKSPACE/bundle/bin/initdb" ]; then
+            echo "::error::bundle/bin/initdb missing after cache-restore/build"
+            exit 1
+          fi
+          {
+            echo "NEXUS_PG_BIN=$GITHUB_WORKSPACE/bundle/bin"
+            echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/bundle/lib"
+            echo "NEXUS_CA3_BUNDLE=$GITHUB_WORKSPACE/bundle"
+          } >> "$GITHUB_ENV"
+
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
+        uses: ./.github/actions/prime-bge-onnx
+
+      - name: Build the stamped gate jar
+        run: scripts/build-gate-jar.sh
+
+      - name: Run the quarantined tests
+        # Exit codes, one by one (never masked): 0 all passed; 1 a quarantined test failed (the expected state,
+        # shown by the report below, not a red nightly); 5 nothing was selected although the registry lists
+        # tests, a failure; anything else (2 interrupted, 3 internal, 4 usage, which includes the registry
+        # check in tests/_quarantine.py) fails the job.
+        shell: bash
+        run: |
+          set +e
+          NX_QUARANTINE_RESULTS="$GITHUB_WORKSPACE/quarantine-results.json" \
+            uv run pytest -o addopts="" -m quarantine -q -rA --color=no -p no:cacheprovider
+          rc=$?
+          set -e
+          case "$rc" in
+            0|1) echo "pytest exit $rc" ;;
+            5) echo "::error::the registry lists ${{ needs.registry.outputs.count }} tests but pytest selected none"; exit 1 ;;
+            *) echo "::error::pytest exited $rc"; exit "$rc" ;;
+          esac
+
+      - name: Report each test's result, age and deadline
+        # Always, so a red run still says which listed tests ran. Exit 1 past a deadline (fix or delete the test),
+        # 3 when a listed test has no result (the run examined nothing for it). A passing test is not released here.
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          rc=0
+          uv run python scripts/quarantine_report.py --results quarantine-results.json --expect-all > quarantine-report.txt || rc=$?
+          cat quarantine-report.txt
+          { echo '```'; cat quarantine-report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Keep the results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: quarantine-results
+          path: |
+            quarantine-results.json
+            quarantine-report.txt
+          retention-days: 30
+          if-no-files-found: ignore
