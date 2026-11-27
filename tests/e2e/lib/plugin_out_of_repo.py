@@ -174,9 +174,10 @@ STRONG_REPO_ROOTS = frozenset({
 })
 #: Directories a user's own project is likely to have too: REPO-ONLY only when the path
 #: exists in the nexus checkout. `docs/rdr/` is carved out as PROJECT: the RDR skills name
-#: the user's own directory with it.
+#: the user's own directory with it. `.nexus` is a PROJECT root: since RDR-259 a user's own
+#: repository carries its settings at `.nexus/project.json`.
 GENERIC_REPO_ROOTS = frozenset({"src", "tests", "scripts", "docs", "web", "service", ".claude"})
-PROJECT_ROOTS = frozenset({".serena", ".beads", ".git"})
+PROJECT_ROOTS = frozenset({".serena", ".beads", ".git", ".nexus"})
 EXTS = ("md", "yaml", "yml", "json", "sh", "py", "txt", "toml", "xml", "java", "cfg")
 
 NEXUS_CHECKOUT: str | None = None   # set by main() (--repo-root, else detected from this file)
