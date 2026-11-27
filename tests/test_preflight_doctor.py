@@ -72,25 +72,20 @@ def _answering_engine(status: int):
     return server, server.server_address[1]
 
 
-def test_a_local_engine_that_does_not_answer_is_reported_at_once_and_doctor_is_not_run(monkeypatch) -> None:
-    """A wedged engine must not stall the synchronous preamble for the whole doctor bound: probe /health first."""
+def _closed_port() -> int:
+    """A port nothing listens on: bound, then released, so a connect is refused."""
     import socket
 
-    from nexus import health
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        closed_port = s.getsockname()[1]  # bound then released: nothing listens, connection is refused
-    monkeypatch.setattr(health, "_resolve_service_endpoint", lambda _config_dir: ("127.0.0.1", closed_port))
-    calls = _fake_bounded(monkeypatch, stdout="doctor: ok\n")
-    text = "\n".join(pd.nx_doctor_block())
-    assert calls == [], "doctor must not run when the engine does not answer"
-    assert "Status: SKIP - engine not answering" in text and f"127.0.0.1:{closed_port}" in text
-    assert "run 'nx doctor' directly" in text and "unavailable" not in text
+        return s.getsockname()[1]
 
 
-@pytest.mark.parametrize("status", [200, 503], ids=["healthy", "db-down-still-answers"])
-def test_a_local_engine_that_answers_gets_doctor_under_the_long_bound(monkeypatch, status: int) -> None:
+@pytest.mark.parametrize("status", [200, 401, 404, 500, 502, 503], ids=["ok", "401", "404", "500", "proxy-502", "db-down-503"])
+def test_any_http_answer_means_the_engine_answers_and_doctor_runs(monkeypatch, status: int) -> None:
+    """The first probe mapped every HTTP error but 503 to "did not answer" and skipped doctor on an engine that had."""
     from nexus import health
+
     server, port = _answering_engine(status)
     try:
         monkeypatch.setattr(health, "_resolve_service_endpoint", lambda _config_dir: ("127.0.0.1", port))
@@ -103,3 +98,45 @@ def test_a_local_engine_that_answers_gets_doctor_under_the_long_bound(monkeypatc
     assert kw["timeout"] == pd._DOCTOR_TIMEOUT and "Status: PASS" in lines
 
 
+def test_a_refused_connection_runs_doctor_because_it_is_fast_there_and_says_what_to_do(monkeypatch) -> None:
+    """Nothing listening is the engine being down: doctor fails fast and carries the fix steps and its other checks."""
+    from nexus import health
+
+    monkeypatch.setattr(health, "_resolve_service_endpoint", lambda _config_dir: ("127.0.0.1", _closed_port()))
+    calls = _fake_bounded(monkeypatch, returncode=1, stdout="Storage service unreachable: start it with nx daemon service start\n")
+    text = "\n".join(pd.nx_doctor_block())
+    assert len(calls) == 1, "doctor must run when the connection is refused"
+    assert "nx daemon service start" in text and "Status: FAIL" in text
+
+
+def test_a_listener_that_accepts_and_never_replies_is_a_warn_naming_the_engine_and_doctor_is_not_run(monkeypatch) -> None:
+    """The one case that skips doctor: a wedged engine, where doctor would wait on the same engine for its whole bound."""
+    import socket
+
+    from nexus import health
+
+    wedged = socket.socket()
+    wedged.bind(("127.0.0.1", 0))
+    wedged.listen(8)  # the kernel completes the handshake; nothing ever reads or answers
+    port = wedged.getsockname()[1]
+    try:
+        monkeypatch.setattr(health, "_resolve_service_endpoint", lambda _config_dir: ("127.0.0.1", port))
+        monkeypatch.setattr(pd, "_ENGINE_PROBE_TIMEOUT", 0.3)
+        calls = _fake_bounded(monkeypatch, stdout="doctor: ok\n")
+        text = "\n".join(pd.nx_doctor_block())
+    finally:
+        wedged.close()
+    assert calls == [], "doctor must not run behind a wedged engine"
+    assert "Status: WARN" in text and f"127.0.0.1:{port}" in text and "engine" in text
+    assert "run 'nx doctor' directly" in text and "unavailable" not in text and "SKIP" not in text
+
+
+def test_a_probe_that_cannot_be_made_never_costs_the_doctor_run(monkeypatch) -> None:
+    from nexus import health
+
+    def boom(_config_dir):
+        raise RuntimeError("registry unreadable")
+
+    monkeypatch.setattr(health, "_resolve_service_endpoint", boom)
+    calls = _fake_bounded(monkeypatch, stdout="doctor: ok\n")
+    assert "Status: PASS" in pd.nx_doctor_block() and len(calls) == 1
