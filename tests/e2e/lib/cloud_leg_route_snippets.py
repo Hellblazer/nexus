@@ -182,13 +182,24 @@ else:
     raise SystemExit("gc expire-quarantine accepted an origin nothing registers")
 """
 
-TELEMETRY_RENAME = r"""
+#: Prepended to the probes that print a refusal's reason: the `reason` key of an engine error body, or None when the body has none.
+_REASON_OF = r"""
+def _reason_of(exc):
+    try:
+        body = exc.response.json()
+    except ValueError:
+        return None
+    return body.get("reason") if isinstance(body, dict) else None
+"""
+
+TELEMETRY_RENAME = _REASON_OF + r"""
 import httpx
+from nexus.db.http_engine_status import fetch_engine_status
 from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 # nexus-n3hhc: the telemetry rename judges its target with the label rule. This runs against the production engine at
 # release time, where a data write is Sam's alone, so the probe proves before it renames that nothing is recorded under
-# its source label (unique per run), and refuses to run otherwise (linda's condition). The legal rename then moves zero
-# rows, and the minted-form target must be refused with 400 before either table is touched.
+# its source label (unique per run), and refuses to run otherwise (linda's condition). The minted-form target goes first:
+# the label rule runs before the rename guard, so it is a 400 in every gate state, with either table untouched.
 store = HttpTelemetryStore()
 source = "@label@-tel-probe"
 search_rows = int(store.query_collection_stats(source, days=36500).get("row_count") or 0)
@@ -200,16 +211,34 @@ hook_rows = sum(1 for r in store.list_hook_failures(days=0, limit=max(hooks["tot
 if search_rows or hook_rows:
     raise SystemExit(f"refusing: {search_rows} search and {hook_rows} hook rows are recorded under {source!r}")
 print("no rows under the probe source")
-moved = store.rename_collection(old=source, new=source + "-renamed")
-assert all(v == 0 for v in moved.values()), f"the probe's legal rename moved rows: {moved}"
-print(moved)
 try:
     store.rename_collection(old=source, new="c42")
 except httpx.HTTPStatusError as exc:
+    print("minted target answered", exc.response.status_code, "reason", _reason_of(exc))
     assert exc.response.status_code == 400, f"a minted-form target answered {exc.response.status_code}, not 400"
     print("minted target refused 400")
 else:
     raise SystemExit("a minted-form target was accepted: the engine does not judge the telemetry rename target")
+# The legal pair (source -> source-renamed) names no registry row. Before gate 3 latches the rename moves no row and every
+# count is 0 (the probe's source holds none). Once it has latched, the one-row regime checks the registry moved the label
+# first and refuses 409 rename_not_in_registry (RenameGuard.requireRegistryRenamed; wire ledger 0434c01e91): an intended
+# answer, so the probe takes either, each only with its exact reason. The latch is one-way, so a 200 with the latch
+# already reported is a failure; a 409 against a latch not yet reported is a stale status and passes.
+status = fetch_engine_status(timeout=20.0) or {}
+completion = status.get("rdr229_completion")
+latched = completion.get("gate3_latched") if isinstance(completion, dict) else None
+print("gate3_latched:", "unknown" if latched is None else latched)
+try:
+    moved = store.rename_collection(old=source, new=source + "-renamed")
+except httpx.HTTPStatusError as exc:
+    reason = _reason_of(exc)
+    print("legal rename answered", exc.response.status_code, "reason", reason)
+    assert exc.response.status_code == 409 and reason == "rename_not_in_registry", (
+        f"the legal rename answered {exc.response.status_code} reason {reason!r}, not 200 or 409 rename_not_in_registry")
+else:
+    assert latched is not True, f"gate 3 has latched and the legal rename was accepted ({moved}), not refused 409 rename_not_in_registry"
+    assert all(v == 0 for v in moved.values()), f"the probe's legal rename moved rows: {moved}"
+    print("legal rename answered 200", moved)
 """
 
 CHASH_RENAME_REFUSAL = r"""
@@ -256,7 +285,7 @@ else:
     raise SystemExit("a minted-form target was accepted: the engine does not judge the taxonomy rename target")
 """
 
-PERSIST_SPLIT_REFUSAL = r"""
+PERSIST_SPLIT_REFUSAL = _REASON_OF + r"""
 import httpx
 from nexus.commands.catalog import _get_catalog
 from nexus.corpus import t3_collection_name
@@ -273,18 +302,20 @@ home = t3_collection_name("cloud-leg-probe", t3=make_t3(), for_write=True)
 row = cat.get_collection(home)
 if row is None:
     raise SystemExit(f"{home} is not registered: the store-put step has not run")
-other = "@label@-split-other"
-# A second live collection on the home row's tuple is refused 409, so `other` takes an owner no tenant registers (1.9998, beside
-# FOR_TUPLE's 1.9999). A different model_version would not do: the store steps resolve the probe collection by its content type,
-# owner and model and take the newest version, so a higher one would capture their deletes.
-cat.register_collection(other, content_type=row["content_type"], owner_id="1.9998",
-                        embedding_model=row["embedding_model"], model_version=row["model_version"])
+# A second live collection on the home row's tuple is refused 409 (LiveTupleConflict), so `other` takes an owner no tenant registers (1.9998,
+# beside FOR_TUPLE's 1.9999). A different model_version would not do: the store steps resolve the probe collection by its content type,
+# owner and model and take the newest version, so a higher one would capture their deletes. `other` is registered WITHOUT a name, so the
+# engine adopts the tuple's live row or mints one and answers its label: a named one would stay live on a persistent tenant and every
+# later run's differently named registration would clash with it.
+other = cat.register_collection(None, content_type=row["content_type"], owner_id="1.9998",
+                                embedding_model=row["embedding_model"], model_version=row["model_version"]).label
 ids = store.persist_discovered_topics(other, [{"label": "split-probe", "doc_ids": []}])
 if not ids:
     raise SystemExit(f"no topic was filed under {other}: the probe has nothing of another collection to split")
 try:
     store.persist_split({"topic_id": ids[0], "collection_name": home, "child_specs": []})
 except httpx.HTTPStatusError as exc:
+    print("persist_split answered", exc.response.status_code, "reason", _reason_of(exc))
     assert exc.response.status_code == 400, f"persist_split of another collection's topic answered {exc.response.status_code}, not 400"
     print("persist_split refused 400")
 else:
