@@ -507,12 +507,14 @@ public final class DataMoveWorker implements AutoCloseable {
         FailureHandler.Stage stage = failure.stage();
         String detail = failure.detail();
         FailureHandler.Disposition d;
+        boolean handlerFailed = false;
         try {
             d = failures.onFailure(failure);
         } catch (RuntimeException e) {
             // Disposition masks its reason, and oneLine masks the exception text before it cuts it
             d = FailureHandler.Disposition.blocked(detail + " (the failure handler failed: "
                 + FailureHandler.oneLine(e.toString()) + ")");
+            handlerFailed = true;
         }
         // a failure of any kind ends a run of deferrals that began in an earlier pass: a wait that follows it reports its own age
         finisher.forget(move.label());
@@ -524,8 +526,9 @@ public final class DataMoveWorker implements AutoCloseable {
             // a handler that counted no retry leaves the row's count as it was
             int retries = d.retries() >= 0 ? d.retries() : move.transientRetries();
             MoveEvents.blocked(move.label(), stage.name(), failure.tenant(), retries, sqlstate, d.reason());
-            states.blocked(move, d.reason(), d.page());
-            var page = d.page();
+            // a handler that could not decide counted nothing, so it clears no page a counted failure latched (the rule a deferral follows)
+            var page = handlerFailed ? keptPage(move) : d.page();
+            states.blocked(move, d.reason(), page);
             if (page != null && page.entered() && states.announce(move.label())) {
                 MoveEvents.needsOperator(move.label(), page.step(), sqlstate, page.boundMs(), retries,
                     page.terminatesIndexBuilds(), MoveRetryPolicy.pageReason(retries, page.terminatesIndexBuilds()));
@@ -769,7 +772,7 @@ public final class DataMoveWorker implements AutoCloseable {
      */
     private boolean stoppedPass(DataMove move, String reason) {
         log.info("event=data_move_pass_stopped label={} reason=\"{}\"", move.label(), reason);
-        states.blocked(move, reason);
+        states.blocked(move, reason, keptPage(move));   // a stop is not an operator's reset: a latched page stays
         return false;
     }
 
