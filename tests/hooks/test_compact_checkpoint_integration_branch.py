@@ -37,7 +37,7 @@ def _git(*args: str, cwd: Path) -> None:
 
 
 def _commit(repo: Path, name: str) -> None:
-    (repo / name).write_text(name)
+    (repo / name).write_text(name, encoding="utf-8")
     _git("add", name, cwd=repo)
     _git("commit", "-q", "-m", name, cwd=repo)
 

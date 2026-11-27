@@ -33,7 +33,7 @@ def sf():
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", *args],
-        cwd=cwd, check=True, capture_output=True, text=True,
+        cwd=cwd, check=True, capture_output=True, text=True, encoding="utf-8"
     ).stdout
 
 
@@ -48,7 +48,7 @@ def _origin(tmp_path: Path, branch: str) -> Path:
     seed = tmp_path / "seed"
     seed.mkdir()
     _git("init", "-q", "-b", branch, cwd=seed)
-    (seed / "f").write_text("1")
+    (seed / "f").write_text("1", encoding="utf-8")
     _git("add", "f", cwd=seed)
     _git("commit", "-q", "-m", "one", cwd=seed)
     _git("push", "-q", str(origin), "HEAD:" + branch, cwd=seed)
@@ -77,7 +77,7 @@ def test_a_clone_measures_against_whatever_origin_head_names(sf, tmp_path: Path)
     assert sf.default_branch_ref(str(clone), "git") == "origin/trunk"
     work = sf.worktree_work(str(clone), "", "git")
     assert work.unlanded == 0
-    (clone / "g").write_text("2")
+    (clone / "g").write_text("2", encoding="utf-8")
     _git("add", "g", cwd=clone)
     _git("commit", "-q", "-m", "two", cwd=clone)
     assert sf.worktree_work(str(clone), "", "git").unlanded == 1
@@ -101,7 +101,7 @@ def test_a_repository_with_no_default_branch_it_can_name_counts_unlanded_as_unkn
     repo = tmp_path / "repo"
     repo.mkdir()
     _git("init", "-q", "-b", "work", cwd=repo)
-    (repo / "f").write_text("1")
+    (repo / "f").write_text("1", encoding="utf-8")
     _git("add", "f", cwd=repo)
     _git("commit", "-q", "-m", "one", cwd=repo)
     _git("remote", "add", "origin", str(origin), cwd=repo)
@@ -116,7 +116,7 @@ def test_the_integration_branch_is_the_base_when_origin_has_it(sf, tmp_path: Pat
     origin = _origin(tmp_path, "main")
     seed = tmp_path / "seed"
     _git("checkout", "-q", "-b", "develop", cwd=seed)
-    (seed / "d").write_text("1")
+    (seed / "d").write_text("1", encoding="utf-8")
     _git("add", "d", cwd=seed)
     _git("commit", "-q", "-m", "develop only", cwd=seed)
     _git("push", "-q", str(origin), "HEAD:develop", cwd=seed)
@@ -124,7 +124,7 @@ def test_the_integration_branch_is_the_base_when_origin_has_it(sf, tmp_path: Pat
     assert sf.default_branch_ref(str(clone), "git") == "origin/main"
     assert sf.default_branch_ref(str(clone), "git", integration_branch="develop") == "origin/develop"
     _git("checkout", "-q", "-b", "feature", "origin/develop", cwd=clone)
-    (clone / "g").write_text("2")
+    (clone / "g").write_text("2", encoding="utf-8")
     _git("add", "g", cwd=clone)
     _git("commit", "-q", "-m", "mine", cwd=clone)
     assert sf.worktree_work(str(clone), "", "git", integration_branch="develop").unlanded == 1

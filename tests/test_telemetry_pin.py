@@ -377,7 +377,7 @@ def test_no_account_home_starts_no_poster_and_reports_it(plugin_account, tmp_pat
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "dropped.jsonl"))
     monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:9")
     started: list[object] = []
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
+    monkeypatch.setattr(lib, "_spawn_poster", lambda *a, **k: started.append(a))
     lib.log_routing_event(rule="r", outcome="deny")
     assert started == []
     [drop] = _drops(tmp_path / "dropped.jsonl")
@@ -385,21 +385,27 @@ def test_no_account_home_starts_no_poster_and_reports_it(plugin_account, tmp_pat
 
 
 def test_the_poster_child_is_started_with_the_built_environment(plugin_account, tmp_path, monkeypatch) -> None:
+    """A real child: the module's own ``__file__`` names a script that writes its environment to a file, so what the child
+    inherits is read from the child itself, with no stdlib module patched."""
+    from tests._settle import settle  # noqa: PLC0415
+
     plugin_account(telemetry=True)
     lib = _load("nx_pin_routing_lib_env", SCRIPTS / "routing" / "_lib.py")
     for name in DECOY_NAMES:
         monkeypatch.setenv(name, "decoy")
-    seen: list[dict] = []
-
-    class _P:
-        stdin = None
-
-        def __init__(self, argv, **kw) -> None:
-            seen.append(kw["env"])
-
-    monkeypatch.setattr(subprocess, "Popen", _P)
-    assert lib._spawn_poster({"rule": "r"}, "http://127.0.0.1:1", "t") is False  # stdin is None: nothing to write to
-    [env] = seen
+    out = tmp_path / "child-env.json"
+    dump = tmp_path / "dump_env.py"
+    dump.write_text(
+        "import json, os, sys\n"
+        "sys.stdin.buffer.read()\n"
+        f"open({str(out)!r}, 'w', encoding='utf-8').write(json.dumps(dict(os.environ)))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(lib, "__file__", str(dump))
+    assert lib._spawn_poster({"rule": "r"}, "http://127.0.0.1:1", "t") is True
+    settle(lambda: not out.exists(), what="the poster child's environment dump")
+    env = json.loads(out.read_text(encoding="utf-8"))
+    assert env, "non-vacuity: the child ran and dumped an environment"
     for name in DECOY_NAMES:
         assert env.get(name) != "decoy", name
     assert "NX_SERVICE_URL" not in env and "HTTPS_PROXY" not in env

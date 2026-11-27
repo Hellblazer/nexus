@@ -124,7 +124,7 @@ def _cold(repo: Path, home: Path, real_home: bool) -> "dict[str, dict[str, float
     for _ in range(COLD_RUNS):
         proc = subprocess.run(
             [sys.executable, "-I", "-c", _COLD_SCRIPT, str(PLUGIN_COPY), str(repo), str(home), "real" if real_home else "override"],
-            capture_output=True, text=True, env=env, check=False, timeout=60,
+            capture_output=True, text=True, env=env, check=False, timeout=60, encoding="utf-8"
         )
         assert proc.returncode == 0, proc.stderr
         for k, v in json.loads(proc.stdout.strip().splitlines()[-1]).items():

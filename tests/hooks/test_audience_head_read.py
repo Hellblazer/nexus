@@ -87,7 +87,7 @@ def test_a_strict_working_tree_needs_no_git_unless_the_report_asks_for_it(audien
 def test_a_commit_that_lacks_the_file_is_absence_not_strict_and_runs_one_process(audience, tmp_path, shim, monkeypatch):
     repo = init_repo(tmp_path / "r", {"README": "x\n"})
     (repo / ".nexus").mkdir()
-    (repo / PROJECT).write_text(_j())
+    (repo / PROJECT).write_text(_j(), encoding="utf-8")
     shim.install(monkeypatch)
     s = audience.read_settings(_p(repo), head=True)
     assert s.values["subagent_git"] == "seatbelt" and s.problems == []
@@ -127,7 +127,7 @@ def test_advice_block_is_the_union_of_head_the_working_tree_and_the_user_file(au
     _set_wt(repo, _j(advice_block=["whole_disk_scan"]))
     f = audience.HOME / ".config" / "nexus" / "conexus.json"
     f.parent.mkdir(parents=True)
-    f.write_text(json.dumps({"advice_block": ["shared_glob_delete"]}))
+    f.write_text(json.dumps({"advice_block": ["shared_glob_delete"]}), encoding="utf-8")
     shim.install(monkeypatch)
     assert audience.advice_blocked(_p(repo), head=True) == frozenset({"pattern_kill", "whole_disk_scan", "shared_glob_delete"})
     assert audience.advice_blocked(_p(repo)) == frozenset({"whole_disk_scan", "shared_glob_delete"})
@@ -167,7 +167,7 @@ def test_exit_128_is_no_head_copy_and_not_strict(audience, tmp_path, shim, monke
     repo = tmp_path / "r"
     (repo / ".git").mkdir(parents=True)  # a .git that is not a repository: cat-file exits 128
     (repo / ".nexus").mkdir()
-    (repo / PROJECT).write_text(_j())
+    (repo / PROJECT).write_text(_j(), encoding="utf-8")
     shim.install(monkeypatch)
     s = audience.read_settings(_p(repo), head=True)
     assert s.values["subagent_git"] == "seatbelt" and s.problems == []
@@ -250,7 +250,7 @@ def test_a_directory_at_the_path_is_strict_and_reported(audience, tmp_path, shim
     import shutil  # noqa: PLC0415
 
     shutil.rmtree(repo / PROJECT)
-    (repo / PROJECT).write_text(_j())  # a working file, so the committed copy is asked for
+    (repo / PROJECT).write_text(_j(), encoding="utf-8")  # a working file, so the committed copy is asked for
     shim.install(monkeypatch)
     s = audience.read_settings(_p(repo), head=True)
     assert s.values["subagent_git"] == "strict" and _probs(s) == [(HEAD, "")] and "not a file" in s.problems[0].what
@@ -262,7 +262,7 @@ def test_a_submodule_at_the_path_is_strict_and_reported(audience, tmp_path, shim
     run_git(repo, "update-index", "--add", "--cacheinfo", "160000," + run_git(repo, "rev-parse", "HEAD").strip() + "," + PROJECT)
     run_git(repo, "commit", "-q", "-m", "gitlink")
     (repo / ".nexus").mkdir(exist_ok=True)
-    (repo / PROJECT).write_text(_j())
+    (repo / PROJECT).write_text(_j(), encoding="utf-8")
     shim.install(monkeypatch)
     s = audience.read_settings(_p(repo), head=True)
     assert s.values["subagent_git"] == "strict" and _probs(s) == [(HEAD, "")] and "not a file" in s.problems[0].what
@@ -277,7 +277,7 @@ def test_a_committed_symlink_is_a_blob_of_its_target_text_and_so_is_strict_when_
     run_git(repo, "add", PROJECT)
     run_git(repo, "commit", "-q", "-m", "link")
     (repo / PROJECT).unlink()
-    (repo / PROJECT).write_text(_j())
+    (repo / PROJECT).write_text(_j(), encoding="utf-8")
     shim.install(monkeypatch)
     s = audience.read_settings(_p(repo), head=True)
     assert s.values["subagent_git"] == "strict" and _probs(s) == [(HEAD, "")]
@@ -322,7 +322,7 @@ def _plain(path: pathlib.Path, **project) -> pathlib.Path:
     (path / ".git").mkdir(parents=True)
     if project:
         (path / ".nexus").mkdir()
-        (path / PROJECT).write_text(_j(**project))
+        (path / PROJECT).write_text(_j(**project), encoding="utf-8")
     return path
 
 
@@ -408,7 +408,7 @@ def test_a_version_2_index_that_names_the_file_says_yes_and_one_that_does_not_sa
 
 def test_a_version_3_index_is_searched_too(audience, tmp_path):
     repo = init_repo(tmp_path / "r", {PROJECT: _j()})
-    (repo / "intent.txt").write_text("i\n")
+    (repo / "intent.txt").write_text("i\n", encoding="utf-8")
     run_git(repo, "add", "-N", "intent.txt")  # an intent-to-add entry forces index version 3
     raw = (pathlib.Path(_gd(audience, repo)) / "index").read_bytes()
     assert raw[:4] == b"DIRC" and int.from_bytes(raw[4:8], "big") == 3, "the fixture did not produce a version 3 index"
@@ -442,7 +442,7 @@ def test_a_split_or_sparse_index_says_unknown(audience, tmp_path):
     sparse = init_repo(tmp_path / "sparse", {"z.txt": "z\n"})
     info = pathlib.Path(_gd(audience, sparse)) / "info"
     info.mkdir(exist_ok=True)
-    (info / "sparse-checkout").write_text("/*\n")
+    (info / "sparse-checkout").write_text("/*\n", encoding="utf-8")
     assert audience.index_names_project(_gd(audience, sparse)) == "unknown"
 
 

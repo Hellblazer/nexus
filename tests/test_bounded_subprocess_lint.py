@@ -139,6 +139,11 @@ SRC_ROOT = REPO_ROOT / "src" / "nexus"
 #: both, and the full suite caught it -- 27 failures across five bootstrap
 #: files. The sites are left on the stock call deliberately.
 _CANNOT_IMPORT_NEXUS: dict[str, str] = {
+    "src/nexus/hooks/_audience.py": (
+        "bootstrap-safe: the byte copy of the plugin's conexus/hooks/scripts/_audience.py, which runs under "
+        "`uv tool run python` with nexus absent, so it cannot import run_bounded; its two spawns (a 2 s HEAD read and a "
+        "10 s version probe) stay on the stock call. See tests/test_audience.py, which holds the two copies byte-identical."
+    ),
     "src/nexus/_install/census_core.py": (
         "bootstrap-safe: runs with nexus absent, so it cannot import "
         "run_bounded. See tests/test_install_census_core_is_bootstrap_safe.py."

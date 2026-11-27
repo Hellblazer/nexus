@@ -43,6 +43,10 @@ NON_CREDENTIAL: dict[tuple[str, str], int] = {
     ("conexus/hooks/scripts/mailbox_drain.py", "_pending_lock"): 1,
     ("conexus/hooks/scripts/version_lockstep_action.py", "_lock_is_held_once"): 1,  # the upgrade-lock probe (nexus-rcngf)
     ("src/nexus/hooks/mailbox_drain.py", "_pending_lock"): 1,
+    # The once-per-session mark of the settings notice: an empty file named by the session, created O_EXCL, never read for content
+    # (nexus-sby49.12). The byte copy under src/ is the same function.
+    ("conexus/hooks/scripts/_audience.py", "claim_session_once"): 1,
+    ("src/nexus/hooks/_audience.py", "claim_session_once"): 1,
     ("src/nexus/config.py", "_config_write_lock"): 1,
     ("src/nexus/daemon/service_registry.py", "_open"): 1,  # the election flock
     ("src/nexus/daemon/service_registry.py", "try_hold_spawn_lock"): 1,  # the storage supervisor's spawn lock file, empty (nexus-j738q)

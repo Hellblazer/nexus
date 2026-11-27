@@ -91,7 +91,7 @@ def test_an_outranked_project_value_is_shown_beside_the_effective_one(pinned, tm
     posture = build_posture(tmp_path, "user-strict")
     repo = posture.repo
     (repo / ".nexus").mkdir()
-    (repo / ".nexus" / "project.json").write_text(json.dumps({"version": 1, "subagent_git": "seatbelt"}))
+    (repo / ".nexus" / "project.json").write_text(json.dumps({"version": 1, "subagent_git": "seatbelt"}), encoding="utf-8")
     audience = pinned(posture)
     report = audience.build_report(str(repo), versions=VERSIONS)
     row = {r["key"]: r for r in report["settings"]}["subagent_git"]
@@ -102,7 +102,7 @@ def test_an_outranked_project_value_is_shown_beside_the_effective_one(pinned, tm
 def test_problems_are_listed_with_the_file_the_key_and_what_was_used(pinned, tmp_path):
     posture = build_posture(tmp_path, "plain")
     (posture.repo / ".nexus").mkdir()
-    (posture.repo / ".nexus" / "project.json").write_text(json.dumps({"version": 1, "subagent-git": "strict"}))
+    (posture.repo / ".nexus" / "project.json").write_text(json.dumps({"version": 1, "subagent-git": "strict"}), encoding="utf-8")
     audience = pinned(posture)
     report = audience.build_report(str(posture.repo), versions=VERSIONS)
     assert [(p["file"], p["key"]) for p in report["problems"]] == [(".nexus/project.json", "subagent-git")]
@@ -115,7 +115,7 @@ def test_retired_user_file_that_still_exists_is_listed_as_having_no_effect(pinne
     retired_name = pinned(posture).RETIRED_USER_FILES[0]
     flag = posture.home / ".config" / "nexus" / retired_name
     flag.parent.mkdir(parents=True)
-    flag.write_text("")
+    flag.write_text("", encoding="utf-8")
     audience = pinned(posture)
     report = audience.build_report(str(posture.repo), versions=VERSIONS)
     retired = {pathlib.Path(r["path"]).name: r["note"] for r in report["retired"]}
@@ -132,7 +132,7 @@ def test_the_retired_markers_are_not_reported_and_decide_nothing(pinned, tmp_pat
     posture = build_posture(tmp_path, posture_name)
     path = posture.repo.joinpath(*marker.split("/"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{}")
+    path.write_text("{}", encoding="utf-8")
     audience = pinned(posture)
     report = audience.build_report(str(posture.repo), versions=VERSIONS)
     row = {r["key"]: r for r in report["settings"]}["subagent_git"]
@@ -165,7 +165,7 @@ def test_head_difference_is_reported_inside_a_repository(pinned, tmp_path):
 
     posture = build_posture(tmp_path, "plain")
     repo = init_repo(tmp_path / "gitrepo", {".nexus/project.json": json.dumps({"version": 1, "subagent_git": "strict"})})
-    (repo / ".nexus" / "project.json").write_text(json.dumps({"version": 1}))
+    (repo / ".nexus" / "project.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
     audience = pinned(posture)
     report = audience.build_report(str(repo), versions=VERSIONS)
     assert report["head_differs"] is True
@@ -198,7 +198,7 @@ def test_the_plugin_copy_runs_as_a_script(tmp_path):
     posture = build_posture(tmp_path, "project-strict")
     proc = subprocess.run(
         [sys.executable, str(PLUGIN_COPY), "show", "--cwd", str(posture.repo)], capture_output=True, text=True, timeout=30,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False, encoding="utf-8"
     )
     assert proc.returncode == 0, proc.stderr
     assert "subagent_git" in proc.stdout and "strict" in proc.stdout and ".nexus/project.json" in proc.stdout

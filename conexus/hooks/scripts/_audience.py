@@ -229,6 +229,37 @@ def _windows_profile_dir() -> "str | None":
         ole32.CoTaskMemFree(path)
 
 
+def _posix_uid() -> "int | None":
+    """The POSIX user id, or None where there is none (Windows). The one ``getuid`` of this module."""
+    try:
+        return os.getuid()
+    except AttributeError:
+        return None
+
+
+def argv_off_cwd(argv: "list[str]") -> "list[str]":
+    """*argv* with its first element resolved on PATH alone, never through the working directory.
+
+    On Windows a hook runs with the project as its working directory and ``CreateProcess`` takes a ``git.exe`` planted there
+    before PATH. This file is the same bytes in the plugin and in ``nexus``, and the plugin runs with no ``nexus`` importable, so
+    the resolver is the plugin's own ``_exec_path.which_off_cwd`` when that is next to this file and the wheel's
+    ``nexus.util.nx_argv.which_off_cwd`` when it is not. A tool that is not on PATH raises ``FileNotFoundError``, which is what
+    the spawn itself would have raised.
+    """
+    try:
+        from _exec_path import which_off_cwd  # noqa: PLC0415 -- the plugin's helper, beside this file
+    except ImportError:
+        from nexus.util.nx_argv import which_off_cwd  # noqa: PLC0415 -- the wheel's
+    found = which_off_cwd(argv[0])
+    if found is None:
+        raise FileNotFoundError(f"{argv[0]}: not found on PATH outside the working directory")
+    return [found, *argv[1:]]
+
+
+def _tool_argv(tool: str, *args: str) -> "list[str]":
+    return [tool, *args]
+
+
 def account_home() -> "str | None":
     """The OS account's home directory, or None when the account has none.
 
@@ -241,7 +272,7 @@ def account_home() -> "str | None":
     import pwd  # noqa: PLC0415 -- POSIX only; the module has to import on Windows
 
     try:
-        return pwd.getpwuid(os.getuid()).pw_dir or None
+        return pwd.getpwuid(_posix_uid() or 0).pw_dir or None
     except KeyError:  # no passwd entry (a bare container): no home, no user settings
         return None
 
@@ -569,15 +600,15 @@ _HEAD_SPEC = b"HEAD:.nexus/project.json"
 def _run_cat_file(root: str, gitdir: str) -> "subprocess.CompletedProcess[bytes]":
     """One ``git cat-file --batch`` process asked for the committed file on stdin: the whole HEAD read is one spawn."""
     return subprocess.run(  # noqa: S603 -- fixed argv, no shell; the request is a constant on stdin
-        ["git", "--git-dir", gitdir, "cat-file", "--batch"], cwd=root, input=_HEAD_SPEC + b"\n", capture_output=True,
-        timeout=GIT_TIMEOUT_S, check=False,
+        argv_off_cwd(_tool_argv("git", "--git-dir", gitdir, "cat-file", "--batch")), cwd=root, input=_HEAD_SPEC + b"\n",
+        capture_output=True, timeout=GIT_TIMEOUT_S, check=False,
     )
 
 
 def _run_git(root: str, gitdir: str, *args: str) -> "subprocess.CompletedProcess[bytes]":
     """One git process with a fixed argv, for the checks that are not the HEAD read (the remote-ref check of ``show``)."""
     return subprocess.run(  # noqa: S603 -- fixed argv, no shell
-        ["git", "--git-dir", gitdir, *args], cwd=root, stdin=subprocess.DEVNULL, capture_output=True,
+        argv_off_cwd(_tool_argv("git", "--git-dir", gitdir, *args)), cwd=root, stdin=subprocess.DEVNULL, capture_output=True,
         timeout=GIT_TIMEOUT_S, check=False,
     )
 
@@ -612,7 +643,8 @@ def _read_head(root: str, gitdir: str) -> _FileRead:
     """
     fr = _FileRead(HEAD_LABEL, PROJECT_LABEL + " at HEAD", "head")
     try:
-        if hasattr(os, "getuid") and os.stat(root).st_uid != os.getuid():
+        uid = _posix_uid()
+        if uid is not None and os.stat(root).st_uid != uid:
             fr.problems.append(_head_problem("the repository is owned by another user; the committed copy was not read", False, "environment"))
             return fr
         proc = _run_cat_file(root, gitdir)
@@ -1043,7 +1075,8 @@ def claim_session_once(kind: str, payload: object) -> "bool | None":
             return None
         import tempfile  # noqa: PLC0415
 
-        who = str(os.getuid()) if hasattr(os, "getuid") else "w"
+        uid = _posix_uid()
+        who = str(uid) if uid is not None else "w"
         path = os.path.join(tempfile.gettempdir(), f"conexus-{kind}-{who}-{sid}")
         os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
         return True
@@ -1091,13 +1124,11 @@ def plugin_version() -> "str | None":
 
 
 def _nx_version() -> "str | None":
-    import shutil  # noqa: PLC0415 -- the report only
-
-    exe = shutil.which("nx")
-    if not exe:
-        return None
     try:
-        out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10, check=False).stdout.split()  # noqa: S603
+        out = subprocess.run(  # noqa: S603 -- the resolved CLI, a fixed argv, no shell
+            argv_off_cwd(_tool_argv("nx", "--version")), capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10, check=False,
+        ).stdout.split()
     except (OSError, subprocess.SubprocessError):
         return None
     return out[-1] if out else None

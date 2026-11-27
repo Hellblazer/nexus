@@ -30,6 +30,7 @@ except ImportError:  # Windows
 
 import pytest
 
+from tests._module_seam import setattr_in
 from tests.hooks.audience_harness import path_without
 from tests._platform import WINDOWS_SHEBANG, install_windows_exe_fake
 
@@ -132,7 +133,7 @@ def _run(
         argv = [sys.executable, "-c", _NO_HOME_DRIVER, str(script.parent), str(script)]
     else:
         argv = [sys.executable, str(HARNESS), str(home), str(script)]
-    return subprocess.run(argv, input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=60, check=False)
+    return subprocess.run(argv, input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=60, check=False, encoding="utf-8")
 
 
 def _out(proc: subprocess.CompletedProcess[str]) -> dict:
@@ -284,7 +285,7 @@ def test_a_hook_entry_run_leaves_the_real_logs_directory_untouched(tmp_path):
     (tmp_path / "tmp").mkdir()
     proc = subprocess.run(
         [sys.executable, str(SCRIPT)], input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "real-home-probe", "cwd": str(repo)}),
-        capture_output=True, text=True, env=env, timeout=60, check=False,
+        capture_output=True, text=True, env=env, timeout=60, check=False, encoding="utf-8"
     )
     assert proc.returncode == 0 and proc.stderr == ""
     assert len(_temp_marks(tmp_path)) == 1, "the claim must have run and kept its mark in the test's temporary directory"
@@ -310,7 +311,7 @@ def test_when_no_mark_can_be_kept_anywhere_it_is_silent_rather_than_speaking_on_
     proc = subprocess.run(
         [sys.executable, "-c", _NO_MARK_DRIVER, str(SCRIPT.parent), str(SCRIPT)],
         input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s-a", "cwd": str(repo)}),
-        capture_output=True, text=True, timeout=60, check=False,
+        capture_output=True, text=True, timeout=60, check=False, encoding="utf-8"
     )
     assert proc.returncode == 0 and proc.stdout == "" and proc.stderr == ""
 
@@ -356,7 +357,7 @@ def test_a_repeat_claim_is_cheap_and_scans_nothing(audience_copy, tmp_path, monk
     assert audience_copy.claim_session_once("settings-notice", payload) is True
     scans: list = []
     real_scandir = os.scandir
-    monkeypatch.setattr(os, "scandir", lambda *a, **k: scans.append(a) or real_scandir(*a, **k))
+    setattr_in(monkeypatch, audience_copy, "os.scandir", lambda *a, **k: scans.append(a) or real_scandir(*a, **k))
     start = time.perf_counter()
     for _ in range(200):
         assert audience_copy.claim_session_once("settings-notice", payload) is False
@@ -483,7 +484,7 @@ def test_without_the_settings_helper_it_is_silent_and_exits_zero(tmp_path):
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH",)}
     proc = subprocess.run(
         [sys.executable, str(lone / "settings_notice.py")],
-        input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s-a", "cwd": str(repo)}), capture_output=True, text=True, env=env, timeout=60, check=False,
+        input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s-a", "cwd": str(repo)}), capture_output=True, text=True, env=env, timeout=60, check=False, encoding="utf-8"
     )
     assert proc.returncode == 0 and proc.stdout == "" and proc.stderr == ""
 
@@ -491,7 +492,7 @@ def test_without_the_settings_helper_it_is_silent_and_exits_zero(tmp_path):
 def test_garbage_on_stdin_is_silent_and_exits_zero(tmp_path):
     proc = subprocess.run(
         [sys.executable, str(HARNESS), str(_home(tmp_path / "home")), str(SCRIPT)],
-        input="not json at all", capture_output=True, text=True, timeout=60, check=False,
+        input="not json at all", capture_output=True, text=True, timeout=60, check=False, encoding="utf-8"
     )
     assert proc.returncode == 0 and proc.stderr == ""
 

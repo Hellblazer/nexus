@@ -29,7 +29,7 @@ def run_git(repo: "Path | str", *args: str) -> str:
     """Run the real git in *repo* with no user or system config; return stdout. Raises on a non-zero exit."""
     proc = subprocess.run(
         [real_git(), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", *args],
-        cwd=str(repo), capture_output=True, text=True, env={**os.environ, **_ENV}, check=False,
+        cwd=str(repo), capture_output=True, text=True, env={**os.environ, **_ENV}, check=False, encoding="utf-8"
     )
     assert proc.returncode == 0, f"git {' '.join(args)}: {proc.stderr}"
     return proc.stdout
@@ -55,7 +55,7 @@ class GitShim:
         self.bin.mkdir()
         self.log = root / "shim-calls.log"
         self.mode_file = root / "shim-mode"
-        self.log.write_text("")
+        self.log.write_text("", encoding="utf-8")
         script = self.bin / "git"
         script.write_text(
             "#!/bin/sh\n"
@@ -78,10 +78,10 @@ class GitShim:
         return self
 
     def mode(self, name: str) -> None:
-        self.mode_file.write_text(name)
+        self.mode_file.write_text(name, encoding="utf-8")
 
     def calls(self) -> list[str]:
-        return [line for line in self.log.read_text().splitlines() if line.strip()]
+        return [line for line in self.log.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     def verbs(self) -> list[str]:
         """The git sub-command of each recorded call (the first argument that is not an option or its value)."""

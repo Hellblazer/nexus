@@ -46,11 +46,11 @@ EXEMPT: dict[tuple[str, str], int] = {
     ("src/nexus/daemon/installer.py", "_launchd_loaded_now"): 1,
     # pwd.getpwuid(os.getuid()): behind `import pwd`, whose ImportError arm IS the non-POSIX branch.
     ("src/nexus/db/onnx_model_root.py", "_home_base"): 1,
-    # pwd.getpwuid(os.getuid()): the OS account's home, read from the account database and never from
-    # $HOME (nexus-sby49); the audience helper's POSIX branch, behind `import pwd`.
-    ("conexus/hooks/scripts/_audience.py", "account_home"): 1,
+    # The audience helper's one getuid, in ``_posix_uid`` (None on Windows, where there is no uid): the account's home from the
+    # passwd database and never from $HOME (nexus-sby49), the owner check of the HEAD read, and the session mark's name.
+    ("conexus/hooks/scripts/_audience.py", "_posix_uid"): 1,
     # The byte copy of that helper under src/ (nexus-sby49.3): the same lookup, for the wheel's own hooks.
-    ("src/nexus/hooks/_audience.py", "account_home"): 1,
+    ("src/nexus/hooks/_audience.py", "_posix_uid"): 1,
     # The same lookup, to compare a config --file path with the account's own gitconfig (nexus-sby49).
     ("conexus/hooks/scripts/routing/_user_git_seatbelt.py", "_homes"): 1,
     # Same shape, for the mint-lock creation log (nexus-28bzt): does $HOME match the account's pwd home.
