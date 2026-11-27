@@ -109,8 +109,9 @@ def _binding_refs(value: Any) -> set[str]:
     """
     if isinstance(value, str):
         if '"' in value:
-            # nexus-o5vbo: a double-quoted part of a corpus list names a label exactly, so a ``$`` inside it
-            # is the label's own character, not a binding (:mod:`nexus.label_quote`).
+            # nexus-o5vbo: in any slot's comma list (the check does not know which slot a string came from), a
+            # double-quoted part names a label exactly, so a ``$`` inside it is the label's own character, not a
+            # binding (:mod:`nexus.label_quote`).
             found: set[str] = set()
             for part in (p.strip() for p in value.split(",")):
                 if not is_quoted(part):

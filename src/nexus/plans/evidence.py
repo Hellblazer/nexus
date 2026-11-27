@@ -120,7 +120,10 @@ def _refs(value: Any, found: set[str]) -> None:
     Mirrors ``schema._binding_refs``: recurses lists and dicts, scans
     inside strings, and skips ``$stepN.field`` (a step reference the
     runner resolves, not a binding). Over-matching is the safe direction
-    for a refusal, so interpolated references count.
+    for a refusal, so interpolated references count. It differs in one
+    way: ``schema._binding_refs`` skips a double-quoted part of a comma
+    list in any slot (a label named with its quotes, nexus-o5vbo), and
+    this does not, so a ``$`` inside quotes still counts here.
     """
     if isinstance(value, str):
         for m in _REF_RE.finditer(value):

@@ -86,9 +86,11 @@ def test_the_corpus_reader_keeps_the_unquoted_all_wildcard(monkeypatch: pytest.M
 
 
 @pytest.mark.t2_tenant
-def test_the_corpus_reader_reads_an_unquoted_glob_label_by_exact_name_as_before(corpus_names: list[str]) -> None:
-    for label in ("notes*", "notes-*", "notes-deadbeef", "$topic"):
-        assert mcp_core._resolve_corpus_target(label, t3=None) == [label]
+@pytest.mark.parametrize("label", ["notes*", "notes-*", "notes-deadbeef", "$topic"])
+def test_the_corpus_reader_reads_an_unquoted_glob_label_by_exact_name_as_before(corpus_names: list[str], label: str) -> None:
+    """The premise behind ``quote_corpus_label``: this reader does not strip a trailing ``*``, ``-*`` or an 8-hex suffix and does
+    not read a leading ``$`` as a binding, so each resolves to exactly its own label, with nothing else beside it."""
+    assert mcp_core._resolve_corpus_target(label, t3=None) == [label]
 
 
 @pytest.mark.t2_tenant
