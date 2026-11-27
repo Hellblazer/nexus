@@ -29,6 +29,7 @@ from tests.hooks.test_drain_credential_binding import (
     _drops,
     _save,
     _send_event,
+    poster_cfg,
     _url,
 )
 from tests.hooks.test_mailbox_drain_hook import _row, _write_storage_lease, engine  # noqa: F401 -- the fixture
@@ -149,7 +150,7 @@ class TestRoutingPoster:
         from tests._settle import settle  # noqa: PLC0415
 
         real = engine()
-        _write_storage_lease(tmp_path / "config", host="127.0.0.1", port=real.port)
+        _write_storage_lease(poster_cfg(tmp_path), host="127.0.0.1", port=real.port)
         res = _send_event(tmp_path, _via(proxy))
         assert res.returncode == 0, res.stderr
         settle(lambda: not real.auth, what="the poster child's POST")
@@ -160,7 +161,7 @@ class TestRoutingPoster:
         from tests._settle import settle  # noqa: PLC0415
 
         url = "http://192.0.2.1:9"
-        _write_lease_file(tmp_path / "config", url, scheme="http", tenant="default")
+        _write_lease_file(poster_cfg(tmp_path), url, scheme="http", tenant="default")
         res = _send_event(tmp_path, {"NX_SERVICE_URL": url})
         assert res.returncode == 0, res.stderr
         settle(lambda: "unresolvable" not in _drops(tmp_path), what="the unresolvable drop record")

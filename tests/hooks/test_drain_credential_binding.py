@@ -42,12 +42,18 @@ _SAVED = "saved-service-token"
 _LEASE = "local-supervisor-token"  # what _write_storage_lease puts in the lease
 
 
-def _save(tmp_path: Path, *, url: str | None, token: str = _SAVED) -> None:
+def poster_cfg(tmp_path: Path) -> Path:
+    """The account's config directory the telemetry poster reads (RDR-259 Decision 9): ``<account home>/.config/nexus``, the account
+    home being the in-process test seam ``_audience._ACCOUNT_HOME_OVERRIDE`` that ``_send_event`` sets."""
+    return tmp_path / "acct" / ".config" / "nexus"
+
+
+def _save(tmp_path: Path, *, url: str | None, token: str = _SAVED, cfg: Path | None = None) -> None:
     lines = ["credentials:"]
     if url is not None:
         lines.append(f"  service_url: {url}")
     lines.append(f"  service_token: {token}")
-    cfg = tmp_path / "config"
+    cfg = cfg if cfg is not None else tmp_path / "config"
     cfg.mkdir(parents=True, exist_ok=True)
     path = cfg / "config.yml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -184,7 +190,8 @@ class TestCleartextOffMachine:
 _ROUTING_DIR = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "routing"
 
 _SEND = (
-    "import sys; sys.path.insert(0, sys.argv[1]); import _lib; "
+    "import sys; sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[1] + '/..'); "
+    "import _audience; _audience._ACCOUNT_HOME_OVERRIDE = sys.argv[2]; import _lib; "
     "_lib._send_routing_event({'rule': 'r', 'outcome': 'allow'})"
 )
 
@@ -198,11 +205,10 @@ def _send_event(tmp_path: Path, env: dict[str, str]):
     # The ambient environment minus the service variables (Windows needs SYSTEMROOT for sockets in
     # the poster child); the drain cases above scrub the same way through ``_env``.
     child_env = {k: v for k, v in os.environ.items() if not k.startswith(("NX_SERVICE_", "NX_MINT_"))}
-    child_env["NEXUS_CONFIG_DIR"] = str(tmp_path / "config")
     child_env["NX_DROPPED_WRITES_LOG_PATH"] = str(tmp_path / "dropped.jsonl")
     child_env.update(env)
     return subprocess.run(
-        [sys.executable, "-c", _SEND, str(_ROUTING_DIR)],
+        [sys.executable, "-c", _SEND, str(_ROUTING_DIR), str(tmp_path / "acct")],
         env=child_env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
     )
 
@@ -214,20 +220,23 @@ def _drops(tmp_path: Path) -> str:
 
 class TestRoutingTelemetryPoster:
     def test_env_url_naming_another_host_gets_no_saved_token(self, tmp_path, engine) -> None:
-        real, decoy = engine(), engine()
-        _save(tmp_path, url=_url(real))
-        res = _send_event(tmp_path, {"NX_SERVICE_URL": _url(decoy)})
-        assert res.returncode == 0, res.stderr
+        """RDR-259 Decision 9 on top of the origin binding: the environment names no telemetry endpoint at all, so a decoy
+        URL in it gets nothing, and the saved token still goes to the saved URL."""
         from tests._settle import settle  # noqa: PLC0415
 
-        settle(lambda: "unresolvable" not in _drops(tmp_path), what="the unresolvable drop record")
-        assert decoy.auth == [] and real.auth == [], (decoy.auth, real.auth)
+        real, decoy = engine(), engine()
+        _save(tmp_path, url=_url(real), cfg=poster_cfg(tmp_path))
+        res = _send_event(tmp_path, {"NX_SERVICE_URL": _url(decoy)})
+        assert res.returncode == 0, res.stderr
+        settle(lambda: not real.auth, what="the poster child's POST")
+        assert decoy.auth == [], decoy.auth
+        assert set(real.auth) == {f"Bearer {_SAVED}"}, real.auth
 
     def test_env_url_naming_the_bound_origin_still_posts_with_it(self, tmp_path, engine) -> None:
         from tests._settle import settle  # noqa: PLC0415
 
         real = engine()
-        _save(tmp_path, url=_url(real))
+        _save(tmp_path, url=_url(real), cfg=poster_cfg(tmp_path))
         res = _send_event(tmp_path, {"NX_SERVICE_URL": _url(real)})
         assert res.returncode == 0, res.stderr
         settle(lambda: not real.auth, what="the poster child's POST")
@@ -237,19 +246,20 @@ class TestRoutingTelemetryPoster:
         from tests._settle import settle  # noqa: PLC0415
 
         real, decoy = engine(), engine()
-        _write_storage_lease(tmp_path / "config", host="127.0.0.1", port=real.port)
+        _write_storage_lease(poster_cfg(tmp_path), host="127.0.0.1", port=real.port)
         res = _send_event(tmp_path, {
             "NX_SERVICE_HOST": "127.0.0.1", "NX_SERVICE_PORT": str(decoy.port),
         })
         assert res.returncode == 0, res.stderr
-        settle(lambda: "unresolvable" not in _drops(tmp_path), what="the unresolvable drop record")
+        settle(lambda: not real.auth, what="the poster child's POST")
         assert decoy.auth == [], decoy.auth
+        assert set(real.auth) == {f"Bearer {_LEASE}"}, real.auth
 
     def test_the_bare_lease_still_posts(self, tmp_path, engine) -> None:
         from tests._settle import settle  # noqa: PLC0415
 
         real = engine()
-        _write_storage_lease(tmp_path / "config", host="127.0.0.1", port=real.port)
+        _write_storage_lease(poster_cfg(tmp_path), host="127.0.0.1", port=real.port)
         res = _send_event(tmp_path, {})
         assert res.returncode == 0, res.stderr
         settle(lambda: not real.auth, what="the poster child's POST")
