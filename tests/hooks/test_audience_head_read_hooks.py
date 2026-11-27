@@ -220,7 +220,6 @@ def test_write_project_settings_helper_is_not_the_committed_copy(tmp_path: Path)
     assert json.loads(committed)["subagent_git"] == "strict"
 
 
-@pytest.mark.xfail(strict=True, reason="needs A's per-key HEAD fix: the reader skips HEAD once the working tree is strict, even for advice_block")
 def test_the_advice_reads_head_for_its_own_key_when_the_working_tree_is_strict_for_another(tmp_path: Path, shim: GitShim) -> None:
     repo = init_repo(tmp_path / "r", {PROJECT: _j(subagent_git="strict", advice_block=["pattern_kill"])})
     _set_wt(repo, _j(subagent_git="strict"))
