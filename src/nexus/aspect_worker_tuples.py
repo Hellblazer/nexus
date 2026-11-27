@@ -47,7 +47,7 @@ import httpx
 import structlog
 
 from nexus import clock as nxclock
-from nexus.collection_errors import SupersededCollectionWriteError
+from nexus.collection_errors import RetiredNoSuccessorError, SupersededCollectionWriteError
 from nexus.db.t2.records import QueueRow
 
 _log = structlog.get_logger(__name__)
@@ -510,7 +510,9 @@ class TupleQueueSide:
             )
             self._forget(claim)
             return
-        except SupersededCollectionWriteError as exc:
+        except (SupersededCollectionWriteError, RetiredNoSuccessorError) as exc:
+            # RDR-229 R7: a retired collection with no live successor is refused like a superseded one (it has no
+            # successor to rewrite the task to, so its repeat is dead-lettered)
             self._superseded_verdict(claim, exc)
             return
         except AspectUpsertBadRequestError as exc:
@@ -581,7 +583,7 @@ class TupleQueueSide:
                 task_id=claim.task_id, attempts=claim.attempts + 1, interval_seconds=interval,
             )
 
-    def _superseded_verdict(self, claim: HeldClaim, exc: SupersededCollectionWriteError) -> None:
+    def _superseded_verdict(self, claim: HeldClaim, exc: SupersededCollectionWriteError | RetiredNoSuccessorError) -> None:
         """409: the collection name was retired. The rename rewrote the task body
         to the successor, so the claim is released (no attempt counted) and the
         next claim extracts under the new name. Bounded: a task that answers 409

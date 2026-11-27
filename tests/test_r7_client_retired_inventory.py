@@ -25,7 +25,7 @@ from structlog.testing import capture_logs
 import nexus.doctor_assignments as da
 import nexus.doctor_embeddings as de
 import nexus.doctor_search as ds
-from nexus import health, search_engine
+from nexus import corpus, health, search_engine
 from nexus.catalog.engine_writes.collection_delete import SupersededCollectionDeleteError, refusal_of
 from nexus.catalog.recovery_bundle import _collection_rows
 from nexus.cli import main
@@ -622,3 +622,28 @@ def test_taxonomy_persist_discovered_propagates_the_retired_error_even_when_the_
 
     with pytest.raises(RetiredNoSuccessorError):
         store.persist_discovered_topics(RETIRED_NAME, [{"label": "t"}])
+
+
+# ── chunk writes: the registration wrapper (corpus.py) ──────────────────────────────────────────────────────────────
+
+def test_the_registration_helper_expires_the_entry_neither_retries_nor_re_registers_on_a_retired_no_successor_refusal(monkeypatch):
+    """corpus._write_registering: the engine refused a write because the name is retired with no live successor. The cache
+    entry is expired so the next write takes the cheap revalidation read instead of uploading another body, and the
+    re-registration (an upsert that would revive the name) never runs."""
+    monkeypatch.setattr(corpus, "_profile_model_for_content_type", lambda _ct: None)  # no engine endpoint is read
+    writer = MagicMock()
+    writer.get_collection.return_value = {"superseded_by": ""}
+    attempts: list[int] = []
+
+    def write_fn() -> None:
+        attempts.append(1)
+        raise _retired_409(RETIRED_NAME)
+
+    with pytest.raises(RetiredNoSuccessorError):
+        corpus.write_with_registration_retry(RETIRED_NAME, write_fn, registrar=lambda: writer)
+    try:
+        assert len(attempts) == 1, "the write is not sent again"
+        assert writer.register_collection.call_count == 1, "only the up-front registration; no re-registration"
+        assert corpus._registration_cache_state(None, RETIRED_NAME) == "stale"
+    finally:
+        corpus._REGISTERED_COLLECTIONS.discard(corpus._registration_cache_key(None, RETIRED_NAME))

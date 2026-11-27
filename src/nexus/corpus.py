@@ -12,7 +12,7 @@ import click
 import structlog
 
 from nexus.catalog.rows import legacy_names as _legacy
-from nexus.collection_errors import SupersededCollectionWriteError  # noqa: F401 — re-exported: callers import it from here
+from nexus.collection_errors import RetiredNoSuccessorError, SupersededCollectionWriteError  # noqa: F401 — re-exported: callers import it from here
 from nexus.registration_retry import REGISTRATION_RETRY_ACTIVE, reregister_after_unregistered
 from nexus.collection_mint import mint_knowledge_subject_label
 from nexus.knowledge_subject import CollectionRegistryUnreadableError, CollectionStoreUnreadableError, SubjectFinder, catalog_subject_finder, knowledge_subject_label  # noqa: F401 — re-exported (RDR-229 P2.8)
@@ -2497,7 +2497,8 @@ def _write_registering(
     ensure_collection_registered(name, registrar=registrar)
     try:
         return write_fn()
-    except SupersededCollectionWriteError:
+    except (SupersededCollectionWriteError, RetiredNoSuccessorError):
+        # RDR-229 R7: a retired name with no live successor is refused the same way, and is expired the same way.
         # nexus-mp8ys: the ENGINE refused the write because the name is retired
         # (409 collection_superseded; this process's cache still called it live).
         # Neither retried nor re-registered: the re-registration below is an

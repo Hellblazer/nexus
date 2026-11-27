@@ -2239,6 +2239,27 @@ class TestSupersededBound:
         assert nack[3]["dead"] is True and "aspect_worker_superseded_repeat_dead" in tuple_env.events
         assert db.completed == []
 
+    def test_a_retired_no_successor_409_releases_once_and_the_repeat_is_nacked_dead(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        """RDR-229 R7: the engine's refusal of a write to a retired collection with no live successor is handled as the
+        superseded 409 is: released once (no attempt counted), dead-lettered on the repeat, never a bare failure."""
+        from nexus.collection_errors import RetiredNoSuccessorError
+
+        tuples, db, side = self._side(tuple_env, monkeypatch)
+        db.complete_raises += [RetiredNoSuccessorError("old", 41)] * 2
+
+        claims, _ = side.claim_batch(park=False)
+        side.process(claims)
+        assert len(tuples.ops("release")) == 1 and tuples.ops("nack") == []
+
+        tuples.tasks.append(_NS(id="task0", body=_json.dumps(_task_body(0)), attempts=0))
+        claims, _ = side.claim_batch(park=False)
+        side.process(claims)
+        (nack,) = tuples.ops("nack")
+        assert nack[3]["dead"] is True and "aspect_worker_superseded_repeat_dead" in tuple_env.events
+        assert db.completed == []
+
     def test_a_release_that_answers_claim_not_found_is_not_an_error(
         self, tuple_env, monkeypatch,  # noqa: ANN001
     ) -> None:
