@@ -16,6 +16,7 @@ project's only primer (marginalia's gate, S2b), printed by ``session_context.run
 from __future__ import annotations
 
 import json
+import types
 from pathlib import Path
 
 import pytest
@@ -103,9 +104,17 @@ class TestSessionContextPrime:
 
         def _fake(args, timeout, cwd=None):
             calls.append(args)
-            return prime if args == ["bd", "prime"] else ready
+            return prime
+
+        def _fake_spawn(args, timeout, cwd=None):
+            # `bd ready` goes through _spawn (it needs the exit code and stderr, GH #1689): None is a failed bd, "" a clean empty list
+            calls.append(args)
+            if ready is None:
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="Error: dolt server unreachable"), ""
+            return types.SimpleNamespace(returncode=0, stdout=ready, stderr=""), ""
 
         monkeypatch.setattr(session_context, "run_command", _fake)
+        monkeypatch.setattr(session_context, "_spawn", _fake_spawn)
         return "\n".join(session_context._render_beads(proj)), calls
 
     def test_prints_prime_when_plugin_is_off(self, monkeypatch, tmp_path: Path) -> None:
@@ -133,6 +142,7 @@ class TestSessionContextPrime:
         out, calls = self._run(monkeypatch, tmp_path, beads_dir=True, plugin_on=False, ready=None)
         assert ["bd", "prime"] not in calls
         assert self.PRIME not in out
+        assert "exit 1" in out and "dolt server unreachable" in out, "a failed bd ready is said, not silent (GH #1689)"
 
     def test_session_start_prints_the_primer_where_the_plugin_is_off_but_never_runs_bd_ready(self, monkeypatch, tmp_path: Path) -> None:
         """marginalia's gate (S2b): ``bd prime`` is that project's only primer, so it stays at session start; the ready list

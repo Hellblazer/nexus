@@ -374,11 +374,10 @@ def _render_beads(project_dir: Path) -> list[str]:
         if is_no_beads_database(proc.stderr, proc.stdout):
             return [f"beads: {NO_BEADS_DATABASE_NOTE}; nothing to show"]
         return [f"beads: `bd ready` failed ({failure_summary(proc.returncode, proc.stderr, proc.stdout)})"]
-    ready_output = proc.stdout.strip() or None
-    lines = _render_ready_beads(ready_output)
-    # A bd that just failed or timed out on `bd ready` is not asked again.
-    if ready_output is not None:
-        lines.extend(_render_bd_prime(project_dir))
+    lines = _render_ready_beads(proc.stdout.strip() or None)
+    # A bd that just failed or timed out on `bd ready` is not asked again (returned above); one that ran clean and listed
+    # nothing is asked for its primer (it used to be skipped, because the runner could not tell the two apart).
+    lines.extend(_render_bd_prime(project_dir))
     return lines
 
 
