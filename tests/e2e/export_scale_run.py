@@ -70,6 +70,7 @@ from nexus._install.layout_core import exe_name  # noqa: E402
 from nexus.backup import cloud_export as ce  # noqa: E402
 from nexus.db.pg_provision import bootstrap_superuser  # noqa: E402
 from tests._child_process import integration_pg_conf, java_executable, pg_data_tempdir, stop_group  # noqa: E402
+from tests._chunk_seed import collection_id_sql  # noqa: E402
 from tests._pg_ctl import pg_ctl_start  # noqa: E402
 from tests.db._service_fixture import (  # noqa: E402
     SERVICE_ROLES_SQL,
@@ -248,19 +249,77 @@ def _share_name(percent: str) -> str:
     return "scale-share-" + percent.replace(".", "p")
 
 
+def collection_id() -> str:
+    """The registry's ``collection_id`` of the run's collection, as a scalar subselect.
+
+    RDR-229 P3.1 (vectors-068): a row that names a collection carries the id beside the name, or its CHECK refuses it
+    (23514, and a NOT VALID check is enforced on every new row). The subselect is uncorrelated, so the planner
+    evaluates it once per statement, not once per row. The registry row (``seed_registry_sql``) must exist first; a
+    missing one gives NULL and the CHECK refuses the row, which is the loud outcome this wants.
+    """
+    return collection_id_sql(_TENANT, _COLLECTION)
+
+
+def seed_registry_sql(chunks: int) -> str:
+    """The registry row and the documents. Pure: the text the run sends, so a test can read it."""
+    t, coll, model = _TENANT, _COLLECTION, _MODEL
+    docs = max(1, chunks // 10)
+    return f"""
+INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state)
+VALUES ('{t}', '{coll}', 'knowledge', 'scalerun', '{model}', 'live') ON CONFLICT DO NOTHING;
+INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection, physical_collection_id)
+SELECT '{t}', '1.1.' || d, 'document ' || d, '{coll}', {collection_id()} FROM generate_series(1, {docs}) d;
+"""
+
+
+def seed_chunk_batch_sql(lo: int, hi: int) -> str:
+    """One batch of chunks and their manifest rows (numbers ``lo`` to ``hi`` inclusive). Pure."""
+    t, coll, model = _TENANT, _COLLECTION, _MODEL
+    chash = "decode(md5(g::text) || md5(g::text || 'x'), 'hex')"
+    cid = collection_id()
+    return f"""
+INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768, metadata, collection_id)
+SELECT '{t}', '{coll}', {chash}, '{model}', repeat(md5(g::text) || ' ', 30), p1.v + p2.v,
+       jsonb_build_object('source', 'scale', 'i', g, 'tags', jsonb_build_array('a', 'b')), {cid}
+FROM generate_series({lo}, {hi}) g JOIN public.scale_vp1 p1 ON p1.i = g % 2000 JOIN public.scale_vp2 p2 ON p2.i = (g / 2000) % 250;
+INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model, collection_id)
+SELECT '{t}', '1.1.' || ((g - 1) / 10 + 1), (g - 1) % 10, {chash}, (g - 1) % 10, '{coll}', '{model}', {cid}
+FROM generate_series({lo}, {hi}) g;
+"""
+
+
+def count_mismatches(expected: dict[str, int], actual: dict[str, int]) -> list[str]:
+    """One line for each key whose *actual* count is not the *expected* one (a seed that came up short, or long)."""
+    return [f"{k}: seeded {actual.get(k)}, wanted {v}" for k, v in expected.items() if actual.get(k) != v]
+
+
+def expected_seed_counts(chunks: int, memory_rows: int) -> dict[str, int]:
+    """What ``_seed`` must leave behind. The tenant's own ``memory`` rows depend on the shares, so the table's total is counted."""
+    return {"collection": 1, "documents": max(1, chunks // 10), "chunks": chunks, "catalog_document_chunks": chunks,
+            "memory_all_tenants": memory_rows}
+
+
+def seed_counts(cluster: Cluster) -> dict[str, int]:
+    """The counts ``expected_seed_counts`` names, read back from the database. The collection row is counted only when its id is set."""
+    def n(sql: str) -> int:
+        return int(cluster.psql(sql, timeout=1800))
+
+    t = _TENANT
+    return {
+        "collection": n(f"SELECT count(*) FROM nexus.catalog_collections WHERE tenant_id = '{t}' AND name = '{_COLLECTION}' AND collection_id IS NOT NULL"),
+        "documents": n(f"SELECT count(*) FROM nexus.catalog_documents WHERE tenant_id = '{t}' AND physical_collection_id IS NOT NULL"),
+        "chunks": n(f"SELECT count(*) FROM nexus.chunks WHERE tenant_id = '{t}' AND collection_id IS NOT NULL"),
+        "catalog_document_chunks": n(f"SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id = '{t}' AND collection_id IS NOT NULL"),
+        "memory_all_tenants": n("SELECT count(*) FROM nexus.memory"),
+    }
+
+
 def _seed(cluster: Cluster, chunks: int, memory_rows: int, small_rows: int, say: Callable[[str], None],
           shares: list[str] | None = None) -> None:
     """Chunks, their manifest and documents, and an id-keyed table, by SQL as the superuser."""
-    t, coll, model = _TENANT, _COLLECTION, _MODEL
+    t = _TENANT
     say("seed: collection and documents")
-    docs = max(1, chunks // 10)
-    cluster.psql_script(f"""
-INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state)
-VALUES ('{t}', '{coll}', 'knowledge', 'scalerun', '{model}', 'live') ON CONFLICT DO NOTHING;
-INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection)
-SELECT '{t}', '1.1.' || d, 'document ' || d, '{coll}' FROM generate_series(1, {docs}) d;
-""")
-    chash = "decode(md5(g::text) || md5(g::text || 'x'), 'hex')"
+    cluster.psql_script(seed_registry_sql(chunks))
     batches = [(lo, min(lo + _BATCH - 1, chunks)) for lo in range(1, chunks + 1, _BATCH)]
     say("seed: vector pools")
     # 2,000 x 250 vector sums are 500,000 distinct vectors without 384 million random() calls; the pools are scratch tables
@@ -270,15 +329,7 @@ CREATE UNLOGGED TABLE public.scale_vp2 AS SELECT i, (SELECT array_agg((random() 
 """)
     for n, (lo, hi) in enumerate(batches, 1):
         # one psql session per batch keeps a transaction's WAL bounded
-        cluster.psql_script(f"""
-INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768, metadata)
-SELECT '{t}', '{coll}', {chash}, '{model}', repeat(md5(g::text) || ' ', 30), p1.v + p2.v,
-       jsonb_build_object('source', 'scale', 'i', g, 'tags', jsonb_build_array('a', 'b'))
-FROM generate_series({lo}, {hi}) g JOIN public.scale_vp1 p1 ON p1.i = g % 2000 JOIN public.scale_vp2 p2 ON p2.i = (g / 2000) % 250;
-INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model)
-SELECT '{t}', '1.1.' || ((g - 1) / 10 + 1), (g - 1) % 10, {chash}, (g - 1) % 10, '{coll}', '{model}'
-FROM generate_series({lo}, {hi}) g;
-""", timeout=3600)
+        cluster.psql_script(seed_chunk_batch_sql(lo, hi), timeout=3600)
         say(f"seed: chunks {hi}/{chunks} (batch {n}/{len(batches)})")
     cluster.psql("DROP TABLE public.scale_vp1, public.scale_vp2")
     say("seed: memory rows")
@@ -295,6 +346,9 @@ SELECT CASE WHEN {small_every} > 0 AND g % {small_every} = 1 THEN '{_SMALL_TENAN
     say("seed: analyze, checkpoint")
     cluster.psql("ANALYZE nexus.chunks; ANALYZE nexus.catalog_document_chunks; ANALYZE nexus.catalog_documents; ANALYZE nexus.memory;", timeout=3600)
     cluster.psql("CHECKPOINT")
+    short = count_mismatches(expected_seed_counts(chunks, memory_rows), seed_counts(cluster))
+    if short:
+        raise click.ClickException("the seed came up short, so no number from this run is about the size it claims: " + "; ".join(short))
 
 
 # -- the timed export ---------------------------------------------------------------------------------------
@@ -468,8 +522,13 @@ def main(chunks: int, memory_rows: int, small_tenant_rows: int, share_tenants: s
             "memory_of_small_tenant": int(cluster.psql(f"SELECT count(*) FROM nexus.memory WHERE tenant_id = '{_SMALL_TENANT}'")),
             "catalog_document_chunks": int(cluster.psql(f"SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id = '{_TENANT}'")),
         }
-        if counts["chunks"] < chunks:
-            raise click.ClickException(f"seeded {counts['chunks']} chunks, wanted {chunks}")
+        # _seed has already asserted the seed's counts (ids included); these are the numbers the summary records, so they are
+        # held to the same wanted values here, not only recorded
+        if counts["chunks"] != chunks or counts["catalog_document_chunks"] != chunks:
+            raise click.ClickException(
+                f"seeded {counts['chunks']} chunks and {counts['catalog_document_chunks']} manifest rows, wanted {chunks} of each")
+        if counts["memory_all_tenants"] != memory_rows:
+            raise click.ClickException(f"seeded {counts['memory_all_tenants']} memory rows in all, wanted {memory_rows}")
         indexes = cluster.psql(
             "SELECT string_agg(DISTINCT indexdef, E'\\n') FROM pg_indexes WHERE schemaname = 'nexus' AND tablename LIKE 'chunks%' "
             "AND indexdef ILIKE '%hnsw%'")

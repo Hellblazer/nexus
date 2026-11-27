@@ -35,6 +35,11 @@ that examined nothing fails (non-vacuity): ``examined`` must be positive.
 
 Expected red on develop until the Phase 2 steps land are listed by the gate's summary, not here. A check is
 never weakened to be green.
+
+CHECK 6 IS STILL ERROR ON THE HEAD SCHEMA (nexus-clfse.2). Only its document_aspects insert is fixed (it stamps
+collection_id, vectors-068). Its "re-opening the repair moves" fixture still targets the rdr229-residue-* moves, which
+catalog-052 supersedes on a fresh install with rdr229-p31-residue-* replacements, so its DELETE from nexus.data_moves
+violates data_moves_supersedes_fk and the check records ERROR until the clfse.2 plan's step 6 redesigns that fixture.
 """
 from __future__ import annotations
 
@@ -63,7 +68,7 @@ from nexus.db.http_vector_client import HttpVectorClient
 from nexus.scoring import _resolve_calibration_factors
 from nexus.search_engine import _threshold_for_collection_model, search_cross_corpus
 from nexus.sensitivity import read_sensitivity
-from tests._chunk_seed import _lit, _pg_state, _psql_superuser, seed_chunks_direct
+from tests._chunk_seed import _lit, _pg_state, _psql_superuser, collection_id_for, seed_chunks_direct
 from tests._reapable_age import age_chunks_past_grace
 
 pytestmark = [pytest.mark.t2_tenant]
@@ -459,6 +464,27 @@ def _seed(what: str, fn: Callable[[], Any]) -> Any:
         raise _GateError(f"fixture: {what} failed: {type(exc).__name__}: {exc}") from exc
 
 
+def document_aspects_insert_sql(tenant: str, collection: str, source_path: str, source_uri: str, doc_id: str) -> str:
+    """The one ``nexus.document_aspects`` row of check 6, as a statement that returns the count of rows it inserted.
+
+    Pure: the text the check sends, so a test can read it. RDR-229 P3.1 (vectors-068): a row that names a collection
+    carries its registry id (``document_aspects_collection_id_check``), stamped by a subselect on the registry row,
+    which ``_p210_collection`` has made before this runs. The statement returns the count so the caller can assert it.
+    """
+    return ("WITH ins AS (INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, "
+            "extractor_name, source_uri, doc_id, collection_id) "
+            f"VALUES ({_lit(tenant)}, {_lit(collection)}, {_lit(source_path)}, now(), "
+            f"'m', 'e', {_lit(source_uri)}, {_lit(doc_id)}, {collection_id_for(_lit(tenant), collection)}) RETURNING 1) "
+            "SELECT count(*) FROM ins")
+
+
+def _insert_document_aspects(tenant: str, collection: str, source_path: str, source_uri: str, doc_id: str) -> None:
+    """Run ``document_aspects_insert_sql`` and require that it wrote exactly the one row."""
+    got = _sql(document_aspects_insert_sql(tenant, collection, source_path, source_uri, doc_id))
+    if got != "1":
+        raise RuntimeError(f"the aspects row of {doc_id} under {collection!r}: inserted {got!r} rows, wanted 1")
+
+
 def _p210_collection(ctx: dict[str, Any], name: str, content_type: str) -> None:
     """A registered collection holding one chunk, so its row is visible to a reader that lists collections."""
     def go() -> None:
@@ -569,10 +595,8 @@ def _p210_part_repair(ctx: dict[str, Any]) -> dict[str, Any]:
     r = _p210_doc(ctx, "gate-stem", "chroma://gate-stem//abs/path/r.md")
     ctrl_note = _p210_doc(ctx, "ctl-know", "chroma://ctl-know//abs/note")
     ctrl_elsewhere = _p210_doc(ctx, "ctl-know", "chroma://elsewhere//abs/z.md")
-    _seed("the aspects row of the repairable document", lambda: _sql(
-        "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, "
-        f"extractor_name, source_uri, doc_id) VALUES ({_lit(ctx['tenant'])}, 'gate-stem', 'abs/path/r.md', now(), "
-        "'m', 'e', 'chroma://gate-stem//abs/path/r.md', " + _lit(r) + ")"))
+    _seed("the aspects row of the repairable document", lambda: _insert_document_aspects(
+        ctx["tenant"], "gate-stem", "abs/path/r.md", "chroma://gate-stem//abs/path/r.md", r))
     ctx["r"] = r
     before = _doctor_documents()
     ev["doctor_before"] = {"file_typed": before["chroma_prefix_free"]["file_typed"],
@@ -589,6 +613,9 @@ def _p210_part_repair(ctx: dict[str, Any]) -> dict[str, Any]:
              f"surface absent: no registered data move {DOCS_MOVE!r} (P2.10 registers the repair of residue already "
              "moved, one move per table); the engine never repairs it", ev)
 
+    # STALE ON THE HEAD SCHEMA (nexus-clfse.2, step 6): the rdr229-residue-* moves below are superseded by catalog-052's
+    # rdr229-p31-residue-* replacements, so the DELETE violates data_moves_supersedes_fk and check 6 ends in ERROR.
+    # Only the document_aspects seed above was fixed (collection_id); this re-open is not.
     # The substrate engine booted before this fixture existed, so its worker found nothing and completed the moves
     # over an empty table. Re-open the documents move exactly as the changeset registered it (the satellites it
     # registers on completion go too: that INSERT has no ON CONFLICT), so the worker meets the fixture.

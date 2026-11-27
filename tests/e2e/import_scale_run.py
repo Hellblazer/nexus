@@ -69,18 +69,23 @@ _EXIT_NOT_COMMITTED = 6
 _LOAD_WARN_SECONDS = 30 * 60
 
 
-def _seed_other_tables(cluster: esr.Cluster, chunks: int, say: Callable[[str], None]) -> dict[str, int]:
-    """Every data and derived table the export seed leaves empty, with the references a restore rewrites. Returns the plan."""
+def other_tables_plan(chunks: int) -> dict[str, int]:
+    """The row counts of the tables whose size scales with the run."""
+    return {"topics": max(20, chunks // 100), "memory_summaries": max(10, chunks // 25),
+            "plans": max(10, chunks // 25), "nx_answer_runs": max(10, chunks // 10)}
+
+
+def seed_other_tables_scripts(chunks: int) -> list[tuple[str, str]]:
+    """Every data and derived table the export seed leaves empty, as ``(progress message, SQL script)`` pairs. Pure:
+    the text the run sends, so a test can read it."""
     t, coll, model = esr._TENANT, esr._COLLECTION, esr._MODEL
     docs = max(1, chunks // 10)
-    n_topics = max(20, chunks // 100)
-    n_summaries = max(10, chunks // 25)
-    n_plans = max(10, chunks // 25)
-    n_runs = max(10, chunks // 10)
+    plan = other_tables_plan(chunks)
+    n_topics, n_summaries, n_plans, n_runs = plan["topics"], plan["memory_summaries"], plan["plans"], plan["nx_answer_runs"]
     chash = "decode(md5(g::text) || md5(g::text || 'x'), 'hex')"
-    plan = {"topics": n_topics, "memory_summaries": n_summaries, "plans": n_plans, "nx_answer_runs": n_runs}
-    say("seed: owners, profile, meta, sensitivity, links, aspects, highlights")
-    cluster.psql_script(f"""
+    cid = esr.collection_id()   # RDR-229 P3.1: every row that names the collection carries its registry id (vectors-068 CHECKs)
+    scripts: list[tuple[str, str]] = []
+    scripts.append(("seed: owners, profile, meta, sensitivity, links, aspects, highlights", f"""
 INSERT INTO catalog_owners (tenant_id, tumbler_prefix, name, owner_type)
 VALUES ('{t}', '1.1', 'owner-1', 'curator'), ('{t}', '1.2', 'owner-2', 'repo');
 INSERT INTO embedding_profile (tenant_id, content_type, embedding_model, dimension) VALUES ('{t}', 'knowledge', '{model}', 768);
@@ -89,34 +94,32 @@ INSERT INTO catalog_sensitivity_changes (tenant_id, tumbler, old, new, reason, a
 SELECT '{t}', '1.1.' || g, false, true, 'r', 'a' FROM generate_series(1, {max(10, chunks // 50)}) g;
 INSERT INTO catalog_links (tenant_id, from_tumbler, to_tumbler, link_type, created_by)
 SELECT '{t}', '1.1.' || g, '1.1.' || (g % {docs} + 1), 'cites', 'a' FROM generate_series(1, {docs}) g;
-INSERT INTO document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, source_uri, doc_id)
-SELECT '{t}', '{coll}', 'p' || g, now(), 'm', 'e', 'u' || g, '1.1.' || g FROM generate_series(1, {docs}) g;
-INSERT INTO document_highlights (tenant_id, doc_id, source_uri, collection, ingested_at)
-SELECT '{t}', '1.1.' || g, 'u' || g, '{coll}', now() FROM generate_series(1, {max(10, docs // 2)}) g;
-INSERT INTO chunk_orphaned_at (tenant_id, collection, chash, orphaned_at, embedding_model)
-SELECT '{t}', '{coll}', {chash}, now(), '{model}' FROM generate_series(1, {max(10, chunks // 50)}) g;
-INSERT INTO taxonomy_meta (tenant_id, collection) VALUES ('{t}', '{coll}');
+INSERT INTO document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, source_uri, doc_id, collection_id)
+SELECT '{t}', '{coll}', 'p' || g, now(), 'm', 'e', 'u' || g, '1.1.' || g, {cid} FROM generate_series(1, {docs}) g;
+INSERT INTO document_highlights (tenant_id, doc_id, source_uri, collection, ingested_at, collection_id)
+SELECT '{t}', '1.1.' || g, 'u' || g, '{coll}', now(), {cid} FROM generate_series(1, {max(10, docs // 2)}) g;
+INSERT INTO chunk_orphaned_at (tenant_id, collection, chash, orphaned_at, embedding_model, collection_id)
+SELECT '{t}', '{coll}', {chash}, now(), '{model}', {cid} FROM generate_series(1, {max(10, chunks // 50)}) g;
+INSERT INTO taxonomy_meta (tenant_id, collection, collection_id) VALUES ('{t}', '{coll}', {cid});
 INSERT INTO claude_assisted_remediation_consents (tenant_id, scope, ts, granted)
 SELECT '{t}', 's' || g, now(), g % 2 = 0 FROM generate_series(1, 10) g;
-""")
-    say("seed: topics (parents of larger id), assignments, links, centroids")
-    cluster.psql_script(f"""
-INSERT INTO topics (tenant_id, label, collection, created_at)
-SELECT '{t}', 'topic ' || lpad(g::text, 7, '0'), '{coll}', now() FROM generate_series(1, {n_topics}) g;
+"""))
+    scripts.append(("seed: topics (parents of larger id), assignments, links, centroids", f"""
+INSERT INTO topics (tenant_id, label, collection, created_at, collection_id)
+SELECT '{t}', 'topic ' || lpad(g::text, 7, '0'), '{coll}', now(), {cid} FROM generate_series(1, {n_topics}) g;
 WITH ordered AS (SELECT id, lead(id) OVER (ORDER BY id) AS nxt, row_number() OVER (ORDER BY id) AS rn FROM topics WHERE tenant_id = '{t}')
 UPDATE topics x SET parent_id = o.nxt FROM ordered o WHERE x.id = o.id AND o.rn % 2 = 1 AND o.nxt IS NOT NULL;
 CREATE UNLOGGED TABLE public.scale_ids AS SELECT row_number() OVER (ORDER BY id) AS rn, id FROM topics WHERE tenant_id = '{t}';
-INSERT INTO topic_assignments (tenant_id, doc_id, topic_id, source_collection, embedding_model)
-SELECT '{t}', {chash}, i.id, '{coll}', '{model}' FROM generate_series(1, {max(10, chunks // 5)}) g JOIN public.scale_ids i ON i.rn = g % {n_topics} + 1;
+INSERT INTO topic_assignments (tenant_id, doc_id, topic_id, source_collection, embedding_model, source_collection_id)
+SELECT '{t}', {chash}, i.id, '{coll}', '{model}', {cid} FROM generate_series(1, {max(10, chunks // 5)}) g JOIN public.scale_ids i ON i.rn = g % {n_topics} + 1;
 INSERT INTO topic_links (tenant_id, from_topic_id, to_topic_id)
 SELECT '{t}', a.id, b.id FROM public.scale_ids a JOIN public.scale_ids b ON b.rn = a.rn % {n_topics} + 1;
-INSERT INTO taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_model, embedding_768)
-SELECT '{t}', '{coll}', i.id, 'centroid ' || i.rn, '{model}', v.v
+INSERT INTO taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_model, embedding_768, collection_id)
+SELECT '{t}', '{coll}', i.id, 'centroid ' || i.rn, '{model}', v.v, {cid}
 FROM public.scale_ids i, (SELECT array_agg((random() * 2 - 1)::real)::nexus.vector(768) AS v FROM generate_series(1, 768)) v;
 DROP TABLE public.scale_ids;
-""")
-    say("seed: memory_summaries (live, negative and dangling sources), plans, runs, steps")
-    cluster.psql_script(f"""
+"""))
+    scripts.append(("seed: memory_summaries (live, negative and dangling sources), plans, runs, steps", f"""
 CREATE UNLOGGED TABLE public.scale_mem AS SELECT row_number() OVER (ORDER BY id) AS rn, id FROM memory WHERE tenant_id = '{t}';
 INSERT INTO plans (tenant_id, query, plan_json, created_at, verb)
 SELECT '{t}', 'q' || g, '{{"steps": []}}'::jsonb, now(), 'research' FROM generate_series(1, {n_plans}) g;
@@ -137,16 +140,63 @@ INSERT INTO nx_answer_steps (run_id, tenant_id, step_index, operator, source, el
 SELECT r.id, '{t}', k, CASE k WHEN 0 THEN 'extract' ELSE 'rank' END, 'llm', 5, k = 0
 FROM nx_answer_runs r, generate_series(0, 1) k WHERE r.tenant_id = '{t}';
 DROP TABLE public.scale_mem, public.scale_plan;
-""", timeout=3600)
-    say("seed: search_telemetry, relevance_log")
-    cluster.psql_script(f"""
+"""))
+    scripts.append(("seed: search_telemetry, relevance_log", f"""
 INSERT INTO search_telemetry (tenant_id, ts, query_hash, collection, raw_count, kept_count)
 SELECT '{t}', now() - (g || ' seconds')::interval, md5(g::text), '{coll}', 10, 5 FROM generate_series(1, {max(10, chunks // 2)}) g;
 INSERT INTO relevance_log (tenant_id, query, chunk_id, action, timestamp)
 SELECT '{t}', 'q' || (g % 100), md5(g::text) || md5('r' || g), CASE WHEN g % 2 = 0 THEN 'hit' ELSE 'miss' END, now()
 FROM generate_series(1, {max(10, chunks // 5)}) g;
-""", timeout=3600)
-    return plan
+"""))
+    return scripts
+
+
+def expected_other_counts(chunks: int) -> dict[str, int]:
+    """The tenant's row count in each table ``seed_other_tables_scripts`` writes (the ``generate_series`` sizes, spelled once more here)."""
+    plan = other_tables_plan(chunks)
+    docs = max(1, chunks // 10)
+    return {
+        "catalog_owners": 2, "embedding_profile": 1, "catalog_meta": max(10, chunks // 500),
+        "catalog_sensitivity_changes": max(10, chunks // 50), "catalog_links": docs,
+        "document_aspects": docs, "document_highlights": max(10, docs // 2), "chunk_orphaned_at": max(10, chunks // 50),
+        "taxonomy_meta": 1, "claude_assisted_remediation_consents": 10,
+        "topics": plan["topics"], "topic_assignments": max(10, chunks // 5), "topic_links": plan["topics"],
+        "taxonomy_centroids": plan["topics"],
+        "plans": plan["plans"], "memory_summaries": plan["memory_summaries"], "nx_answer_runs": plan["nx_answer_runs"],
+        "nx_answer_steps": 2 * plan["nx_answer_runs"],
+        "search_telemetry": max(10, chunks // 2), "relevance_log": max(10, chunks // 5),
+    }
+
+
+#: The tables above whose rows name the run's collection and so must carry its id (vectors-068). The count of a table here is
+#: of the rows that DO carry it, so a row stamped NULL cannot count toward the seed.
+_ID_COLUMN = {"document_aspects": "collection_id", "document_highlights": "collection_id", "chunk_orphaned_at": "collection_id",
+              "taxonomy_meta": "collection_id", "topics": "collection_id", "topic_assignments": "source_collection_id",
+              "taxonomy_centroids": "collection_id"}
+
+
+def other_counts(cluster: esr.Cluster) -> dict[str, int]:
+    """Read back what ``expected_other_counts`` names. A table in ``_ID_COLUMN`` counts only its rows whose id is set."""
+    t = esr._TENANT
+    out = {}
+    for table in expected_other_counts(1):
+        stamped = f" AND {_ID_COLUMN[table]} IS NOT NULL" if table in _ID_COLUMN else ""
+        out[table] = int(cluster.psql(f"SELECT count(*) FROM nexus.{table} WHERE tenant_id = '{t}'{stamped}", timeout=1800))
+    return out
+
+
+def _seed_other_tables(cluster: esr.Cluster, chunks: int, say: Callable[[str], None]) -> dict[str, int]:
+    """Seed every data and derived table the export seed leaves empty. Returns the plan.
+
+    Raises when any table holds other than the seeded count, so a short seed stops the run instead of being recorded.
+    """
+    for message, sql in seed_other_tables_scripts(chunks):
+        say(message)
+        cluster.psql_script(sql, timeout=3600)
+    short = esr.count_mismatches(expected_other_counts(chunks), other_counts(cluster))
+    if short:
+        raise click.ClickException("the seed of the other tables came up short: " + "; ".join(short))
+    return other_tables_plan(chunks)
 
 
 class _Sampler(threading.Thread):
