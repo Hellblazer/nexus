@@ -82,6 +82,7 @@ def _run_raw(stdin_text: str, env_extra: dict[str, str] | None = None):
     return subprocess.run(
         _guard_argv(),
         input=stdin_text, capture_output=True, text=True, timeout=20, env=env,
+        encoding="utf-8",
     )
 
 
@@ -165,7 +166,7 @@ def shared_repo(tmp_path: pathlib.Path) -> pathlib.Path:
 
 @pytest.fixture()
 def linked_worktree(shared_repo: pathlib.Path, tmp_path: pathlib.Path) -> pathlib.Path:
-    (shared_repo / "f.txt").write_text("x")
+    (shared_repo / "f.txt").write_text("x", encoding="utf-8")
     # The project settings file is committed before `worktree add`, so the worktree checkout has it.
     subprocess.run(["git", "add", "f.txt", ".nexus/project.json"], cwd=shared_repo, check=True)
     subprocess.run(
@@ -186,7 +187,7 @@ def linked_worktree(shared_repo: pathlib.Path, tmp_path: pathlib.Path) -> pathli
 
 
 def test_the_one_copy_is_wired():
-    hooks = json.loads((PROJECT_ROOT / "conexus" / "hooks" / "hooks.json").read_text())
+    hooks = json.loads((PROJECT_ROOT / "conexus" / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     declared: list[str] = []
     for entry in hooks["hooks"]["PreToolUse"]:
         for h in entry.get("hooks", []):
@@ -195,7 +196,7 @@ def test_the_one_copy_is_wired():
     wired = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/" + SCRIPT.name
     assert wired in declared, f"hooks.json PreToolUse does not run {SCRIPT.name}: {declared}"
     assert SCRIPT.is_file()
-    assert "subagent_git_write_requires_orchestrator:" in (ROUTING / "registry.yaml").read_text()
+    assert "subagent_git_write_requires_orchestrator:" in (ROUTING / "registry.yaml").read_text(encoding="utf-8")
     assert not (PROJECT_ROOT / "src" / "nexus" / "hooks" / "subagent_git_write_gate.py").exists(), (
         "a second copy of the guard is back in the wheel"
     )
@@ -1603,6 +1604,7 @@ def test_a_payload_without_cwd_takes_the_project_from_claude_project_dir(linked_
     proc = subprocess.run(
         _guard_argv(), input=payload, capture_output=True, text=True,
         timeout=20, env=env, cwd=str(elsewhere),
+        encoding="utf-8",
     )
     assert "permissionDecision" not in _hso(proc), proc.stdout
 
@@ -1619,6 +1621,7 @@ def test_the_process_cwd_is_never_the_project(linked_worktree):
     proc = subprocess.run(
         _guard_argv(), input=payload, capture_output=True, text=True,
         timeout=20, env=env, cwd=str(linked_worktree),
+        encoding="utf-8",
     )
     assert _hso(proc).get("permissionDecision") == "deny", proc.stdout
 
@@ -1651,7 +1654,7 @@ def test_the_routing_allow_escape_passes_and_is_logged(shared_repo, tmp_path):
     ):
         out = _verdict(cmd, shared_repo)
         assert "permissionDecision" not in out, f"escape did not pass {cmd!r}: {out}"
-    log = (tmp_path / "dropped_writes.jsonl").read_text()
+    log = (tmp_path / "dropped_writes.jsonl").read_text(encoding="utf-8")
     assert '"escape"' in log and "subagent_git_write_requires_orchestrator" in log, log
 
 
@@ -1708,6 +1711,7 @@ def _config_read(repo: pathlib.Path, *args: str) -> str:
     the hook, which only gates a subagent's Bash tool)."""
     out = subprocess.run(
         ["git", "config", *args], cwd=repo, capture_output=True, text=True, check=False,
+        encoding="utf-8",
     )
     return out.stdout.strip()
 
@@ -2035,6 +2039,7 @@ def test_git_refuses_a_worktree_write_without_the_extension_so_it_cannot_reach_t
     refused = subprocess.run(
         ["git", "config", "--worktree", "zz.probe", "1"], cwd=linked_worktree,
         capture_output=True, text=True,
+        encoding="utf-8",
     )
     assert refused.returncode != 0 and "worktreeConfig" in refused.stderr, refused.stderr
     assert _config_read(shared_repo, "--local", "--get", "zz.probe") == ""
@@ -2072,7 +2077,7 @@ def _env_is_uutils() -> bool:
     Its ``env -S`` does not split a separate ``-S 'git config'`` string and does not
     read ``\\_`` as a blank, so some spellings that write config under GNU or BSD
     ``env`` cannot run there at all. The hook denies them either way."""
-    out = subprocess.run(["env", "--version"], capture_output=True, text=True, check=False)
+    out = subprocess.run(["env", "--version"], capture_output=True, text=True, check=False, encoding="utf-8")
     return "uutils" in out.stdout
 
 
@@ -2097,12 +2102,12 @@ def test_the_real_git_sandbox_keeps_global_and_system_writes_in_the_box(tmp_path
             env=env, check=True, capture_output=True, cwd=tmp_path,
         )
     home = tmp_path / "box" / "home"
-    assert "probe" in (home / "gitconfig").read_text()
-    assert "probe" in (home / "systemconfig").read_text()
+    assert "probe" in (home / "gitconfig").read_text(encoding="utf-8")
+    assert "probe" in (home / "systemconfig").read_text(encoding="utf-8")
 
 
 def _config_snapshot(paths: list[pathlib.Path]) -> dict[str, str | None]:
-    return {str(p): p.read_text() if p.is_file() else None for p in paths}
+    return {str(p): p.read_text(encoding="utf-8") if p.is_file() else None for p in paths}
 
 
 #: Commands in the new deny families that a real git does NOT turn into a
@@ -2157,6 +2162,7 @@ def test_every_config_deny_family_command_really_writes_config(tmp_path):
             run = subprocess.run(
                 [bash(), "-c", cmd], cwd=main, env=env, capture_output=True, text=True,
                 check=False, timeout=20,
+                encoding="utf-8",
             )
             wrote = _config_snapshot(watched) != before
             if template in _NOT_REAL_WRITES:
@@ -2186,9 +2192,9 @@ def test_the_config_alias_through_a_variable_really_writes_and_denies(tmp_path):
         env = _sandbox_env(box)
         subprocess.run(["git", "init", "-q"], cwd=main, check=True, env=env)
         cfg = main / ".git" / "config"
-        before = cfg.read_text()
-        subprocess.run([bash(), "-c", cmd], cwd=main, env=env, capture_output=True, text=True, timeout=20)
-        assert cfg.read_text() != before, f"{cmd!r} did not write"
+        before = cfg.read_text(encoding="utf-8")
+        subprocess.run([bash(), "-c", cmd], cwd=main, env=env, capture_output=True, text=True, timeout=20, encoding="utf-8")
+        assert cfg.read_text(encoding="utf-8") != before, f"{cmd!r} did not write"
         assert _denied(cmd, main), cmd
 
 
@@ -2205,7 +2211,7 @@ def test_a_quoted_command_a_consumer_runs_really_writes_and_denies(tmp_path):
     env = _sandbox_env(box)
     stubs = box / "stubs"
     stubs.mkdir(parents=True)
-    (stubs / "ssh").write_text('#!/bin/sh\nshift\nexec sh -c "$*"\n')
+    (stubs / "ssh").write_text('#!/bin/sh\nshift\nexec sh -c "$*"\n', encoding="utf-8")
     (stubs / "ssh").chmod(0o755)
     put_stubs_first(env, stubs)
     sub = box / "sub"
@@ -2213,7 +2219,7 @@ def test_a_quoted_command_a_consumer_runs_really_writes_and_denies(tmp_path):
     for repo in (sub, main):
         repo.mkdir(parents=True)
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
-    (sub / "f").write_text("x")
+    (sub / "f").write_text("x", encoding="utf-8")
     subprocess.run(["git", "add", "f"], cwd=sub, check=True, env=env)
     subprocess.run(["git", "commit", "-qm", "i"], cwd=sub, check=True, env=env)
     subprocess.run(
@@ -2252,8 +2258,8 @@ def test_a_backslash_in_a_double_quoted_consumer_string_really_writes_and_denies
     env = _sandbox_env(box)
     stubs = box / "stubs"
     stubs.mkdir(parents=True)
-    (stubs / "ssh").write_text('#!/bin/sh\nshift\nexec sh -c "$*"\n')
-    (stubs / "watch").write_text('#!/bin/sh\nexec sh -c "$*"\n')
+    (stubs / "ssh").write_text('#!/bin/sh\nshift\nexec sh -c "$*"\n', encoding="utf-8")
+    (stubs / "watch").write_text('#!/bin/sh\nexec sh -c "$*"\n', encoding="utf-8")
     for name in ("ssh", "watch"):
         (stubs / name).chmod(0o755)
     put_stubs_first(env, stubs)
@@ -2262,10 +2268,10 @@ def test_a_backslash_in_a_double_quoted_consumer_string_really_writes_and_denies
     for repo in (sub, main):
         repo.mkdir(parents=True)
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
-        (repo / "f").write_text("x")
+        (repo / "f").write_text("x", encoding="utf-8")
         subprocess.run(["git", "add", "f"], cwd=repo, check=True, env=env)
         subprocess.run(["git", "commit", "-qm", "one"], cwd=repo, check=True, env=env)
-        (repo / "f").write_text("xy")
+        (repo / "f").write_text("xy", encoding="utf-8")
         subprocess.run(["git", "commit", "-qam", "two"], cwd=repo, check=True, env=env)
     subprocess.run(
         ["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "s"],
@@ -2296,6 +2302,7 @@ def test_a_backslash_in_a_double_quoted_consumer_string_really_writes_and_denies
         subprocess.run(
             [bash(), "-c", cmd], cwd=where, env=env, capture_output=True, text=True,
             check=False, timeout=60,
+            encoding="utf-8",
         )
         assert _config_snapshot([watched]) != before, f"{cmd!r} did not write"
         assert _denied(cmd, wt), f"{cmd!r} was not denied in a linked worktree"
@@ -2371,16 +2378,16 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
     env = _sandbox_env(box)
     stubs = box / "stubs"
     stubs.mkdir(parents=True)
-    (stubs / "ssh").write_text('#!/bin/sh\nshift\nexec sh -c "$*"\n')
-    (stubs / "git-config").write_text('#!/bin/sh\nexec git config "$@"\n')
-    (stubs / "docker").write_text('#!/bin/sh\nshift 2\nexec "$@"\n')
+    (stubs / "ssh").write_text('#!/bin/sh\nshift\nexec sh -c "$*"\n', encoding="utf-8")
+    (stubs / "git-config").write_text('#!/bin/sh\nexec git config "$@"\n', encoding="utf-8")
+    (stubs / "docker").write_text('#!/bin/sh\nshift 2\nexec "$@"\n', encoding="utf-8")
     for name in ("ssh", "git-config", "docker"):
         (stubs / name).chmod(0o755)
     put_stubs_first(env, stubs)
     main = box / "main"
     main.mkdir(parents=True)
     subprocess.run(["git", "init", "-q"], cwd=main, check=True, env=env)
-    (main / "f").write_text("x")
+    (main / "f").write_text("x", encoding="utf-8")
     subprocess.run(["git", "add", "f"], cwd=main, check=True, env=env)
     subprocess.run(["git", "commit", "-qm", "one"], cwd=main, check=True, env=env)
     wt = box / "wt"
@@ -2419,6 +2426,7 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
         run = subprocess.run(
             [bash(), "-c", cmd], cwd=wt, env=env, capture_output=True, text=True,
             check=False, timeout=60,
+            encoding="utf-8",
         )
         if _config_snapshot([common]) == before and _env_s_could_not_run(cmd, run.stderr):
             unsplit += 1  # uutils env: this spelling cannot run here; the denial below still holds
@@ -2437,6 +2445,7 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
         subprocess.run(
             [bash(), "-c", cmd], cwd=wt, env=env, capture_output=True, text=True,
             check=False, timeout=60,
+            encoding="utf-8",
         )
         assert _config_snapshot([common]) == before, f"control {cmd!r} wrote"
         assert not _denied(cmd, wt), f"control {cmd!r} was wrongly denied"
@@ -2452,6 +2461,7 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
     out = subprocess.run(
         ["git", "config", "--worktree", "--get", "user.name"], cwd=wt, env=env,
         capture_output=True, text=True, check=True,
+        encoding="utf-8",
     )
     assert out.stdout.strip() == "via-dashdash"
     assert not _denied(cmd, wt), cmd
@@ -2477,6 +2487,7 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
         subprocess.run(
             [bash(), "-c", redirected], cwd=wt, env=env, capture_output=True, text=True,
             check=False, timeout=60,
+            encoding="utf-8",
         )
         assert _config_snapshot([primary_file]) != before, f"{redirected!r} did not write the primary"
         assert _denied(redirected, wt), f"{redirected!r} was not denied from a linked worktree"
@@ -2495,14 +2506,16 @@ def test_the_nexus_13wz1_residuals_really_write_and_deny_from_a_linked_worktree(
         'bash -c "gi' + BS + BS + 't add g4"',
     )):
         name = f"g{n + 1}"
-        (main / name).write_text("y")
+        (main / name).write_text("y", encoding="utf-8")
         run = subprocess.run(
             [bash(), "-c", verb], cwd=main, env=env, capture_output=True, text=True,
             check=False, timeout=60,
+            encoding="utf-8",
         )
         staged = subprocess.run(
             ["git", "diff", "--cached", "--name-only"], cwd=main, env=env,
             capture_output=True, text=True, check=True,
+            encoding="utf-8",
         ).stdout.split()
         assert name in staged, f"{verb!r} did not stage {name}: {run.stderr}"
         assert _denied(verb, main), f"{verb!r} was not denied in the shared tree"
@@ -2548,7 +2561,7 @@ def test_a_git_dir_assignment_really_redirects_a_worktree_write_into_the_primary
     ):
         primary_file.unlink(missing_ok=True)
         subprocess.run([bash(), "-c", cmd], cwd=linked_worktree, env=env, check=False)
-        assert primary_file.is_file() and "user" in primary_file.read_text(), cmd
+        assert primary_file.is_file() and "user" in primary_file.read_text(encoding="utf-8"), cmd
         assert _denied(cmd, linked_worktree), cmd
 
 
@@ -2718,7 +2731,7 @@ def _sidefx_box(box: pathlib.Path, where: str):
     a tracked branch `tracked`), and with *where* == "wt" a linked worktree.
     Returns (env, primary, cwd)."""
     env = _sandbox_env(box)
-    (box / "home" / "gitconfig").write_text('[protocol "file"]\n\tallow = always\n')
+    (box / "home" / "gitconfig").write_text('[protocol "file"]\n\tallow = always\n', encoding="utf-8")
 
     def g(*args, cwd):
         subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True)
@@ -2727,7 +2740,7 @@ def _sidefx_box(box: pathlib.Path, where: str):
     for repo in (up, sub):
         repo.mkdir(parents=True)
         g("init", "-q", "-b", "main", cwd=repo)
-        (repo / "f").write_text("x")
+        (repo / "f").write_text("x", encoding="utf-8")
         g("add", "f", cwd=repo)
         g("commit", "-qm", "one", cwd=repo)
     g("submodule", "add", "-q", str(sub), "sm", cwd=up)
@@ -2748,11 +2761,12 @@ def _sidefx_box(box: pathlib.Path, where: str):
 def _sidefx_state(main: pathlib.Path, cwd: pathlib.Path) -> dict[str, str]:
     """What a command could have changed, as one string per name."""
     def text(p: pathlib.Path) -> str:
-        return p.read_text() if p.is_file() else ""
+        return p.read_text(encoding="utf-8") if p.is_file() else ""
 
     refs = subprocess.run(
         ["git", "for-each-ref", "--format=%(refname) %(objectname) %(symref)"], cwd=main,
         capture_output=True, text=True, check=True,
+        encoding="utf-8",
     ).stdout
     cfgs = [text(main / ".git" / "config"), text(main / ".git" / "config.worktree")]
     for extra in sorted((main / ".git" / "worktrees").glob("*/config.worktree")):
@@ -2777,6 +2791,7 @@ def _sidefx_run(cmd: str, setup: str, where: str, tmp: pathlib.Path):
     subprocess.run(
         [bash(), "-c", real], cwd=cwd, env=env, capture_output=True, text=True,
         check=False, timeout=60,
+        encoding="utf-8",
     )
     after = _sidefx_state(main, cwd)
     changed = frozenset(k for k in after if after[k] != before[k])
@@ -3533,6 +3548,7 @@ def _config_keys(cfg: pathlib.Path, env: dict[str, str]) -> dict[str, str]:
     out = subprocess.run(
         ["git", "config", "--file", str(cfg), "--list"], env=env, check=True,
         capture_output=True, text=True,
+        encoding="utf-8",
     ).stdout
     return dict(line.partition("=")[::2] for line in out.splitlines())
 
@@ -3563,7 +3579,7 @@ def test_a_worktree_upstream_form_really_writes_only_branch_keys_in_the_common_c
     assert changed == {"branch.wtb.remote", "branch.wtb.merge"}, sorted(changed)
     assert after["branch.wtb.remote"] == "bare", after.get("branch.wtb.remote")
     for extra in sorted((main / ".git" / "worktrees").glob("*/config.worktree")):
-        assert extra.read_text() == "", f"{extra} was written"
+        assert extra.read_text(encoding="utf-8") == "", f"{extra} was written"
 
 
 def test_sparse_checkout_is_left_out_and_still_denied_in_the_shared_tree_by_the_verb_scan(
@@ -3731,7 +3747,7 @@ def test_help_autocorrect_in_git_config_parameters_past_a_long_entry_really_runs
     for i, cmd in enumerate(_autocorrect_params_cmds()[:1] + _autocorrect_params_cmds()[4:5]):
         env, main, _ = _sidefx_box(tmp_path / f"p{i}", "main")
         before = _sidefx_state(main, main)
-        subprocess.run([bash(), "-c", cmd], cwd=main, env=env, capture_output=True, text=True, check=False, timeout=30)
+        subprocess.run([bash(), "-c", cmd], cwd=main, env=env, capture_output=True, text=True, check=False, timeout=30, encoding="utf-8")
         assert _sidefx_state(main, main) != before, cmd
         assert _denied(cmd, main), cmd
 
@@ -3749,6 +3765,7 @@ def test_help_autocorrect_set_to_a_value_git_runs_really_runs_the_typo_and_a_saf
         subprocess.run(
             ["git", "-c", f"help.autocorrect={value}", "confg", "user.name", "x"],
             cwd=main, env=env, capture_output=True, text=True, check=False, timeout=30,
+            encoding="utf-8",
         )
         changed = _sidefx_state(main, main) != before
         assert changed == wrote, f"help.autocorrect={value}: wrote={changed}"
@@ -4093,7 +4110,7 @@ def _write_remote_hosts_file(hosts: str | None) -> None:
     if hosts is None:
         f.unlink(missing_ok=True)
     else:
-        f.write_text(hosts + "\n")
+        f.write_text(hosts + "\n", encoding="utf-8")
 
 
 @pytest.fixture()
@@ -4145,6 +4162,7 @@ def _remote_verdict(host: str, cwd: pathlib.Path, hosts: str | None, *, env_host
         _guard_argv(),
         input=json.dumps(_payload(_REMOTE_CMD.format(host=host), agent=True, cwd=str(cwd))),
         capture_output=True, text=True, timeout=20, env=env,
+        encoding="utf-8",
     )
     return _hso(proc)
 

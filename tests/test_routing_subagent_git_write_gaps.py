@@ -91,6 +91,7 @@ def _git_env(box: pathlib.Path) -> dict[str, str]:
 def _git(cwd: pathlib.Path, env: dict[str, str], *args: str) -> str:
     done = subprocess.run(
         ["git", *args], cwd=cwd, env=env, capture_output=True, text=True, check=True,
+        encoding="utf-8",
     )
     return done.stdout
 
@@ -113,7 +114,7 @@ class Sandbox:
         g = self.g
         g(self.main, "init", "-q", "-b", "main")
         for i in (1, 2):
-            (self.main / "f.txt").write_text(f"v{i}\n")
+            (self.main / "f.txt").write_text(f"v{i}\n", encoding="utf-8")
             g(self.main, "add", "f.txt")
             g(self.main, "commit", "-q", "-m", f"c{i}")
         g(self.main, "remote", "add", "origin", str(origin))
@@ -122,14 +123,14 @@ class Sandbox:
         g(self.main, "tag", "oldtag", "HEAD")
         peer = box / "peer"
         g(box, "clone", "-q", str(origin), str(peer))
-        (peer / "f.txt").write_text("v3\n")
+        (peer / "f.txt").write_text("v3\n", encoding="utf-8")
         g(peer, "commit", "-q", "-am", "c3")
         g(peer, "tag", "peer-tag", "HEAD")
         g(peer, "push", "-q", "origin", "main", "peer-tag", "main:other")
-        (self.main / "dirty.txt").write_text("d\n")
+        (self.main / "dirty.txt").write_text("d\n", encoding="utf-8")
         self.wt = box / "wt"
         g(self.main, "worktree", "add", "-q", "-b", "wtb", str(self.wt))
-        (self.main / "f.txt").write_text("v2\n")
+        (self.main / "f.txt").write_text("v2\n", encoding="utf-8")
 
     def g(self, cwd: pathlib.Path, *args: str) -> str:
         return _git(cwd, self.env, *args)
@@ -148,6 +149,7 @@ class Sandbox:
         subprocess.run(
             [bash(), "-c", cmd], cwd=cwd or self.main, env=self.env, capture_output=True, text=True,
             timeout=60, check=False,
+            encoding="utf-8",
         )
 
 
@@ -165,6 +167,7 @@ def _verdict(cmd: str, cwd: pathlib.Path) -> dict:
     proc = subprocess.run(
         _guard_argv(), input=json.dumps(payload), capture_output=True,
         text=True, timeout=20, env=env,
+        encoding="utf-8",
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)["hookSpecificOutput"] if proc.stdout else {}
@@ -748,7 +751,7 @@ def test_foreach_really_runs_a_command_in_a_submodule_and_denies(sandbox):
     sub = sandbox.box / "sub"
     sub.mkdir()
     sandbox.g(sub, "init", "-q", "-b", "main")
-    (sub / "s.txt").write_text("s\n")
+    (sub / "s.txt").write_text("s\n", encoding="utf-8")
     sandbox.g(sub, "add", "s.txt")
     sandbox.g(sub, "commit", "-q", "-m", "s")
     sandbox.g(
@@ -764,9 +767,9 @@ def test_foreach_really_runs_a_command_in_a_submodule_and_denies(sandbox):
     # and the helper's `init` really writes the common config, as `submodule init` does
     cfg = sandbox.main / ".git" / "config"
     sandbox.g(sandbox.main, "config", "--remove-section", "submodule.sm")
-    before = cfg.read_text()
+    before = cfg.read_text(encoding="utf-8")
     sandbox.run("git submodule--helper init")
-    assert cfg.read_text() != before, "submodule--helper init wrote nothing"
+    assert cfg.read_text(encoding="utf-8") != before, "submodule--helper init wrote nothing"
     for cwd in (sandbox.main, sandbox.wt):
         assert _denied("git submodule--helper init", cwd), f"helper init was not denied in {cwd.name}"
 

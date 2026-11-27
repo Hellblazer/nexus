@@ -74,7 +74,7 @@ def primary(tmp_path: pathlib.Path) -> pathlib.Path:
     repo = tmp_path / "primary"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    (repo / "f.txt").write_text("x")
+    (repo / "f.txt").write_text("x", encoding="utf-8")
     subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
     subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"],
@@ -100,6 +100,7 @@ def _verdict(cmd: str, cwd: pathlib.Path) -> dict:
     proc = subprocess.run(
         _guard_argv(), input=json.dumps(payload),
         capture_output=True, text=True, timeout=20, env=env,
+        encoding="utf-8",
     )
     assert proc.returncode == 0, proc.stderr
     return {} if proc.stdout == "" else json.loads(proc.stdout)["hookSpecificOutput"]
