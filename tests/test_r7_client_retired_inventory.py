@@ -40,6 +40,7 @@ from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from nexus.db.retired_rows import RetiredSkips
 from nexus.db.t2._refreshable_client import _RetiredNoSuccessorHttpError
 from nexus.db.t2.http_document_aspects_store import _raise_fenced_refusal
+from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 from nexus.search_engine import SearchDiagnostics, search_cross_corpus
 from nexus.upgrade_ladder.rungs.manifest_section_labels import _chunk_metadatas
 from tests.test_6pfgb15_note_ttl import _COLLECTION, _entry, _FakeCatalog, _lapsed_row, _World
@@ -575,7 +576,7 @@ def test_reembed_job_error_gives_the_typed_retired_error_its_own_message():
     assert "was retired and has no successor" in err.message and "collection_superseded" not in err.message
 
 
-def test_the_aspect_upsert_and_taxonomy_persist_do_not_flatten_the_retired_error_to_a_generic_conflict():
+def test_the_aspect_upsert_does_not_flatten_the_retired_error_to_a_generic_conflict():
     request = httpx.Request("POST", "http://x/upsert")
     response = httpx.Response(409, request=request, json={"error": "collection_superseded", "reason": "collection_superseded", "collection": RETIRED_NAME})
     typed = _RetiredNoSuccessorHttpError(_retired_409(RETIRED_NAME), httpx.HTTPStatusError("409", request=request, response=response))
@@ -595,3 +596,29 @@ def test_a_delete_refused_for_a_retired_row_with_no_successor_is_the_typed_refus
     refusal = refusal_of(exc)
 
     assert isinstance(refusal, SupersededCollectionDeleteError) and refusal.successor == ""
+
+
+def _transport_retired_409(name: str) -> RetiredNoSuccessorError:
+    """What the shared T2 transport raises for the engine's retired 409: also the httpx.HTTPStatusError it was."""
+    request = httpx.Request("POST", "http://x/topics/persist_discovered")
+    body = {"error": "collection_superseded", "reason": "retired_no_successor", "collection": name, "collection_id": 41}
+    response = httpx.Response(409, request=request, json=body)
+    return _RetiredNoSuccessorHttpError(_retired_409(name), httpx.HTTPStatusError("409", request=request, response=response))
+
+
+def test_taxonomy_persist_discovered_propagates_the_retired_error_even_when_the_collection_has_topics(monkeypatch):
+    """The 409 benign-skip branch reads a body with no sqlstate as the concurrent-discovery race and, when the collection
+    has topics, returns []. A retired no-successor 409 is also a 409 with no sqlstate: without the typed re-raise it would
+    be swallowed as 'topics already persisted' (http_taxonomy_store.py, persist_discovered_topics)."""
+    store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
+
+    def refuse(path, payload):
+        raise _transport_retired_409(RETIRED_NAME)
+
+    store._post = refuse
+    store.get_topics_for_collection = lambda collection: [{"id": 1}]  # the benign reading would find topics and return []
+    monkeypatch.setattr(HttpTaxonomyStore, "_catalog_registrar", None)  # a property on the real store; the retry wrapper is stubbed
+    monkeypatch.setattr("nexus.corpus.write_with_registration_retry", lambda name, write_fn, **kw: write_fn())
+
+    with pytest.raises(RetiredNoSuccessorError):
+        store.persist_discovered_topics(RETIRED_NAME, [{"label": "t"}])
