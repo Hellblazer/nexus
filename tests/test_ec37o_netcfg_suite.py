@@ -25,9 +25,8 @@ in four legs:
 * ``config_corporate_proxy``: ``config.yml`` names the terminating proxy and the CA that signed it (a
   corporate TLS-inspecting proxy): the user's choice is honoured, and the proxy reads the bearer.
 
-Only requests that carry a bearer are held to this (Sam's ruling leaves the others alone): the T3 client's
-unauthenticated ``/version`` probe, for one, still honours ``HTTPS_PROXY`` and ``SSL_CERT_FILE``, so the
-assertions are on what the proxies read (``auth``), never on whether anything touched them.
+The assertions are on what the proxies read (``auth``). The unauthenticated probes the client trusts take the
+same transport (nexus-ec37o residual 1); ``tests/test_ec37o_probe_transport.py`` holds those to "never touched".
 """
 from __future__ import annotations
 
@@ -104,9 +103,9 @@ def _matrix() -> list[pytest.param]:
     params = []
     for caller in CALLERS:
         for leg in LEGS:
-            # the T3 client reads /version from whatever answers: the terminating proxy standing in for the engine
-            # is not a conformant one, and the client raises ManagedServiceIncompatible (a guarded error) in the child
-            marks = (pytest.mark.expects_unresolvable_endpoint,) if caller.name == "nx_t3_vector_client" and leg == "config_corporate_proxy" else ()
+            # the T3 client's /version probe takes the same transport: when the environment's CA is the only one that
+            # names the origin, the probe cannot trust it and raises ManagedServiceUnreachable (a guarded error) in the child
+            marks = (pytest.mark.expects_unresolvable_endpoint,) if caller.name == "nx_t3_vector_client" and leg == "env_trust_only" else ()
             params.append(pytest.param(caller, leg, id=f"{caller.name}-{leg}", marks=marks))
     return params
 

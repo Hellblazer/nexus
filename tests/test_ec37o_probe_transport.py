@@ -186,8 +186,19 @@ PLAIN_PROBES = [p for p in PROBES if not p.https]
 LEGS = ("env_attack", "env_trust_only", "config_tunnel")
 
 
-@pytest.mark.parametrize("leg", LEGS)
-@pytest.mark.parametrize("probe", HTTPS_PROBES, ids=lambda p: p.name)
+def _https_matrix() -> list[pytest.param]:
+    # the compatibility probe raises ManagedServiceUnreachable (a guarded error, charged to the test by the
+    # storage-touch guard unless marked) when the origin's CA is not trusted: that refusal is the point of env_trust_only
+    return [
+        pytest.param(
+            probe, leg, id=f"{probe.name}-{leg}",
+            marks=(pytest.mark.expects_unresolvable_endpoint,) if probe.name == "managed_service_probe" and leg == "env_trust_only" else (),
+        )
+        for probe in HTTPS_PROBES for leg in LEGS
+    ]
+
+
+@pytest.mark.parametrize(("probe", "leg"), _https_matrix())
 def test_an_https_probe_takes_its_proxy_and_ca_from_config_only(tmp_path, pki, origin, mitm, tunnel, probe, leg):
     real_ca, attacker_ca = pki[0], pki[1]
     attack = {**_proxy_env(mitm.url), **_ca_env(attacker_ca.pem, tmp_path / "attacker-certs")}

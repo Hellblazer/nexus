@@ -777,7 +777,7 @@ def _proxy_matrix() -> list[pytest.param]:
         if caller.name in ("doctor_whoami_probe", "mint_armed_bearer_for"):
             continue  # neither carries a lease token
         for leg in ("bare", "url_real", "hostport_real"):
-            params.append(pytest.param(caller, leg, id=f"{caller.name}-{leg}", marks=_marks(caller.name == "nx_t3_vector_client" and leg == "url_real")))
+            params.append(pytest.param(caller, leg, id=f"{caller.name}-{leg}"))
     return params
 
 
@@ -793,22 +793,20 @@ def test_a_lease_token_never_goes_through_a_proxy(tmp_path, real, decoy, caller,
     if caller.after is not None:
         caller.after(tmp_path, real, decoy, True)
     context = (proc.returncode, proc.stderr[-400:], real.requests, decoy.requests)
-    # nothing, not just no credential: a request with a bearer dials the engine directly. The one request
-    # that may meet a proxy is the T3 client's unauthenticated GET /version compatibility probe (no bearer).
-    allowed = [("http://127.0.0.1:%d/version" % real.port, None)] if caller.name == "nx_t3_vector_client" else []
-    assert decoy.auth == [] and all(r in allowed for r in decoy.requests), context
+    # nothing, not just no credential: a request with a bearer dials the engine directly, and so does the T3 client's
+    # unauthenticated GET /version compatibility probe, whose answer it trusts (nexus-ec37o residual 1)
+    assert decoy.auth == [] and decoy.requests == [], context
     assert LEASE in real.auth, context
 
 
-@pytest.mark.parametrize("caller", [pytest.param(c, id=c.name, marks=_marks(c.name == "nx_t3_vector_client")) for c in _TOKEN_CALLERS])
+@pytest.mark.parametrize("caller", [pytest.param(c, id=c.name) for c in _TOKEN_CALLERS])
 def test_an_exported_token_at_a_plain_http_url_never_goes_through_a_proxy(tmp_path, real, decoy, caller):
     """The env-token leg of the same rule: the bearer goes straight to the engine whatever proxy is named."""
     proc = caller.run(tmp_path, {"NX_SERVICE_URL": real.url, "NX_SERVICE_TOKEN": "exported-by-the-user", **_proxy_env(decoy)})
     if caller.after is not None:
         caller.after(tmp_path, real, decoy, True)
     context = (proc.returncode, proc.stderr[-400:], real.requests, decoy.requests)
-    allowed = [(f"{real.url}/version", None)] if caller.name == "nx_t3_vector_client" else []
-    assert decoy.auth == [] and all(r in allowed for r in decoy.requests), context
+    assert decoy.auth == [] and decoy.requests == [], context  # the compatibility probe goes direct too
     assert EXPORTED in real.auth, context
 
 
