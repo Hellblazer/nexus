@@ -101,7 +101,7 @@ def test_a_run_with_chat_decisions_still_asks_apply() -> None:
     para = _app_decided()
     assert "took Branch A of step 11 (no edit question was asked in chat)" in para
     assert "When any edit was decided in chat, the run asks `Apply` as in step 12 of SKILL.md." in para
-    assert "ask the author to confirm unless the run is App-decided, below" in _apply_paragraph()
+    assert "ask the author to confirm unless the run is App-decided or follows a reply that only says to apply" in _apply_paragraph()
 
 
 def test_a_no_to_the_query_question_goes_to_step_12_and_branch_b_uses_explicit_numbers() -> None:
