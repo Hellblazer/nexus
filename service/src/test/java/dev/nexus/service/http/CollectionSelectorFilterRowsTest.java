@@ -225,7 +225,7 @@ class CollectionSelectorFilterRowsTest {
         Resp list = post("/v1/vectors/search", "{\"collections\":[\"live-five\",\"retired-eight\"],\"query\":\"q\"}");
         for (Resp r : new Resp[] {body, query, list}) {
             assertThat(r.status()).as(r.body()).isEqualTo(409);
-            assertThat(r.json().path("reason").asText()).isEqualTo("collection_superseded");
+            assertThat(r.json().path("reason").asText()).isEqualTo("retired_no_successor");
             assertThat(r.json().path("collection").asText()).isEqualTo("retired-eight");
             assertThat(r.json().path("collection_id").asLong()).isEqualTo(8);
             assertThat(r.json().has("superseded_by")).as(r.body()).isFalse();
@@ -269,7 +269,7 @@ class CollectionSelectorFilterRowsTest {
                 r = post(path, "{\"" + slot.labelField() + "\":" + value + "}");
             }
             exercised++;
-            if (r.status() != 409 || !"collection_superseded".equals(r.json().path("reason").asText())
+            if (r.status() != 409 || !"retired_no_successor".equals(r.json().path("reason").asText())
                     || r.json().path("collection_id").asLong() != 8 || r.json().has("superseded_by")
                     || r.json().has("successor_collection_id")) {
                 notRefused.add(path + " -> " + r.status() + " " + r.body());
@@ -303,7 +303,7 @@ class CollectionSelectorFilterRowsTest {
         Resp r = get("/v1/catalog/collections/get?collection_id=8");
         assertThat(r.status()).as(r.body()).isEqualTo(409);
         JsonNode j = r.json();
-        assertThat(j.path("reason").asText()).isEqualTo("collection_superseded");
+        assertThat(j.path("reason").asText()).isEqualTo("retired_no_successor");
         assertThat(j.path("collection").asText()).isEqualTo("retired-eight");
         assertThat(j.path("collection_id").asLong()).isEqualTo(8);
         assertThat(j.has("superseded_by")).as("no successor, no successor fields: %s", r.body()).isFalse();

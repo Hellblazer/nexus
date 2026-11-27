@@ -18,7 +18,7 @@ public final class NoSuccessorBodyAsserts {
 
     /** {@code body} (status already 409) is the bare marker of the retired collection {@code label} / {@code id}; {@code what} names the request. */
     public static void assertBareMarker(JsonNode body, String what, String label, long id) {
-        assertThat(body.path("reason").asText()).as(what + ": " + body).isEqualTo("collection_superseded");
+        assertThat(body.path("reason").asText()).as(what + ": " + body).isEqualTo("retired_no_successor");
         assertThat(body.path("error").asText()).as(what).isEqualTo("collection_superseded");
         assertThat(body.path("collection").asText()).as(what + ": " + body).isEqualTo(label);
         assertThat(body.path("collection_id").asLong(-1)).as(what).isEqualTo(id);

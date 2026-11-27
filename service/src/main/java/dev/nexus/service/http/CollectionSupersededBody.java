@@ -19,7 +19,8 @@ import java.util.Optional;
  * {@code error} and {@code reason} the same value, {@code message}, {@code collection} (the retired label) and
  * {@code superseded_by} (the successor's label, the key the client's {@code superseded_write_error_from_body} reads), plus the ids,
  * {@code collection_id} and {@code successor_collection_id}. The successor fields are present only when the walk by
- * {@code superseded_by_id} ({@link CollectionSuccessor}) found a live successor; its label is the row's CURRENT label.
+ * {@code superseded_by_id} ({@link CollectionSuccessor}) found a live successor; its label is the row's CURRENT label. With none, {@code error}
+ * stays {@code collection_superseded} and {@code reason} is {@code retired_no_successor} ({@link HttpUtil#RETIRED_NO_SUCCESSOR_REASON}, RDR-229 R7).
  */
 final class CollectionSupersededBody {
 
@@ -31,7 +32,7 @@ final class CollectionSupersededBody {
     static String of(long retiredId, String retiredLabel, Optional<CollectionSuccessor.Successor> successor) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("error", HttpUtil.COLLECTION_SUPERSEDED_REASON);
-        body.put("reason", HttpUtil.COLLECTION_SUPERSEDED_REASON);
+        body.put("reason", successor.isPresent() ? HttpUtil.COLLECTION_SUPERSEDED_REASON : HttpUtil.RETIRED_NO_SUCCESSOR_REASON);
         body.put("message", successor
             .map(s -> "collection_id " + retiredId + " ('" + retiredLabel + "') was superseded by '" + s.label()
                 + "' (collection_id " + s.id() + "), so a request that names it is refused")

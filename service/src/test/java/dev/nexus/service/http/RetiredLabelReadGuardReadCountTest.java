@@ -93,7 +93,7 @@ class RetiredLabelReadGuardReadCountTest extends AtomicWriteTestBase {
         var refusal = RetiredLabelReadGuard.refusal(rows, TENANT, Set.of(), labels);
 
         assertThat(refusal).isPresent();
-        assertThat(refusal.get()).contains("\"reason\":\"collection_superseded\"").contains("\"collection\":\"" + retired + "\"")
+        assertThat(refusal.get()).contains("\"reason\":\"retired_no_successor\"").contains("\"collection\":\"" + retired + "\"")
             .doesNotContain("superseded_by").doesNotContain("successor_collection_id");
         // one read for the labels, one for the retired row's successor lookup (a tombstone only)
         assertThat(connections.get()).isEqualTo(2);

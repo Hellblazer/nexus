@@ -141,7 +141,7 @@ class RetiredLabelReadersTest {
         Resp byId = send(reader, reader.byId(id));
 
         assertThat(byLabel.status()).as("by label: %s", byLabel.body()).isEqualTo(409);
-        assertThat(byLabel.reason()).isEqualTo("collection_superseded");
+        assertThat(byLabel.reason()).isEqualTo("retired_no_successor");
         assertThat(byLabel.json().path("error").asText()).isEqualTo("collection_superseded");
         assertThat(byLabel.json().path("collection").asText()).isEqualTo(retired);
         assertThat(byLabel.json().path("collection_id").asLong(-1)).isEqualTo(id);

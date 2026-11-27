@@ -418,6 +418,10 @@ public final class HttpUtil {
      *       also carries {@code collection}, {@code superseded_by} (the successor) and {@code message}. NOT a
      *       "not registered" 422 on purpose: a client retries that one by re-registering, which revives the
      *       retired name. Not retryable; only an explicit registration revives the name.</li>
+     *   <li>{@code retired_no_successor} (409): a request named a retired collection whose successor was deleted, so it names none
+     *       ({@link #RETIRED_NO_SUCCESSOR_REASON}, RDR-229 R7). {@code error} stays {@code collection_superseded}; the body carries
+     *       {@code collection}, {@code collection_id} and {@code message}, never {@code superseded_by} or {@code successor_collection_id}.
+     *       Not retryable.</li>
      *   <li>{@code unregistered_embedding_model} (422): a chunk or centroid write named a collection whose
      *       embedding model is registered in no {@code nexus.embedding_models} row and has no partition
      *       ({@link #UNREGISTERED_EMBEDDING_MODEL_REASON}, RDR-225); the body carries {@code model}.</li>
@@ -956,6 +960,13 @@ public final class HttpUtil {
 
     /** {@code error} (and {@code reason}) on the 409 for a chunk write to a superseded collection name (nexus-mp8ys). Wire contract. */
     static final String COLLECTION_SUPERSEDED_REASON = "collection_superseded";
+
+    /**
+     * {@code reason} of the 409 for a request that names a retired collection with no live successor (RDR-229 R7, nexus-p2m1x.25): its
+     * {@code superseded_by_id} is its own id, because its successor was deleted. {@code error} stays {@code collection_superseded}; the body
+     * carries no {@code superseded_by} and no {@code successor_collection_id}. Wire contract.
+     */
+    static final String RETIRED_NO_SUCCESSOR_REASON = "retired_no_successor";
 
     /** The {@link dev.nexus.service.db.CollectionSupersededException} in {@code t}'s cause chain, or null. */
     static dev.nexus.service.db.CollectionSupersededException collectionSuperseded(Throwable t) {

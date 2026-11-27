@@ -114,7 +114,7 @@ class CollectionRetiredIdRoutesTest {
         Resp r = fx.get("/v1/catalog/collections/get?collection_id=" + xId);
 
         assertThat(r.status()).as(r.body()).isEqualTo(409);
-        assertThat(r.reason()).isEqualTo("collection_superseded");
+        assertThat(r.reason()).isEqualTo("retired_no_successor");
         assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(xId);
         assertThat(r.json().has("superseded_by")).as("no successor fields: %s", r.body()).isFalse();
         assertThat(r.json().has("successor_collection_id")).isFalse();
