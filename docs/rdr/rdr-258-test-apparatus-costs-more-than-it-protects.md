@@ -363,7 +363,8 @@ blocking at least at the release boundaries, the release PR into main and, for
 wire pairing from Phase 2, the engine release) or *accounting* (class A: it
 reports as a fitness function in warning mode and is reviewed every 2 weeks; a
 class-A check with a numeric value also fails past an explicit alarm line,
-which Sam sets per check from Phase 0's report). Grounds: the warn mode of
+which Sam sets per check from Phase 0's report). Every class-A check is
+demoted, either by a phase step or by a review batch (Phase 1 step 7). Grounds: the warn mode of
 fitness functions (258-research-9); CA-1; the red census (258-research-1). One
 test decides a check's class: what it guards. A check that guards a failure a
 user can receive is class U; every other check is class A. Phase 0's report can
@@ -385,7 +386,7 @@ The class of each named check, from strand C's inventory (258-research-5):
 | `docs_reference_rot` | A, hygiene | citations inside RDRs and docs |
 | Mode-declarations census, `module_seam`, vacuity floors, shard partition | A, apparatus | they guard the test suite's own correctness |
 | Plugin ledger, changelog fragments, ci-evidence, push script | A, process | release bookkeeping; whether the release PR into main runs each ledger check blocking is not verified here, and Phase 4 step 1 checks it |
-| `cli_runner_output_invariant`, `tmp_root`, the other lint modules | to classify in Phase 0 | not classified by strand C |
+| `cli_runner_output_invariant`, `tmp_root`, the other lint modules | to classify in Phase 0 | not classified by strand C; a class-A one is demoted in a review batch (Phase 1 step 7) |
 | The push-time check gate's nine checks | the class of the CI check each one runs | Phase 0 classes pg-cluster, docs-readers and write-seam (258-research-18) |
 
 The class of the remaining lint modules is written into each module by Phase 0,
@@ -404,7 +405,9 @@ what the check's `guards:` header names. A check whose reds were all fixed by
 ledger or ceiling edits retires after 60 days. A demoted check reports instead
 of failing, so a reported failing item fixed by changing what `guards:` names
 also counts as a catch. Each check's 60-day clock starts on the day its
-demotion lands, so the first clocks start with Phase 1's demotions. The 2-week
+demotion commit lands on develop, read from git; the first clocks start with
+Phase 1's demotions, and every other class-A check's clock starts with its
+phase step or review batch. The 2-week
 review applies the rule from Phase 1 step 5 on. Grounds: the 67-to-4 ceiling record and the absence of any merit
 retirement since 2026-10-04 (258-research-4); the 3.1x regrowth after a burst
 cleanup (258-research-7). No verified source gives a retirement rule; this
@@ -478,7 +481,10 @@ born from incidents (258-research-4); Google's "a test for each behavior"
 The new code is small and reuses existing patterns.
 
 - **Check header.** Three comment lines at the top of each check module:
-  `owner:`, `guards:`, `class: U | A`. A check without them is listed by the
+  `owner:`, `guards:`, `class: U | A`. The `guards:` line holds the incident
+  or bead id and the paths of the guarded thing; the report counts a guard
+  catch when a fix touched those paths and not the check's own ceiling,
+  ledger or allowlist files. A check without them is listed by the
   report as a finding; no test fails on it (a new gate to police the gates
   would repeat Gap 2).
 - **Report script** (`scripts/check_value_report.py`, illustrative name):
@@ -748,16 +754,18 @@ automatic counts); for each numeric class-A check, its value, trend and a
 proposed alarm line, sent to Sam one check at a time; and the target for the
 ledger-and-ceiling commit share, which Sam left for Phase 0 to set.
 
-### Phase 1: Report mode for four class-A checks, the 2-week review and rule (h). Sam decides each demotion and alarm line, each retirement and the AGENTS.md rule; the implementer builds the reporting and runs the reviews without him.
+### Phase 1: Report mode for four class-A checks, the 2-week review, rule (h) and the review batches. Sam decides each demotion and alarm line, each batch, each retirement and the AGENTS.md rule; the implementer builds the reporting, runs the reviews and proposes the batches without him.
 
 **Sam decides**: each step's demotion, with the alarm line of a numeric check;
-each retirement the review proposes; the AGENTS.md rule in step 6.
+each step 7 batch; each retirement the review proposes; the AGENTS.md rule in
+step 6.
 **Without Sam**: the report-mode code, the advisory job layout, the review
-records, the cause test in step 3, and the step 6 draft.
+records, the cause test in step 3, the step 6 draft, and each batch proposal.
 
 Ordered by measured red runs (258-research-2). `cli_runner_output_invariant`
 (27) and `tmp_root` (20) are larger than step 4 but were not examined
-(258-research-14); they are not in this phase, and Phase 0 classes them.
+(258-research-14); Phase 0 classes them, and a class-A one is demoted in a
+review batch (step 7).
 
 #### Step 1: Storage-touch ratchet (68 red runs) [Sam]
 
@@ -799,6 +807,21 @@ Write rule (h) into the AGENTS.md hot rule on review gates: a finding is
 answered by fixing the behaviour and adding a behaviour test; a new accounting
 check lands in report mode with an owner, an incident and, if numeric, an
 alarm line.
+
+#### Step 7: The review demotes the class-A remainder in batches [Sam per batch]
+
+The remainder is every check Phase 0 classes A that no other step demotes:
+not steps 1 to 4 here, not the ceilings of Phase 3, not the ledgers of Phase 4.
+From the first review on, the review proposes the next batch from Phase 0's
+report, largest baseline red-run count first, and sends it to Sam as one
+decision (Sam, 2026-11-27, T2 `nexus/sam-ruling-rdr258-accept-2026-11-27`).
+Each batch is a plannable unit of its own: the review record names its checks,
+the alarm line of each numeric one, the advisory-job and push-gate changes,
+and its demotion lands as one change, which starts each check's 60-day clock.
+Batches continue until the report shows that the baseline red runs a
+still-blocking class-A check would still turn red put the accounting share
+under the 30% target; after that, the rest of the remainder is demoted at the
+review's pace.
 
 ### Phase 2: Wire pairing blocks at the release boundaries. Sam decides the engine-release change and the develop demotion; the implementer prepares both without him.
 
@@ -1006,7 +1029,7 @@ except where the table says otherwise.
 
 | Metric | Baseline | Target |
 | --- | --- | --- |
-| Red share by category (product, accounting, flake/infra, stale/ambient, harness, build) | 2.4% / 63.6% / 15.1% / 10.9% / 7.4% / 0.5%, sample-corrected estimates (258-research-1) | accounting under 30%; no target for the other categories |
+| Red share by category (product, accounting, flake/infra, stale/ambient, harness, build) | 2.4% / 63.6% / 15.1% / 10.9% / 7.4% / 0.5%, sample-corrected estimates (258-research-1) | accounting under 30%, reached through Phase 1 steps 1 to 4, Phases 3 and 4, and the review batches of Phase 1 step 7; no target for the other categories |
 | CI red time | about 280 h, 19% of the window; accounting 188 h (258-research-1, 258-research-2) | under 140 red hours per sixty days |
 | Ledger-and-ceiling commit share | 545 of 8,165 non-merge commits, 7% (258-research-3) | set by Phase 0 step 5 |
 | Lint module count | 200 modules, 3,380 tests (258-research-4) | no net growth |
