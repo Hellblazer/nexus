@@ -75,7 +75,6 @@ def _proxies(opener) -> dict[str, str]:
 
 
 def _handshake(ctx: ssl.SSLContext, origin: TlsOrigin) -> None:
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # the client floor these handshakes assert under, whatever the context's default
     with socket.create_connection(("127.0.0.1", origin.port), timeout=5) as raw, ctx.wrap_socket(raw, server_hostname="127.0.0.1"):
         pass
 
@@ -90,6 +89,9 @@ def origin(pki) -> Iterator[TlsOrigin]:
 # ── the CLI trust store ──────────────────────────────────────────────────────
 
 class TestCliTrust:
+    def test_the_context_floors_the_protocol_at_tls_1_2_explicitly(self, config_dir) -> None:
+        assert bt.bearer_ssl_context().minimum_version == ssl.TLSVersion.TLSv1_2
+
     def test_an_unset_trust_store_does_not_trust_the_test_ca(self, config_dir, origin) -> None:
         with pytest.raises(ssl.SSLCertVerificationError):
             _handshake(bt.bearer_ssl_context(), origin)
@@ -204,6 +206,9 @@ class TestCliUrllib:
 # ── the plugin's stdlib mirror ───────────────────────────────────────────────
 
 class TestPluginTrust:
+    def test_the_context_floors_the_protocol_at_tls_1_2_explicitly(self, hook) -> None:
+        assert hook.bearer_ssl_context().minimum_version == ssl.TLSVersion.TLSv1_2
+
     def test_an_unset_trust_store_does_not_trust_the_test_ca(self, hook, origin) -> None:
         with pytest.raises(ssl.SSLCertVerificationError):
             _handshake(hook.bearer_ssl_context(), origin)

@@ -75,6 +75,7 @@ def _build_context(ca_bundle: str) -> ssl.SSLContext:
     # OpenSSL reads ``SSL_CERT_FILE`` / ``SSL_CERT_DIR``, and it opens the file ``SSLKEYLOGFILE`` names.
     # This is the context it would build, with certifi's bundle loaded explicitly and nothing from the env.
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # verify_mode CERT_REQUIRED and check_hostname on
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # an explicit floor; the default is the same since Python 3.10
     if sys.version_info >= (3, 13):  # what create_default_context added in 3.13
         ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN | ssl.VERIFY_X509_STRICT
     # The PEM text, not the path: OpenSSL then opens no file (on Windows a file BIO needs an OPENSSL_Applink
