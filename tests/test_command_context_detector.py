@@ -314,8 +314,10 @@ def test_polyglot_full_kitchen_sink(tmp_path: Path) -> None:
 def test_accepts_explicit_root_not_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """detect_project_types uses the root argument, not os.getcwd()."""
     make_dir(tmp_path, "Cargo.toml")
-    # Change cwd to a different dir (one with no markers)
-    monkeypatch.chdir(Path("/tmp"))
+    # Change cwd to a different dir (one with no markers); "/tmp" does not exist on Windows
+    elsewhere = tmp_path.parent / (tmp_path.name + "-elsewhere")
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
     result = detect_project_types(tmp_path)
     assert "- Rust" in result
 
