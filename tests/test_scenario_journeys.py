@@ -68,7 +68,10 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.commands.store import _t3
+from nexus.db.http_vector_client import HttpVectorClient, is_service_backed
 from nexus.db.t2.http_tuple_store import ClaimNotFoundError, HttpTupleStore, ReplySpec
+from nexus.mcp.core import collection_verify
 from tests._catalog_fixture_ops import active_reader, documents_by_file_path, documents_by_title
 from tests._engine_substrate import ensure_engine
 
@@ -273,6 +276,23 @@ def _git_init(repo: Path) -> None:
         subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
 
 
+#: nexus-9biyo: eleven more short, distinct notes. With journey 1's own note that is twelve, above the deep-verify
+#: probe's n_results=10, so a 100% probe hit rate means each sampled note was found among others.
+_VERIFY_CORPUS = {
+    "scenario-journey-1-wal": "Write ahead logging records every change durably before data pages are touched.",
+    "scenario-journey-1-vacuum": "Autovacuum reclaims dead tuples so that updated tables do not bloat.",
+    "scenario-journey-1-bread": "Sourdough bread rises slowly because wild yeast ferments the flour overnight.",
+    "scenario-journey-1-orbit": "A geostationary satellite orbits above the equator once every sidereal day.",
+    "scenario-journey-1-chess": "In chess the knight moves in an L shape and may jump over other pieces.",
+    "scenario-journey-1-coral": "Coral reefs shelter a quarter of marine species despite covering little seafloor.",
+    "scenario-journey-1-latin": "Latin nouns change their endings to show case, number and grammatical gender.",
+    "scenario-journey-1-solder": "Solder joins electronic components by melting a tin alloy around the leads.",
+    "scenario-journey-1-monsoon": "The summer monsoon brings heavy rain to South Asia as warm air rises inland.",
+    "scenario-journey-1-fugue": "A fugue weaves one melodic subject through several independent voices.",
+    "scenario-journey-1-glacier": "Glaciers carve broad valleys as slowly flowing ice drags rock across the bed.",
+}
+
+
 @pytest.mark.scenario
 def test_store_put_is_searchable_and_catalogued(t2_service_env) -> None:
     """Journey 1: ``store put`` -> ``search`` -> catalog, three different
@@ -308,6 +328,32 @@ def test_store_put_is_searchable_and_catalogued(t2_service_env) -> None:
     docs = documents_by_title(title)
     assert len(docs) == 1, f"expected exactly one catalog document for {title!r}, got {docs}"
     assert docs[0].chunk_count > 0, "catalog row must reflect the written chunk"
+
+    # nexus-9biyo: deep verify on the service client, through the CLI verb and the MCP tool. The probe used to
+    # call Chroma-era ``_client_for`` / ``peek``, which ``HttpVectorClient`` lacks, so every service install died
+    # with "embedding probe failed". Non-vacuity: the handle is the service client, and the collection holds
+    # more documents than one probe result page (n_results=10).
+    collection = put.output.split("\u2192")[-1].strip().split()[0]
+    for note_title, text in _VERIFY_CORPUS.items():
+        more = runner.invoke(main, ["store", "put", "-", "--title", note_title, "-c", "fixture-subject"], input=text + "\n")
+        assert more.exit_code == 0, more.output
+    db = _t3()
+    assert isinstance(db, HttpVectorClient) and is_service_backed(db)
+    total = len(_VERIFY_CORPUS) + 1
+    assert db.collection_info(collection)["count"] == total > 10
+
+    verify = runner.invoke(main, ["collection", "verify", collection, "--deep"])
+    assert verify.exit_code == 0, verify.output
+    assert "embedding probe failed" not in verify.output
+    assert "embedding health OK" in verify.output
+    assert "100% probe hit rate" in verify.output
+    assert "cosine" in verify.output
+
+    tool = collection_verify(collection)
+    assert "Status:     healthy" in tool, tool
+    assert f"Documents:  {total}" in tool, tool
+    assert "Probe hit rate: 100%" in tool, tool
+    assert "(cosine)" in tool, tool
 
 
 @pytest.mark.scenario
