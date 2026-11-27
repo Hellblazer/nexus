@@ -210,7 +210,8 @@ class TestTrashCmd:
         result = CliRunner().invoke(main, ["catalog", "trash"])
         assert result.exit_code != 0
         assert "engine" in result.output.lower()
-        assert "nexus-dkymw" in result.output
+        assert "does not yet expose the trash route" in result.output
+        assert "Upgrade the deployed engine-service" in result.output
 
 
 # ── CLI: nx catalog restore ─────────────────────────────────────────────────
@@ -321,4 +322,5 @@ class TestRestoreCmd:
         result = CliRunner().invoke(main, ["catalog", "restore", "1.2.3"])
         assert result.exit_code != 0
         assert "engine" in result.output.lower()
-        assert "nexus-dkymw" in result.output
+        assert "does not yet expose the restore route" in result.output
+        assert "Upgrade the deployed engine-service" in result.output
