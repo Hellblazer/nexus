@@ -3612,11 +3612,18 @@ its acceptance is that test green plus the census pin it lowers.
     latch), `gc_restore_rereferenced`, `gc_restore_rereferenced_bounded`,
     `quarantine_restore_chunks` and `quarantine_reattach_plan`
     (the test fails once `vectors-083` exists and a row is left). The
-    reaper's own expiry functions stay on the label to P4.1 (the reaper
-    ruling R1 of bead nexus-p2m1x.35); `vectors-083-7` adds to
-    `reaper_expire_client_quarantine` only an arm that, when the origin
-    label names no live knowledge collection, narrows the expiry to rows whose origin
-    id is JSON null. The ten
+    reaper's own expiry functions, `reaper_expire_quarantine` and
+    `reaper_expire_client_quarantine`, still select rows by the label tag
+    until P4.1 (the reaper ruling R1 of bead nexus-p2m1x.35), but from
+    `vectors-086` (nexus-p2m1x.28) each guards a row by its own
+    `origin_collection_id` as well as by the id the label resolves to: a
+    manifest row of that id protects the chunk whatever label the call
+    carried, and from the latch a quarantine row with no origin id is never
+    expired, is not counted as protected, and is not reported (a later data
+    move will stamp such rows). `vectors-083-7` had added to
+    `reaper_expire_client_quarantine` an arm that, when the origin label
+    names no live knowledge collection, narrows the expiry to rows whose
+    origin id is JSON null; `vectors-086-2` keeps it. The ten
     `TwinKeyUpsert` sites take the id key as their conflict target, among
     them the chunk and centroid upserts (`PgVectorRepository.java:1352`,
     `CatalogRepository.java:6863`, `TaxonomyCentroidRepository.java:197`).
@@ -4760,3 +4767,4 @@ large, and moved under a ratchet.
 - 2026-11-26: P3.12 landed in full (grant 3, nexus-p2m1x.32): `nx collection delete` by label or `--id`, 3c6833a3fd, 65b245534f and 4ddee8c813 (in no engine or client tag yet). P3.12's text and the Day 2 table now say what shipped, the 0.1.203 floor and why, the retired-label refusal as ruled on the bead (only a retired label with a live direct successor is refused), and the `--keep-source` consequence. The 2026-11-24 line above describing P3.12 in part stands as the record of that date.
 - 2026-11-26: citations to landed, reviewed code (grant 3), nexus-p2m1x.48, the two boot_work warm-up commits of the next engine cut: the `MoveBootWork.java` and `MoveBootWorkTest.java` line cites (the announce and retainAnnounced block, the validation-in-flight block, the entry publisher, the restarted-engine builds line and its test) follow the sampler's new warm-up code, which shifted them; no wording changes.
 - 2026-11-26: the delete's lock modes follow the quarantine lane's fix round (grant 3, nexus-p2m1x.23 and .27; the commits of feature/rdr229-nextcut-quarantine, unpublished until the stack lands; T2 `nexus/nextcut-quarantine-lane-2026-11-26`): a delete by id takes the origin's row and its quarantine siblings' rows FOR UPDATE in one `collection_id`-ordered statement, a delete by label the siblings FOR UPDATE and the origin FOR KEY SHARE in the same order, and a rename's retag key-shares each sibling's row before it reads the rows; the `CollectionDeleteFence.java` cites are re-read from that tree.
+- 2026-11-26: the reaper's two expiry functions guard a quarantine row by its own origin id (grant 3, nexus-p2m1x.28; Sam's ruling, T2 `nexus/sam-ruling-rdr229-nextcut-ddl-cap-2961-2026-11-26`): `vectors-086` redefines `reaper_expire_quarantine` and `reaper_expire_client_quarantine`; after a one-row rename a move that commits after the retag leaves a row tagged with the old label, which the label-resolved guard missed; the I8 census's basis for the two reaper rows no longer says the call was ruled safe.
