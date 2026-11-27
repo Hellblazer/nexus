@@ -100,15 +100,20 @@ def _engine_restart_refusal(exc: Exception) -> str | None:
 def _engine_drop_move_refusal(exc: Exception) -> str | None:
     """What to say when *exc* is the engine's 409 ``rename_refused`` with ``missing: name_key_drop_move``, else ``None``.
 
-    This is the normal wait after the restart that latches gate 3 (RDR-229 P3.7): the engine runs one short background
-    step for a minute or two and then renames work. Nothing is wrong and no restart is needed, so the generic "fix the
-    error and retry" would send the person looking for a fault.
+    This is the normal wait from the latch of gate 3 (RDR-229 P3.7), which comes at the restart that applies the changesets
+    and not before it (until the latch a rename is the name path and is not refused). The engine runs one background move,
+    the name-key drop move, and the refusal lasts as long as it does: about 10 s on an empty store, longer while the move
+    waits behind a running index build (the engine warns past six hours). Nothing is wrong and no restart is needed, so the
+    generic "fix the error and retry" would send the person looking for a fault. A stalled move gives the same 409, so the
+    text also says what to do when it outlasts a few minutes.
     """
     if _rename_refused_missing(exc) != "name_key_drop_move":
         return None
     return (
-        "The engine is finishing a short background step after an upgrade or restart, so renames are refused for now. "
-        "Run the rename again in a minute or two; `nx doctor` shows the wait."
+        "The engine is running a background step that has to finish before it can rename (seconds on a small store, "
+        "longer while an index build runs), so renames are refused for now. Run the rename again in a minute or two. "
+        "If it still refuses after several minutes, run `nx doctor` and report what its \"RDR-229 collection rename\" "
+        "row says, since a stalled step gives the same refusal."
     )
 
 

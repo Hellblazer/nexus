@@ -934,13 +934,16 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     The engine refuses a new name it reserves (409 ``label_reserved``: a
     collection renamed away from that label still has rows that carry it
     until a later release relabels them), and refuses every rename (409
-    ``rename_refused``) while it cannot yet run the one-row rename. After
-    the restart that follows an upgrade this is ``missing:
-    name_key_drop_move`` for a minute or two while the engine runs a short
-    background step: run the rename again then (``nx doctor`` shows the
-    wait). ``missing: restart`` appears only when a listed changeset
-    failed to apply on its own; the restart is then the operator's to
-    order.
+    ``rename_refused``) while it cannot yet run the one-row rename. From
+    the latch of gate 3, which the restart after an upgrade brings, this is
+    ``missing: name_key_drop_move`` while the engine runs its name-key drop
+    move: about 10 s on an empty store, longer while the move waits behind
+    an index build. Run the rename again then; if it still refuses after
+    several minutes, run ``nx doctor`` and report the "RDR-229 collection
+    rename" row, since a stalled move gives the same refusal. Before the
+    latch a rename is the name path and is not refused. ``missing:
+    restart`` appears only when a listed changeset failed to apply on its
+    own; the restart is then the operator's to order.
 
     Cross-prefix renames (e.g. ``code__`` ↔ ``docs__``) change the
     embedding-model space and are rejected unless ``--force-prefix-change``
