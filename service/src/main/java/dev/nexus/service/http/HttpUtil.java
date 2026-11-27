@@ -603,12 +603,13 @@ public final class HttpUtil {
             log.warn("event={}_collection_superseded {} tenant={} collection={} superseded_by={}",
                 event, context, collectionSuperseded.tenant(), collectionSuperseded.collection(),
                 collectionSuperseded.supersededBy());
+            // RDR-229 R7: a retired name with no live successor carries the retired_no_successor reason and no superseded_by
             send(exchange, 409,
                 "{\"error\":\"" + COLLECTION_SUPERSEDED_REASON + "\""
-                + ",\"reason\":\"" + COLLECTION_SUPERSEDED_REASON + "\""
+                + ",\"reason\":\"" + (collectionSuperseded.hasSuccessor() ? COLLECTION_SUPERSEDED_REASON : RETIRED_NO_SUCCESSOR_REASON) + "\""
                 + ",\"message\":" + jsonString(collectionSuperseded.getMessage())
                 + ",\"collection\":" + jsonString(collectionSuperseded.collection())
-                + ",\"superseded_by\":" + jsonString(collectionSuperseded.supersededBy())
+                + (collectionSuperseded.hasSuccessor() ? ",\"superseded_by\":" + jsonString(collectionSuperseded.supersededBy()) : "")
                 + "}");
             return true;
         }

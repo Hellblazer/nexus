@@ -146,6 +146,19 @@ class HttpUtilPartitionErrorsTest {
     }
 
     @Test
+    void aWriteToATombstoneWithNoSuccessor_is409RetiredNoSuccessor_namingNoSuccessorField() throws Exception {
+        // RDR-229 R7 (nexus-p2m1x.25): its successor was deleted, so there is nowhere to redirect the write
+        var ex = send(CollectionSupersededException.noSuccessor("acme", "c1"));
+        assertThat(ex.status).isEqualTo(409);
+        JsonNode body = MAPPER.readTree(ex.body());
+        assertThat(body.get("error").asText()).isEqualTo("collection_superseded");
+        assertThat(body.get("reason").asText()).isEqualTo("retired_no_successor");
+        assertThat(body.get("collection").asText()).isEqualTo("c1");
+        assertThat(body.has("superseded_by")).isFalse();
+        assertThat(body.get("message").asText()).contains("no live successor").doesNotContain("write to '");
+    }
+
+    @Test
     void aSupersededRefusalWrappedByTheTransactionLayer_isStill409() throws Exception {
         var ex = send(new RuntimeException("tx failed",
             new CollectionSupersededException("acme", "c1", "c2")));

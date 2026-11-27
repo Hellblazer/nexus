@@ -368,6 +368,29 @@ class ReembedCutoverTest extends ReembedFixture {
             .isPresent();
     }
 
+    /** RDR-229 R7 (nexus-p2m1x.25): a source retired with no live successor is said to have none, never "superseded by" its own dead label. */
+    @Test
+    void aSourceRetiredWithNoLiveSuccessor_blocksTheCutover_sayingItHasNone() {
+        Fx fx = pair("blockednone");
+        seedDocs(fx, 2, 3);
+        Job started = startJob(fx, null, false);
+        String dead = "knowledge__gone__minilm-l6-v2-384__v9";
+        // the row a deleted successor leaves: the text of a label nothing bears, and its own id as the successor id
+        su(ctx -> ctx.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, dead)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATALOG_COLLECTIONS.COLLECTION_ID)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant())).and(CATALOG_COLLECTIONS.NAME.eq(fx.src())).execute());
+        ReembedRunner runner = runner(fx, ONE_DOC_PER_BATCH);
+        runner.setPhaseHookForTests(new Probe().hook(Set.of()));
+
+        runner.tick();
+
+        Job blocked = job(fx, started.jobId());
+        assertThat(blocked.state()).isEqualTo(CUTOVER);
+        assertThat(blocked.lastError()).contains("cutover is blocked").contains("names no live successor")
+            .doesNotContain(dead).contains(fx.tgt());
+    }
+
     @Test
     void aSourceThatIsNoLongerRegistered_blocksTheCutover_andSaysSoInLastError() {
         Fx fx = pair("unreg");

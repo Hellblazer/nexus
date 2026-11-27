@@ -15190,4 +15190,17 @@ public final class CatalogRepository {
             ? DSL.val(metaJson).cast(SQLDataType.JSONB).coerce(String.class)
             : DSL.castNull(SQLDataType.JSONB).coerce(String.class);
     }
+
+    /**
+     * RDR-229 R7 (nexus-p2m1x.25): the CURRENT label of the live successor of the retired row {@code row} (as {@link #getCollection} returns
+     * it), found through {@link CollectionSuccessor}, or empty when it names none. The text of a tombstone whose successor was deleted is its
+     * own dead label, so a refusal that says what a row was superseded by asks this and never prints the stored text. A map with no
+     * {@code collection_id} is judged by the text it carries.
+     */
+    public java.util.Optional<String> liveSuccessorLabel(String tenant, Map<String, Object> row) {
+        if (row.get("collection_id") instanceof Number id) {
+            return CollectionSuccessor.of(tenantScope, tenant, id.longValue()).map(CollectionSuccessor.Successor::label);
+        }
+        return row.get("superseded_by") instanceof String text && !text.isEmpty() ? java.util.Optional.of(text) : java.util.Optional.empty();
+    }
 }

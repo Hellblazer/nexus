@@ -564,8 +564,11 @@ public final class ReembedRunner {
             }
             int superseded = catalog.supersedeCollection(tenant, source, job.targetCollection(), null);
             if (superseded == 0) {
-                blocked(tenant, job, "the source is already superseded by " + row.get("superseded_by")
-                    + ", not by " + job.targetCollection());
+                // the successor is found by id: the text of a tombstone whose successor was deleted is its own dead label (RDR-229 R7)
+                blocked(tenant, job, reader.liveSuccessorLabel(tenant, row)
+                    .map(l -> "the source is already superseded by " + l + ", not by " + job.targetCollection())
+                    .orElse("the source is already retired and names no live successor, so it is not superseded by "
+                        + job.targetCollection()));
                 return;
             }
             if (!jobs.setCutoverStep(tenant, job.jobId(), ReembedStateMachine.CUTOVER_STEP_SUPERSEDED)) {

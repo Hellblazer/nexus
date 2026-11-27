@@ -2705,7 +2705,7 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 409,
                 "{\"error\":" + MAPPER.writeValueAsString(
                     "superseded_by names a retired collection: " + supersededBy
-                    + " is itself superseded by " + targetRetiredBy
+                    + " is itself " + SuccessorWording.supersededBy(repo.liveSuccessorLabel(tenant, targetRow))
                     + "; refusing to build an unaudited two-hop chain") + "}"); return;
         }
         // Guard 2 — refuse to CHAIN a second supersession. Re-asserting the SAME target
@@ -2718,7 +2718,7 @@ public final class CatalogHandler implements HttpHandler {
             if (!currentBy.equals(supersededBy)) {
                 HttpUtil.send(exchange, 409,
                     "{\"error\":" + MAPPER.writeValueAsString(
-                        "collection " + name + " is already superseded by " + currentBy
+                        "collection " + name + " is already " + SuccessorWording.supersededBy(repo.liveSuccessorLabel(tenant, oldRow))
                         + "; refusing to chain a second supersede to " + supersededBy) + "}"); return;
             }
             // Same target: the desired state already holds. Reply as though one row was
@@ -2751,13 +2751,9 @@ public final class CatalogHandler implements HttpHandler {
                     "{\"error\":" + MAPPER.writeValueAsString(
                         "collection not found: " + name) + "}"); return;
             }
-            Object recheckSuperseded = recheck.get("superseded_by");
-            String actualSupersededBy = recheckSuperseded instanceof String s ? s : "";
             HttpUtil.send(exchange, 409,
-                "{\"error\":" + MAPPER.writeValueAsString(
-                    "collection " + name + " was superseded to " + actualSupersededBy
-                    + " concurrently; refusing to chain a second supersede to "
-                    + supersededBy) + "}"); return;
+                "{\"error\":" + MAPPER.writeValueAsString(SuccessorWording.concurrentSupersede(
+                    name, repo.liveSuccessorLabel(tenant, recheck), supersededBy)) + "}"); return;
         }
         HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
     }
@@ -2926,11 +2922,13 @@ public final class CatalogHandler implements HttpHandler {
         // unattended indexer path — checks only T3 chunk presence.)
         String srcSuperseded = (String) srcRow.get("superseded_by");
         if (srcSuperseded != null && !srcSuperseded.isEmpty()) {
+            Optional<String> srcLive = repo.liveSuccessorLabel(tenant, srcRow);
             HttpUtil.send(exchange, 409,
                 "{\"error\":" + MAPPER.writeValueAsString("source collection " + oldName
-                    + " is retired (superseded by " + srcSuperseded + "); renaming it would carry the "
-                    + "supersession onto the new name. Rename " + srcSuperseded + " instead, or clear the "
-                    + "supersession first.") + "}"); return;
+                    + " is retired (" + SuccessorWording.retiredBecause(srcLive) + "); renaming it would carry the "
+                    + "supersession onto the new name. "
+                    + srcLive.map(l -> "Rename " + l + " instead, or clear the supersession first.")
+                        .orElse("It has no successor to rename instead; clear the supersession first.")) + "}"); return;
         }
         // nexus-gaou3: a rename onto a LIVE collection is a collision: fail loud with 409. The
         // RDR-162 cross_model flag that opted into a documents-only COPY repoint is gone
@@ -2988,14 +2986,15 @@ public final class CatalogHandler implements HttpHandler {
             var blocker = repo.blockingTable(tenant, newName);
             boolean empty = blocker.isEmpty();
             if (!identityOk || !empty) {
+                Optional<String> tgtSuccessor = repo.liveSuccessorLabel(tenant, tgtRow);
                 HttpUtil.send(exchange, 409,
                     "{\"error\":" + MAPPER.writeValueAsString("target collection " + newName
-                        + " is retired (superseded by " + tgtSuperseded + ") and cannot be revived by "
+                        + " is retired (" + SuccessorWording.retiredBecause(tgtSuccessor) + ") and cannot be revived by "
                         + "this rename: "
                         + (!empty
                             ? "it still holds " + blocker.get().describe() + ", so renaming onto it "
                               + "would merge two collections. Purge or restore it first."
-                            : "it was retired in favour of " + tgtSuperseded + ", not of " + oldName
+                            : "it was retired " + tgtSuccessor.map(l -> "in favour of " + l).orElse("with no live successor") + ", not of " + oldName
                               + ", so reviving it here would erase that supersession unaudited. "
                               + "Unwind the rename chain one hop at a time.")) + "}"); return;
             }

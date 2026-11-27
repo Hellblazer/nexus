@@ -25,6 +25,7 @@ public final class CollectionSupersededException extends RuntimeException {
     private final String collection;
     private final String supersededBy;
 
+    /** The write is refused and {@code supersededBy}, the live successor's current label, is where it should go. */
     public CollectionSupersededException(String tenant, String collection, String supersededBy) {
         super("collection '" + collection + "' was superseded by '" + supersededBy
             + "', so a write to it is refused; write to '" + supersededBy + "' instead");
@@ -33,8 +34,25 @@ public final class CollectionSupersededException extends RuntimeException {
         this.supersededBy = supersededBy;
     }
 
+    private CollectionSupersededException(String tenant, String collection) {
+        super("collection '" + collection + "' is retired and names no live successor, so a write to it is refused");
+        this.tenant = tenant;
+        this.collection = collection;
+        this.supersededBy = "";
+    }
+
+    /**
+     * The refusal of a write to a retired collection whose successor was deleted (RDR-229 R7): there is nowhere to redirect it, and the text
+     * the row's {@code superseded_by} still holds is its own dead label, which is no successor.
+     */
+    public static CollectionSupersededException noSuccessor(String tenant, String collection) {
+        return new CollectionSupersededException(tenant, collection);
+    }
+
     public String tenant() { return tenant; }
     public String collection() { return collection; }
-    /** The successor the refused write should go to. */
+    /** The successor the refused write should go to; empty when {@link #hasSuccessor()} is false. */
     public String supersededBy() { return supersededBy; }
+    /** False when the retired collection names no live successor. */
+    public boolean hasSuccessor() { return !supersededBy.isEmpty(); }
 }

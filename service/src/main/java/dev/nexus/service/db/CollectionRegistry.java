@@ -1123,7 +1123,7 @@ public final class CollectionRegistry {
      * @throws CollectionSupersededException if the row names a successor
      */
     public static CollectionRow requireWritable(DSLContext ctx, String tenant, String collection) {
-        return refuseIfSuperseded(tenant, collection, requireForWrite(ctx, tenant, collection));
+        return refuseIfSuperseded(tenant, collection, requireForWrite(ctx, tenant, collection), id -> CollectionSuccessor.of(ctx, tenant, id));
     }
 
     /**
@@ -1132,7 +1132,7 @@ public final class CollectionRegistry {
      * costs what {@link #lookup} costs.
      */
     public static CollectionRow lookupWritable(TenantScope scope, String tenant, String collection) {
-        return refuseIfSuperseded(tenant, collection, lookup(scope, tenant, collection));
+        return refuseIfSuperseded(tenant, collection, lookup(scope, tenant, collection), id -> CollectionSuccessor.of(scope, tenant, id));
     }
 
     /**
@@ -1192,9 +1192,20 @@ public final class CollectionRegistry {
         return scope.withTenant(tenant, ctx -> lifecycleState(ctx, tenant, collection));
     }
 
-    private static CollectionRow refuseIfSuperseded(String tenant, String collection, CollectionRow row) {
+    /**
+     * The refusal of a write to a retired name. The successor it names is the live row found by id ({@link CollectionSuccessor}), by its current
+     * label; a tombstone whose successor was deleted names none (RDR-229 R7), whatever text its {@code superseded_by} still holds. A row with
+     * no id (older than the stamp) falls back to that text.
+     */
+    private static CollectionRow refuseIfSuperseded(String tenant, String collection, CollectionRow row,
+                                                    java.util.function.LongFunction<Optional<CollectionSuccessor.Successor>> successorOf) {
         if (row.isSuperseded()) {
-            throw new CollectionSupersededException(tenant, collection, row.supersededBy());
+            String successor = row.collectionId() > 0
+                ? successorOf.apply(row.collectionId()).map(CollectionSuccessor.Successor::label).orElse("")
+                : row.supersededBy();
+            throw successor.isEmpty()
+                ? CollectionSupersededException.noSuccessor(tenant, collection)
+                : new CollectionSupersededException(tenant, collection, successor);
         }
         return row;
     }
