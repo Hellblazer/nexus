@@ -1834,9 +1834,10 @@ def verify_collection_deep(db: "T3Database", collection_name: str) -> VerifyResu
     if count < 2:
         return VerifyResult(status="skipped", doc_count=count)
 
-    client = db._client_for(collection_name)
-    col = client.get_collection(collection_name)
-    peek = col.peek(limit=5)
+    # Public surface only: ``HttpVectorClient`` (the production handle) has no ``_client_for`` and its collection
+    # handle has no ``peek`` (nexus-9biyo). An unfiltered ``get(limit=5)`` is the same first-five sample.
+    col = db.get_collection(collection_name)
+    peek = col.get(limit=5, include=["documents"], sensitivity="include")
 
     if not peek["ids"]:
         return VerifyResult(status="skipped", doc_count=0)
@@ -1844,11 +1845,12 @@ def verify_collection_deep(db: "T3Database", collection_name: str) -> VerifyResu
     probe_ids = peek["ids"]
     probe_docs = peek.get("documents") or [""] * len(probe_ids)
 
-    meta = col.metadata or {}
-    if db._local_mode:
-        metric = meta.get("hnsw:space", "l2")
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — circular-dep avoidance (db.http_vector_client)
+
+    if is_service_backed(db):
+        metric = "cosine"  # pgvector HNSW cosine; the service exposes no collection metadata
     else:
-        metric = "cosine"  # Cloud SPANN; hnsw:space not populated
+        metric = (getattr(col, "metadata", None) or {}).get("hnsw:space", "l2") if db._local_mode else "cosine"
 
     found_count = 0
     last_distance: float | None = None
