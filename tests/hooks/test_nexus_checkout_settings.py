@@ -61,7 +61,9 @@ def test_the_project_file_is_the_one_nexus_settings_file() -> None:
 def test_the_preflight_the_file_names_is_the_script_nexus_keeps() -> None:
     body = json.loads(PROJECT_FILE.read_text(encoding="utf-8"))
     script = ROOT / body["preflight"]
-    assert script.is_file() and script.stat().st_mode & stat.S_IXUSR
+    assert script.is_file()
+    if sys.platform != "win32":
+        assert script.stat().st_mode & stat.S_IXUSR
 
 
 def test_the_reader_finds_no_problem_in_the_file(nexus_payload) -> None:
