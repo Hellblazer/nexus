@@ -558,7 +558,9 @@ def _scope_fit(plan_scope_tags: str, normalized_scope_pref: str) -> float | None
         return 0.0
     scope_lower = normalized_scope_pref.lower()
     scope_is_family_prefix = scope_lower.endswith("__")
-    tags = [t for t in plan_scope_tags.split(",") if t]
+    # nexus-o5vbo: a stored tag is read in canonical form too, as the caller's scope is, so a tag saved
+    # with redundant quotes ("code__repo") still fits a caller who names code__repo.
+    tags = [t for t in (_normalize_scope_string(raw) for raw in plan_scope_tags.split(",")) if t]
     for tag in tags:
         tag_lower = tag.lower()
         # Direction 1: caller is more-or-equally specific than plan tag.

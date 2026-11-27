@@ -58,7 +58,7 @@ def test_a_lone_quote_or_a_one_sided_quote_is_not_a_quoted_part() -> None:
 def corpus_names(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     names = ["all", "notes*", "notes-*", "notes-deadbeef", "$topic", "code__repo__minilm-l6-v2__v1", "plain"]
     monkeypatch.setattr(mcp_core, "_get_collection_names", lambda: names)
-    monkeypatch.setattr(mcp_core, "_get_collection_counts", lambda: dict.fromkeys(names, 100))
+    monkeypatch.setattr(mcp_core, "_get_fanout_counts", lambda: dict.fromkeys(names, 100))
     return names
 
 
@@ -68,10 +68,13 @@ def test_the_corpus_reader_names_exactly_a_quoted_label(corpus_names: list[str],
 
 
 @pytest.mark.t2_tenant
-def test_the_corpus_reader_keeps_the_unquoted_all_wildcard(corpus_names: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unquoted ``all`` still fans out; it does not name the label ``all``."""
-    target = mcp_core._resolve_corpus_target("all", t3=None)
-    assert "all" not in target or len(target) > 1
+def test_the_corpus_reader_keeps_the_unquoted_all_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unquoted ``all`` fans out to every collection; the same word quoted names a collection that is not there."""
+    names = ["notes*", "plain", "code__repo__minilm-l6-v2__v1"]
+    monkeypatch.setattr(mcp_core, "_get_collection_names", lambda: names)
+    monkeypatch.setattr(mcp_core, "_get_fanout_counts", lambda: dict.fromkeys(names, 100))
+    assert mcp_core._resolve_corpus_target("all", t3=None) == names
+    assert mcp_core._resolve_corpus_target('"all"', t3=None) == []
 
 
 @pytest.mark.t2_tenant
@@ -107,9 +110,11 @@ def test_the_scope_reader_keeps_a_quoted_problem_label_whole(label: str) -> None
     assert normalize_scope_tags(normalize_scope_tags(quoted)) == quoted  # idempotent
 
 
-def test_the_scope_reader_drops_the_quotes_where_no_reader_would_misread_the_label() -> None:
-    assert _normalize_scope_string('"code__repo"') == "code__repo"
-    assert normalize_scope_tags('"code__repo",rdr__') == "code__repo,rdr__"
+@pytest.mark.parametrize("label", ["code__repo", "plain", "code__repo__minilm-l6-v2__v1", "rdr__", "1.16"])
+def test_the_scope_reader_drops_the_quotes_where_no_reader_would_misread_the_label(label: str) -> None:
+    """The branch the old function lacked: it left a quoted string as it was."""
+    assert _normalize_scope_string(f'"{label}"') == label
+    assert normalize_scope_tags(f'"{label}",zzz') == ",".join(sorted([label, "zzz"]))
 
 
 @pytest.mark.parametrize(
@@ -141,3 +146,71 @@ def test_a_quoted_scope_preference_fits_only_a_plan_tagged_with_the_same_quoted_
     pref = _normalize_scope_string('"all"')
     assert _scope_fit('"all"', pref) == 1.0
     assert _scope_fit("rdr__", pref) is None
+
+
+# --- a comma list is read part by part (review A) ----------------------------------------------------------------
+
+def _plan(corpus: str) -> str:
+    import json  # noqa: PLC0415
+
+    return json.dumps({"steps": [{"tool": "search", "args": {"corpus": corpus}}]})
+
+
+def test_a_plan_corpus_list_of_two_quoted_parts_is_two_tags() -> None:
+    tags = _infer_scope_tags(_plan('"all","$x"')).split(",")
+    assert sorted(tags) == ['"$x"', '"all"']
+
+
+def test_a_plan_corpus_list_mixing_quoted_and_unquoted_parts_reads_each_alone() -> None:
+    tags = _infer_scope_tags(_plan('"all",code__a-deadbeef,"notes*",docs__b,$bind,all'))
+    assert sorted(tags.split(",")) == ['"all"', '"notes*"', "code__a", "docs__b"]
+
+
+def test_a_stored_corpus_list_survives_a_second_normalisation() -> None:
+    tags = _infer_scope_tags(_plan('"all","notes*"'))
+    assert normalize_scope_tags(tags) == tags
+
+
+# --- a stored tag is read in canonical form too (review D) -------------------------------------------------------
+
+def test_a_tag_stored_with_redundant_quotes_still_fits_a_caller_naming_the_label() -> None:
+    from nexus.plans.matcher import _scope_fit  # noqa: PLC0415
+
+    assert _scope_fit('"code__repo"', "code__repo") == 1.0
+    assert _scope_fit('"code__repo",rdr__', _normalize_scope_string('"code__repo"')) == 1.0
+
+
+# --- the owner narrowing re-joins labels quoted (review C) -------------------------------------------------------
+
+def _narrow(monkeypatch: pytest.MonkeyPatch, expanded: list[str], kinds: dict[str, tuple[str, str]]) -> dict:
+    from nexus.plans import owner_narrowing as on  # noqa: PLC0415
+
+    monkeypatch.setattr(on, "expand_corpus", lambda corpus: list(expanded))
+    monkeypatch.setattr(on, "attribute_collection", lambda name: kinds[name])
+    args, narrowing = on.narrow_args_by_owner({"corpus": "knowledge,code"}, "1.2")
+    assert narrowing is not None and narrowing.status == "narrowed"
+    return args
+
+
+def test_a_sole_kept_label_all_is_not_rejoined_as_the_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
+    kinds = {"all": ("knowledge", "x"), "code__1-9__bge__v1": ("code", "1-9")}
+    args = _narrow(monkeypatch, ["all", "code__1-9__bge__v1"], kinds)
+    assert args["corpus"] == '"all"'
+
+
+def test_kept_labels_are_rejoined_each_in_its_own_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    kinds = {"plain": ("knowledge", "x"), "all": ("knowledge", "y"), "code__1-9__bge__v1": ("code", "1-9")}
+    args = _narrow(monkeypatch, ["plain", "all", "code__1-9__bge__v1"], kinds)
+    assert args["corpus"] == 'plain,"all"'
+
+
+# --- a quoted part is not a binding (review E) -------------------------------------------------------------------
+
+def test_a_dollar_inside_a_quoted_corpus_part_is_not_a_binding() -> None:
+    from nexus.plans.schema import _binding_refs  # noqa: PLC0415
+
+    assert _binding_refs('"$topic"') == set()
+    assert _binding_refs('"$topic",plain') == set()
+    assert _binding_refs('$topic') == {"topic"}  # unquoted: still a binding
+    assert _binding_refs('"$a",$b') == {"b"}
+    assert _binding_refs("repo/$area") == {"area"}

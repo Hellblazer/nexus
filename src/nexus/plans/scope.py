@@ -15,8 +15,9 @@ between the save path (``plan_library.save_plan``), the inference helper
 from __future__ import annotations
 
 import json
+import re
 
-from nexus.label_quote import HASH_SUFFIX_RE, label_needs_quote, unquote_label
+from nexus.label_quote import HASH_SUFFIX_RE, WILDCARD_WORDS, label_needs_quote, unquote_label
 
 __all__ = [
     "_HASH_SUFFIX_RE",
@@ -27,7 +28,7 @@ __all__ = [
     "normalize_scope_tags",
 ]
 
-_HASH_SUFFIX_RE = HASH_SUFFIX_RE
+_HASH_SUFFIX_RE: re.Pattern[str] = HASH_SUFFIX_RE
 
 # Comma-separated ``scope_tags`` entries; also the keys ``_infer_scope_tags``
 # looks for in retrieval-step args.
@@ -39,7 +40,7 @@ _RETRIEVAL_SCOPE_ARGS: tuple[str, ...] = ("corpus", "collection")
 # builtin plans that use ``corpus: all`` would be scope-filtered out of
 # the candidate pool whenever ``scope_preference`` is set (RDR-091
 # critic follow-up, nexus-dfok).
-_SCOPE_AGNOSTIC_SENTINELS: frozenset[str] = frozenset({"all"})
+_SCOPE_AGNOSTIC_SENTINELS: frozenset[str] = WILDCARD_WORDS
 
 
 def _normalize_scope_string(scope: str) -> str:
@@ -108,7 +109,8 @@ def _infer_scope_tags(plan_json: str) -> str:
     Walks the ``steps`` list in *plan_json*. For every step, collects any
     ``args["corpus"]`` or ``args["collection"]`` value that is a literal
     string (not a ``$var`` binding placeholder and not the ``"all"``
-    wildcard sentinel). Each collected value is normalized via
+    wildcard sentinel), split on commas so each part is read alone. Each
+    collected part is normalized via
     :func:`_normalize_scope_string`. The result is a comma-separated,
     sorted, deduplicated string — ``""`` when the plan names no literal
     retrieval scope (e.g. traverse-only plans or plans that search
@@ -137,10 +139,11 @@ def _infer_scope_tags(plan_json: str) -> str:
             value = args.get(key)
             if not isinstance(value, str) or not value:
                 continue
-            if value.startswith("$"):
-                continue
-            if value in _SCOPE_AGNOSTIC_SENTINELS:
-                continue
-            collected.add(_normalize_scope_string(value))
+            # nexus-o5vbo: a corpus value is a comma list, so each part is read on its own; read whole,
+            # '"all","$x"' is one quoted label and is stored as the one corrupt tag all","$x.
+            for part in (p.strip() for p in value.split(",")):
+                if not part or part.startswith("$") or part in _SCOPE_AGNOSTIC_SENTINELS:
+                    continue
+                collected.add(_normalize_scope_string(part))
 
     return ",".join(sorted(tag for tag in collected if tag))

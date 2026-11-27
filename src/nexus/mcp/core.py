@@ -3468,7 +3468,7 @@ def _search_render(
 
     Args:
         query: Search query string
-        corpus: Corpus prefixes or collection names, comma-separated. "all" for everything. Double-quote a label to name it exactly: "all" is a collection labelled all.
+        corpus: Corpus prefixes or collection names, comma-separated. "all" for everything.
         limit: Page size (default 10)
         offset: Skip N results for pagination (default 0)
         where: Metadata filter (KEY=VALUE, comma-separated). Ops: = >= <= > < !=
@@ -3987,7 +3987,8 @@ def search(
     corpus: Annotated[str, Field(
         description=(
             "Corpus prefixes or full collection names, comma-separated; \"all\" for "
-            "every corpus. \"knowledge\" means every live knowledge__* subject "
+            "every corpus. A label that is itself a wildcard word is named with double quotes "
+            "inside the value: '\"all\"'. \"knowledge\" means every live knowledge__* subject "
             "collection, the same scope store_get/store_list give it."
         ),
     )] = "knowledge,code,docs",
@@ -4722,7 +4723,10 @@ def _dedup_by_id_keep_best(rows: list[dict], limit: int) -> list[dict]:
 def search_metadata_scoped(
     query: Annotated[str, Field(description="Search query text.")],
     corpus: Annotated[str, Field(
-        description="Corpus prefixes or full collection names, comma-separated; \"all\" for all.",
+        description=(
+            "Corpus prefixes or full collection names, comma-separated; \"all\" for all. "
+            "A label that is itself a wildcard word is named with double quotes inside the value: '\"all\"'."
+        ),
     )] = "knowledge,code,docs",
     limit: Annotated[int, Field(description="Max rows returned, after per-document dedup.")] = 10,
     content_type: Annotated[str, Field(description="Catalog content_type filter; \"\" = no filter.")] = "",
@@ -4871,7 +4875,10 @@ def search_topic_scoped(
     query: Annotated[str, Field(description="Search query text.")],
     topic: Annotated[str, Field(description="Topic label (see `nx taxonomy discover`).")],
     corpus: Annotated[str, Field(
-        description="Corpus prefixes or full collection names, comma-separated; \"all\" for all.",
+        description=(
+            "Corpus prefixes or full collection names, comma-separated; \"all\" for all. "
+            "A label that is itself a wildcard word is named with double quotes inside the value: '\"all\"'."
+        ),
     )] = "knowledge,code,docs",
     limit: Annotated[int, Field(description="Max rows returned.")] = 10,
     structured: Annotated[bool, Field(
@@ -4973,7 +4980,10 @@ def search_graph_hop(
         description="Seed document tumbler(s) to traverse from (a list, or a single string).",
     )],
     corpus: Annotated[str, Field(
-        description="Corpus prefixes or full collection names, comma-separated; \"all\" for all.",
+        description=(
+            "Corpus prefixes or full collection names, comma-separated; \"all\" for all. "
+            "A label that is itself a wildcard word is named with double quotes inside the value: '\"all\"'."
+        ),
     )] = "knowledge,code,docs",
     limit: Annotated[int, Field(description="Max rows returned, after per-document dedup.")] = 10,
     link_type: Annotated[str, Field(
@@ -5127,7 +5137,10 @@ def search_graph_hop(
 def search_aspect_scoped(
     query: Annotated[str, Field(description="Search query text.")],
     corpus: Annotated[str, Field(
-        description="Corpus prefixes or full collection names, comma-separated; \"all\" for all.",
+        description=(
+            "Corpus prefixes or full collection names, comma-separated; \"all\" for all. "
+            "A label that is itself a wildcard word is named with double quotes inside the value: '\"all\"'."
+        ),
     )] = "knowledge,code,docs",
     limit: Annotated[int, Field(description="Max rows returned, after per-document dedup.")] = 10,
     field: Annotated[str, Field(
@@ -5308,8 +5321,8 @@ def query(
     question: Annotated[str, Field(description="Natural-language research question.")],
     corpus: Annotated[str, Field(
         description=(
-            "Corpus prefix or full collection name; \"all\" for every corpus; "
-            "double-quote a label to name it exactly (\"all\" is a collection labelled all). "
+            "Corpus prefix or full collection name; \"all\" for every corpus. "
+            "A label that is itself a wildcard word is named with double quotes inside the value: '\"all\"'. "
             "Empty (default) means every knowledge__* collection when no catalog "
             "param is set; with one (author, content_type, follow_links, "
             "subtree), the content_type's own corpus when it names one "

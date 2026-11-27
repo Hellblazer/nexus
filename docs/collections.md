@@ -141,11 +141,18 @@ may not contain `/` or `,`, and it may not begin or end with whitespace.
 A few labels pass that rule and still mean something else where a corpus or scope
 list is read: `all` is the search wildcard, a trailing `*`, `-*` or `-<8 hex>`
 is a glob or hash suffix in a plan's scope tags, and a leading `$` is a plan
-binding. In those lists, put the label in double quotes to name it exactly:
-`corpus="all"` searches the collection labelled `all`, where `corpus=all`
-searches every corpus. One pair of quotes is removed, so a label that itself
-starts and ends with `"` is wrapped again (`""x""` names `"x"`). A part with no
-surrounding quotes reads as it always did.
+binding. To name such a label, put double quotes inside the value, around the
+label. The tool argument is `corpus='"all"'` (in JSON, `"corpus": "\"all\""`): it
+searches the collection labelled `all`, where `corpus="all"` (no quote characters
+in the value) searches every corpus. One pair of quotes is removed, so a label that
+itself starts and ends with `"` is wrapped again (`""x""` names `"x"`). A part with
+no surrounding quotes reads as it always did.
+
+The quoted form is honored by the MCP search family (`search`, `query`, and the
+`search_metadata_scoped`, `search_topic_scoped`, `search_graph_hop` and
+`search_aspect_scoped` tools) and by a plan's scope tags and retrieval-step
+`corpus` args. The CLI `nx search --corpus` has no wildcard word and reads no
+quotes, so a label named `all` is typed there as it is.
 
 To give a collection a readable label, rename it with `nx collection rename
 OLD NEW`. A minted `c<id>` knowledge collection renames to a bare readable label

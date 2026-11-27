@@ -22,12 +22,12 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["HASH_SUFFIX_RE", "is_quoted", "label_needs_quote", "quote_label", "unquote_label"]
+__all__ = ["HASH_SUFFIX_RE", "WILDCARD_WORDS", "is_quoted", "label_needs_quote", "quote_label", "unquote_label"]
 
 _QUOTE = '"'
-HASH_SUFFIX_RE = re.compile(r"-[0-9a-fA-F]{8}$")
+HASH_SUFFIX_RE: re.Pattern[str] = re.compile(r"-[0-9a-fA-F]{8}$")
 #: The words a reader treats as a wildcard (compared lower-case: the plan matcher folds case).
-_WILDCARDS = frozenset({"all"})
+WILDCARD_WORDS: frozenset[str] = frozenset({"all"})
 
 
 def is_quoted(part: str) -> bool:
@@ -46,7 +46,7 @@ def label_needs_quote(label: str) -> bool:
     """True when a reader would misread *label* unquoted: a wildcard word, a trailing ``*`` or 8-hex suffix, a leading
     ``$``, or a label that starts and ends with a quote (read as a quoted part)."""
     return (
-        label.lower() in _WILDCARDS
+        label.lower() in WILDCARD_WORDS
         or label.endswith("*")
         or bool(HASH_SUFFIX_RE.search(label))
         or label.startswith("$")

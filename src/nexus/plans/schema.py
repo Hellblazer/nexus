@@ -28,6 +28,7 @@ import logging
 import re
 from typing import Any
 
+from nexus.label_quote import is_quoted
 from nexus.plans.answer_kind import ANSWER_KIND_KEY, PlanAnswerKind
 from nexus.plans.evidence import ReservedBindingError, check_no_reserved_declarations
 
@@ -84,6 +85,13 @@ _TYPED_ARG_SLOTS: frozenset[str] = TYPED_FILTER_BINDINGS | frozenset({"seeds"})
 _BINDING_REF_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 
 
+def _binding_refs_of_text(text: str) -> set[str]:
+    return {
+        m.group(1) for m in _BINDING_REF_RE.finditer(text)
+        if not text[m.end():m.end() + 1] == "."
+    }
+
+
 def _binding_refs(value: Any) -> set[str]:
     """Binding names *value* feeds into whatever slot holds it.
 
@@ -100,10 +108,15 @@ def _binding_refs(value: Any) -> set[str]:
     binding, so a name followed by a dot is skipped.
     """
     if isinstance(value, str):
-        return {
-            m.group(1) for m in _BINDING_REF_RE.finditer(value)
-            if not value[m.end():m.end() + 1] == "."
-        }
+        if '"' in value:
+            # nexus-o5vbo: a double-quoted part of a corpus list names a label exactly, so a ``$`` inside it
+            # is the label's own character, not a binding (:mod:`nexus.label_quote`).
+            found: set[str] = set()
+            for part in (p.strip() for p in value.split(",")):
+                if not is_quoted(part):
+                    found |= _binding_refs_of_text(part)
+            return found
+        return _binding_refs_of_text(value)
     if isinstance(value, list):
         out: set[str] = set()
         for item in value:

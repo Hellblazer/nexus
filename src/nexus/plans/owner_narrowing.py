@@ -55,6 +55,8 @@ from typing import Any, Literal
 
 import structlog
 
+from nexus.label_quote import quote_label
+
 _log = structlog.get_logger(__name__)
 
 __all__ = [
@@ -306,7 +308,9 @@ def narrow_args_by_owner(
             unattributed=tuple(unattributed),
         )
     out = dict(args)
-    out["corpus"] = ",".join(kept)
+    # nexus-o5vbo: the kept labels are names, not corpus words: a sole ``all`` joined bare reads as the wildcard
+    # and the step would escape the narrowing it was given.
+    out["corpus"] = ",".join(quote_label(name) for name in kept)
     return out, OwnerNarrowing(
         "narrowed", tumblers, plan_corpus, out["corpus"], kept=tuple(kept), removed=tuple(removed),
         unattributed=tuple(unattributed),
