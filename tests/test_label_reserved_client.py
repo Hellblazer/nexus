@@ -57,7 +57,7 @@ def _engine(requests: list, *, refuse: tuple[str, ...], status: int = 409, body:
 def _assert_the_one_message(text: str, label: str = LABEL, *, user_chooses: bool = True) -> None:
     out = " ".join(text.split())
     assert f"the collection label '{label}' is reserved" in out, out
-    assert "renamed away from it still has rows that carry it" in out and "later engine release" in out, out
+    assert "renamed away from it still has rows that carry it" in out and "engine drops the name columns" in out, out
     assert "P4.1" not in out, "users do not know the phase name"
     assert "Nothing was written" in out, out
     assert f"rename that collection back to '{label}'" in out.lower(), out
@@ -193,7 +193,7 @@ def test_reindex_whose_reregistration_is_refused_says_the_collection_was_already
     assert result.exit_code != 0, out
     assert "reindex of 'knowledge__test' stopped after the delete" in out
     assert "collection 'knowledge__test' was deleted" in out
-    assert "is reserved" in out and "later engine release" in out and "P4.1" not in out
+    assert "is reserved" in out and "engine drops the name columns" in out and "P4.1" not in out
     assert "Nothing was written" not in out, "the delete already ran: that claim would be false on this path"
     assert "rename that collection back to 'knowledge__test'" in out.lower()
     assert missing_commands(out) == [] and named_commands(out)
@@ -221,6 +221,6 @@ def test_migrate_fallback_says_the_documents_moved_when_the_supersede_is_refused
     assert result.exit_code == 0, out
     writer.update_documents_collection_batch.assert_called_once()  # the documents moved: this is what the message must say
     assert "Migrated 1 doc(s)" in out and "docs__default' was NOT marked superseded" in out
-    assert "is reserved" in out and "later engine release" in out and "P4.1" not in out
+    assert "is reserved" in out and "engine drops the name columns" in out and "P4.1" not in out
     assert "only the supersession pointer is missing" in out
     assert "Traceback" not in result.output and "superseded by" not in out.replace("NOT marked superseded", "")

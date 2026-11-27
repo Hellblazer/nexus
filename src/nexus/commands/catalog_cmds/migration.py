@@ -277,7 +277,7 @@ def migrate_fallback_cmd(
                 f"source {source!r} was NOT marked superseded: {reserved.explanation}\n"
                 f"The documents moved and stay moved; only the supersession pointer is missing. It cannot be set while "
                 f"{only_target!r} is reserved: rename the collection that was renamed away from it back to "
-                f"{only_target!r}, or wait for the engine release that relabels its rows."
+                f"{only_target!r}, or wait until the engine drops the name columns that hold it."
             )
         except ValueError as exc:
             click.echo(

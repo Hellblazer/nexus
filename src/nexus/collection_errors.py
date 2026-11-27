@@ -79,8 +79,9 @@ def superseded_write_error_from_body(
 class LabelReservedError(RuntimeError):
     """The engine refused a label because it is reserved (409 ``label_reserved``, RDR-229 P3.7, engine 0.1.202).
 
-    A collection renamed away from the label by the one-row rename still has rows that carry it, under another
-    collection id, until a later engine release relabels them. A register, a supersede's successor, a rename's target
+    A collection renamed away from the label by the one-row rename is not freed of it while a name-keyed table still
+    holds a row under that label for another collection id; the label frees when the engine drops the name columns
+    (RDR-229 P4.1). A register, a supersede's successor, a rename's target
     and an import of that label are refused before anything is written, so the message is the same for each: the
     label, why, and the way out. Never retried. Exposes ``label`` and ``explanation`` (the first sentence alone, for a
     caller whose own message says what else happened: a delete that already ran, documents that already moved).
@@ -102,7 +103,7 @@ class LabelReservedError(RuntimeError):
     @property
     def explanation(self) -> str:
         return (f"the collection label {self.label!r} is reserved: a collection that was renamed away from it still "
-                f"has rows that carry it, and the label can be used again once a later engine release relabels those rows.")
+                f"has rows that carry it, and the label can be used again once the engine drops the name columns that hold them.")
 
     def with_fixed_label(self) -> "LabelReservedError":
         """The same refusal worded for a caller whose label is not the person's to change."""

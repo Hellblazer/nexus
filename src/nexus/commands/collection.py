@@ -931,9 +931,13 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     old name leaves no row; an older engine cascades the new name through
     those stores and leaves a retired row for the old name.
 
+    From the gate 3 latch the rename changes that one row's label, and its
+    content type and owner from the new name when the name parses.
+
     The engine refuses a new name it reserves (409 ``label_reserved``: a
-    collection renamed away from that label still has rows that carry it
-    until a later release relabels them), and refuses every rename (409
+    collection renamed away from that label while a name-keyed table still
+    holds a row under it; the label frees when the engine drops the name
+    columns, RDR-229 P4.1), and refuses every rename (409
     ``rename_refused``, ``missing: restart``) until it restarts after an
     upgrade whose completion step has not run; the restart is the
     operator's to order.
