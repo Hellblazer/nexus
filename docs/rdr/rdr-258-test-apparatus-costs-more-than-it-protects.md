@@ -821,7 +821,10 @@ and its demotion lands as one change, which starts each check's 60-day clock.
 Batches continue until the report shows that the baseline red runs a
 still-blocking class-A check would still turn red put the accounting share
 under the 30% target; after that, the rest of the remainder is demoted at the
-review's pace.
+review's pace. With the 286 other red runs of the baseline window held
+constant, that means about 122 accounting red runs per sixty days or fewer,
+against 501 (258-research-1; inferred, not read: the other categories do not
+move).
 
 ### Phase 2: Wire pairing blocks at the release boundaries. Sam decides the engine-release change and the develop demotion; the implementer prepares both without him.
 
@@ -1129,3 +1132,4 @@ split into its own RDR at accept if Sam prefers.
 - 2026-11-27: Gate round 2 — PASSED (0 Critical, 11 Significant, 0 ship-blocker(s)); blob `37f653b4c9e1`; critique `nexus_rdr/258-gate-critique-2026-11-27-r2`.
 - 2026-11-27: round 2 fixes (258-research-19). Q1 closed: Sam chose the guard catch. N1: one class test, by what a check guards; a catch can move a check from A to U only. N7: the 2-week review applies retirement from Phase 1 step 5, each check's 60-day clock starts at its demotion, rule (h) moves to Phase 1 step 6, and Phase 8 keeps only the plugin guidance. One-line fixes from N2 (class U blocks at least at the release boundaries; pass/fail checks never fail on develop; (h)'s alarm line only for numeric checks), N3 (docs_reference_rot leaves the docs-readers selector) and N6 (a target for each phase metric). N4, N5, N8 to N11 carried to implementation.
 - 2026-11-27: Gate round 3 — PASSED (0 Critical, 14 Significant, 0 ship-blocker(s)); blob `0c28c8be1f16`; critique `nexus_rdr/258-gate-critique-2026-11-27-r3`.
+- 2026-11-27: Sam's accept condition (T2 `nexus/sam-ruling-rdr258-accept-2026-11-27`; 258-research-20). Phase 1 step 7: the 2-week review demotes the class-A remainder in batches from Phase 0's report, each batch to Sam, until the accounting share is under 30%; this disposes of round 3's planning blocker "no phase demotes the class-A remainder". Fix-check one-liners: `guards:` carries the guarded paths, so the report can derive a guard catch; each 60-day clock starts at the demotion commit on develop, and every class-A check now has a demoting step or batch.
