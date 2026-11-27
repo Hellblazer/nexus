@@ -116,7 +116,7 @@ _KWARGS_READ: dict[str, str] = {
         "bootstrap's own, which carry encoding='utf-8' and errors='replace' and no text "
         "(pinned by test_sync_does_not_inherit_the_hosts_stdin_and_decodes_utf8)"
     ),
-    "src/nexus/commands/command_context.py:97": (
+    "src/nexus/commands/command_context.py:108": (
         "``_check_output`` funnel into run_bounded: every caller passes timeout, stderr "
         "or text, none passes encoding, so the wrapper's utf-8 default decides; its "
         "children are git, bd, gh and nx"

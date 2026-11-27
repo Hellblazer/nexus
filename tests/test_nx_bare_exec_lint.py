@@ -445,6 +445,9 @@ _HOOK_SPAWN_ALLOWED: frozenset[tuple[str, str]] = frozenset({
     # ``_spawn_detached(argv)`` is called once, from ``run``, with the list
     # ``nx_argv_for(which_off_cwd("nx"), ...)`` builds (absolute on both platforms).
     ("nexus/hooks/upgrade_auto.py", "_spawn_detached"),
+    # ``_spawn(argv)`` takes an argv its two callers in the same file (``run_command``, ``_render_beads``) resolved
+    # through ``argv_off_cwd``; it exists to hand back the exit code and stderr ``run_command`` drops (GH #1689).
+    ("nexus/hooks/session_context.py", "_spawn"),
 })
 
 

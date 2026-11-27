@@ -177,34 +177,31 @@ def which(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-def _spawn(args: list[str], timeout: int, cwd: str | None = None) -> tuple["subprocess.CompletedProcess[str] | None", str]:
-    """Run *args* bounded, off the cwd. Returns ``(process, problem)``: *process* is ``None`` when it never ran to an
-    exit (*problem* says why: not found, timed out, an OS error), and ``problem`` is empty when it did."""
+def _spawn(argv: list[str], timeout: int, cwd: str | None = None) -> tuple["subprocess.CompletedProcess[str] | None", str]:
+    """Run *argv* bounded. *argv* arrives already resolved off the cwd (:func:`run_command` and :func:`_render_beads` pass
+    ``argv_off_cwd(...)``). Returns ``(process, problem)``: *process* is ``None`` when it never ran to an exit (*problem*
+    says why: not found, timed out, an OS error), and ``problem`` is empty when it did."""
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
-    from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 - stdlib-only, function-level so the hook module itself stays import-light
-
     try:
-        # Windows: a git.exe / bd.exe planted in the project (the hook's cwd) would
-        # run ahead of PATH. Resolved off the cwd; FileNotFoundError is caught below.
         result = run_bounded(
-            argv_off_cwd(args),
+            argv,
             timeout=timeout,
             cwd=cwd,
         )
         if DEBUG and result.stderr:
             print(  # noqa: T201 — carried: stderr, not the stdout decision channel
-                f"[session-hook] stderr from {args[0]}: {result.stderr[:500]}", file=sys.stderr
+                f"[session-hook] stderr from {argv[0]}: {result.stderr[:500]}", file=sys.stderr
             )
         return result, ""
     except subprocess.TimeoutExpired:
-        debug(f"{args} timed out after {timeout}s")
+        debug(f"{argv} timed out after {timeout}s")
         return None, f"timed out after {timeout}s"
     except FileNotFoundError:
-        debug(f"{args[0]} command not found")
-        return None, f"`{args[0]}` was not found"
+        debug(f"{argv[0]} command not found")
+        return None, f"`{argv[0]}` was not found"
     except OSError as e:
-        debug(f"{args} failed: {e}")
+        debug(f"{argv} failed: {e}")
         return None, f"could not run: {e}"
 
 
@@ -213,7 +210,16 @@ def run_command(args: list[str], timeout: int, cwd: str | None = None) -> str | 
     Run a command and return its stdout, or None on failure.
     Stderr is captured; printed to stderr only when DEBUG is set.
     """
-    result, _problem = _spawn(args, timeout, cwd)
+    from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 - stdlib-only, function-level so the hook module itself stays import-light
+
+    # Windows: a git.exe / bd.exe planted in the project (the hook's cwd) would
+    # run ahead of PATH. Resolved off the cwd; FileNotFoundError is handled by _spawn.
+    try:
+        argv = argv_off_cwd(args)
+    except FileNotFoundError:
+        debug(f"{args[0]} command not found off the cwd")
+        return None
+    result, _problem = _spawn(argv, timeout, cwd)
     if result is not None and result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
     return None
@@ -365,7 +371,13 @@ def _render_beads(project_dir: Path) -> list[str]:
     if not which('bd'):
         debug("bd command not found")
         return []
-    proc, problem = _spawn(['bd', 'ready'], BD_TIMEOUT, str(project_dir))
+    from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 - stdlib-only, function-level so the hook module itself stays import-light
+
+    try:
+        argv = argv_off_cwd(['bd', 'ready'])
+    except FileNotFoundError:
+        return ["beads: `bd` was not found on PATH outside the project directory"]
+    proc, problem = _spawn(argv, BD_TIMEOUT, str(project_dir))
     if proc is None:
         return [f"beads: `bd ready` {problem}"]
     if proc.returncode != 0:

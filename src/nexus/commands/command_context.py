@@ -497,27 +497,23 @@ def _engine_not_answering() -> str | None:
 
     ``None`` also when no local engine is discoverable (a managed endpoint, or no service configured: ``nx doctor`` is the
     judge of those) and when the probe itself cannot be made: only a confirmed address that gives no answer returns a
-    reason.  Any HTTP answer, a 503 included, counts as answering; the engine is up and doctor says what is wrong.
+    reason.  Any HTTP answer, a 503 included, counts as answering; the engine is up and doctor says what is wrong.  The
+    endpoint and the probe are the ones ``nx doctor`` and ``nx daemon service status`` use, not copies.
     """
     try:
-        import httpx  # noqa: PLC0415 — deferred: only the doctor block pays for the client
+        from nexus import config as _config  # noqa: PLC0415 — deferred: only the doctor block pays for them
+        from nexus.commands.daemon import _probe_health  # noqa: PLC0415, PLC2701 — the status verb's own probe
+        from nexus.health import _resolve_service_endpoint  # noqa: PLC0415, PLC2701 — one rule for "where is the engine"
 
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, same reason
-        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred, same reason
-        from nexus.health import _resolve_service_endpoint  # noqa: PLC0415, PLC2701 — one rule for "where is the engine", not a copy
-
-        endpoint = _resolve_service_endpoint(nexus_config_dir())
+        endpoint = _resolve_service_endpoint(_config.nexus_config_dir())
+        if endpoint is None:
+            return None
+        host, port = endpoint
+        answer = _probe_health(host, port, timeout=_ENGINE_PROBE_TIMEOUT)
     except Exception:  # noqa: BLE001 — a probe that cannot be made never costs the preamble
         return None
-    if endpoint is None:
-        return None
-    host, port = endpoint
-    try:
-        httpx.get(f"http://{host}:{port}/health", timeout=_ENGINE_PROBE_TIMEOUT, verify=get_shared_ssl_context())
-    except (httpx.TransportError, OSError) as exc:
-        return f"the engine at {host}:{port} did not answer /health within {_ENGINE_PROBE_TIMEOUT:g}s ({type(exc).__name__})"
-    except Exception:  # noqa: BLE001 — see above
-        return None
+    if answer == "unreachable":
+        return f"the engine at {host}:{port} did not answer /health within {_ENGINE_PROBE_TIMEOUT:g}s"
     return None
 
 
