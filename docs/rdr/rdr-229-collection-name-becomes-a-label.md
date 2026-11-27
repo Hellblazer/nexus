@@ -2004,11 +2004,15 @@ while the engine serves:
     names no successor is split: P3.5c's part (its bullet) is on the stack
     for the re-embed readers, and the label-addressed read refusal, the
     `RETIRED_NO_SUCCESSOR` marker on the wire, its typed client error and
-    not-retried read move to the next paired cut, after 0.1.202 / 8.5.6.
-    The per-reader tests for the other readers did not ship in this cut and
-    no bead comment defers them; they stay on bead nexus-p2m1x.25 with the
-    deferred pieces (Sam, "Split"; linda, 2026-11-24; T2
-    `229-research-328`, `229-research-336`).
+    not-retried read move to Phase 4, to P4.0 (bead nexus-p2m1x.34; Sam, ask
+    `rdr229-r7-defer`, option 1, 2026-11-27, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`; the split itself is Sam's
+    "Split" and linda's, 2026-11-24; T2 `229-research-328`, `229-research-336`).
+    The acceptance that the chunks of a no-successor tombstone are unreadable
+    travels with them to P4.0 and was not granted for Phase 3. The per-reader
+    tests over today's 409 shipped after the P3.5c landing line:
+    `CollectionRetiredNoSuccessorReadersTest` sends the id of such a tombstone
+    to every read route of the census (51 readers, in both gate states;
+    commits 21c4b06b57, 28fd6a73fe and 3904bdc8a7), beside the re-embed tests.
 
     The check is not read only at boot. The move worker knows in process
     when a move completes: the completion transaction sets `completed_at`
@@ -3239,7 +3243,7 @@ its acceptance is that test green plus the census pin it lowers.
   completion check, which reports in its own `rdr229_completion` field,
   with the read set and gates later releases extend (item 6, "Readers
   during the stamp"); and R7's pre-flight counts, with the reader contract
-  split between P3.5c and the next paired cut (bead nexus-p2m1x.25). Test: an upgrade
+  split between P3.5c and P4.0 (bead nexus-p2m1x.34). Test: an upgrade
   boot registers the move and rewrites no row of a large table; a killed run
   resumes from its last committed batch; an insert and an update without the
   id are refused; a name-path rename gives every rewritten row, and the
@@ -3716,13 +3720,18 @@ its acceptance is that test green plus the census pin it lowers.
     this cut, on the stack: a re-embed refusal names the successor's label
     or says the collection is retired with no successor, the by-id 409, and
     `TargetSelection` refusing a target with no successor. Deferred to the
-    next paired cut, after 0.1.202 / 8.5.6 (bead nexus-p2m1x.25, linda's
-    ruling of 2026-11-24, corrected at 10:53 UTC): the label-addressed read
-    refusal, the marker on the wire, the typed client error and the
-    client's not-retried read of it. The per-reader tests Sam's wording put
-    in this cut did not ship for the readers other than re-embed's (which
-    keep the tests named below), and no bead comment defers them; they are
-    carried on nexus-p2m1x.25 with the deferred pieces. The re-embed retargeting
+    Phase 4, P4.0 (bead nexus-p2m1x.34; linda's ruling of 2026-11-24, bead
+    nexus-p2m1x.25, corrected at 10:53 UTC, first put it in the next paired
+    cut, after 0.1.202 / 8.5.6, and Sam's ruling on ask `rdr229-r7-defer`,
+    2026-11-27, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`, moved it to Phase 4): the
+    label-addressed read refusal, the marker on the wire, the typed client
+    error and the client's not-retried read of it. The acceptance that the
+    chunks of a no-successor tombstone are unreadable travels with them and
+    was not granted for Phase 3. The per-reader tests Sam's wording put in
+    this cut shipped after the landing line, over today's 409:
+    `CollectionRetiredNoSuccessorReadersTest` (commits 21c4b06b57, 28fd6a73fe
+    and 3904bdc8a7; its 51 readers in both gate states), beside the
+    re-embed tests named below. The re-embed retargeting
     guard named the stored `superseded_by` text as the successor, which for
     a tombstone whose successor was deleted is its own dead label. It now
     finds the successor by `superseded_by_id` (`CollectionSuccessor`,
@@ -3747,9 +3756,9 @@ its acceptance is that test green plus the census pin it lowers.
     `job_id` and `state`). Tests: `ReembedRetiredNoSuccessorTest` (plan and
     start, source and target, by label and by id, with the live-successor,
     renamed-successor and revive controls and an unregistered source),
-    `TargetSelectionTest` (its R7 block) and `ReembedTargetTest`; whether
-    every other reader class has a test of its own for this case was not
-    checked. Not changed: the supersede and writer messages that still
+    `TargetSelectionTest` (its R7 block) and `ReembedTargetTest`; every
+    other reader class is covered by `CollectionRetiredNoSuccessorReadersTest`
+    (its 409 at the route boundary, not each reader's own id path). Not changed: the supersede and writer messages that still
     print the stored text (`CatalogHandler.java:2707-2708`, `:2721`,
     `:2758-2760`; `CatalogHandler.java:2931`, `:2993`;
     `ReembedRunner.java:567`; `CollectionSupersededException.java:28-29`), which linda
@@ -4823,3 +4832,4 @@ large, and moved under a ratchet.
 - 2026-11-27: the fresh-install and half-stamped chain, matching the engine as measured (grant 3, nexus-p2m1x.48 step 2; tests Rdr229P35HalfStampedStoreTest, Rdr229FreshInstallRenameRestartTest, Rdr229P37RenameStagesTest and Rdr229P37RestartValueTest at 87990cb039 on the P3.7 lane): gate 3 does not latch in boot 1, so a boot-1 rename is the name path; the restart's walk applies every P3.5b changeset and latches gate 3; renames are refused naming `name_key_drop_move` until that move completes, then the one-row rename runs; `missing` = `restart` appears only when a listed changeset fails on its own. P3.5's Test loses "inferred from code, not tested"; item 6's order and restart-signal text, the half-stamped Test Plan scenario's Verify clause and the rename scenario's setup (which now waits for the stamp moves, the restart, the latch and readiness `none`) say so. No decision changed.
 - 2026-11-27: the mint class does not empty at Phase 3 (Sam's ruling, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`, ask `rdr229-mint-pin`, option 1; grant 3, nexus-p2m1x.28): item 12's census paragraph and the routing paragraph's "all empty at P3.8" now say the class keeps the parsers of the names a user types and the names `nx` is about to register, is pinned at 129 (`tests/test_collection_name_parse_census.py:418`) so it cannot grow, and retires with the Phase 4 parsers (P4.3).
 - 2026-11-27: item 6's list says `topic_assignments_chunk_fk` is not dropped in Phase 3 and why (linda; Rdr229P37OneRowRenameTest, nexus-p2m1x.27): after the drop move the one-row rename rewrites no assignment row, so the key stays satisfied; `topic_assignments_collection_fk` still refuses the rename by its cascade and is dropped by the move. P4.1's first child-key drop step removes the key with the other two name child keys.
+- 2026-11-27: R7 is deferred to Phase 4 (Sam, ask `rdr229-r7-defer`, option 1, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`; grant 3, nexus-p2m1x.25 and .34): the label-addressed read refusal, `RETIRED_NO_SUCCESSOR`, its typed client error and not-retried read, and the acceptance that a no-successor tombstone's chunks are unreadable (not granted for Phase 3) go to P4.0 (nexus-p2m1x.34), not nexus-p2m1x.25; the per-reader tests over today's 409 are named as shipped (`CollectionRetiredNoSuccessorReadersTest`, 3904bdc8a7 and its two predecessors), not as owed. The 2026-11-24 lines above that say they stay on .25 are the record of that date.
