@@ -13,16 +13,16 @@ became row reads or fell under one of the others.
 from __future__ import annotations
 
 MINT_A: str = (
-    'RDR-204 (a): the name is a user argument, a rename target or one nx is about to register; no row exists yet. Empties at Phase 3.'
+    'RDR-204 (a): the name is a user argument, a rename target or one nx is about to register; no row exists yet. Stays in the mint class: the user-typed and about-to-register name parsers are kept (the ruling on ask rdr229-mint-pin, 2026-11-27); the class is pinned at 129 and retires with the Phase 4 parsers.'
 )
 MINT_REG: str = (
-    "Registration seam: derives the new row's content type and owner from the name because no row exists yet (RDR-204 (a)); the model it registers is the caller's resolved one where it has one (nx index repo: the row's, RDR-229 P2.3). Empties at Phase 3."
+    "Registration seam: derives the new row's content type and owner from the name because no row exists yet (RDR-204 (a)); the model it registers is the caller's resolved one where it has one (nx index repo: the row's, RDR-229 P2.3). Stays in the mint class (see MINT_A)."
 )
 MINT_NOROW: str = (
-    'Item 1 NoRow/Unreadable outcome: reads the row first and answers with the mint-class name derivation only when no row answers. Stays until P3.8.'
+    'Item 1 NoRow/Unreadable outcome: reads the row first and answers with the mint-class name derivation only when no row answers. Stays in the mint class (see MINT_A).'
 )
 MINT_ROUTE: str = (
-    "Item 1 NoRow/Unreadable outcome at a router (RDR-229 P2.9): the row's content_type decides, and the name's own `<type>__` segment (corpus.routing_content_type / candidate_content_type) answers only for a collection with no row. Empties at P3.8."
+    "Item 1 NoRow/Unreadable outcome at a router (RDR-229 P2.9): the row's content_type decides, and the name's own `<type>__` segment (corpus.routing_content_type / candidate_content_type) answers only for a collection with no row (P3.8 registers every new collection with its row). Stays in the mint class (see MINT_A)."
 )
 MIG_BUNDLE_STEM: str = (
     "RDR-229 owner-is-source: reads a collection name's owner stem (`<slug>-<hash8>`, the repo owner's repo_hash) from a name no row of this catalog backs: a name from another install's .nxexp bundle, or a name of an older era's collections on this install (the code__ collections whose stem is compared), so a migration source (RDR-229 item 1). The parse itself is legacy_names.owner_stem (the floor, moved there from nxexp_owner.py; P2.2 missed it), so the sites here are the two callers in nxexp_owner.py; P4.4 removes those with the old-bundle import."
@@ -49,7 +49,7 @@ MINT_QUAR: str = (
     "Mints the quarantine sibling's name from the origin's; the row is preferred and the name read only when the origin has none (RDR-204 coordinator ruling 2026-09-08)."
 )
 MINT_PARSE: str = (
-    "The render path's parse counterpart (RDR-204); empties at Phase 3."
+    "The render path's parse counterpart (RDR-204). Stays in the mint class (see MINT_A)."
 )
 MINT_T3: str = (
     'Builds the candidate name `<user_arg>__` to find an existing collection for a bare content type (item 1: mint).'
