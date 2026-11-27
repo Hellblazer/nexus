@@ -2900,19 +2900,33 @@ def _with_evidence_source(
     }}
 
 
-def _single_owner(owner_rows: dict[str, list[dict]] | None, chash: str, collection: str | None) -> str | None:
+def _single_owner(
+    owner_rows: dict[str, list[dict]] | None, chash: str, collection: str | None, parent: str | None = None,
+) -> str | None:
     """The one document owning *chash* (in *collection*, when the chunk's collection is known), else ``None``:
     no owner set, no owner, or several (a shared chash is ambiguous, never a guess). With the chunk's
     collection known, a row that names no collection (a pre-catalog-025 engine) is not counted: it could be
     an owner in another collection. Owners are live documents (``chash_positions``); a tombstoned co-owner
-    does not make the chash ambiguous."""
+    does not make the chash ambiguous.
+
+    *parent* is the document the step's retrieval was confined to (nexus-z1d0l.1.12): it knows its parent the
+    way a tumbler-id hydration does, so a chash several documents own binds to it when it is one of those
+    owners, and stays ambiguous when it is not. A confinement never names an owner the rows do not show."""
     if not owner_rows:
         return None
     docs = list(dict.fromkeys(
         row["doc_id"] for row in owner_rows.get(chash, ())
         if row.get("doc_id") and (not collection or row.get("collection") == collection)
     ))
+    if parent and parent in docs:
+        return parent
     return docs[0] if len(docs) == 1 else None
+
+
+def _confined_parent() -> str | None:
+    """The tumbler of the document the run's retrieval is confined to, else ``None`` (no confinement)."""
+    confinement = active_confinement()
+    return confinement.tumbler if confinement is not None and confinement.tumbler else None
 
 
 def _named_collection(collections: Any) -> str | None:
@@ -2939,8 +2953,9 @@ def _position_identities(
     Taken from the hydrated positions BEFORE the empty-content filter, the merges and the cap. A tumbler-id
     position IS its document. A chash position takes its collection from the retrieval step's per-chunk output
     (when that output lines up with *ids*), else the one collection the step names; its tumbler only when the
-    owner rows the hydration fetched show exactly one owning document. The retrieval step's own tumbler is not
-    read: search may have picked one of several owners of a shared chunk, and the step output does not say."""
+    owner rows the hydration fetched show exactly one owning document, or the document the run's retrieval is
+    confined to is one of several (:func:`_single_owner`). The retrieval step's own tumbler is not read: search
+    may have picked one of several owners of a shared chunk, and the step output does not say."""
     from collections import deque  # noqa: PLC0415 — as the module's other lazy imports
 
     source = evidence_source if (
@@ -2949,6 +2964,7 @@ def _position_identities(
     cols = source.get("chunk_collections") if source else None
     rows = owner_lookups.owner_rows if owner_lookups is not None and owner_lookups.asked else None
     named = _named_collection(collections)
+    parent = _confined_parent()
     queues: dict[str, Any] = {}
     for i, (cid, text) in enumerate(zip(ids, contents)):
         if not text:
@@ -2959,7 +2975,7 @@ def _position_identities(
             ident = (str(cid), None, collection)
         else:
             chash = str(cid) if _CHASH_RE.fullmatch(str(cid)) else None
-            ident = (_single_owner(rows, chash, collection) if chash else None, chash, collection)
+            ident = (_single_owner(rows, chash, collection, parent) if chash else None, chash, collection)
         queues.setdefault(text, deque()).append(ident)
     return queues
 
@@ -2999,7 +3015,7 @@ def _check_records_for(
     that position's identity (``queues``: shown text -> identities in position order); a reserved item takes its own
     named-source identity; a repair item keeps its chash and collection, but its tumbler came from a search step's
     tumblers (possibly an inferred owner of a shared chunk) and is not read: its tumbler is the one owner *owner_rows*
-    shows, else none. The coverage note is a record the model may cite but not an input to cover
+    shows (the confined document, when it is one of several), else none. The coverage note is a record the model may cite but not an input to cover
     (``is_evidence=False``). Any other text has no identity. The record text is the body, without the
     ``[source: ...]`` note the hydration prefixes."""
     from nexus.plans.reserved_stream import strip_source_note  # noqa: PLC0415 — as the module's other lazy imports
@@ -3017,7 +3033,7 @@ def _check_records_for(
             records.append(EvidenceRecord(item_id, held.raw, held.doc_id or None, held.chash or None, held.collection or None))
         elif repaired is not None:
             chash, collection = repaired.chash or None, repaired.collection or None
-            tumbler = _single_owner(owner_rows, chash, collection) if chash else None
+            tumbler = _single_owner(owner_rows, chash, collection, _confined_parent()) if chash else None
             records.append(EvidenceRecord(item_id, strip_source_note(text), tumbler, chash, collection))
         else:
             is_note = supplement is not None and bool(supplement.note) and text == supplement.note
