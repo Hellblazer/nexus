@@ -81,8 +81,9 @@ def test_show_prints_paths_values_and_sources_for_a_plain_repository(pin, plain_
     pin(plain_posture)
     result = _run("show", "--cwd", str(plain_posture.repo))
     assert result.exit_code == 0, result.output
-    assert str(plain_posture.repo / ".nexus" / "project.json") in result.output
-    assert str(plain_posture.home / ".config" / "nexus" / "conexus.json") in result.output
+    shown = result.output.replace("\\", "/")  # the report joins its path parts with "/" on every platform
+    assert (plain_posture.repo / ".nexus" / "project.json").as_posix() in shown
+    assert (plain_posture.home / ".config" / "nexus" / "conexus.json").as_posix() in shown
     assert "subagent_git = seatbelt  (source: default)" in result.output or "subagent_git" in result.output
     assert "no problems" in result.output
 
