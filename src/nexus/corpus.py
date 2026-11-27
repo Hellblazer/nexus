@@ -807,7 +807,7 @@ def routing_content_type(name: str, *, db: object = None) -> str | None:
 
     Row: the row's ``content_type``. NoRow (after one bounded cache re-read): :func:`candidate_content_type`,
     since a collection a write is creating has no row yet. Unreadable: the same, with a warning. A read-only
-    scan reads ``row_content_type(name, strict=True)`` instead. *db* is the caller's own handle. Empties at P3.8.
+    scan reads ``row_content_type(name, strict=True)`` instead. *db* is the caller's own handle. Stays in the mint class (the ruling on ask rdr229-mint-pin, 2026-11-27).
     """
     from nexus.collection_route import read_row_for_write  # noqa: PLC0415 — deferred: collection_route reaches mcp_infra
 

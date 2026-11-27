@@ -6,7 +6,7 @@ found by their catalog row's attributes, not by rendering a name (item 5).
   answers the row as :class:`CollectionAttributes`, or ``None`` on a 404.
 - ``collection_for_repo`` answers the registered row, whatever shape its label
   has. Only a new tuple or a ``bump`` still renders a name (the mint class,
-  which empties at P3.8).
+  which stays: the ruling on ask rdr229-mint-pin, 2026-11-27).
 - ``t3_collection_name`` finds a knowledge subject through
   ``find_collection('knowledge', subject, model)``: a label that is not of the
   conformant shape is found by its subject.
