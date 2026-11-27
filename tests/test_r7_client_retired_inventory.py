@@ -149,3 +149,47 @@ def test_store_export_all_skips_a_retired_collection_and_exports_the_rest(monkey
     assert "1 retired collection was not exported" in result.output and RETIRED_NAME in result.output
     assert "across 1 collections" in result.output
     assert any(e["event"] == "retired_collection_skipped" and e["site"] == "store_export_all" for e in logs)
+
+
+# ── nx doctor --check-search ────────────────────────────────────────────────────────────────────────────────────────
+
+def _check_search_world(monkeypatch):
+    import nexus.doctor_search as ds
+
+    probed: list[list[str]] = []
+    monkeypatch.setattr(ds, "_load_canaries", lambda: [])
+    monkeypatch.setattr(ds, "run_name_resolution_probe", lambda *a, **k: [])
+    monkeypatch.setattr(ds, "_list_collections", lambda: [
+        {"name": RETIRED_NAME, "superseded_by": RETIRED_NAME},
+        {"name": "docs__live__bge-base-en-v15-768__v1", "content_type": "docs"}])
+    monkeypatch.setattr(ds, "_make_t3", lambda: object())
+
+    def probe(*, collections, **kw):
+        probed.append(list(collections))
+        return []
+
+    monkeypatch.setattr(ds, "run_retrieval_quality_probe", probe)
+    return ds, probed
+
+
+def test_check_search_does_not_probe_a_retired_collection_and_reports_the_skip_without_failing(monkeypatch, capsys):
+    ds, probed = _check_search_world(monkeypatch)
+
+    with capture_logs() as logs:
+        ds.run_check_search(json_out=False)  # no SystemExit(2): a skip is not a regression
+
+    assert probed == [["docs__live__bge-base-en-v15-768__v1"]]
+    out = capsys.readouterr().out
+    assert "retired_skipped" in out and RETIRED_NAME in out and "1 retired_skipped" in out
+    assert any(e["event"] == "retired_collection_skipped" and e["site"] == "doctor_check_search" for e in logs)
+
+
+def test_check_search_json_carries_the_retired_skip(monkeypatch, capsys):
+    import json
+
+    ds, _ = _check_search_world(monkeypatch)
+    with capture_logs():  # the skip's log line would otherwise share stdout with the JSON
+        ds.run_check_search(json_out=True)
+    retrieval = json.loads(capsys.readouterr().out)["probes"][1]
+    assert retrieval["summary"] == {"retired_skipped": 1}
+    assert [(r["name"], r["outcome"]) for r in retrieval["results"]] == [(RETIRED_NAME, "retired_skipped")]

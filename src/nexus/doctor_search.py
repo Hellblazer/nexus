@@ -52,6 +52,8 @@ from typing import Any, Callable
 
 import click
 
+from nexus.db.retired_rows import skip_retired_rows
+
 _CHASH_SHAPE = re.compile(r"chash:[0-9a-f]{64}(:\d+-\d+)?")
 
 
@@ -66,7 +68,7 @@ _FAIL_OUTCOMES = {"error", "model_drift"}
 class ProbeResult:
     name: str
     surface: str
-    outcome: str  # matched | empty | error | threshold_drop | model_drift
+    outcome: str  # matched | empty | error | threshold_drop | model_drift | retired_skipped
     error: str | None = None
     shape_note: str = ""
     # Probe 3b-specific context (None on probe 3a rows).
@@ -538,6 +540,7 @@ _GLYPH = {
     "error": "[\u2717]",
     "threshold_drop": "[!]",
     "model_drift": "[\u2717]",
+    "retired_skipped": "[-]",
 }
 
 
@@ -598,6 +601,7 @@ def format_combined_human(
         f"{rq.get('empty', 0)} empty, "
         f"{rq.get('threshold_drop', 0)} threshold_drop (warning), "
         f"{rq.get('model_drift', 0)} model_drift, "
+        f"{rq.get('retired_skipped', 0)} retired_skipped (not probed), "
         f"{rq.get('error', 0)} error."
     )
     return "\n".join(lines)
@@ -654,6 +658,14 @@ def run_check_search(*, json_out: bool) -> None:
             )
         )
     else:
+        # RDR-229 R7: the engine refuses a by-label read of a retired collection that has no live successor, so
+        # such a row is reported as skipped (never a probe, never a FAIL).
+        rows, retired_skipped = skip_retired_rows(rows, site="doctor_check_search")
+        retrieval_results.extend(
+            ProbeResult(name=name, surface="retrieval_quality", outcome="retired_skipped",
+                        error="retired with no live successor; not probed")
+            for name in retired_skipped
+        )
         collections = [str(r["name"]) for r in rows if r.get("name")]
         if collections:
             try:
