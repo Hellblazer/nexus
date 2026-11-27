@@ -968,7 +968,7 @@ def emit(_lib, payload: dict, hits: list[Hit], blocked: "frozenset[str] | None" 
     escaped = bool(ctx.command) and _lib.should_skip_for_reason(ctx.command)
     rows = _blocked_rows(payload) if blocked is None else blocked
     if blocked is None and any(row_mode(h.row, rows) != "deny" for h in hits):
-        rows = _blocked_rows(payload, head=True)  # a row that would only warn: the committed copy may list it
+        rows = rows | _blocked_rows(payload, head=True)  # a row that would only warn: the committed copy may list it; the second read only adds
     denying = [h for h in hits if row_mode(h.row, rows) == "deny"]
     for h in hits:
         if h in denying:

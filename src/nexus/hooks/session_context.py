@@ -437,7 +437,7 @@ def run(payload: dict | None) -> HookResult:
     is the one structural deviation. Everything that is reference context (T2 memory, ready beads, the bd primer, the
     capabilities block, the Knowledge Map) is not computed here any more; see the module docstring.
     """
-    # nexus-mtheb: the T1 contract leads the context; its dispatch sentence is the maintainer's (nexus-sby49.3, I1b).
+    # nexus-mtheb: the T1 contract leads the context, the same for every session (nexus-sby49.3, I1b).
     audience_payload = payload if isinstance(payload, dict) else {}
     output_lines: list[str] = _t1_top_lines(audience_payload)
     project_dir = Path(os.environ.get('CLAUDE_PROJECT_DIR', os.getcwd())).resolve()

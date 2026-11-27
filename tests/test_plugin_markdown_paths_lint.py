@@ -82,10 +82,6 @@ _REPO_PATH = re.compile(
 #: ``tests/test_repo_only_references_lint.py`` holds the wider rule (all plugin markdown, resource files, MCP and CLI
 #: text) with its own line-level allowlist.
 _REPO_PATH_ALLOWED: dict[str, dict[str, str]] = {
-    "conexus/skills/composition-probe/SKILL.md": {
-        "scripts/mvnw-leased.sh": "named under 'when the project has that script' (the nexus repo), with a ./mvnw fallback",
-        "service/mvnw": "named inside the same nexus-repo clause, as what the script wraps",
-    },
     "conexus/commands/continuation.md": {
         "tests/e2e/lib/commit_scope_audit.sh": "guarded: 'when the project has' the script, with a by-hand fallback",
     },

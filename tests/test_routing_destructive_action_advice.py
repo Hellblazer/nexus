@@ -659,3 +659,42 @@ def test_a_helper_that_raises_also_leaves_every_row_advising(monkeypatch: pytest
     broken.advice_blocked = boom  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "_audience", broken)
     assert daa._blocked_rows(_payload("ls")) == frozenset()
+
+
+def test_a_second_read_that_fails_cannot_take_a_block_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hit that would only warn makes the hook read the committed copy too; that read adds to the first answer, so a helper
+    that fails the second time (an empty set) leaves the row the first read listed denying (nexus-sby49.18)."""
+    first, other = daa.ROWS[0], daa.ROWS[1]
+    reads: list[bool] = []
+
+    def blocked_rows(payload: dict, head: bool = False) -> frozenset:
+        reads.append(head)
+        return frozenset() if head else frozenset({first.id})
+
+    class Denied(Exception):
+        pass
+
+    class FakeLib:
+        def should_skip_for_reason(self, command: str) -> bool:
+            return False
+
+        def log_routing_event(self, **kw: object) -> None:
+            pass
+
+        def extract_escape_reason(self, command: str) -> str:
+            return ""
+
+        def deny(self, text: str, summary: str = "") -> None:
+            raise Denied(summary)
+
+        def pass_through(self) -> None:
+            raise AssertionError("no escape here")
+
+        def warn(self, text: str) -> None:
+            raise AssertionError("a denying row means no bare warning")
+
+    monkeypatch.setattr(daa, "_blocked_rows", blocked_rows)
+    with pytest.raises(Denied) as denied:
+        daa.emit(FakeLib(), _payload("ls"), [daa.Hit(first, ""), daa.Hit(other, "")])
+    assert reads == [False, True], "the committed copy is asked because one hit would only warn"
+    assert first.id in str(denied.value)

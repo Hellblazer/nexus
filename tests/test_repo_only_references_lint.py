@@ -346,10 +346,6 @@ _ALLOWED: dict[str, list[Site]] = {
         Site("tests/e2e/lib/commit_scope_audit.sh", "when the project has", "a guarded conditional: the script runs only in a project that has it; any other project takes the by-hand branch on the same line"),
         Site("tests/e2e/lib/commit_scope_audit.sh", "<session-start-ref>..", "the command for the branch the conditional names; reached only when the project has the script"),
     ],
-    "conexus/skills/composition-probe/SKILL.md": [
-        Site("scripts/mvnw-leased.sh", "when the project has that script", "a guarded conditional: used only in a project that has the script; any other project takes the ./mvnw branch in the same paragraph"),
-        Site("service/mvnw", "wraps `service/mvnw`", "describes what the nexus script wraps, inside the same guarded conditional"),
-    ],
 }
 
 #: The two release ledgers name repo paths on purpose: one is the changelog of what changed, the other the list of

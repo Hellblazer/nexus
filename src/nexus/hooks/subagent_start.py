@@ -93,7 +93,7 @@ try:
         user_brief_questions as _user_brief_questions,
     )
 except BaseException:  # noqa: BLE001
-    def _guard_mode(payload: object) -> str:
+    def _guard_mode(payload: object, head: bool = False) -> str:
         return "strict"
 
     def _project_text(payload: object, key: str) -> "str | None":
@@ -210,7 +210,7 @@ def _orchestration(payload: dict) -> str:
     """The Orchestration table for this dispatch: the head, Completion, Inbox and Search scope for everyone, and the Git row
     where the project or the user turned the full subagent git guard on (``subagent_git`` strict)."""
     rows = [_ORCH_HEAD, _ORCH_COMPLETION, _ORCH_INBOX]
-    if _guard_mode(payload) == "strict":
+    if _guard_mode(payload, head=True) == "strict":  # as the guard answers: a repository strict only at HEAD gets the row too
         rows.append(_ORCH_GIT)
     rows.append(_ORCH_SEARCH_SCOPE)
     return "".join(rows)

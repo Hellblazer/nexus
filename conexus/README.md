@@ -24,7 +24,7 @@ claude --plugin-dir ./conexus
 The defaults suit most users. To run the full subagent git guard, to turn on telemetry, or to add your own text to what the plugin tells dispatched agents, write one of two JSON files:
 
 - `.nexus/project.json`, tracked in a repository. It can tighten the plugin or add text, and it cannot loosen a rule or turn telemetry on.
-- `~/.config/nexus/conexus.json`, yours. It holds the keys only you may set (`telemetry`, `t1_nudge`) and can set the others for every repository.
+- `~/.config/nexus/conexus.json`, yours. It holds the keys only you may set (`telemetry`, `t1_nudge`) and can also set `subagent_git`, `advice_block` and `brief_questions` for every repository; `preflight`, `ci_wait`, `credential_helper` and `integration_branch` are project-only.
 
 ```json
 { "version": 1, "subagent_git": "strict", "telemetry": true }

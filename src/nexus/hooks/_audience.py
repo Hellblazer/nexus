@@ -257,6 +257,9 @@ def argv_off_cwd(argv: "list[str]") -> "list[str]":
 
 
 def _tool_argv(tool: str, *args: str) -> "list[str]":
+    """An argv headed by *tool*, built from a name and not a literal list: the bare-argv lints read a literal list headed ``git``
+    or ``nx`` as unresolved, and this keeps the call to ``argv_off_cwd`` that wraps it in plain view. Only ever an argument of
+    ``argv_off_cwd``; ``tests/hooks/test_audience_spawn_off_cwd.py`` pins that."""
     return [tool, *args]
 
 
@@ -271,8 +274,11 @@ def account_home() -> "str | None":
         return _windows_profile_dir()
     import pwd  # noqa: PLC0415 -- POSIX only; the module has to import on Windows
 
+    uid = _posix_uid()
+    if uid is None:  # no POSIX uid: never map "unknown" to root
+        return None
     try:
-        return pwd.getpwuid(_posix_uid() or 0).pw_dir or None
+        return pwd.getpwuid(uid).pw_dir or None
     except KeyError:  # no passwd entry (a bare container): no home, no user settings
         return None
 
@@ -550,11 +556,6 @@ def _read_file(label: str, path: str, role: str, *, who: str, follow: bool, keys
 # ---------------------------------------------------------------------------
 # The committed copy: one git process, the index check, the case table
 # ---------------------------------------------------------------------------
-
-
-_INDEX_ENTRY_FIXED = 62  # ctime, mtime, dev, ino, mode, uid, gid, size (40 bytes), the object id (20), the flags (2)
-_INDEX_CHUNK = 16 * 1024
-_PROJECT_PATH = b".nexus/project.json"
 
 
 _INDEX_ENTRY_FIXED = 62  # ctime, mtime, dev, ino, mode, uid, gid, size (40 bytes), the object id (20), the flags (2)
@@ -1256,9 +1257,16 @@ def build_report(cwd: "str | None" = None, versions: "dict[str, str | None] | No
     except BaseException:  # noqa: BLE001
         home = None
     user_path = os.path.join(home, *USER_FILE_PARTS) if home else None
-    head_differs = None
+    head_differs, head_copy, loosened = None, None, []
     if s.head_read and s.head is not None and s.head.state != "broken" and not any(p.category == "environment" for p in s.head.problems):
-        head_differs = (session.raw if session else None) != s.head.raw
+        head_copy = s.head.state == "ok"
+        if head_copy:
+            head_differs = (session.raw if session else None) != s.head.raw
+            wt = session.values if session else {}
+            if s.head.values.get("subagent_git") == STRICT and wt.get("subagent_git") != STRICT:
+                loosened.append("subagent_git")
+            if set(map(str, s.head.values.get("advice_block") or [])) - set(map(str, wt.get("advice_block") or [])):  # type: ignore[call-overload]
+                loosened.append("advice_block")
     files = [
         {"role": "project", "path": project_path, "exists": bool(session and session.state != "absent")},
         {"role": "user", "path": user_path, "exists": bool(user and user.state not in ("absent", "nohome"))},
@@ -1292,7 +1300,7 @@ def build_report(cwd: "str | None" = None, versions: "dict[str, str | None] | No
             "so a setting named here may not yet be implemented by every hook"
         )
     return {
-        "cwd": cwd, "session_root": root, "files": files, "head_differs": head_differs, "settings": rows, "texts": texts,
+        "cwd": cwd, "session_root": root, "files": files, "head_differs": head_differs, "head_copy": head_copy, "loosened": loosened, "settings": rows, "texts": texts,
         "problems": [dict(p._asdict()) for p in problems], "retired": retired,
         "versions": {"plugin": plugin, "nx": nx, "warning": warning},
     }
@@ -1320,7 +1328,16 @@ def render_report(report: dict) -> str:
         where = f["path"] or "(no account home)"
         out.append("  " + f["role"] + ": " + where + (" (present)" if f["exists"] else " (not present)"))
     hd = report["head_differs"]
-    out.append("  project file at HEAD: " + ("not read" if hd is None else ("differs from the working tree" if hd else "same as the working tree")))
+    if report.get("head_copy") is False:
+        state = "no committed copy"
+    else:
+        state = "not read" if hd is None else ("differs from the working tree" if hd else "same as the working tree")
+    out.append("  project file at HEAD: " + state)
+    if report.get("loosened"):
+        out.append(
+            "  the working copy is looser than HEAD for " + ", ".join(report["loosened"]) + ": the committed value holds, for the guard "
+            "and the advice hook, until the change is committed"
+        )
     out.append("settings:")
     for row in report["settings"]:
         out.append("  " + row["key"] + " = " + _fmt(row["value"]) + "  (source: " + row["source"] + ")")

@@ -129,7 +129,7 @@ registrations:
   - nexus.hooks.board_due
   audience: EVERY-USER
   gate: none
-  evidence: 'I1a, I1b, I1c, I2 and the tripwire: each text has its own entry under constants (nexus-sby49.3)'
+  evidence: 'I1a, I1b, I1c and I2: each text has its own entry under constants (nexus-sby49.3)'
   target_state: as is
   phase: '-'
 - key: SessionStart launch/nx_launch.py nx-hook rdr
@@ -226,7 +226,7 @@ registrations:
   - nexus.hooks.subagent_start
   audience: EVERY-USER
   gate: none
-  evidence: 'I3: every dispatch gets the T1 contract, the relay and the tiers; the maintainer-only rows are constants below'
+  evidence: 'I3: every dispatch gets the T1 contract, the relay and the tiers; the Git row is the strict guard''s prompt half, by setting, and each row is a constant below'
   target_state: as is
   phase: '-'
 - key: SubagentStop hooks/scripts/nx_hook_shim.py subagent-stop-t1-nudge

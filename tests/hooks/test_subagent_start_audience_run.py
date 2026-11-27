@@ -55,6 +55,23 @@ class TestOrchestrationRowsBySetting:
         assert "orchestrator commits pathspec-limited" in ctx
         assert "| Search scope |" in ctx
 
+    def test_a_repository_strict_only_at_head_gets_the_guard_row_the_guard_denies_for(self, tmp_path: Path) -> None:
+        """The guard reads the committed copy, so a working copy that dropped the strict key still denies; the row says so too."""
+        from tests.hooks.audience_harness import write_project_settings
+        from tests.hooks.git_shim import init_repo
+
+        repo = init_repo(tmp_path / "r", {".nexus/project.json": json.dumps({"version": 1, "subagent_git": "strict"})})
+        write_project_settings(repo, subagent_git="seatbelt")
+        ctx = _context(payload={**json.loads(STDIN_PAYLOAD), "cwd": str(repo)})
+        assert "| Git |" in ctx and "NEVER git add/commit" in ctx
+
+    def test_a_plain_repository_gets_no_guard_row_from_the_head_read(self, tmp_path: Path) -> None:
+        from tests.hooks.git_shim import init_repo
+
+        repo = init_repo(tmp_path / "plain", {"README": "x"})
+        ctx = _context(payload={**json.loads(STDIN_PAYLOAD), "cwd": str(repo)})
+        assert "| Git |" not in ctx
+
     def test_a_user_with_the_strict_setting_gets_the_guard_row_in_any_project(self, tmp_path: Path) -> None:
         ctx = _context(account_home=_strict_home(tmp_path))
         assert "NEVER git add/commit" in ctx

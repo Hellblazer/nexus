@@ -141,8 +141,10 @@ SRC_ROOT = REPO_ROOT / "src" / "nexus"
 _CANNOT_IMPORT_NEXUS: dict[str, str] = {
     "src/nexus/hooks/_audience.py": (
         "bootstrap-safe: the byte copy of the plugin's conexus/hooks/scripts/_audience.py, which runs under "
-        "`uv tool run python` with nexus absent, so it cannot import run_bounded; its two spawns (a 2 s HEAD read and a "
-        "10 s version probe) stay on the stock call. See tests/test_audience.py, which holds the two copies byte-identical."
+        "`uv tool run python` with nexus absent, so it cannot import run_bounded; its three spawns (a 2 s HEAD read, a 2 s remote-ref check and a "
+        "10 s version probe) stay on the stock call, for byte-identity with the stdlib plugin copy, and each carries its own timeout "
+        "against the Windows pipe exposure run_bounded closes. tests/hooks/test_audience_spawn_off_cwd.py pins the count at three; "
+        "tests/test_audience.py holds the two copies byte-identical."
     ),
     "src/nexus/_install/census_core.py": (
         "bootstrap-safe: runs with nexus absent, so it cannot import "

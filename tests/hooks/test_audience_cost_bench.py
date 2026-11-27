@@ -148,7 +148,7 @@ def _hook_once(script: Path, payload: dict, repo: Path, home: Path, cfg: Path) -
            "NX_ROUTING_LOG_PATH": str(cfg / "routing.jsonl"), "NX_DROPPED_WRITES_LOG_PATH": str(cfg / "dropped.jsonl")}
     t0 = time.perf_counter_ns()
     proc = subprocess.run([sys.executable, str(HARNESS), str(home), str(script)], input=json.dumps(payload), capture_output=True,
-                          text=True, env=env, check=False, timeout=60)
+                          text=True, encoding="utf-8", env=env, check=False, timeout=60)
     dt = time.perf_counter_ns() - t0
     assert proc.returncode == 0, proc.stderr
     return dt

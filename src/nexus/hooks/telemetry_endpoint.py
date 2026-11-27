@@ -8,6 +8,7 @@ configuration; ``tests/hooks/test_pinned_endpoint_parity.py`` holds them to it. 
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 _DEFAULT_TENANT = "default"
@@ -49,12 +50,18 @@ def telemetry_endpoint_missing(config_dir: Path) -> bool:
 
 
 def _lease(config_dir: Path) -> dict[str, str] | None:
-    """The live local supervisor lease under *config_dir* as ``{"host", "port", "token"}``, or None."""
-    from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415
+    """The local supervisor lease under *config_dir* as ``{"host", "port", "token"}``, or None.
+
+    Read the way the plugin's ``read_storage_service_lease`` reads it: the lease file for this account's service identity, status
+    ``live``, plain TTL freshness (no grace for a live owner, no ``/health`` probe), and never a write: ``ServiceRegistry.discover``
+    would probe a stale lease and reap one, which a settings report must not do and which the plugin's answer does not do.
+    """
+    from nexus.daemon.service_registry import LeaseRecord, service_identity  # noqa: PLC0415
 
     try:
-        record = ServiceRegistry(dir=config_dir, tier="storage_service").discover(service_identity())
-        if record is None:
+        path = config_dir / f"storage_service_addr.{service_identity()}"
+        record = LeaseRecord.from_json(path.read_text(encoding="utf-8"))
+        if not record.is_fresh(time.time()):
             return None
         endpoint = record.endpoint
         if int(endpoint.get("port", 0)) <= 0:

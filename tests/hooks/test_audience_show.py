@@ -202,3 +202,42 @@ def test_the_plugin_copy_runs_as_a_script(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert "subagent_git" in proc.stdout and "strict" in proc.stdout and ".nexus/project.json" in proc.stdout
+
+
+def test_a_working_copy_looser_than_head_says_the_committed_value_holds_until_it_is_committed(pinned, tmp_path):
+    from tests.hooks.git_shim import init_repo  # noqa: PLC0415
+
+    posture = build_posture(tmp_path, "plain")
+    committed = {"version": 1, "subagent_git": "strict", "advice_block": ["pattern_kill"]}
+    repo = init_repo(tmp_path / "loose", {".nexus/project.json": json.dumps(committed)})
+    (repo / ".nexus" / "project.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    audience = pinned(posture)
+    report = audience.build_report(str(repo), versions=VERSIONS)
+    assert report["loosened"] == ["subagent_git", "advice_block"]
+    _, text = _show(audience, ["show", "--cwd", str(repo)])
+    assert "looser than HEAD for subagent_git, advice_block" in text and "until the change is committed" in text
+    assert "differs from the working tree" in text
+
+
+def test_a_working_copy_that_is_stricter_than_head_says_nothing_about_loosening(pinned, tmp_path):
+    from tests.hooks.git_shim import init_repo  # noqa: PLC0415
+
+    posture = build_posture(tmp_path, "plain")
+    repo = init_repo(tmp_path / "tight", {".nexus/project.json": json.dumps({"version": 1})})
+    (repo / ".nexus" / "project.json").write_text(json.dumps({"version": 1, "subagent_git": "strict"}), encoding="utf-8")
+    audience = pinned(posture)
+    assert audience.build_report(str(repo), versions=VERSIONS)["loosened"] == []
+    _, text = _show(audience, ["show", "--cwd", str(repo)])
+    assert "looser" not in text
+
+
+def test_a_head_with_no_copy_of_the_file_says_no_committed_copy_not_differs(pinned, tmp_path):
+    from tests.hooks.git_shim import init_repo  # noqa: PLC0415
+
+    posture = build_posture(tmp_path, "plain")
+    repo = init_repo(tmp_path / "nocopy", {"README": "x"})
+    (repo / ".nexus").mkdir()
+    (repo / ".nexus" / "project.json").write_text(json.dumps({"version": 1, "subagent_git": "strict"}), encoding="utf-8")
+    audience = pinned(posture)
+    _, text = _show(audience, ["show", "--cwd", str(repo)])
+    assert "project file at HEAD: no committed copy" in text and "differs" not in text

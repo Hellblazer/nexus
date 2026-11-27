@@ -77,7 +77,7 @@ def _run(script: Path, payload: dict, repo: Path, tmp_path: Path, shim: GitShim)
         env.pop(k, None)
     proc = subprocess.run(
         [sys.executable, str(HARNESS), str(home), str(script)],
-        input=json.dumps(payload), capture_output=True, text=True, timeout=60, env=env, check=False,
+        input=json.dumps(payload), capture_output=True, text=True, encoding="utf-8", timeout=60, env=env, check=False,
     )
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)["hookSpecificOutput"] if proc.stdout.strip() else {}
@@ -216,7 +216,7 @@ def test_write_project_settings_helper_is_not_the_committed_copy(tmp_path: Path)
     """Pins the fixture's premise: rewriting the working copy leaves HEAD alone."""
     repo = init_repo(tmp_path / "r", {PROJECT: _j(subagent_git="strict")})
     write_project_settings(repo, subagent_git="seatbelt")
-    committed = subprocess.run(["git", "-C", str(repo), "show", "HEAD:" + PROJECT], capture_output=True, text=True, check=True).stdout
+    committed = subprocess.run(["git", "-C", str(repo), "show", "HEAD:" + PROJECT], capture_output=True, text=True, encoding="utf-8", check=True).stdout
     assert json.loads(committed)["subagent_git"] == "strict"
 
 

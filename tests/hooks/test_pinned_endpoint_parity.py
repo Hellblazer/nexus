@@ -119,3 +119,45 @@ def test_the_cleartext_rule_is_what_refuses_those_shapes(ep, tmp_path, monkeypat
     assert ep.pinned_endpoint(cfg) == (None, None)
     monkeypatch.setattr(ep, "_may_carry_bearer", lambda _url: True)
     assert ep.pinned_endpoint(cfg)[0] is not None, f"{name}: no other check refuses it, so the rule is untested if this fails"
+
+
+def test_an_expired_lease_whose_owner_is_alive_and_answering_is_no_engine_for_both_and_is_not_reaped(ep, tmp_path) -> None:
+    """The plugin reads a lease by plain TTL: no grace for a live owner, no ``/health`` probe, no reap. The wheel's mirror
+    must too; a registry ``discover`` would probe the answering port, revive the lease and say an engine exists."""
+    import http.server
+    import json
+    import os
+    import threading
+    import time
+
+    from nexus.daemon.service_registry import service_identity
+
+    class _Health(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            body = json.dumps({"status": "ok", "db": "up"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Health)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        cfg = tmp_path / "cfg"
+        _build(cfg, url=None, token=None, lease=False)
+        record = {
+            "scope_key": service_identity(), "generation": 1, "owner_token": "o", "heartbeat_epoch": time.time() - 120.0,
+            "ttl": 30.0, "endpoint": {"host": "127.0.0.1", "port": server.server_address[1], "token": "tok"},
+            "version": "t", "payload": {"supervisor_pid": os.getpid()}, "status": "live", "format_version": 1,
+        }
+        path = cfg / f"storage_service_addr.{service_identity()}"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        restrict_to_owner(path)
+        assert _answers(ep, cfg) == ((None, None), True)
+        assert path.exists(), "reading the lease for a report must not reap it"
+    finally:
+        server.shutdown()
+        server.server_close()

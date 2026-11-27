@@ -66,7 +66,7 @@ elif package.json present:    runner = "npm test -- /tmp/probe-<id>.ts"
 else:                         surface language-detection failure to the user; halt
 ```
 
-`pom.xml` counts when it sits at the root or under `service/`. `<mvn>` is `scripts/mvnw-leased.sh` when the project has that script (the nexus repo, where Maven lives under `service/` and the script, [mvnw-leased.sh](https://github.com/Hellblazer/nexus/blob/main/scripts/mvnw-leased.sh), wraps `service/mvnw`). The script takes the single-builder lease before it runs Maven, so a probe run cannot collide with a concurrent service build; never use a bare `mvn` or `./mvnw` there. In any other project `<mvn>` is `./mvnw` when it exists, else `mvn`.
+`pom.xml` counts when it sits at the root or under `service/`. `<mvn>` is the project's own Maven wrapper when its AGENTS.md or CLAUDE.md documents one (a wrapper that takes a build lease, say, so a probe run cannot collide with a concurrent build); never use a bare `mvn` or `./mvnw` where one is documented. Otherwise `<mvn>` is `./mvnw` when it exists, else `mvn`.
 
 Map the runner to a file extension: `pytest` → `.py`, `<mvn>` → `.java`, `npm` → `.ts`. Fill the `<id>` and `<classname>` in the chosen runner; that command line is `<runner>` in Step 4.
 
