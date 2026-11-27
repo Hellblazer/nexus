@@ -192,6 +192,14 @@ on:
       - service/src/main/java/dev/nexus/service/db/CollectionLabel.java
       - tests/_chunk_seed.py
       - tests/_catalog_fixture_ops.py
+      # The git-guard routing tests run natively on Windows (Sam 2026-11-27): they spawn Git for Windows'
+      # bash through tests/_git_bash.py, since the System32 bash.exe on win-release is the WSL launcher with
+      # no distribution. They are triggers, unlike RIDES_ALONG above, so an edit to them or to the helper
+      # runs the set.
+      - tests/_git_bash.py
+      - tests/test_routing_subagent_git_write.py
+      - tests/test_routing_subagent_git_write_gaps.py
+      - tests/test_routing_subagent_git_dash_c_worktree.py
       - scripts/check_junit_floor.py
       - .github/actions/resolve-windows-python/**
       - .github/actions/windows-engine-leg/**
@@ -441,7 +449,7 @@ jobs:
       # the ceiling of 204 (0 failed, run 44675562916). The gate's plain-Python cases stay in the set and run on Windows.
       - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py --ignore=tests/daemon/test_spawn_lock_hold.py --ignore=tests/daemon/test_storage_service_running.py --ignore=tests/hooks/test_session_facts_posix.py --ignore=tests/daemon/test_legacy_chash_guard_real_pg.py --ignore=tests/daemon/test_storage_stop_invisible.py --ignore=tests/daemon/test_stop_real_processes_posix.py --ignore=tests/hooks/test_compact_outcome_harness_posix.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_install_lease_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_install_source.py tests/test_pdf_stack.py tests/test_installer_rebuild.py tests/test_mineru_cmd.py tests/test_mineru_spawn_windows_flags.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
+          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py --ignore=tests/daemon/test_spawn_lock_hold.py --ignore=tests/daemon/test_storage_service_running.py --ignore=tests/hooks/test_session_facts_posix.py --ignore=tests/daemon/test_legacy_chash_guard_real_pg.py --ignore=tests/daemon/test_storage_stop_invisible.py --ignore=tests/daemon/test_stop_real_processes_posix.py --ignore=tests/hooks/test_compact_outcome_harness_posix.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_install_lease_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_install_source.py tests/test_pdf_stack.py tests/test_installer_rebuild.py tests/test_mineru_cmd.py tests/test_mineru_spawn_windows_flags.py tests/test_routing_subagent_git_write.py tests/test_routing_subagent_git_write_gaps.py tests/test_routing_subagent_git_dash_c_worktree.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
       # A run that skipped itself on Windows would pass having proved nothing. The
       # floor is sized from the measured run above: junit counts an xfail as a skip,
@@ -526,6 +534,9 @@ jobs:
       # grown by 1637 tests as the set's directories gained files, so the old floor sat far under it.
       # The floor is about 90% of the passes (5200) and the ceiling the measured skips plus the
       # margin of 13 (211), under the 6% cap the workflow test holds (5200 * 6 // 100 = 312).
+      # 2026-11-27: the three git-guard routing test files joined the set (522 tests, 0 skips on qwent's
+      # Windows side). Floor and ceiling are unchanged: the floor is Sam's pre-declared criterion and the
+      # added passes only widen the margin above it.
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |

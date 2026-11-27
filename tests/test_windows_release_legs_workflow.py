@@ -758,6 +758,10 @@ WINDOWS_TEST_SET = (
     "tests/test_install_source.py", "tests/test_pdf_stack.py", "tests/test_installer_rebuild.py",
     # The MinerU CLI (8 reds on native Windows that nothing ran) and the server spawn's Job Object test.
     "tests/test_mineru_cmd.py", "tests/test_mineru_spawn_windows_flags.py",
+    # The git-guard routing tests (522 pass natively, 0 skips) spawn Git for Windows' bash through
+    # tests/_git_bash.py; they and the helper are workflow triggers.
+    "tests/test_routing_subagent_git_write.py", "tests/test_routing_subagent_git_write_gaps.py",
+    "tests/test_routing_subagent_git_dash_c_worktree.py",
     "tests/test_context.py::TestSubagentHookInjection", "tests/test_context.py::TestSessionHookInjection",
 )
 #: Windows-set test files that are deliberately not workflow triggers (the loop that reads this).
@@ -793,6 +797,11 @@ def test_the_rehearsal_triggers_on_every_phase3_windows_module_and_its_tests() -
     assert "src/nexus/hooks/**" in paths, "the hook suite rides on its source path"
     # A dependency bump changes what runs on Windows (nexus-6046d / zw44w).
     assert "pyproject.toml" in paths and "uv.lock" in paths
+
+
+def test_the_rehearsal_triggers_on_the_git_bash_helper_the_git_guard_tests_share() -> None:
+    paths = _triggers(_doc(REHEARSAL))["push"]["paths"]
+    assert "tests/_git_bash.py" in paths
 
 
 def test_the_rehearsal_triggers_on_the_phase4_bootstrap_and_hook_launcher() -> None:
