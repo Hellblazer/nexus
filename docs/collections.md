@@ -135,24 +135,25 @@ bytes, and not the minted form `c<digits>`, which only the engine assigns. It
 may not contain `/` or `,`, and it may not begin or end with whitespace.
 
 To give a collection a readable label, rename it with `nx collection rename
-OLD NEW`. A minted label has no route to a bare readable label without
+OLD NEW`. A minted `c<id>` label renames to a bare readable label without
 `--force-prefix-change`. Three things to know first:
 
 - **A rename sets the collection's content type and owner from the new name.**
   For a `knowledge` collection the owner is its subject. Renaming `c4812` to
-  `distributed-systems-papers` (possible only with the flag below) makes `distributed-systems-papers` its
+  `distributed-systems-papers` makes `distributed-systems-papers` its
   subject, so a later write to `distributed-systems` no longer finds it and
   registers a second collection. Rename a subject's collection only to
   change its subject.
-- **The CLI guards compare the two names.** A minted `c<id>` label has no
-  type prefix, so renaming it to a label without one, or to one the CLI
-  reads as another embedding model (`knowledge__x` reads as
-  voyage-context-3, `c4812` as voyage-code-3), stops with a prefix or
-  model mismatch. `--force-prefix-change` lets it through and switches off
-  the model-token check, so use it only when the new name's type and model
-  are right. A conformant four-segment name whose model token matches the
-  row's model passes without the flag, and sets the owner from its owner
-  segment.
+- **The CLI guards compare the two names.** A minted `c<id>` label carries
+  no type and no model, so the guards read neither from it: it renames to
+  a label with no type prefix, or to a prefixed one whose type is its
+  row's, without the flag. A named label such as `code__foo` still stops
+  with a prefix or model mismatch when the new name reads as another type
+  or embedding model (`code__foo` to `docs__foo`, or to a bare label).
+  `--force-prefix-change` lets it through and switches off the model-token
+  check, so use it only when the new name's type and model are right. A
+  conformant four-segment name whose model token matches the row's model
+  passes without the flag, and sets the owner from its owner segment.
 - **What a rename does depends on the engine's gate 3 latch.** Before it, a
   rename rewrites every table that names the collection, gives the
   collection a new registry row and id, and leaves the old name as a

@@ -285,6 +285,54 @@ class TestRenameCLI:
             else:
                 mock_cascade.assert_called_once_with(old, new)
 
+    @pytest.mark.parametrize(
+        ("old", "row_type", "new", "expect_reject"),
+        [
+            # nexus-a7o92: a minted label names no type and no model, so
+            # nothing it spells is a claim the new name can contradict.
+            ("c4812", "knowledge", "distributed-systems-papers", False),
+            ("c4812", "code", "my-repo", False),
+            # `knowledge__x` reads as voyage-context-3 and `c4812` as
+            # voyage-code-3 by name; that comparison is not a finding.
+            ("c4812", "knowledge", "knowledge__x", False),
+            # The row's own type still guards a target that names another.
+            ("c4812", "knowledge", "docs__foo", True),
+            # A real prefixed name is guarded as before, plain target included.
+            ("code__foo", None, "plain-label", True),
+            ("knowledge__foo", None, "plain-label", True),
+            # Not the minted form (letters, no digits, a suffix): no exemption.
+            ("cabc", "knowledge", "plain-label", True),
+            ("c4812x", "knowledge", "plain-label", True),
+        ],
+    )
+    def test_rename_prefix_guard_skips_minted_labels(
+        self, old: str, row_type: str | None, new: str, expect_reject: bool, env_creds,
+    ) -> None:
+        """nexus-a7o92: a minted ``c<id>`` source renames to a plain label
+        without ``--force-prefix-change``; a real prefixed name does not."""
+        from nexus.commands.collection import rename_cmd
+
+        fake_counts = {
+            "tax_topics": 0, "tax_assignments": 0, "tax_meta": 0,
+            "chash": 0, "catalog_docs": 0,
+        }
+        row = {"content_type": row_type} if row_type else None
+        with patch(
+            "nexus.commands.collection.rename_collection_data_plane",
+            return_value=fake_counts,
+        ) as mock_cascade, patch(
+            "nexus.mcp_infra.get_collection_row", return_value=row,
+        ):
+            result = CliRunner().invoke(rename_cmd, [old, new])
+        if expect_reject:
+            assert result.exit_code != 0, result.output
+            assert "mismatch" in result.output.lower()
+            assert "--force-prefix-change" in result.output
+            mock_cascade.assert_not_called()
+        else:
+            assert result.exit_code == 0, result.output
+            mock_cascade.assert_called_once_with(old, new)
+
     # test_force_prefix_change_bypasses_gate retired (nexus-i711w terminal
     # deletion): same retired client-side fan-out pins as
     # test_rename_happy_path above. The prefix/model gates themselves stay
