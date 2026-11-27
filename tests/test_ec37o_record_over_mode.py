@@ -16,6 +16,8 @@ import pytest
 from nexus.db import http_vector_client as hvc
 from nexus.search_engine import _threshold_for_collection_model
 
+pytestmark = pytest.mark.usefixtures("cloud_mode")  # the tests name voyage models and a voyage engine mode: RDR-109 mode lint
+
 BGE_ROW = {"embedding_model": "bge-base-en-v15-768", "content_type": "docs"}
 VOYAGE_ROW = {"embedding_model": "voyage-context-3", "content_type": "docs"}
 NAME = "docs__1-1__bge-base-en-v15-768__v1"
