@@ -9,8 +9,16 @@ are still read.
 """
 from __future__ import annotations
 
+import json
+from unittest.mock import MagicMock
+
 import pytest
+from click.testing import CliRunner
 from structlog.testing import capture_logs
+
+import nexus.doctor_search as ds
+from nexus.commands.catalog_cmds import doctor
+from nexus.commands.store import expire_cmd, export_cmd
 
 from nexus.collection_errors import retired_no_successor_error_from_body
 from nexus.db.http_vector_client import HttpVectorClient
@@ -102,9 +110,7 @@ def test_store_expire_dry_run_reports_the_skipped_retired_collection_too(monkeyp
 
 
 def test_nx_store_expire_names_the_retired_collections_it_did_not_read(monkeypatch):
-    from click.testing import CliRunner
 
-    from nexus.commands.store import expire_cmd
 
     _expire_world(monkeypatch, retired_row={"superseded_by": RETIRED_NAME})
     monkeypatch.setattr("nexus.commands.store._t3", lambda: HttpVectorClient())
@@ -118,10 +124,7 @@ def test_nx_store_expire_names_the_retired_collections_it_did_not_read(monkeypat
 # ── nx store export --all ───────────────────────────────────────────────────────────────────────────────────────────
 
 def test_store_export_all_skips_a_retired_collection_and_exports_the_rest(monkeypatch, tmp_path):
-    from click.testing import CliRunner
-    from unittest.mock import MagicMock
 
-    from nexus.commands.store import export_cmd
 
     live = "knowledge__live__bge-base-en-v15-768__v1"
     db = MagicMock()
@@ -154,7 +157,6 @@ def test_store_export_all_skips_a_retired_collection_and_exports_the_rest(monkey
 # ── nx doctor --check-search ────────────────────────────────────────────────────────────────────────────────────────
 
 def _check_search_world(monkeypatch):
-    import nexus.doctor_search as ds
 
     probed: list[list[str]] = []
     monkeypatch.setattr(ds, "_load_canaries", lambda: [])
@@ -185,7 +187,6 @@ def test_check_search_does_not_probe_a_retired_collection_and_reports_the_skip_w
 
 
 def test_check_search_json_carries_the_retired_skip(monkeypatch, capsys):
-    import json
 
     ds, _ = _check_search_world(monkeypatch)
     with capture_logs():  # the skip's log line would otherwise share stdout with the JSON
@@ -193,3 +194,99 @@ def test_check_search_json_carries_the_retired_skip(monkeypatch, capsys):
     retrieval = json.loads(capsys.readouterr().out)["probes"][1]
     assert retrieval["summary"] == {"retired_skipped": 1}
     assert [(r["name"], r["outcome"]) for r in retrieval["results"]] == [(RETIRED_NAME, "retired_skipped")]
+
+
+# ── nx catalog doctor ───────────────────────────────────────────────────────────────────────────────────────────────
+
+LIVE_NAME = "knowledge__live__bge-base-en-v15-768__v1"
+
+
+class _FakeCollection:
+    def __init__(self, name):
+        self.name = name
+
+    def get(self, **kw):
+        if self.name == RETIRED_NAME:
+            raise _retired_409(RETIRED_NAME)
+        return {"ids": ["a" * 64], "documents": ["some text"], "metadatas": [{"chunk_text_hash": "a" * 64}]}
+
+
+class _FakeT3:
+    """A tenant listing one retired collection (it still holds chunks) and one live one; a by-label read of the
+    retired one raises what the engine's 409 becomes."""
+
+    def __init__(self):
+        self.opened: list[str] = []
+
+    def list_collections(self, *a, **k):
+        return [{"name": RETIRED_NAME, "superseded_by": RETIRED_NAME, "count": 3, "content_type": "knowledge"},
+                {"name": LIVE_NAME, "count": 1, "content_type": "knowledge", "lifecycle_state": "live"}]
+
+    def get_or_create_collection(self, name):
+        self.opened.append(name)
+        return _FakeCollection(name)
+
+    def get_embeddings(self, name, ids):
+        if name == RETIRED_NAME:
+            raise _retired_409(RETIRED_NAME)
+        return [[0.0] * 768]
+
+    def manifest_less_census(self, name, **kw):
+        if name == RETIRED_NAME:
+            raise _retired_409(RETIRED_NAME)
+        return {"totals": {"superseded": 0}, "chashes": {"superseded": []}, "owners": {}}
+
+
+@pytest.mark.parametrize(("runner", "table_key"), [
+    ("_run_chunk_size_distribution", "tables"),
+    ("_run_chunk_text_dedup", "within"),
+])
+def test_catalog_doctor_per_collection_checks_skip_a_retired_collection_not_fail_on_it(monkeypatch, runner, table_key):
+
+    t3 = _FakeT3()
+    monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
+
+    with capture_logs() as logs:
+        report = getattr(doctor, runner)()
+
+    assert report["pass"] is True, report
+    assert RETIRED_NAME not in t3.opened and RETIRED_NAME not in report[table_key]
+    assert LIVE_NAME in report[table_key], "the live collection is still read"
+    assert report["retired_skipped"] == [RETIRED_NAME]
+    assert any(e["event"] == "retired_collection_skipped" for e in logs)
+
+
+def test_catalog_doctor_name_vs_embed_dim_skips_a_retired_collection_not_a_read_error(monkeypatch):
+
+    t3 = _FakeT3()
+    monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
+
+    report = doctor._run_name_vs_embed_dim()
+
+    assert report["read_errors"] == [] and report["pass"] is True, report
+    assert report["checked"] == 1 and report["retired_skipped"] == [RETIRED_NAME]
+
+
+def test_catalog_doctor_visible_outside_manifest_skips_a_retired_collection(monkeypatch):
+
+    report = doctor._run_visible_outside_manifest(t3=_FakeT3())
+
+    assert report["check_errors"] == [] and report["pass"] is True, report
+    assert report["collections_total"] == 1 and report["retired_skipped"] == [RETIRED_NAME]
+
+
+@pytest.mark.parametrize(("printer", "report"), [
+    ("_print_chunk_size_distribution_text",
+     {"pass": True, "micro_chunk_bytes": 100, "max_document_bytes": 16384, "tables": {}, "retired_skipped": ["r1"]}),
+    ("_print_chunk_text_dedup_text",
+     {"pass": True, "within": {}, "cross_dupe_warn": False, "cross_dupe_chunk_count": 0,
+      "cross_dupe_warn_threshold": 100, "retired_skipped": ["r1"]}),
+    ("_print_name_vs_embed_dim_text",
+     {"pass": True, "checked": 0, "mismatches": [], "empty": [], "skipped_non_conformant": 0, "unknown_token": [],
+      "read_errors": [], "retired_skipped": ["r1"]}),
+])
+def test_catalog_doctor_text_names_the_retired_collections_it_skipped(capsys, printer, report):
+
+    getattr(doctor, printer)(report)
+
+    assert "skipped 1 retired collection" in capsys.readouterr().out

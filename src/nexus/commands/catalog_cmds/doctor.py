@@ -38,7 +38,32 @@ from typing import Any
 import click
 import structlog
 
+from nexus.db.retired_rows import skip_retired_rows
+
 _log = structlog.get_logger(__name__)
+
+
+def _listing_without_retired(t3: Any, *, site: str) -> tuple[list[dict], list[str]]:
+    """The T3 listing a per-collection check reads: bypass-schema (``taxonomy__*``) rows and retired ones left out.
+
+    The engine refuses a by-label read of a retired collection that has no live successor (RDR-229 R7), and such a row
+    can still hold chunks, so a check that opened it would report a read error or a FAIL for a collection nobody can
+    read. The names left out come back as a list and are logged; each check carries them as ``retired_skipped``."""
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415 — command-local import (nexus.db.rows.lifecycle)
+
+    rows, skipped = skip_retired_rows(
+        (c for c in t3.list_collections() if not bypasses_canonical_schema(c["name"], c)), site=site,
+    )
+    return rows, list(skipped)
+
+
+def _echo_retired_skipped(report: dict) -> None:
+    skipped = report.get("retired_skipped") or []
+    if skipped:
+        click.echo(
+            f"  skipped {len(skipped)} retired collection{'' if len(skipped) == 1 else 's'} "
+            f"(no live successor; the engine refuses a read by label): {', '.join(skipped)}"
+        )
 
 #: The exit status of ``--sensitive-with-aspects`` when its row could not look ("not checked": the engine's
 #: sensitive list is unavailable, capped or unreadable). It differs from pass (0), fail (1) and a usage error (2):
@@ -673,10 +698,8 @@ def _run_chunk_size_distribution() -> dict:
 
     try:
         t3 = make_t3()
-        collections = [
-            c["name"] for c in t3.list_collections()
-            if not bypasses_canonical_schema(c["name"], c)
-        ]
+        rows, retired_skipped = _listing_without_retired(t3, site="catalog_doctor_chunk_size_distribution")
+        collections = [c["name"] for c in rows]
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
             "pass": False,
@@ -742,6 +765,7 @@ def _run_chunk_size_distribution() -> dict:
         "max_document_bytes": max_doc_bytes,
         "micro_chunk_bytes": _MICRO_CHUNK_BYTES,
         "tables": tables,
+        "retired_skipped": retired_skipped,
     }
 
 
@@ -755,6 +779,7 @@ def _print_chunk_size_distribution_text(report: dict) -> None:
         f"  thresholds: micro < {report['micro_chunk_bytes']}B, "
         f"over-quota > {report['max_document_bytes']}B"
     )
+    _echo_retired_skipped(report)
     for name, t in report["tables"].items():
         if "error" in t:
             click.echo(f"  ERROR {name}: {t['error']}")
@@ -790,10 +815,8 @@ def _run_chunk_text_dedup() -> dict:
 
     try:
         t3 = make_t3()
-        collections = [
-            c["name"] for c in t3.list_collections()
-            if not bypasses_canonical_schema(c["name"], c)
-        ]
+        rows, retired_skipped = _listing_without_retired(t3, site="catalog_doctor_chunk_text_dedup")
+        collections = [c["name"] for c in rows]
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
             "pass": False,
@@ -870,6 +893,7 @@ def _run_chunk_text_dedup() -> dict:
         "cross_dupe_warn_threshold": _CROSS_COLL_DUPE_WARN_COUNT,
         "cross_dupe_warn": cross_warn,
         "cross_sample": cross[:20],
+        "retired_skipped": retired_skipped,
     }
 
 
@@ -879,6 +903,7 @@ def _print_chunk_text_dedup_text(report: dict) -> None:
         return
     status = "PASS" if report["pass"] else "FAIL"
     click.echo(f"chunk-text-dedup: {status}")
+    _echo_retired_skipped(report)
     for name, t in report["within"].items():
         if "error" in t:
             click.echo(f"  ERROR {name}: {t['error']}")
@@ -1118,10 +1143,8 @@ def _run_name_vs_embed_dim() -> dict:
 
     try:
         t3_db = make_t3()
-        cols = [
-            c["name"] for c in t3_db.list_collections()
-            if not bypasses_canonical_schema(c["name"], c)
-        ]
+        rows, retired_skipped = _listing_without_retired(t3_db, site="catalog_doctor_name_vs_embed_dim")
+        cols = [c["name"] for c in rows]
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
             "pass": False,
@@ -1217,6 +1240,7 @@ def _run_name_vs_embed_dim() -> dict:
         "skipped_non_conformant": skipped_non_conformant,
         "unknown_token": unknown_token,
         "read_errors": read_errors,
+        "retired_skipped": retired_skipped,
     }
 
 
@@ -1232,6 +1256,7 @@ def _print_name_vs_embed_dim_text(report: dict) -> None:
         f"empty={len(report['empty'])}  "
         f"skipped-non-conformant={report['skipped_non_conformant']}"
     )
+    _echo_retired_skipped(report)
     if report["mismatches"]:
         click.echo(
             f"\n  Mislabeled collections ({len(report['mismatches'])}):"
@@ -1583,7 +1608,7 @@ def _run_visible_outside_manifest(
         "reason": "", "checked": 0, "total": 0, "findings": [], "collections": [],
         "collections_total": 0, "collections_unreached": 0, "unrowed_collections": 0,
         "truncated": False, "truncated_reason": "",
-        "check_errors": [], "elapsed_s": 0.0,
+        "check_errors": [], "elapsed_s": 0.0, "retired_skipped": [],
         "row_budget": row_budget, "time_budget_s": time_budget_s,
     }
 
@@ -1592,7 +1617,8 @@ def _run_visible_outside_manifest(
             from nexus.db import make_t3  # noqa: PLC0415 — command-local import (nexus.db)
 
             t3 = make_t3()
-        listing = list(t3.list_collections())
+        listing, retired_skipped = skip_retired_rows(t3.list_collections(), site="catalog_doctor_visible_outside_manifest")
+        report["retired_skipped"] = list(retired_skipped)
         names = sorted(
             c["name"] for c in listing
             if c.get("content_type") == _VISIBLE_CHECK_CONTENT_TYPE and c.get("lifecycle_state") != "quarantine"
@@ -1757,6 +1783,7 @@ def _print_visible_outside_manifest_text(report: dict) -> None:
     if report.get("error"):
         click.echo(f"visible-outside-manifest: ERROR - {report['error']}")
         return
+    _echo_retired_skipped(report)
     if report.get("not_applicable"):
         click.echo(f"visible-outside-manifest: not applicable - {report['reason']}")
         return
