@@ -241,3 +241,15 @@ def test_a_head_with_no_copy_of_the_file_says_no_committed_copy_not_differs(pinn
     audience = pinned(posture)
     _, text = _show(audience, ["show", "--cwd", str(repo)])
     assert "project file at HEAD: no committed copy" in text and "differs" not in text
+
+
+def test_outside_a_checkout_the_project_row_says_no_checkout(pinned, plain_posture, tmp_path):
+    """A directory with no ``.git`` above it has no project file to read; the row says so, not "no account home"."""
+    audience = pinned(plain_posture)
+    outside = tmp_path / "no-repo-here"
+    outside.mkdir()
+    rc, text = _show(audience, ["show", "--cwd", str(outside)])
+    assert rc == 0
+    project_row = next(line for line in text.splitlines() if line.strip().startswith("project:"))
+    assert "(no checkout)" in project_row, project_row
+    assert "no account home" not in project_row, project_row

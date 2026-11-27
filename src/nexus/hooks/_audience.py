@@ -1325,7 +1325,7 @@ def render_report(report: dict) -> str:
         out.append("  warning: " + v["warning"])
     out.append("files:")
     for f in report["files"]:
-        where = f["path"] or "(no account home)"
+        where = f["path"] or ("(no checkout)" if f["role"] == "project" else "(no account home)")
         out.append("  " + f["role"] + ": " + where + (" (present)" if f["exists"] else " (not present)"))
     hd = report["head_differs"]
     if report.get("head_copy") is False:
