@@ -8,7 +8,7 @@ superseding the RDR's original "rank by RECORDED per-plan median cost"
 design): nexus-nyry9.3's .r3 census refuted a rankable recorded-history
 population at authoring time (0 plans with >= 3 distinct successful runs
 across the whole live+deleted library; cost_usd was 0.00 on 182/182 runs;
-``plan_id`` is not even a stable key across a ``nx plan reseed``). This
+``plan_id`` is not even a stable key across a ``nx answer-plan reseed``). This
 module instead PREDICTS a plan's cost from its STEP SHAPE — operator
 names, SQL-fast-path eligibility, and adjacent-operator bundling — priced
 against Phase 1's per-operator telemetry when enough of it exists, falling
@@ -212,7 +212,8 @@ _KNOWN_RETRIEVAL_TOOLS: Final[frozenset[str]] = frozenset({
     "search_metadata_scoped", "search_graph_hop", "search_topic_scoped",
     # RDR-156 Decision 5 (nexus-ubnwk): the fourth combined-query shape.
     "search_aspect_scoped",
-    "plan_search",
+    "answer_plan_search",
+    "answer_plan_search",
     # RDR-147 Step 3 (nexus-v9v5r): the runner-native exact-title lookup -- no embedding, no model call.
     "resolve",
 })

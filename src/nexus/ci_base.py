@@ -19,6 +19,10 @@ from nexus.bounded_subprocess import run_bounded
 
 #: A board topic's base: what the ``board/ci/<topic>`` template accepts before ``--owner`` and ``--push``.
 BASE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+#: The adapter's topic rules (github_board_adapter.py: ``_SEGMENT_BAD``, ``_DASHES``, ``MAX_TOPIC_CHARS``); see :func:`join`.
+_SEGMENT_BAD = re.compile(r"[^A-Za-z0-9._-]+")
+_DASHES = re.compile(r"-{2,}")
+MAX_TOPIC_CHARS = 80
 #: The last two path segments of a remote URL: owner and repo, ``.git`` and a trailing slash dropped. Works for
 #: ``git@host:owner/repo.git``, ``https://host/owner/repo`` (credentials allowed) and ``ssh://`` forms.
 _SLUG = re.compile(r"[/:]([^/:@\s]+)/([^/:@\s]+?)(?:\.git)?/?$")
@@ -42,6 +46,26 @@ def repo_from_url(url: str) -> str | None:
     (``board/ci/<repo>-<branch>--...``, the repo part of ``nx ci wait --repo``). None for a URL with no usable name."""
     slug = slug_from_url(url)
     return slug[1].lower() if slug else None
+
+
+def branch_of(base: str) -> str:
+    """The branch a board *base* names: the part after its last hyphen (``develop`` for ``nexus-develop``, ``main`` for
+    ``recording-rig-main``), or the whole base when it has none. A base is ``<repo>-<branch>`` and the two parts are not
+    delimited, so a branch that itself holds a hyphen reads as its last word; the branches the CI adapter posts for are
+    ``develop``, ``main`` and ``master``."""
+    return base.rsplit("-", 1)[-1]
+
+
+def join(repo: str, branch: str) -> str:
+    """The board topic for *repo* and *branch*, exactly as the CI adapter writes it: conexus
+    ``infra/terraform/ci-board-adapter/lambda/github_board_adapter.py``, ``topic_for(repo_name, branch)`` =
+    ``normalise_segment(f"{repo_name.lower()}-{branch}")`` cut to ``MAX_TOPIC_CHARS`` and stripped of trailing ``._-``, where
+    ``normalise_segment`` maps each run of characters outside ``[A-Za-z0-9._-]`` to ``-``, collapses runs of ``-`` and strips
+    leading ``._-``. So ``a--b`` pushing ``develop`` is the board ``a-b-develop``, and ``.dot`` is ``dot-develop``. The one place a
+    base is put together; the empty string is a topic the adapter refuses (:func:`derive` refuses it too). A client mirror of
+    code in another repository: tests/test_pre_push_hook_round3.py holds the table worked out from those rules."""
+    topic = _DASHES.sub("-", _SEGMENT_BAD.sub("-", f"{repo.lower()}-{branch}")).lstrip("._-")
+    return topic[:MAX_TOPIC_CHARS].rstrip("._-")
 
 
 def remote_url(remote: str = "origin", *, cwd: str | Path | None = None) -> str:
@@ -68,7 +92,10 @@ def derive(remote: str, branch: str | None, *, cwd: str | Path | None = None) ->
     repo = repo_from_url(url)
     if repo is None:
         raise BaseUnderivableError(f"the repo name cannot be read from the remote URL {url!r}: {hint}")
-    return f"{repo}-{branch}"
+    topic = join(repo, branch)
+    if not topic:
+        raise BaseUnderivableError(f"the repo {repo!r} and branch {branch!r} make an empty board topic, so the base cannot be derived: {hint}")
+    return topic
 
 
 def default_branch(remote: str = "origin", *, cwd: str | Path | None = None) -> str | None:

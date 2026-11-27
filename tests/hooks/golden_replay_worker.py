@@ -11,14 +11,17 @@ an older commit). *mode*:
 
 ``old``       a tree that has no ``_audience.py``; the guard runs as it did.
 ``new``       the working tree's guard; the account home is *account-home*
-              (a flagged home makes the account a maintainer, an empty one
-              leaves the repo marker to decide).
+              (a user-strict home turns the strict guard on for every repository,
+              an empty one leaves the repository's own settings to decide).
 
 Each input line is ``{"command": ..., "cwd": ..., "agent_type": ...}``. Each output
-line is ``{"verdict": "<stdout of the hook>", "maintainer": bool|null,
-"nexus_repo": bool|null}``. The guard's git probes are cached per cwd and its
-telemetry is stubbed, so a 200,000-line corpus runs in minutes: neither changes a
-verdict, they only stop a spawn per line.
+line is ``{"verdict": "<stdout of the hook>", "strict": bool|null,
+"project_strict": bool|null, "outcome": "<the last routing event's outcome>"}``:
+``strict`` is "``guard_mode`` reads strict" (the posture the guard ran in) and
+``project_strict`` is "the project's own tracked settings say strict". The
+guard's git probes are cached per cwd and its telemetry is captured, not sent, so a
+200,000-line corpus runs in minutes: neither changes a verdict, they only stop a
+spawn per line.
 """
 from __future__ import annotations
 
@@ -48,10 +51,11 @@ def main(argv: list[str]) -> None:
     assert spec and spec.loader
     guard = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard)
-    guard._lib.log_routing_event = lambda **kwargs: None
+    events: list[str] = []
+    guard._lib.log_routing_event = lambda **kwargs: events.append(str(kwargs.get("outcome", "")))
     for name in ("_in_linked_worktree", "_current_branch", "_is_linked_worktree_root"):
         setattr(guard, name, functools.cache(getattr(guard, name)))
-    maint_cache: dict[str, tuple[bool, bool]] = {}
+    posture_cache: dict[str, tuple[bool, bool]] = {}
     for line in sys.stdin:
         case = json.loads(line)
         cwd = case.get("cwd") or ""
@@ -62,19 +66,26 @@ def main(argv: list[str]) -> None:
         }
         if cwd:
             payload["cwd"] = cwd
-        maint: bool | None = None
-        nexus: bool | None = None
+        strict: bool | None = None
+        project_strict: bool | None = None
         if audience is not None:
-            if cwd not in maint_cache:
-                maint_cache[cwd] = (audience.maintainer(payload), audience.nexus_repo(payload))
-            maint, nexus = maint_cache[cwd]
+            if cwd not in posture_cache:
+                posture_cache[cwd] = (
+                    audience.guard_mode(payload) == "strict",
+                    audience.project_settings(payload).get("subagent_git") == "strict",
+                )
+            strict, project_strict = posture_cache[cwd]
         out = io.StringIO()
+        events.clear()
         with contextlib.redirect_stdout(out):
             try:
                 guard.body(payload)
             except SystemExit:
                 pass
-        sys.stdout.write(json.dumps({"verdict": out.getvalue(), "maintainer": maint, "nexus_repo": nexus}) + "\n")
+        sys.stdout.write(json.dumps({
+            "verdict": out.getvalue(), "strict": strict, "project_strict": project_strict,
+            "outcome": events[-1] if events else "",
+        }) + "\n")
     sys.stdout.flush()
 
 

@@ -25,7 +25,7 @@ import sys
 
 import pytest
 
-from tests.hooks.audience_harness import flagged_home
+from tests.hooks.audience_harness import strict_home
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 SCRIPT = (
@@ -47,7 +47,7 @@ _HOME: list[pathlib.Path | None] = [None]
 @pytest.fixture(autouse=True)
 def _account_home(tmp_path):
     home = tmp_path / "acct-home"
-    _HOME[0] = pathlib.Path(flagged_home(home))
+    _HOME[0] = pathlib.Path(strict_home(home))
     yield
     _HOME[0] = None
 
@@ -227,6 +227,9 @@ def test_anything_beyond_one_literal_invocation_falls_through(primary, worktree)
         f"git -C {wt} commit -m x\ntouch /tmp/y",
         f'git -C {wt} commit -m "{D}(touch /tmp/y)"',
         f"git -C {wt} commit -m {BT}touch /tmp/y{BT}",
+        f"git -C {wt} add -A; git -C {wt} commit -m x",
+        f"git -C {wt} add -A\ngit -C {wt} commit -m x",
+        f"git -C {wt} add -A || git -C {wt} commit -m x",
         f"git -C {wt} rebase --ex 'x=g; y=it; {D}x{D}y -C {p} reset --hard' abc1234",
         f"git -C {wt} switch --ignore-other-worktrees develop",
         f"git -C {wt} branch -u origin/develop",
@@ -250,11 +253,12 @@ def test_anything_beyond_one_literal_invocation_falls_through(primary, worktree)
     assert not passed, passed
 
 
-def test_the_deny_message_leads_with_the_working_shape(primary):
+def test_the_deny_message_gives_the_working_shape(primary):
     reason = _verdict(f"git -C {primary} commit -m x", primary)["permissionDecisionReason"]
-    first = reason.splitlines()[0]
-    assert "git -C <absolute worktree root>" in first, first
-    assert "'HEAD~1'" in first and "-F <file>" in first, first
+    allowed = next(line for line in reason.splitlines() if line.startswith("Allowed shape"))
+    assert "git -C <absolute worktree root>" in allowed, allowed
+    assert "'HEAD~1'" in allowed and "-F <file>" in allowed, allowed
+    assert reason.splitlines()[0].startswith("Denied:"), reason
 
 
 def test_reads_are_untouched(primary, worktree):

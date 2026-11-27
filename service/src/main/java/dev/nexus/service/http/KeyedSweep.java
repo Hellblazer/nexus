@@ -101,8 +101,10 @@ final class KeyedSweep {
      * @param route        the ledger route (the request path)
      * @param raw          the raw request body bytes; their SHA-256 binds the key to this request
      * @param attemptBound the form's statement bound; the ledger adds the pool waits and slack to it
-     * @param gateBusy     true for the two quarantine forms, which can meet the RDR-191 sweep gate; restore
-     *                     never takes the gate and keeps its row-lock timeout error
+     * @param gateBusy     true for the forms whose sweep-gate timeout answers 503 {@code sweep_gate_busy}: the quarantine and
+     *                     expire forms (the RDR-191 sweep gate). False for the two restores: restore-rereferenced takes no
+     *                     gate, and quarantine-restore takes the origin's gate when the call names siblings but keeps its own
+     *                     busy error ({@code quarantine_restore_busy}, also for a row-lock timeout)
      * @param sweep        runs the repository sweep with the marker and returns the outcome
      * @param bodyOf       the response body of an outcome, the same builder the unkeyed call uses
      */

@@ -479,7 +479,7 @@ class TestLiveSqliteRoundTrip:
 
         The save runs synchronously before the envelope is built, so the id
         is in hand; the envelope used to report ``plan_id=0`` (the miss
-        match's synthetic id) while ``plan_search`` showed the row saved.
+        match's synthetic id) while ``answer_plan_search`` showed the row saved.
         Real T2 store, no mock of the save.
         """
         from nexus.mcp.core import nx_answer

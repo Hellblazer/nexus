@@ -58,6 +58,8 @@ class MoveBootWorkTest {
         volatile List<DataMoveRegistry.FailedMove> failed = List.of();
         volatile Map<String, DataMoveRuns.Progress> progress = Map.of();
         volatile CountDownLatch holdRead;
+        /** Run inside the next reads, after they are counted: the test's hook for what happens during a sample. */
+        volatile Runnable onRead;
         final CountDownLatch readEntered = new CountDownLatch(1);
         final AtomicInteger reads = new AtomicInteger();
         final AtomicBoolean aborted = new AtomicBoolean();
@@ -66,6 +68,10 @@ class MoveBootWorkTest {
         @Override
         public MoveBootWork.Snapshot read() {
             reads.incrementAndGet();
+            Runnable hook = onRead;
+            if (hook != null) {
+                hook.run();
+            }
             CountDownLatch hold = holdRead;
             if (hold != null) {
                 readEntered.countDown();
@@ -345,6 +351,92 @@ class MoveBootWorkTest {
             assertThat(e.what()).startsWith("blocked: the data-move worker is not running");
             assertThat(e.safeToStop()).isTrue();
         });
+    }
+
+    // ── the first minute after boot: a move registered after the first sample is reported at once ───────────
+
+    /**
+     * F37 (nexus-p2m1x.48): a move registered after the first sample (the engine's run-time registrations, 2 s after a first
+     * boot's first doctor) used to wait for the next 5 s sample, so a first-run client saw no move and then one. The sampler
+     * keeps a short period for the first minute and the steady one after.
+     */
+    @Test
+    void aMoveRegisteredAfterTheFirstSample_isReportedWellBeforeTheSteadyPeriod_inTheFirstMinute() throws Exception {
+        var w = work(Duration.ofMinutes(15));
+        try {
+            w.start(MoveBootWork.DEFAULT_INTERVAL);   // the steady period of a running engine: 5 s
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (reader.reads.get() == 0 && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+            assertThat(reader.reads.get()).as("the first sample ran at start").isGreaterThan(0);
+            assertThat(registry.snapshot()).as("nothing is registered yet").isEmpty();
+
+            reader.open = List.of(move("late"));   // registered after the first sample
+            long registeredAt = System.nanoTime();
+            String id = MoveBootWork.ID_PREFIX + "late";
+            while (registry.snapshot().stream().noneMatch(e -> e.id().equals(id))
+                && System.nanoTime() - registeredAt < TimeUnit.SECONDS.toNanos(6)) {
+                Thread.sleep(5);
+            }
+            long lagMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - registeredAt);
+
+            assertThat(registry.snapshot()).as("boot_work names the move").anyMatch(e -> e.id().equals(id));
+            assertThat(lagMs).as("boot_work named it within 1 s of its registration (a 250 ms period), not a 5 s period later")
+                .isLessThan(1_000L);
+        } finally {
+            w.close();
+        }
+    }
+
+    /** Pins the END of the warm-up through start(): after the first minute the sampler is on the steady period. */
+    @Test
+    void afterTheFirstMinute_theSamplerRunsAtTheSteadyPeriod_notTheWarmupOne() throws Exception {
+        var w = work(Duration.ofMinutes(15));
+        reader.onRead = () -> {
+            reader.onRead = null;
+            clock.advance(MoveBootWork.WARMUP.plusSeconds(1));   // the first minute is over by the time the first sample ends
+        };
+        try {
+            w.start(MoveBootWork.DEFAULT_INTERVAL);   // steady period 5 s
+            Thread.sleep(1_000);   // four warm-up periods, were the warm-up still on
+            assertThat(reader.reads.get()).as("one sample at start, none a warm-up period later: the next is 5 s out")
+                .isBetween(1, 1);
+        } finally {
+            w.close();
+        }
+    }
+
+    @Test
+    void anUnreadableRegistry_isRetriedAtTheSteadyPeriod_notTheWarmupOne() throws Exception {
+        var w = work(Duration.ofMinutes(15));
+        reader.onRead = () -> {
+            throw new IllegalStateException("connection refused");
+        };
+        try {
+            w.start(MoveBootWork.DEFAULT_INTERVAL);
+            Thread.sleep(1_000);
+            assertThat(reader.reads.get()).as("sampled once at start, and a database refusing connections is not hit every "
+                + "250 ms in the first minute").isBetween(1, 1);
+        } finally {
+            w.close();
+        }
+    }
+
+    @Test
+    void theSamplingPeriod_isShortForTheFirstMinuteAndTheSteadyOneAfter_neverAboveTheSteadyOne() {
+        var w = work(Duration.ofMinutes(15));
+        var steady = Duration.ofSeconds(5);
+        assertThat(w.periodAfter(Instant.parse("2026-11-17T00:00:00Z"), clock.instant(), steady))
+            .as("at boot").isEqualTo(MoveBootWork.WARMUP_INTERVAL);
+        clock.advance(MoveBootWork.WARMUP.minusSeconds(1));
+        assertThat(w.periodAfter(Instant.parse("2026-11-17T00:00:00Z"), clock.instant(), steady))
+            .as("still inside the first minute").isEqualTo(MoveBootWork.WARMUP_INTERVAL);
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(w.periodAfter(Instant.parse("2026-11-17T00:00:00Z"), clock.instant(), steady))
+            .as("the steady-state cost is unchanged after the first minute").isEqualTo(steady);
+        assertThat(w.periodAfter(Instant.parse("2026-11-17T00:00:00Z"), Instant.parse("2026-11-17T00:00:00Z"),
+            Duration.ofMillis(50))).as("a steady period shorter than the warm-up one wins").isEqualTo(Duration.ofMillis(50));
     }
 
     // ── close ───────────────────────────────────────────────────────────────────────────────────────────────

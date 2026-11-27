@@ -32,9 +32,9 @@ def _client(monkeypatch: pytest.MonkeyPatch, row: dict | None) -> HttpCatalogCli
         return httpx.Response(200, json={})
 
     monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
-    client = HttpCatalogClient(base_url="http://mock.test")
+    client = HttpCatalogClient(base_url="https://mock.test")
     client._client = httpx.Client(
-        base_url="http://mock.test", transport=httpx.MockTransport(handler),
+        base_url="https://mock.test", transport=httpx.MockTransport(handler),
     )
     return client
 

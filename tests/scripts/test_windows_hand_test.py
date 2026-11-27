@@ -548,7 +548,7 @@ def test_main_defaults_to_the_heartbeat_for_the_real_runner(monkeypatch: pytest.
         return rec(argv, *args, **kwargs)
 
     setattr_in(monkeypatch, wht, "subprocess.run", real_run_standin)
-    monkeypatch.setattr(wht, "run_with_heartbeat", lambda argv: seen.append(list(argv)) or 3)
+    monkeypatch.setattr(wht, "run_with_heartbeat", lambda argv, **kw: seen.append(list(argv)) or 3)
     assert wht.main(["--session", "wren", "--", "t.py"], run=real_run_standin) == 3
     assert seen and "pwsh -NoProfile -File" in seen[0][-1]
 
@@ -681,3 +681,122 @@ def test_a_step_of_the_same_name_in_another_job_is_not_the_set_jobs(tmp_path: Pa
     named = [j for j, body in doc["jobs"].items() for s in body.get("steps") or [] if s.get("name") == wht.FIXUP_STEP]
     assert wht.SET_JOB in named and len(named) >= 2, named
     assert wht.ci_step_run(wht.FIXUP_STEP) and wht.ci_step_run(wht.FLOOR_STEP)
+
+
+# --- a run that printed no pytest summary is not a pass (nexus-sby49.1) ---------------------------------------
+# On Windows a test that exec'd pytest away ended the run with exit 0 and no output: the client read "0" as green.
+
+SUMMARY_LINES = [
+    b"570 passed, 3 skipped, 3 warnings in 72.75s (0:01:12)",
+    b"1 failed, 3843 passed, 136 skipped, 5 deselected, 4 warnings in 803.36s (0:13:23)",
+    b"3 errors in 0.40s",
+    b"10 passed, 418 deselected in 2.1s",
+    b"no tests ran in 0.01s",
+    b"========== 12 passed in 1.00s ==========",
+    b"\x1b[32m570 passed\x1b[0m\x1b[32m in 72.75s\x1b[0m",
+    b"1 xfailed, 2 xpassed in 0.5s",
+]
+NOT_SUMMARY = [
+    b"",
+    b"....F...s..  [ 54%]",
+    b"windows_hand_test: running 12 passed tests",
+    b"collected 12 items",
+    b"FAILED tests/test_x.py::test_y - AssertionError: 3 passed",
+    b"Installed 222 packages in 12.55s",
+    b"rootdir: C:\\build\\hand\\x\\nexus",
+]
+
+
+@pytest.mark.parametrize("line", SUMMARY_LINES)
+def test_a_pytest_summary_line_is_recognised(line: bytes) -> None:
+    watch = wht.SummaryWatch()
+    watch.feed(line + b"\n")
+    assert watch.seen, line
+
+
+@pytest.mark.parametrize("line", NOT_SUMMARY)
+def test_other_output_is_not_a_summary(line: bytes) -> None:
+    watch = wht.SummaryWatch()
+    watch.feed(line + b"\n")
+    assert not watch.seen, line
+
+
+def test_a_summary_split_across_chunks_and_one_without_a_final_newline_are_seen() -> None:
+    watch = wht.SummaryWatch()
+    for chunk in (b"....\n570 pass", b"ed, 3 skipped in 7", b".5s"):
+        watch.feed(chunk)
+    assert not watch.seen
+    watch.close()
+    assert watch.seen
+
+
+def test_a_clean_exit_with_no_summary_exits_with_the_no_summary_code(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    rec = _Recorder(on_origin=True)
+
+    def real_run_standin(argv, *args, **kwargs):
+        return rec(argv, *args, **kwargs)
+
+    def silent_run(argv, *, tee=None, **kw):
+        tee(b"windows_hand_test: fetching\n")  # output, but no summary
+        return 0
+
+    setattr_in(monkeypatch, wht, "subprocess.run", real_run_standin)
+    monkeypatch.setattr(wht, "run_with_heartbeat", silent_run)
+    assert wht.main(["--session", "wren", "--", "t.py"], run=real_run_standin) == wht.NO_SUMMARY
+    assert "no pytest summary" in capsys.readouterr().err
+
+
+def test_a_clean_exit_with_a_summary_stays_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    rec = _Recorder(on_origin=True)
+
+    def real_run_standin(argv, *args, **kwargs):
+        return rec(argv, *args, **kwargs)
+
+    def loud_run(argv, *, tee=None, **kw):
+        tee(b"....\n12 passed in 1.00s\n")
+        return 0
+
+    setattr_in(monkeypatch, wht, "subprocess.run", real_run_standin)
+    monkeypatch.setattr(wht, "run_with_heartbeat", loud_run)
+    assert wht.main(["--session", "wren", "--", "t.py"], run=real_run_standin) == 0
+
+
+@pytest.mark.parametrize("code", [1, 5, wht.SETUP_FAILED, wht.FLOOR_FAILED])
+def test_a_nonzero_exit_is_kept_even_with_no_summary(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    rec = _Recorder(on_origin=True)
+
+    def real_run_standin(argv, *args, **kwargs):
+        return rec(argv, *args, **kwargs)
+
+    monkeypatch.setattr(wht, "run_with_heartbeat", lambda argv, *, tee=None, **kw: code)
+    setattr_in(monkeypatch, wht, "subprocess.run", real_run_standin)
+    assert wht.main(["--session", "wren", "--", "t.py"], run=real_run_standin) == code
+
+
+def test_check_and_an_injected_runner_are_not_judged_by_a_summary(capsys) -> None:
+    """Only a run whose output the client watched can be judged: --check never starts one."""
+    assert wht.main(["--check"], run=_Recorder(on_origin=True)) in (0, 1)
+    rec = _Recorder(on_origin=True)
+    assert wht.main(["--session", "wren", "--", "t.py"], run=rec, beat=lambda argv: 0) == 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="select on a pipe is POSIX")
+def test_the_heartbeat_runner_tees_the_childs_output_to_stdout_and_the_watch(tmp_path: Path, capfd) -> None:
+    child = tmp_path / "child.py"
+    child.write_text("import sys\nprint('first line')\nprint('7 passed in 0.10s')\nsys.exit(0)\n")
+    watch = wht.SummaryWatch()
+    assert wht.run_with_heartbeat([sys.executable, str(child)], interval=0.05, tee=watch.feed) == 0
+    watch.close()
+    out = capfd.readouterr().out
+    assert "first line" in out and "7 passed in 0.10s" in out, "the run's output must still reach the terminal"
+    assert watch.seen and watch.started
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="select on a pipe is POSIX")
+def test_a_child_that_prints_nothing_leaves_the_watch_unseen(tmp_path: Path) -> None:
+    child = tmp_path / "child.py"
+    child.write_text("import sys\nsys.exit(0)\n")
+    watch = wht.SummaryWatch()
+    assert wht.run_with_heartbeat([sys.executable, str(child)], interval=0.05, tee=watch.feed) == 0
+    watch.close()
+    assert not watch.seen

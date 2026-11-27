@@ -24,9 +24,14 @@ query; classifies each as:
 - ``threshold_drop`` — kept==0 with dropped>0: the collection's nearest real
   neighbours fall past its threshold (nexus-rc45 class, silent
   threshold-drop). A WARNING, not an exit-2 failure; see below.
-- ``model_drift``    — registered ``embedding_model`` metadata
-  disagrees with :func:`corpus.voyage_model_for_collection`.
-  Regression.
+- ``model_drift``    — a row-consistency check: the registered
+  ``embedding_model`` disagrees with the model the same catalog row's
+  ``content_type`` calls for (:func:`corpus.canonical_embedding_model`).
+  The label is consulted only for a collection whose row has no content
+  type (:func:`corpus.voyage_model_for_collection`). It does not compare the
+  label's model token: once the one-row rename is live (8.5.6 and later,
+  after the engine's restart), a rename changes only the label (RDR-229), so a
+  label's model token is not authority. Regression.
 - ``error``          — unexpected exception during search or
   metadata lookup.
 
@@ -121,10 +126,48 @@ def _make_t3():
     return make_t3()
 
 
-def _list_collections() -> list[str]:
-    """Return every registered T3 collection name."""
+def _list_collections() -> list[dict[str, Any]]:
+    """Every registered T3 collection's listing row, from one listing call: the names to probe and the catalog
+    attributes (``content_type``) the expected model comes from."""
     t3 = _make_t3()
-    return [c["name"] for c in t3.list_collections()]
+    return [r for r in t3.list_collections() if isinstance(r, dict)]
+
+
+#: A row that spells a quarantine twin's content type with the lead (``quarantine-docs``) means its origin's. An exact
+#: table, not a prefix strip: the collection-name parse census counts a strip as a parse site.
+_QUARANTINE_ORIGIN_TYPE: dict[str, str] = {
+    "quarantine-code": "code", "quarantine-docs": "docs", "quarantine-rdr": "rdr", "quarantine-knowledge": "knowledge",
+}
+
+
+def _model_for_rows(rows: list[dict[str, Any]]) -> Callable[[str], str]:
+    """``model_for`` for the retrieval probe: the expected model from the collection's catalog row, else from its label.
+
+    This makes ``model_drift`` a row-consistency check: the model the row's ``content_type`` calls for
+    (:func:`nexus.corpus.canonical_embedding_model`, the one place that maps a content type to its model) against the
+    ``embedding_model`` the same row registers. It is not a name-versus-row compare, on purpose: once the one-row rename
+    is live (8.5.6 and later, after the engine's restart), a rename changes only the label (RDR-229), so a label's model
+    token is not authority. The label also names no content type for the engine-minted ``c<id>`` labels
+    every new knowledge subject gets, which the old label rule read as voyage-code-3 (nexus-p2m1x.48).
+
+    A quarantine twin's row carries its origin's content type; a content type that spells the ``quarantine-`` lead
+    (``quarantine-docs``) means its origin's type. A collection whose row has no content type, or one that function does not know, is
+    judged by its label as before.
+    """
+    content_type = {str(r["name"]): str(r["content_type"]) for r in rows if r.get("name") and r.get("content_type")}
+
+    def model_for(col: str) -> str:
+        ct = content_type.get(col)
+        if ct:
+            from nexus.corpus import canonical_embedding_model  # noqa: PLC0415 — deferred import; diagnostic dep only needed in this probe
+
+            try:
+                return canonical_embedding_model(_QUARANTINE_ORIGIN_TYPE.get(ct, ct))
+            except ValueError:
+                pass  # a content type outside the canonical four (a fixture or legacy row): the label rule decides
+        return _default_model_for(col)
+
+    return model_for
 
 
 def _collection_metadata(t3, col: str) -> dict[str, Any]:
@@ -600,7 +643,7 @@ def run_check_search(*, json_out: bool) -> None:
     # probe stays informative even when T3 is unreachable.
     retrieval_results: list[ProbeResult] = []
     try:
-        collections = _list_collections()
+        rows = _list_collections()
     except Exception as exc:  # noqa: BLE001 — probe captures any failure as ProbeResult outcome=error (diagnostic)
         retrieval_results.append(
             ProbeResult(
@@ -611,6 +654,7 @@ def run_check_search(*, json_out: bool) -> None:
             )
         )
     else:
+        collections = [str(r["name"]) for r in rows if r.get("name")]
         if collections:
             try:
                 t3 = _make_t3()
@@ -628,6 +672,7 @@ def run_check_search(*, json_out: bool) -> None:
                     run_retrieval_quality_probe(
                         t3=t3,
                         collections=collections,
+                        model_for=_model_for_rows(rows),
                         probe_for=lambda col: _default_probe_for(t3, col),
                     )
                 )

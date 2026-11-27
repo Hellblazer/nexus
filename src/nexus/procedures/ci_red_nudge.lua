@@ -1,6 +1,6 @@
 -- procedure: ci_red_nudge
 -- summary: The line and wake for next up when the owner of a red develop has not acknowledged it.
--- args: sha:string, next:string?, next_alias:string?, me:string
+-- args: sha:string, branch:string?, next:string?, next_alias:string?, me:string
 -- grants: none
 
 -- RDR-252 post-close audit S2 (nexus-igea9), the procedure the shipped ci_develop_nudge aura wraps. It reads nothing
@@ -12,6 +12,9 @@
 -- two minutes. This is the one place it is woken: a nudge naming me shows the line and wakes; a nudge naming anyone else,
 -- or no one, shows nothing and wakes nothing (show false leaves the block as it was). Who owns the red is not this
 -- procedure's business, and an alias is a name to show, never a way to decide who this session is.
+--
+-- The branch named in the text is the aura's own (a template aura maps branch = "self.branch", see ci_red_notice); with
+-- none mapped it is develop, as before the template.
 --
 -- Values a tuple's writer controls (sha, next, next_alias, me) are checked against their grammar and never echoed in
 -- an error: the error text is logged.
@@ -31,6 +34,10 @@ local function segment(value, name, what)
 end
 
 local me = segment(args.me, "me")
+local branch = segment(args.branch, "branch", "a branch") or "develop"
+if #branch > 32 then
+  error("branch must be a branch of at most 32 letters, digits, dot, dash and underscore; got " .. #branch .. " characters", 0)
+end
 local next_up = segment(args.next, "next")
 segment(args.next_alias, "next_alias", "an alias")
 
@@ -38,5 +45,5 @@ if next_up == nil or next_up ~= me then
   return { show = false, text = "", wake = false }
 end
 
-local text = "Develop is red at " .. string.sub(sha, 1, 7) .. "; no one has acknowledged it yet. You are next up."
+local text = string.upper(string.sub(branch, 1, 1)) .. string.sub(branch, 2) .. " is red at " .. string.sub(sha, 1, 7) .. "; no one has acknowledged it yet. You are next up."
 return { show = true, text = text, wake = true }

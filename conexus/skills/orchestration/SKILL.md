@@ -26,7 +26,7 @@ There is no orchestrator agent. The caller (main conversation or skill) dispatch
 
 ## Subagent Dispatch: Design-of-Record Brief Template (MANDATORY at dispatch time)
 
-Every subagent dispatch is briefed from a design-of-record written before dispatch, stored in T1, and referenced by id in every downstream brief (developer, both reviewers, every fix round). The agent never re-derives a decision (nexus-4kp77, T2 [21371] §Q4).
+Every subagent dispatch is briefed from a design-of-record written before dispatch, stored in T1, and referenced by id in every downstream brief (developer, both reviewers, every fix round). The agent never re-derives a decision.
 
 Mandatory-fields skeleton:
 
@@ -52,7 +52,7 @@ REJECTED: <each rejected alternative + the concrete reason it breaks something, 
 - <test command scoped to the change>
 - <lint command>
 - Report the collected test COUNT, not a description.
-- Verification runs FOREGROUND inside the agent's own turn. Never `run_in_background`, never `Monitor`. A dispatched subagent cannot receive Monitor events or background-task-completion notifications; those route to the MAIN loop only. Waiting on either strands the agent (nexus-dn9xs).
+- Verification runs FOREGROUND inside the agent's own turn. Never `run_in_background`, never `Monitor`. A dispatched subagent cannot receive Monitor events or background-task-completion notifications; those route to the MAIN loop only. Waiting on either strands the agent.
 - Close the hand-back with a VERIFY block in the § VERIFY Line Convention shape below — one line per claim, not prose.
 
 ## WRITE-BACK (mandatory, before returning)
@@ -68,30 +68,30 @@ Non-negotiable fields: bead id; design-of-record T1 id (referenced, never restat
 
 ## Notification Handling (idempotent, MANDATORY)
 
-Task notifications are at-least-once, unbounded-delay, and cross session boundaries. A resumed agent re-notifies under the same task-id, and a notification can surface in the NEXT session after the agent already finished (nexus-62wt7, T2 [21371] §Q3).
+Task notifications are at-least-once, unbounded-delay, and cross session boundaries. A resumed agent re-notifies under the same task-id, and a notification can surface in the NEXT session after the agent already finished.
 
 1. Key on task-id. Maintain a handled set; a repeat notification for a handled id is a no-op unless its content differs.
-2. Never act on a notification's claims directly. Re-derive ground truth first: `git status --porcelain`, file mtimes, and the agent's own T1 write-back (the write-back, not the notification, is the artifact of record). Where to look: T1 has three distinct scopes. MCP-tool `scratch` is scoped to the session id leased at MCP-server spawn and moves only when a `/clear` or `/resume` handoff marker is consumed (the old session's rows strand rather than migrate, JDR-001), so a background agent's write-back lands in the scope that was current when it wrote; a session is swept once it has been idle 24 h, and its flagged rows reach T2 at session end and when the session moves to a new id. `nx` CLI `scratch` is scoped to the current transcript session if a live lease exists, else a shared fallback (nexus-f7xyq). `~/.config/nexus/current_session` is machine-wide, last-writer-wins, and can be owned by a concurrent session. Check the MCP scope before declaring a write-back lost.
+2. Never act on a notification's claims directly. Re-derive ground truth first: `git status --porcelain`, file mtimes, and the agent's own T1 write-back (the write-back, not the notification, is the artifact of record). Where to look: T1 has three distinct scopes. MCP-tool `scratch` is scoped to the session id leased at MCP-server spawn and moves only when a `/clear` or `/resume` handoff marker is consumed (the old session's rows strand rather than migrate, JDR-001), so a background agent's write-back lands in the scope that was current when it wrote; a session is swept once it has been idle 24 h, and its flagged rows reach T2 at session end and when the session moves to a new id. `nx` CLI `scratch` is scoped to the current transcript session if a live lease exists, else a shared fallback. `~/.config/nexus/current_session` is machine-wide, last-writer-wins, and can be owned by a concurrent session. Check the MCP scope before declaring a write-back lost.
 3. Before treating a write-back as missing, confirm the agent has actually terminated. Searching T1 while the agent is still running and treating absence as loss is the recurring false-loss pattern (cdypx, 2026-08-03).
 4. A late notification arriving after recovery work is already complete is informational only. Reconcile it, and CORRECT any recovery note that recorded a now-falsified claim.
 5. Never background-dispatch near a session pause; a live agent at session end cannot be recovered except by hand.
 6. A long job or wait you start by hand (a CI wait loop, a remote suite) has no hook behind it, so register it as work your session owns: `nx identity work register --kind wait --ref <what>` when it starts and `nx identity work done --kind wait --ref <what>` when it ends (`nx identity work run --kind labrun --ref <what> -- <command>` does both for one command). The restart's ready check lists it and asks you before it cuts it off. The label never blocks the job, and a row nothing has written for 12 hours or that predates your session reads stale.
 
-## Resuming a Worktree Agent After a `/clear` (nexus-xxvv3)
+## Resuming a Worktree Agent After a `/clear`
 
 A background `worktree-developer` still mid-flight when the session `/clear`s can be resumed with `SendMessage` under the NEW session id, but the harness re-fires SubagentStart with `agent_type` collapsed to `general-purpose` (the original type is dropped) and the agent's cwd reset to the PRIMARY checkout, not its worktree. One consequence follows:
 
-- **The cwd/git-guard problem is NOT fixed and cannot be from this side.** The resumed agent's cwd is the primary checkout, so the subagent Bash git-policy guard (nexus-3c92m) correctly refuses its `git add`/`commit` there — that guard is doing its job, protecting the shared primary. This is harness behavior (SendMessage resume drops the dispatch-time cwd and type), so there is no fix for it from this side. **The resumed agent itself must account for this when producing its own hand-back**: its Bash cwd is the primary, so a bare `git diff`/`git status` in its own turn reports on the PRIMARY's (usually clean) state, not its worktree's actual changes — its hand-back diff and status must use `git -C <worktree-path> diff` / `git -C <worktree-path> status --short` explicitly (read-only git is guard-exempt regardless of cwd, so this works from inside the resumed agent's own turn).
+- **The cwd/git-guard problem is NOT fixed and cannot be from this side.** The resumed agent's cwd is the primary checkout, so the subagent Bash git-policy guard correctly refuses its `git add`/`commit` there — that guard is doing its job, protecting the shared primary. This is harness behavior (SendMessage resume drops the dispatch-time cwd and type), so there is no fix for it from this side. **The resumed agent itself must account for this when producing its own hand-back**: its Bash cwd is the primary, so a bare `git diff`/`git status` in its own turn reports on the PRIMARY's (usually clean) state, not its worktree's actual changes — its hand-back diff and status must use `git -C <worktree-path> diff` / `git -C <worktree-path> status --short` explicitly (read-only git is guard-exempt regardless of cwd, so this works from inside the resumed agent's own turn).
 
 Prefer, in order: (1) dispatch a FRESH `worktree-developer` (a new Agent call, cwd genuinely inside the worktree) and relay the resumed agent's last-known state (branch, file list, what it had done) in the new dispatch's brief, rather than resuming the old one; (2) if resuming is unavoidable, have the COORDINATOR commit on the resumed agent's behalf, pathspec-limited, after reading its hand-back (`git -C <worktree-path> diff`, per above) — never work around the guard from inside the resumed agent's own turn.
 
-## Sending a Mid-Turn Message to an Agent (RDR-205 Phase 5)
+## Sending a Mid-Turn Message to an Agent
 
 To send a directive or other message to a dispatched agent while it works, `mailbox_send(to="<agent id>", body=...)` (an agent id is used as is); the agent drains `mailbox/<agent id>` with `tuple_in` before composing any hand-back. A caller that wants a resend to land on the same tuple rather than pile up sends raw `tuple_out` with its own nonce instead. Full convention, dead-letter rule, and the template shape: `/conexus:mailbox`. Choosing between `SendMessage`, the mailbox and T2, and messaging peer sessions rather than your own agents: `/conexus:peer-messaging`.
 
 ## VERIFY Line Convention (MANDATORY)
 
-Every implementation or review hand-back ends with a machine-checkable VERIFY block, one line per claim, never prose (nexus-pjzz8, T2 [21371] §Q5; extended by nexus-cnzei.6 item 1 after a 2026-09-13 measurement: reports arrived on time but made false claims — a docs agent reported changing a CLI default it had not touched, and an implementation agent's gate record omitted the one test that would have caught its own NameError. Delivery was never the gap; verification was).
+Every implementation or review hand-back ends with a machine-checkable VERIFY block, one line per claim, never prose (extended after a 2026-09-13 measurement: reports arrived on time but made false claims — a docs agent reported changing a CLI default it had not touched, and an implementation agent's gate record omitted the one test that would have caught its own NameError. Delivery was never the gap; verification was).
 
 Three line shapes, any number of lines, in any order:
 
@@ -109,7 +109,7 @@ An agent with nothing checkable to claim (a pure read, a recommendation with no 
 
 The orchestrator re-runs each reported COMMAND once per round, before accepting the round — it never trusts the reported count. Reading the command line and re-running it yourself is the orchestrator's own job: a fabricated `rc=0 12 passed` line for a command that was never run, or a real but too-narrow command that would not have caught the regression it claims to verify, both read identically from the report alone.
 
-A run that was disturbed (a peer deleted its temp directory, a process under it was killed, a shared path vanished) is killed and rerun clean; its numbers are never quoted, and the hand-back says it was disturbed (feedback_destructive_action_guards).
+A run that was disturbed (a peer deleted its temp directory, a process under it was killed, a shared path vanished) is killed and rerun clean; its numbers are never quoted, and the hand-back says it was disturbed.
 
 ## Review Gate (caller side, MANDATORY on every implementation)
 
@@ -131,7 +131,7 @@ The reviewers cannot dispatch and the developer does not commit unless its brief
 - The locked spec, so the reviewer checks implementation against spec, not style.
 - What was NOT changed on purpose, so scope creep is flagged instead of recommended.
 - Verification already run, so the reviewer checks claims instead of re-running suites.
-- Destroys, where the diff touches a path, a value a consumer derives something from, or a plan: any consumer that deletes something derived from what moved (a `rmtree` of a moved printed path's parent once wiped a laptop's `TMPDIR`); what the plan itself destroys, not only what it produces (a worktree plan listed its costs and not the accidental serialisation it removed); and a long walk or batch that emits no progress, which reads as hung and gets stacked with duplicates (feedback_destructive_action_guards).
+- Destroys, where the diff touches a path, a value a consumer derives something from, or a plan: any consumer that deletes something derived from what moved (a `rmtree` of a moved printed path's parent once wiped a laptop's `TMPDIR`); what the plan itself destroys, not only what it produces (a worktree plan listed its costs and not the accidental serialisation it removed); and a long walk or batch that emits no progress, which reads as hung and gets stacked with duplicates.
 - Every added or modified test rated CAN FAIL or CANNOT FAIL, with the concrete production edit that would turn it red.
 
 **Confirmation-pass brief.** It names the findings under confirmation and asks whether each is closed. It does not name new suspect categories or ask the reviewer to pressure-test, enumerate paths or find what was missed; those instructions manufacture findings on any artifact.
@@ -153,23 +153,27 @@ ship-blocking. Report it as a Critical and name the fix line that introduced it.
 
 **Implementer brief checklist.** A brief that says only WHAT to change leaves these to the reviewer, and each cost a fix round when omitted. Answer them in the brief, or write `UNKNOWN: resolve first` and the agent resolves it before its first edit (the SubagentStart hook injects the first five of these questions into every implementer dispatch):
 
-1. **Consumers.** Every caller and consumer of what changes, including any consumer that deletes something derived from it (grep for them before the first test run, and run any test that deletes a computed path under a throwaway `TMPDIR`, nexus-0tqr7), and which of them filter, re-rank or page after it.
+1. **Consumers.** Every caller and consumer of what changes, including any consumer that deletes something derived from it (grep for them before the first test run, and run any test that deletes a computed path under a throwaway `TMPDIR`), and which of them filter, re-rank or page after it.
 2. **Final point.** Where the output's real final order or display is decided (after boosts, caps, paging), and that the change acts there, not on a proxy.
-3. **Modes.** Behaviour in local and cloud mode, and which was measured. A mode nobody measured is measured first or left unchanged.
+3. **Modes.** Behaviour in each mode the code runs in, and which was measured. A mode nobody measured is measured first or left unchanged.
 4. **Bounds.** Which pool, permit, memory or thread limit the change draws on, and its size against that limit on small and large boxes.
 5. **State.** Every cache or shared state touched, who invalidates it, the invalidate-versus-in-flight-fill race, the first-write and empty cases, the test reset hooks.
-6. **Destroys.** Name what the action destroys, not only what it produces: a push produces a commit and can cancel or replace a verdict someone is waiting on, a branch switch can revert a peer's uncommitted files (feedback_destructive_action_guards).
+6. **Destroys.** Name what the action destroys, not only what it produces: a push produces a commit and can cancel or replace a verdict someone is waiting on, a branch switch can revert a peer's uncommitted files.
 
-**Shared-host clauses.** Every developer, test or debugger brief that touches a test host or the laptop carries these four, verbatim or tightened, because the agent cannot infer them and a stop message arrives after the script has started (feedback_destructive_action_guards):
+**Git in the brief.** The guard judges a subagent's git from the primary checkout, so the brief gives the worktree root (made before dispatch), the one git shape and who pushes: [reference.md](./reference.md) § Git in an implementer brief.
+
+**Worktree base commit.** An `isolation: "worktree"` dispatch may not start at the primary's `HEAD`, so a dispatch whose work depends on a particular commit names that commit in the brief and has the agent check it first (`git merge-base --is-ancestor <commit> HEAD`), or the orchestrator creates the worktree at that commit (`git worktree add <path> <commit>`) and points the agent at it.
+
+**Shared-host clauses.** Every developer, test or debugger brief that touches a test host or the laptop carries these four, verbatim or tightened, because the agent cannot infer them and a stop message arrives after the script has started:
 
 - Delete only paths your own commands created and recorded, by exact name; use your own directory (`~/tmp/<owner>/`), never a shared filename prefix; never delete by glob or by modification time.
 - No `pkill`, `killall` or `kill $(pgrep ...)` anywhere, the laptop included; signal only a pid you started yourself (from your own `$!` or background task id), found by its parent pid, after checking its parent and its working directory (`ps -p <pid> -o pid,ppid,args`, `lsof -a -p <pid> -d cwd`), never one picked out of `ps` by its command line.
 - Run a real hook verb (`nx-hook`, a hook entry's `main`, `session_start`) only inside pytest or with `HOME` and `NEXUS_CONFIG_DIR` both pointed at a scratch directory; measure hook output through `render_session_start`.
 - Scan only the exact roots your run wrote to, depth-bounded on shared roots; when a bead or RDR says to scan a whole home or volume, narrow it and correct its text.
 
-**Debugger.** Defaults to opus; pass `model: "sonnet"` for a single failure with a clear stack trace. Conexus agents do not get the shared Serena (their frontmatter denies it: 4 of about 2,900 conexus-agent runs used it in the 30 days to 2026-10-30, nexus-j6un5.5), so do symbol-level tracing with `/conexus:serena-code-nav` in the main session and put what it finds in the relay. Pass a failing test's error, hypotheses and what was tried in the relay.
+**Debugger.** Defaults to opus; pass `model: "sonnet"` for a single failure with a clear stack trace. Conexus agents do not get the shared Serena (their frontmatter denies it: 4 of about 2,900 conexus-agent runs used it in the 30 days to 2026-10-30), so do symbol-level tracing with `/conexus:serena-code-nav` in the main session and put what it finds in the relay. Pass a failing test's error, hypotheses and what was tried in the relay.
 
-**Developer model.** A mechanical bead goes to the same agent (`developer`, or `worktree-developer` for a worktree dispatch) with `model: "haiku"`. Mechanical means all of: the brief names every file to edit by path, says what changes in each, adds no new file, and leaves no design choice (no `UNKNOWN` above). Typical cases are a rename, a string or doc edit, a version bump, a frontmatter flip, or a pin update the brief spells out; a test pin or ratchet fix whose fix still has to be found is not mechanical. Everything else keeps the agent's own model. Label the bead `dev-model:haiku` or `dev-model:sonnet` at dispatch so the two can be compared on completion and review rounds (nexus-j6un5.4). A Haiku developer whose work fails a review round is re-dispatched on Sonnet, not retried on Haiku. Either Sonnet re-dispatch, after a failed round or after the debugger, also gives the bead `dev-model:redispatched`. An `ESCALATION: Debugger Required` from a Haiku developer follows the escalation rule below like any other; the developer re-dispatch after the debugger resolves runs on Sonnet.
+**Developer model.** A mechanical bead goes to the same agent (`developer`, or `worktree-developer` for a worktree dispatch) with `model: "haiku"`. Mechanical means all of: the brief names every file to edit by path, says what changes in each, adds no new file, and leaves no design choice (no `UNKNOWN` above). Typical cases are a rename, a string or doc edit, a version bump, a frontmatter flip, or a pin update the brief spells out; a test pin or ratchet fix whose fix still has to be found is not mechanical. Everything else keeps the agent's own model. Label the bead `dev-model:haiku` or `dev-model:sonnet` at dispatch so the two can be compared on completion and review rounds. A Haiku developer whose work fails a review round is re-dispatched on Sonnet, not retried on Haiku. Either Sonnet re-dispatch, after a failed round or after the debugger, also gives the bead `dev-model:redispatched`. An `ESCALATION: Debugger Required` from a Haiku developer follows the escalation rule below like any other; the developer re-dispatch after the debugger resolves runs on Sonnet.
 
 **Developer escalation.** If the developer returns `ESCALATION: Debugger Required` (scan for `<!-- ESCALATION -->`), its circuit breaker fired. Do not re-dispatch the developer. Guard first: `scratch(action="search", query="circuit-breaker-fired-for-<bead>")`. If found, this is the second firing: stop and report to the user that the debugger's fix did not hold and human investigation is needed. If not found, write that scratch entry (tag `escalation-guard`), then dispatch the debugger with the escalation's Failing test, Error, What I tried, Hypothesis and Diagnostic suggestion fields plus scratch entries tagged `failed-approach`. When it resolves, re-dispatch the developer with the debugger's one-sentence root cause, the files it touched, and "do not retry approaches listed under scratch tag `failed-approach`".
 

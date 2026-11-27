@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""plan_search pages for real, and plan_delete's missing id is an error result (MCP audit I3, I15).
+"""answer_plan_search pages for real, and answer_plan_delete's missing id is an error result (MCP audit I3, I15).
 
 The store is a stub: the engine's plan search takes a limit and no offset, so the tool has to ask for
 offset + limit + 1 rows and slice. No service is reached.
@@ -54,52 +54,52 @@ def _ids(out: str) -> list[int]:
 
 
 def test_page_one_names_the_next_offset(db: _Db) -> None:
-    out = core.plan_search(query="plan", limit=2)
+    out = core.answer_plan_search(query="plan", limit=2)
     assert _ids(out) == [1, 2]
     assert "offset=2" in out
 
 
 def test_page_two_returns_a_full_page_and_the_next_offset(db: _Db) -> None:
-    out = core.plan_search(query="plan", limit=2, offset=2)
+    out = core.answer_plan_search(query="plan", limit=2, offset=2)
     assert _ids(out) == [3, 4]
     assert "offset=4" in out
 
 
 def test_the_last_page_has_no_next_offset(db: _Db) -> None:
-    out = core.plan_search(query="plan", limit=2, offset=4)
+    out = core.answer_plan_search(query="plan", limit=2, offset=4)
     assert _ids(out) == [5]
     assert "offset=" not in out
 
 
 def test_an_offset_larger_than_the_limit_still_pages(db: _Db) -> None:
-    out = core.plan_search(query="plan", limit=1, offset=3)
+    out = core.answer_plan_search(query="plan", limit=1, offset=3)
     assert _ids(out) == [4]
     assert "offset=4" in out
 
 
 def test_an_offset_past_the_end_says_no_matches(db: _Db) -> None:
-    assert core.plan_search(query="plan", limit=2, offset=9) == "No matching plans."
+    assert core.answer_plan_search(query="plan", limit=2, offset=9) == "No matching plans."
 
 
 def test_the_store_is_asked_for_offset_plus_limit_plus_one(db: _Db) -> None:
-    core.plan_search(query="plan", limit=2, offset=3)
+    core.answer_plan_search(query="plan", limit=2, offset=3)
     assert db.asked == [6]
 
 
 def test_plan_delete_of_a_missing_id_is_an_error_result(db: _Db) -> None:
-    out = core.plan_delete(plan_id=999)
+    out = core.answer_plan_delete(plan_id=999)
     assert "Not found: plan id 999" in out
     assert is_failure(out)
 
 
 def test_plan_delete_of_a_lost_race_is_an_error_result(db: _Db, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(db.plans, "delete_plan", lambda plan_id: False)
-    out = core.plan_delete(plan_id=1)
+    out = core.answer_plan_delete(plan_id=1)
     assert "already deleted" in out
     assert is_failure(out)
 
 
 def test_plan_delete_of_a_present_id_succeeds(db: _Db) -> None:
-    out = core.plan_delete(plan_id=2)
+    out = core.answer_plan_delete(plan_id=2)
     assert out.startswith("Deleted plan id=2")
     assert not is_failure(out)

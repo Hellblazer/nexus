@@ -157,8 +157,8 @@ class CollectionDeleteFenceTest {
         Future<Map<String, Integer>> delete;
         try (Connection verb = verbHolding(sibling)) {
             delete = pool.submit(() -> catalog.deleteCollection(T, origin, false));
-            assertThat(PgActivityProbe.waitsOnALock(pg, "%key share%catalog_collections%"))
-                .as("the delete waits on the sibling's registry row read FOR KEY SHARE (before, its first wait was the registry delete at its end)").isTrue();
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%catalog_collections%"))
+                .as("the delete waits on the sibling's registry row, read FOR UPDATE (before, its first wait was the registry delete at its end)").isTrue();
             assertThat(delete.isDone()).as("and has not finished").isFalse();
             assertThat(chunksIn(sibling)).as("the sibling's row is still there: the delete had removed nothing when it met the verb").isEqualTo(1);
             verb.rollback();
@@ -183,7 +183,7 @@ class CollectionDeleteFenceTest {
             // a restore: the verb holds the sibling's row and moves its rows away (here, out of the table), then commits
             DSL.using(verb, SQLDialect.POSTGRES).deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(T).and(CHUNKS.COLLECTION.eq(sibling))).execute();
             delete = pool.submit(() -> catalog.deleteCollection(T, origin, false));
-            assertThat(PgActivityProbe.waitsOnALock(pg, "%key share%catalog_collections%")).as("the delete waits on the verb's row").isTrue();
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%catalog_collections%")).as("the delete waits on the verb's row").isTrue();
             verb.commit();
         }
 
@@ -207,7 +207,7 @@ class CollectionDeleteFenceTest {
             DSL.using(verb, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, renamed)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(siblingId)).execute();
             delete = pool.submit(() -> catalog.deleteCollection(T, origin, false));
-            assertThat(PgActivityProbe.waitsOnALock(pg, "%key share%catalog_collections%")).as("the delete waits on the verb's row").isTrue();
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%catalog_collections%")).as("the delete waits on the verb's row").isTrue();
             verb.commit();
         }
 
@@ -284,7 +284,7 @@ class CollectionDeleteFenceTest {
         try (Connection verb = verbHolding(sibling)) {
             delete = pool.submit(() -> catalog.deleteCollection(T, origin, false));
             // the delete holds the per-tenant guard SHARED and is parked on the sibling's row
-            assertThat(PgActivityProbe.waitsOnALock(pg, "%key share%catalog_collections%")).as("the delete is mid-flight").isTrue();
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%catalog_collections%")).as("the delete is mid-flight").isTrue();
 
             assertThatThrownBy(() -> jobs.start(T, origin, other, null, false, false))
                 .as("a start takes the guard exclusive and cannot while the delete holds it: refused, retryable, nothing written")
@@ -379,7 +379,7 @@ class CollectionDeleteFenceTest {
         DeadlockRetry.setRetryListenerForTests(retries::add);
         try {
             for (int round = 0; round < 8; round++) {
-                String[] c = originWithSibling();   // a sibling too: the siblings' key shares are in the same ordered lock
+                String[] c = originWithSibling();   // a sibling too: the sibling's row is in the same ordered FOR UPDATE statement as the origin's
                 String origin = c[0];
                 long originId = idOf(origin);
                 Future<Map<String, Integer>> first;
@@ -407,6 +407,232 @@ class CollectionDeleteFenceTest {
             }
             assertThat(retries).as("no delete was a deadlock victim: the deadlock retry belt never ran for a delete")
                 .noneMatch(c -> c.startsWith("catalog.deleteCollection "));
+        } finally {
+            DeadlockRetry.setRetryListenerForTests(null);
+        }
+    }
+
+    // ── (d) a sibling's row is taken FOR UPDATE (nexus-p2m1x.23 residual (b)) ───
+
+    /** A hand session holding {@code label}'s registry row {@code FOR KEY SHARE}: the lock a retag, a writer or a second delete's old read took. */
+    private Connection holderKeyShare(String label) throws Exception {
+        Connection hand = pg.createConnection("");
+        hand.setAutoCommit(false);
+        DSL.using(hand, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(label)).forKeyShare().fetch();
+        return hand;
+    }
+
+    /**
+     * The mode, which is the fix: a delete takes the sibling's row {@code FOR UPDATE}, so a key share on it that is not the delete's own makes the
+     * delete wait BEFORE it removes any of the sibling's rows. (Key-sharing it, as the delete did, never conflicts with another key share and the
+     * delete ran on; it then met the other holder in the sibling's registry delete.) By id and by label.
+     */
+    @Timeout(120)
+    @org.junit.jupiter.params.ParameterizedTest(name = "{0}")
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"by id", "by label"})
+    void aDeleteOfAnOrigin_takesTheSiblingsRowForUpdate_soAKeyShareOnItMakesTheDeleteWaitBeforeRemovingAnyOfItsRows(String how) throws Exception {
+        String[] c = originWithSibling();
+        String origin = c[0];
+        String sibling = c[1];
+        long originId = idOf(origin);
+        Future<Map<String, Integer>> delete;
+        try (Connection hand = holderKeyShare(sibling)) {
+            delete = pool.submit(() -> how.equals("by id") ? catalog.deleteCollectionById(T, origin, originId, false)
+                : catalog.deleteCollection(T, origin, false));
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%catalog_collections%"))
+                .as("the delete waits on the sibling's row: it asked for FOR UPDATE, which a key share holder conflicts with").isTrue();
+            assertThat(delete.isDone()).isFalse();
+            assertThat(chunksIn(sibling)).as("it had removed nothing when it met the holder").isEqualTo(1);
+            hand.rollback();
+        }
+
+        Map<String, Integer> counts = delete.get(60, TimeUnit.SECONDS);
+
+        assertThat(counts).containsEntry("quarantine_chunks", 1);
+        assertThat(registered(sibling)).as("the emptied sibling is unregistered").isFalse();
+        assertThat(registered(origin)).isFalse();
+    }
+
+    /** An origin of its own whose one chunk sits in {@code sibling}, tagged for it, as a quarantine move leaves it. */
+    private String originInSharedSibling(String sibling) throws Exception {
+        String origin = "docs__row14shr" + n.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, T, origin);
+            PgContainerHelper.insertChunks(ctx, T, sibling, List.of(Chash.ofText("row14 shared sibling chunk " + origin).toHex()),
+                List.of("row14 shared sibling chunk"), List.of(new float[384]), List.of(Map.<String, Object>of("origin_collection", origin)));
+            return null;
+        });
+        return origin;
+    }
+
+    /**
+     * Two deletes whose origins share one quarantine sibling (the sibling registered first, so its id is below both origins'), released together
+     * from the start guard: they serialise on the sibling's row, taken before either origin's, so neither is a deadlock victim and the sibling, which
+     * the second to finish finds empty, is unregistered. Key-sharing it (the old lock) let both run on, each saw the other's rows still there, and
+     * the emptied sibling stayed registered. The retry listener shows no 40P01 ran for a delete.
+     */
+    @Timeout(300)
+    @Test
+    void twoDeletesOfOriginsSharingASibling_serialiseOnTheSiblingsRow_neitherDeadlocks_andTheEmptiedSiblingIsUnregistered() throws Exception {
+        java.util.List<String> retries = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DeadlockRetry.setRetryListenerForTests(retries::add);
+        try {
+            for (int round = 0; round < 6; round++) {
+                String sibling = "quarantine-docs__row14shared" + n.incrementAndGet() + "__minilm-l6-v2-384__v1";
+                su(ctx -> { PgContainerHelper.insertCollection(ctx, T, sibling); return null; });
+                String first = originInSharedSibling(sibling);
+                String second = originInSharedSibling(sibling);
+                long firstId = idOf(first);
+                long secondId = idOf(second);
+                assertThat(idOf(sibling)).as("setup: the sibling's id is below both origins'").isLessThan(Math.min(firstId, secondId));
+                assertThat(chunksIn(sibling)).as("setup: the sibling holds a row of each").isEqualTo(2);
+                Future<Map<String, Integer>> a;
+                Future<Map<String, Integer>> b;
+                try (Connection start = startHoldingTheGuard()) {
+                    a = pool.submit(() -> catalog.deleteCollectionById(T, first, firstId, false));
+                    b = pool.submit(() -> catalog.deleteCollectionById(T, second, secondId, false));
+                    assertThat(waiters(2, "%pg_advisory_xact_lock_shared%")).as("both deletes are parked on the guard").isTrue();
+                    start.commit();
+                }
+                a.get(60, TimeUnit.SECONDS);
+                b.get(60, TimeUnit.SECONDS);
+                assertThat(registered(first)).isFalse();
+                assertThat(registered(second)).isFalse();
+                assertThat(chunksIn(sibling)).as("round %d: no row left in the sibling", round).isZero();
+                assertThat(registered(sibling)).as("round %d: the second delete found the sibling empty and unregistered it", round).isFalse();
+            }
+            assertThat(retries).as("no delete was a deadlock victim").noneMatch(c -> c.startsWith("catalog.deleteCollection "));
+        } finally {
+            DeadlockRetry.setRetryListenerForTests(null);
+        }
+    }
+
+    // ── (e) the delete's sibling lock against a mover and a rename that hold the origin first ───
+
+    /** A shared quarantine sibling registered FIRST (its id is below the origin's) with one origin that has a row in it; returns {origin, sibling}. */
+    private String[] originWithLowerSibling(String stem) throws Exception {
+        String sibling = "quarantine-docs__row14" + stem + n.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        su(ctx -> { PgContainerHelper.insertCollection(ctx, T, sibling); return null; });
+        String origin = originInSharedSibling(sibling);
+        assertThat(idOf(sibling)).as("setup: the sibling's id is below the origin's").isLessThan(idOf(origin));
+        return new String[] {origin, sibling};
+    }
+
+    /**
+     * PostgreSQL looks for a cycle in the backend that has waited a {@code deadlock_timeout} (1 s), and ends THAT backend: the first to wait, once the
+     * cycle exists. The delete is parked first, so a mover released at once would find itself the second waiter and the delete the victim (its own
+     * belt then retries it, and the mover is never ended). Held past the timeout, the delete's check finds no cycle yet, and the mover, waiting second and
+     * checking last, is the victim: the case the mover's retry is for.
+     */
+    private static void waitPastTheDeadlockTimeout() throws InterruptedException {
+        TimeUnit.MILLISECONDS.sleep(2_500);
+    }
+
+    private static void await(java.util.concurrent.CountDownLatch latch) {
+        try {
+            if (!latch.await(60, TimeUnit.SECONDS)) throw new IllegalStateException("the latch was never released");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * A gc mover holds the origin's row {@code FOR KEY SHARE} ({@link GcCollectionReads#enter}) and then writes into the sibling, whose registry row
+     * the chunk's foreign key key-shares. A delete by id of an origin whose sibling has the LOWER id holds the sibling {@code FOR UPDATE} first and then
+     * waits for the origin the mover holds, so the two wait on each other: 40P01. Before the delete took the sibling {@code FOR UPDATE} the mover's
+     * key share did not conflict with the delete's, so this cycle is the delete's own doing. The movers run through {@link GcCollectionReads#attemptRestore},
+     * which retries a transaction PostgreSQL ended as a deadlock victim; the delete parks first and the mover is the second to wait, so it is the victim
+     * and must be run again, never surface the 40P01. The re-run finds the origin deleted (a typed unregistered refusal) or finishes.
+     */
+    @Timeout(180)
+    @Test
+    void aMoverHoldingTheOriginKeyShared_againstADeleteByIdWhoseSiblingIdIsLower_isRetriedAndNeverSurfacesTheDeadlock() throws Exception {
+        java.util.List<String> retries = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DeadlockRetry.setRetryListenerForTests(retries::add);
+        try {
+            String[] c = originWithLowerSibling("mover");
+            String origin = c[0];
+            String sibling = c[1];
+            long originId = idOf(origin);
+            var holding = new java.util.concurrent.CountDownLatch(1);
+            var proceed = new java.util.concurrent.CountDownLatch(1);
+            var first = new java.util.concurrent.atomic.AtomicBoolean(true);
+            Future<Integer> mover = pool.submit(() -> GcCollectionReads.attemptRestore(GcCollectionReads.Gate.NONE, origin, sibling,
+                gate -> scope.withTenant(T, ctx -> {
+                    GcCollectionReads.enter(ctx, T, GcCollectionReads.Gate.NONE, gate, origin, sibling);   // the origin FOR KEY SHARE
+                    if (first.getAndSet(false)) {
+                        holding.countDown();
+                        await(proceed);
+                    }
+                    // the write into the sibling: the chunk's foreign key key-shares the sibling's registry row
+                    PgContainerHelper.insertChunks(ctx, T, sibling, List.of(Chash.ofText("row14 mover chunk " + origin).toHex()),
+                        List.of("row14 mover chunk"), List.of(new float[384]), List.of(Map.<String, Object>of("origin_collection", "some-other-origin")));
+                    return 1;
+                })));
+            await(holding);
+            Future<Map<String, Integer>> delete = pool.submit(() -> catalog.deleteCollectionById(T, origin, originId, false));
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%catalog_collections%"))
+                .as("the delete holds the sibling and waits for the origin the mover key-shares").isTrue();
+            waitPastTheDeadlockTimeout();
+            proceed.countDown();
+
+            delete.get(90, TimeUnit.SECONDS);
+            Throwable moverFailure = null;
+            try {
+                mover.get(90, TimeUnit.SECONDS);
+            } catch (ExecutionException e) {
+                moverFailure = e.getCause();
+            }
+            assertThat(moverFailure == null || moverFailure instanceof UnregisteredCollectionException)
+                .as("the mover was run again after the deadlock: it finished, or found the origin deleted; it did not surface %s", moverFailure).isTrue();
+            assertThat(retries).as("non-vacuity: the cycle happened and the mover was the victim that was retried").anyMatch(r -> r.startsWith("gc "));
+            assertThat(registered(origin)).isFalse();
+        } finally {
+            DeadlockRetry.setRetryListenerForTests(null);
+        }
+    }
+
+    /**
+     * A rename holds the origin's row and then key-shares its quarantine siblings for the retag ({@link QuarantineOrigin#retagRowsOf}); a delete by id
+     * of that origin, whose sibling has the LOWER id, holds the sibling first and waits for the origin. The rename is the second to wait, so it is the
+     * deadlock victim, and its caller's {@link DeadlockRetry} (the rename runs through {@code manifestWriteTxn}) runs it again; the test runs the retag in the
+     * same shape, origin {@code FOR UPDATE} then retag, under that belt.
+     */
+    @Timeout(180)
+    @Test
+    void aRenamesRetagHoldingTheOrigin_againstADeleteByIdWhoseSiblingIdIsLower_isResolvedByTheDeadlockRetry() throws Exception {
+        java.util.List<String> retries = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DeadlockRetry.setRetryListenerForTests(retries::add);
+        try {
+            String[] c = originWithLowerSibling("rename");
+            String origin = c[0];
+            long originId = idOf(origin);
+            String renamed = "docs__row14renamed" + n.incrementAndGet() + "__minilm-l6-v2-384__v1";
+            var holding = new java.util.concurrent.CountDownLatch(1);
+            var proceed = new java.util.concurrent.CountDownLatch(1);
+            var first = new java.util.concurrent.atomic.AtomicBoolean(true);
+            Future<Integer> rename = pool.submit(() -> DeadlockRetry.run("test.rename " + origin, () -> scope.withTenant(T, ctx -> {
+                ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(origin)).forUpdate().fetch();   // the rename's hold on its row
+                if (first.getAndSet(false)) {
+                    holding.countDown();
+                    await(proceed);
+                }
+                return QuarantineOrigin.retagRowsOf(ctx, T, origin, renamed, dev.nexus.service.datamove.Gate3.never());
+            })));
+            await(holding);
+            Future<Map<String, Integer>> delete = pool.submit(() -> catalog.deleteCollectionById(T, origin, originId, false));
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%catalog_collections%"))
+                .as("the delete holds the sibling and waits for the origin the rename holds").isTrue();
+            waitPastTheDeadlockTimeout();
+            proceed.countDown();
+
+            delete.get(90, TimeUnit.SECONDS);
+            rename.get(90, TimeUnit.SECONDS);   // an exception here is a deadlock the belt did not absorb
+            assertThat(retries).as("non-vacuity: the cycle happened and the rename was the victim that was retried").anyMatch(r -> r.startsWith("test.rename "));
+            assertThat(registered(origin)).isFalse();
         } finally {
             DeadlockRetry.setRetryListenerForTests(null);
         }

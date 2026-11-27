@@ -26,7 +26,7 @@ WHY IT IS A BUG AND NOT A COSMETIC COUNTER:
   * ``plans/matcher.py`` reads ``success_count`` when ranking, and the matcher
     is supposed to be able to decay always-failing plans (RDR-179 item 3). It
     could not: there were no failures to decay.
-  * ``nx plan list`` / ``show`` present these to operators as quality signals.
+  * ``nx answer-plan list`` / ``show`` present these to operators as quality signals.
 
 THE FORCED CHOICE. The store is strictly binary — ``success_count`` /
 ``failure_count``, with a third "empty" column requiring a Liquibase changeset

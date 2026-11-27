@@ -111,7 +111,7 @@ _log = structlog.get_logger(__name__)
 #: wire in the same session this bead was designed. This is a PERMANENT,
 #: known fact recorded every run — never UNAVAILABLE, never omitted, never
 #: windowed. The exact literal the design of record specifies; do not reword.
-_CONSENT_RETIRED = "RETIRED (nexus-lqqb2, 2026-08-28)"
+_CONSENT_RETIRED = "RETIRED"
 
 #: search_telemetry's per-collection reader (``query_collection_stats``) is
 #: windowed by ``days``; the §4.5 "global count" figure wants effectively
@@ -146,8 +146,7 @@ _ZERO_HIT_RATE_WORST_N = 2
 #: absence in the current window), same "always-labeled" doctrine as
 #: ``search_telemetry``'s LOWER BOUND caveat just below it.
 _NX_ANSWER_RUNS_CONTINUATION_CAVEAT = (
-    "hit/fallback/total/since_count above have ZERO visibility into "
-    "RDR-200 continuation rows (zero engine change): every "
+    "hit/fallback/total/since_count above have ZERO visibility into continuation rows (zero engine change): every "
     "nx_answer_report completion row is misclassified server-side as "
     "an inline-planner fallback, and a paired continuation call "
     "contributes 2 physical rows for 1 logical nx_answer invocation — "
@@ -526,7 +525,7 @@ def _render_text(data: dict[str, Any]) -> None:
 
 @click.group("telemetry")
 def telemetry_group() -> None:
-    """Telemetry baseline and diagnostics (nexus-v0x32)."""
+    """Telemetry baseline and diagnostics."""
 
 
 @telemetry_group.command("baseline")

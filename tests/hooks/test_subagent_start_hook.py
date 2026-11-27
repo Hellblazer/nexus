@@ -9,10 +9,13 @@ module only (nexus-q02nx.21).
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -22,8 +25,23 @@ import nexus.hooks.subagent_start as _subagent_start_mod
 from tests._platform import posix_only
 from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 from tests._child_encoding import PYTHON_CHILD_ENCODING
+from tests.hooks.audience_harness import SRC_SEAM_PRELUDE, src_seam_env
 
 pytestmark = pytest.mark.t2_tenant
+
+#: The driver runs in a child process, where the in-process audience seam does not reach, so the account it
+#: sees is named by ``NX_TEST_ACCOUNT_HOME`` (audience_harness.SRC_SEAM_PRELUDE). Default: an account with no
+#: settings file. A test that wants a setting names a settings home or a project with a settings file as ``cwd``.
+_PLAIN_HOME = tempfile.mkdtemp(prefix="nx-acct-unflagged-")
+atexit.register(shutil.rmtree, _PLAIN_HOME, ignore_errors=True)
+
+
+def _strict_home(tmp_path: Path) -> str:
+    """An account home whose user settings turn the strict subagent guard on (the user-strict fixture)."""
+    settings = tmp_path / "acct-strict" / ".config" / "nexus" / "conexus.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"subagent_git": "strict"}), encoding="utf-8")
+    return str(tmp_path / "acct-strict")
 
 STDIN_PAYLOAD = json.dumps({
     "session_id": "test-session",
@@ -37,7 +55,7 @@ STDIN_PAYLOAD = json.dumps({
 #: test_subagent_stop_hook.py's own driver does — a real process with a real
 #: environment, since several tests here vary env (and cwd) per call and
 #: ``os.environ``/the process cwd are process-global.
-_PY_DRIVER = """
+_PY_DRIVER = SRC_SEAM_PRELUDE + """
 import json, sys
 from nexus._hook_runtime._io import never_fail
 from nexus.hooks import subagent_start
@@ -77,8 +95,9 @@ def _run_hook(
     cwd: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {
-        **os.environ,
+        **{k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"},  # the helper's cwd fallback: a nexus session's would make this a nexus repo
         "PATH": os.environ.get("PATH", ""),
+        **src_seam_env(_PLAIN_HOME),
         **(env_overrides or {}),
     }
     return subprocess.run(
@@ -121,9 +140,6 @@ class TestSubagentStartHook:
         assert "Foreground: final message IS the hand-back" in ctx
         assert "| Inbox |" in ctx
         assert "Re-check inbox right before composing any hand-back" in ctx
-        assert "| Git |" in ctx
-        assert "NEVER git add/commit" in ctx
-        assert "orchestrator commits pathspec-limited" in ctx
 
 
 class TestClaimantIdInjection:
@@ -456,6 +472,7 @@ class TestWorktreeProjectResolution:
 
 
 class TestBriefCheckInjection:
+    # The user's and the non-nexus maintainer's cases are in test_subagent_start_audience_run.py (no tenant).
     """nexus-yjg4v: an agent that changes code gets the brief check, so the
     questions behind 2026-10-08's four review fix rounds (consumers, the real
     display point, local vs cloud, resource bounds, cache state) are answered
@@ -468,20 +485,27 @@ class TestBriefCheckInjection:
         "prompt_id": "abc123",
     }
 
-    def _ctx(self, agent_type: str) -> str:
-        result = _run_hook(stdin=json.dumps({**self._REAL_SHAPE, "agent_type": agent_type}))
+    def _ctx(self, agent_type: str, *, cwd: Path | None = None, account_home: str | None = None) -> str:
+        payload = {**self._REAL_SHAPE, "agent_type": agent_type}
+        if cwd is not None:
+            payload["cwd"] = str(cwd)
+        env = src_seam_env(account_home) if account_home else None
+        result = _run_hook(stdin=json.dumps(payload), env_overrides=env)
         assert result.returncode == 0, result.stderr
         return json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
 
-    @pytest.mark.parametrize(
-        "agent_type",
-        ["developer", "conexus:developer", "worktree-developer", "general-purpose", "claude", "conexus:debugger"],
-    )
-    def test_implementer_types_get_the_brief_check(self, agent_type: str) -> None:
-        ctx = self._ctx(agent_type)
+    _IMPLEMENTERS = ["developer", "conexus:developer", "worktree-developer", "general-purpose", "claude", "conexus:debugger"]
+
+    @pytest.mark.parametrize("agent_type", _IMPLEMENTERS)
+    def test_implementer_types_get_the_brief_check_with_the_projects_own_question(
+        self, agent_type: str, project_settings_repo,
+    ) -> None:
+        repo = project_settings_repo(brief_questions=["Does it hold in both modes, local AND cloud?"])
+        ctx = self._ctx(agent_type, cwd=repo)
         assert "## Brief check" in ctx
-        for question in ("Consumers:", "Final point:", "Modes:", "Bounds:", "State:"):
+        for question in ("Consumers:", "Final point:", "Bounds:", "State:"):
             assert question in ctx, question
+        assert "5. Does it hold in both modes, local AND cloud?" in ctx
 
     @pytest.mark.parametrize(
         "agent_type",
@@ -495,8 +519,8 @@ class TestBriefCheckInjection:
             "Plan",
         ],
     )
-    def test_read_only_types_do_not(self, agent_type: str) -> None:
-        assert "## Brief check" not in self._ctx(agent_type)
+    def test_read_only_types_do_not(self, agent_type: str, project_strict_repo: Path) -> None:
+        assert "## Brief check" not in self._ctx(agent_type, cwd=project_strict_repo)
 
 
 class TestAgentTypeClassification:

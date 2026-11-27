@@ -118,6 +118,8 @@ _ABSENT = object()
 
 def _arg(spec: ArgSource, row: Any, name: str, identity: str | None = None) -> Any:
     if spec.kind == "self":
+        if spec.value != "identity":  # self.branch is a template's: expansion made it a literal, so none is left to fill here
+            raise _Failure("args", f"{name}: self.{spec.value} is not something a loaded aura fills")
         if identity is None:
             raise _Failure("args", f"{name}: this session has no identity to fill self.{spec.value} with")
         return identity
@@ -197,6 +199,7 @@ class AuraRuntime:
         self._identity = identity
         self._lanes = {a.name: _Lane(a) for a in auras}
         self._cond = threading.Condition()
+        self._retiring = 0  # retirements of pre-template blocks still running (:meth:`retire_blocks`)
         self._refused: set[tuple[str, str]] = set()  # (aura, row id) already logged for its stamp refusal
 
     def extend(self, auras: Sequence[Aura], identity: str | None) -> None:
@@ -207,6 +210,36 @@ class AuraRuntime:
             self._identity = identity
             for aura in auras:
                 self._lanes.setdefault(aura.name, _Lane(aura))
+
+    def retire_blocks(self, pairs: Sequence[tuple[str, str]]) -> None:
+        """Remove each ``(aura name, threads value)`` block from the session's threads entry, on a worker thread (a T2
+        read and write), under the same lock as every other block write. The loader asks it once a template that replaced
+        a pre-template aura has expanded, so the old heading does not stay in the entry. A failure is logged, never raised."""
+        pairs = list(pairs)
+        if not pairs:
+            return
+        with self._cond:
+            self._retiring += 1
+        threading.Thread(target=self._retire, args=(pairs,), name="aura-retire", daemon=True).start()
+
+    def _retire(self, pairs: list[tuple[str, str]]) -> None:
+        try:
+            batch = getattr(self._writer, "remove_blocks", None)
+            if batch is not None:  # one read-modify-write for every heading
+                try:
+                    batch(pairs)
+                except Exception as exc:  # noqa: BLE001 -- an old block left in place is cosmetic
+                    _log.warning("aura_legacy_blocks_not_removed", blocks=[a for a, _ in pairs], error=str(exc))
+                return
+            for aura, threads_value in pairs:
+                try:
+                    self._writer.remove_block(aura, threads_value)
+                except Exception as exc:  # noqa: BLE001 -- one failure spares the rest
+                    _log.warning("aura_legacy_block_not_removed", aura=aura, error=str(exc))
+        finally:
+            with self._cond:
+                self._retiring -= 1
+                self._cond.notify_all()
 
     # -- the waiter side: match and enqueue, never block ---------------------------------------------------------
 
@@ -364,7 +397,9 @@ class AuraRuntime:
     def wait_idle(self, timeout: float) -> bool:
         """Wait until every queue is empty and no worker runs. False on timeout."""
         with self._cond:
-            return self._cond.wait_for(lambda: not any(l.running for l in self._lanes.values()), timeout)
+            return self._cond.wait_for(
+                lambda: not self._retiring and not any(l.running for l in self._lanes.values()), timeout,
+            )
 
     def is_disabled(self, aura: str) -> bool:
         return self._lanes[aura].disabled

@@ -141,6 +141,18 @@ _interpreter.reexec_if_needed()
 sys.path.insert(0, os.path.dirname(__file__))
 import _lib  # noqa: E402
 
+# The deny's redirect is neutral unless the project's tracked settings carry a ``credential_helper`` text naming its own safe
+# way to use the credential; that text is introduced by its source, never in this guard's voice (RDR-259 Decision 2). The
+# setting only adds text, so a helper that cannot be imported gives the neutral redirect.
+try:
+    from _audience import project_text as _project_text, provenance_label as _provenance_label  # noqa: E402 -- the sys.path insert above reaches it
+except BaseException:  # noqa: BLE001
+    def _project_text(payload: object, key: str) -> "str | None":
+        return None
+
+    def _provenance_label(key: str, source: str, value: "str | None" = None) -> "str | None":
+        return None
+
 RULE_NAME = "credential_print_guard"
 
 #: RDR-219: the credential environment-variable names this guard protects.
@@ -177,16 +189,24 @@ _FAILSAFE_MARKERS: tuple[str, ...] = (
     *CREDENTIAL_ENV_VARS,
 )
 
-_REDIRECT = (
+_REFUSAL = (
     "This command would print a Claude Code credential. Harnesses never read "
     "the keychain or a credential file directly, and never print the "
-    "automation token. The nexus repo's wrapper "
-    "(https://github.com/Hellblazer/nexus/blob/main/tests/e2e/lib/claude_credentials.py) "
-    "does both safely: `claude_credentials.py status` checks the token, and "
-    "`claude_credentials.py run -- <command>` runs a child process with it "
-    "set in the environment. A project without that wrapper asks its operator "
-    "for an equivalent (RDR-219)."
+    "automation token."
 )
+
+#: What the deny says when the project names no helper.
+_REDIRECT_USER = (
+    _REFUSAL + " Ask your operator for a helper that checks the token "
+    "and runs a command with it set in the environment without printing it."
+)
+
+
+def _redirect(payload: dict) -> str:
+    helper = _project_text(payload, "credential_helper")
+    label = _provenance_label("credential_helper", "project", helper) if helper else None
+    return f"{_REFUSAL}\n{label}" if label else _REDIRECT_USER
+
 
 # ---------------------------------------------------------------------------
 # Rule 1: a keychain read naming one of the two credential items.
@@ -451,7 +471,7 @@ def body(payload: dict) -> None:
                 command_fragment=command,
             )
             _lib.deny(
-                f"{_REDIRECT}\n\n(guard error while matching this command; "
+                f"{_redirect(payload)}\n\n(guard error while matching this command; "
                 f"denied on the failure-mode substring check because a "
                 f"protected marker is present: {exc})"
             )
@@ -468,7 +488,7 @@ def body(payload: dict) -> None:
             rule=RULE_NAME, outcome="deny", tool_name="Bash",
             command_fragment=command,
         )
-        _lib.deny(f"{_REDIRECT}\n\nMatched: {reason}.")
+        _lib.deny(f"{_redirect(payload)}\n\nMatched: {reason}.")
         return
     _lib.pass_through()
 

@@ -96,6 +96,18 @@ from typing import Any, Callable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _endpoint_resolve as _ep  # noqa: E402 -- must follow the sys.path insert
 
+# Routing telemetry (a routing_events row carries the user's command fragment to their engine) is an opt-in user setting,
+# ``telemetry`` in ``conexus.json``, off by default. It sends data, so a helper that cannot be imported binds it to False:
+# a broken helper records nothing.
+try:
+    from _audience import telemetry_child_env as _telemetry_child_env, telemetry_enabled as _telemetry_enabled  # noqa: E402 -- same sys.path insert
+except BaseException:  # noqa: BLE001
+    def _telemetry_child_env(environ):
+        return None
+
+    def _telemetry_enabled() -> bool:
+        return False
+
 ESCAPE_TOKEN = "# routing-allow:"
 ESCAPE_REASON_MIN_LENGTH = 8
 
@@ -451,7 +463,14 @@ def _read_data_token_lease(config_dir: pathlib.Path, base_url: str) -> str | Non
     sibling module. ``tests/test_routing_hooks.py``'s
     ``test_parity_read_data_token_lease_*`` suite still runs both
     wrappers against the same on-disk lease fixture and asserts
-    identical return values."""
+    identical return values.
+
+    nexus-ec37o: a lease is bound to its host, not to a transport, so a data token is
+    served only over https or to a loopback host, as a stored credential is."""
+    try:
+        _ep.require_secure_transport(base_url)
+    except _ep.EndpointUnresolvable:
+        return None
     return _ep.read_data_token_lease(config_dir, base_url)
 
 
@@ -468,85 +487,6 @@ def _read_config_yml_credentials(config_dir: pathlib.Path) -> dict:
     return _ep.read_config_yml_credentials(config_dir)
 
 
-def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":
-    """``(base_url, token)`` for the nexus-service engine, or
-    ``(None, None)`` when nothing is resolvable. Never raises.
-
-    FULL RESOLUTION (nexus-gjv9b PART 2 CRITICAL review fix, replacing
-    an env-only leg that left the routing hooks write-never on any
-    normal interactive install -- nothing exports ``NX_SERVICE_HOST``/
-    ``PORT``/``TOKEN`` into a Claude Code process by default). Reuses
-    ``t2_prefix_scan.py``'s stdlib-only discovery: a fresh
-    ``ServiceRegistry`` lease file, then ``config.yml`` credentials, then
-    the ``NX_SERVICE_*`` env vars, with a data-token lease (nexus-znvjd)
-    preferred over any static token once a base URL is known. Mirrors
-    ``nexus.db.service_endpoint.resolve_service_endpoint``'s precedence
-    exactly, minus the raise-on-failure (this caller wants a quiet
-    ``(None, None)`` to fall through to the metered drop, never an
-    exception to handle).
-
-    Precedence, matching ``t2_prefix_scan._resolve_endpoint``:
-      1. ``service_url`` -- ``NX_SERVICE_URL`` env, else ``config.yml``'s
-         ``service_url``. Token: ``NX_SERVICE_TOKEN`` env, else
-         ``config.yml``'s ``service_token``, else the lease's token.
-      2. ``NX_SERVICE_HOST``/``PORT`` env (+ ``NX_SERVICE_TOKEN``, else
-         the lease's token).
-      3. The bare local-supervisor lease alone.
-    On every leg, a fresh data-token lease for the resolved host wins
-    over whatever static token was found.
-    """
-    config_dir = _default_config_dir()
-    lease = _read_service_lease(config_dir)
-    yaml_creds = _read_config_yml_credentials(config_dir)
-
-    url = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/")
-    if not url:
-        url = yaml_creds.get("service_url", "").strip().rstrip("/")
-    if url:
-        if _ep.has_userinfo(url):
-            # The CLI refuses a service_url carrying user:password@ (nexus-ujbf8);
-            # a routing hook neither sends to it nor echoes it.
-            return None, None
-        data_token = _read_data_token_lease(config_dir, url)
-        if data_token:
-            return url, data_token
-        token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
-        if not token:
-            token = yaml_creds.get("service_token", "").strip()
-        if not token:
-            token = lease["token"] if lease else ""
-        if not token:
-            return None, None
-        return url, token
-
-    port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
-    if port_str:
-        try:
-            port = int(port_str)
-        except ValueError:
-            return None, None
-        host = os.environ.get("NX_SERVICE_HOST", "").strip() or "127.0.0.1"
-        url = f"http://{host}:{port}"
-        data_token = _read_data_token_lease(config_dir, url)
-        if data_token:
-            return url, data_token
-        token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or (
-            lease["token"] if lease else ""
-        )
-        if not token:
-            return None, None
-        return url, token
-
-    if lease is not None:
-        url = f"http://{lease['host']}:{lease['port']}"
-        data_token = _read_data_token_lease(config_dir, url)
-        if data_token:
-            return url, data_token
-        return url, lease["token"]
-
-    return None, None
-
-
 #: Mirrors ``nexus.db.t2.http_telemetry_store.DEFAULT_TENANT`` verbatim --
 #: hardcoded, not imported, because this script has no ``nexus`` import.
 _DEFAULT_TENANT = "default"
@@ -554,6 +494,9 @@ _DEFAULT_TENANT = "default"
 #: The ``session_id`` of the payload :func:`run_hook` read; one hook process
 #: handles one payload, so :func:`log_routing_event` defaults to it.
 _payload_session_id: str = ""
+
+#: The payload :func:`run_hook` read, for the audience gate on :func:`log_routing_event`.
+_payload: dict = {}
 
 #: Mirrors ``nexus.dropped_writes.NAMED_DROP_CAUSES`` verbatim (nexus-gjv9b
 #: review fold-in round 5, code-review non-blocking item 1) -- the FULL
@@ -611,7 +554,7 @@ def _post_routing_event_http(
 
     Cause vocabulary (nexus-gjv9b review fold-in rounds 3-4, critique
     CRITICAL 1/2, code-review item 1): ``"unresolvable"`` (no
-    endpoint/credential at all — :func:`_engine_endpoint` returned
+    endpoint/credential at all — :func:`_pinned_endpoint` returned
     ``(None, None)``), ``"401"``/``"403"``/``"route_absent"``
     (HTTP 404/405 — the serving engine predates this route entirely, the
     plugin-cut-ahead-of-the-engine case a doctor check must never read
@@ -634,9 +577,9 @@ def _post_routing_event_http(
     (:func:`_poster_main`), never in the hook, so the deadline bounds the
     child's life, not the hook's decision; see :data:`_ROUTING_POST_BUDGET_S`.
     *endpoint* is the ``(base_url, token)`` the hook already resolved;
-    without it this resolves its own.
+    without it this resolves its own, pinned to the account (:func:`_pinned_endpoint`).
     """
-    base_url, token = endpoint if endpoint is not None else _engine_endpoint()
+    base_url, token = endpoint if endpoint is not None else _pinned_endpoint()
     if base_url is None:
         return "unresolvable"
     import threading  # noqa: PLC0415 — stdlib, only needed on this path
@@ -674,6 +617,10 @@ def _post_routing_event_once(
                 "Content-Type": "application/json",
             },
         )
+        # nexus-ec37o: the proxy and CA of config.yml, never the environment's; no proxy over plain http; no
+        # redirect followed (urllib would copy the bearer to its target).
+        # This is the detached one-shot poster, so the process-wide opener is ours to set.
+        urllib.request.install_opener(_ep.bearer_opener(base_url, _default_config_dir()))
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed internal engine URL, not user input
             if 200 <= resp.status < 300:
                 return ""
@@ -792,7 +739,7 @@ def log_routing_event(
     (:func:`_spawn_poster`) that POSTs the event, and returns at once; it
     never waits on the network. On ANY failure (unresolvable endpoint -- no
     live supervisor lease, no config.yml credentials, no NX_SERVICE_* env,
-    per :func:`_engine_endpoint` -- metered by the hook; timeout, refused
+    per :func:`_pinned_endpoint` -- metered by the hook; timeout, refused
     connection, non-2xx -- metered by the child), a drop is recorded through
     :func:`_record_dropped_routing_event` rather than a JSONL fallback or a
     retry file. The JSONL append and rotation
@@ -801,8 +748,14 @@ def log_routing_event(
     An empty ``session_id`` falls back to the session of the payload
     :func:`run_hook` read (nexus-m4lej: two guards' seven call sites never
     passed it, so every routing_events row carried an empty session).
+
+    Telemetry is opt-in: the event carries the user's command fragment to their engine, so it is recorded only when the
+    user's ``telemetry`` setting is true; otherwise this returns before it resolves an endpoint, starts a child or meters
+    a drop.
     """
     try:
+        if not _telemetry_enabled():
+            return
         record: dict = {
             "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
             "rule": rule,
@@ -827,14 +780,26 @@ def log_routing_event(
 
 
 def _send_routing_event(record: dict) -> None:
-    """Hook side of the write: resolve the endpoint (local file and env reads only), then hand the POST to a
-    detached child. Never touches the network, so the hook's decision does not wait on the engine
+    """Hook side of the write: resolve the endpoint (the account's config directory only, RDR-259 Decision 9), then
+    hand the POST to a detached child. Never touches the network, so the hook's decision does not wait on the engine
     (nexus-njn1a.1). An endpoint that cannot be resolved is a purely local fact and is metered here; a child
     that cannot be started is metered here as ``other``. A POST that fails afterwards is metered by the child."""
-    base_url, token = _engine_endpoint()
+    try:
+        env = _telemetry_child_env(os.environ)
+    except Exception:  # noqa: BLE001 -- no environment, no telemetry
+        env = None
+    if env is None:
+        _record_dropped_routing_event(
+            "telemetry is on, but this account has no home directory, so no telemetry is sent",
+            cause="unresolvable", event=record,
+        )
+        return
+    base_url, token = _ep.pinned_endpoint(pathlib.Path(env["NEXUS_CONFIG_DIR"]))
     if base_url is None:
         _record_dropped_routing_event(
-            "routing_events POST failed: unresolvable", cause="unresolvable", event=record,
+            "telemetry is on, but no engine is configured under the account's config directory; "
+            "an engine named only in the environment is not used for telemetry",
+            cause="unresolvable", event=record,
         )
         return
     if not _spawn_poster(record, base_url, token):
@@ -850,18 +815,16 @@ _CREATE_NO_WINDOW = 0x08000000
 _CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
 
-def _poster_env() -> "dict[str, str]":
-    """The child's environment: this process's, with the two path variables the drop meter reads made
-    absolute (the child starts in the filesystem root, so a relative path would name a different place)."""
-    env = dict(os.environ)
-    for name in ("NEXUS_CONFIG_DIR", "NX_DROPPED_WRITES_LOG_PATH"):
-        raw = env.get(name, "").strip()
-        if raw and not os.path.isabs(raw):
-            try:
-                env[name] = os.path.abspath(raw)
-            except OSError:
-                pass
-    return env
+def _pinned_endpoint() -> "tuple[str, str] | tuple[None, None]":
+    """``(base_url, token)`` for the poster from the account's own config directory, or ``(None, None)``: no account home,
+    or no engine configured there. Reads no environment variable (RDR-259 Decision 9, nexus-sby49.10)."""
+    try:
+        env = _telemetry_child_env(os.environ)
+    except Exception:  # noqa: BLE001 -- no environment, no endpoint
+        return None, None
+    if env is None:
+        return None, None
+    return _ep.pinned_endpoint(pathlib.Path(env["NEXUS_CONFIG_DIR"]))
 
 
 def _spawn_poster(record: dict, base_url: str, token: str) -> bool:
@@ -872,7 +835,9 @@ def _spawn_poster(record: dict, base_url: str, token: str) -> bool:
     POST with it, and stdout and stderr on the null device, so it can never write to the hook's stdout (the
     protocol channel) and holds no pipe the host reads to EOF (a child that inherited it would keep the hook
     "running" until the POST ended). The event, with the bearer token, goes in over stdin, not argv, where
-    ``ps`` would show a command fragment and the token. A pipe write this small does not block. Never raises.
+    ``ps`` would show a command fragment and the token. A pipe write this small does not block. Its environment is
+    :func:`_audience.telemetry_child_env`'s, never the hook's own (RDR-259 Decision 9); an account with no home starts no
+    child. Never raises.
     """
     try:
         import subprocess  # noqa: PLC0415 — stdlib, only needed on this path
@@ -882,7 +847,9 @@ def _spawn_poster(record: dict, base_url: str, token: str) -> bool:
         # Only this interpreter, by absolute path: no name for CreateProcess to search the working directory for.
         argv = [os.path.abspath(sys.executable), os.path.abspath(__file__), _POSTER_ARGV]
         stable_cwd = os.path.abspath(os.sep)
-        env = _poster_env()
+        env = _telemetry_child_env(os.environ)
+        if env is None:
+            return False
         if not _IS_WINDOWS:
             proc = subprocess.Popen(  # noqa: S603 -- argv list, this interpreter and this file, no shell
                 argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -966,8 +933,9 @@ def run_hook(
         raw = ""
 
     payload = parse_stdin(raw)
-    global _payload_session_id
+    global _payload_session_id, _payload
     _payload_session_id = str(payload.get("session_id") or "")
+    _payload = payload
 
     try:
         body(payload)

@@ -140,8 +140,8 @@ class TestReadyBeadsAndCapabilitiesCarried:
             "`follow_links`",
             "`depth`",
             "`nx_answer`",
-            "`plan_save`",
-            "`plan_search`",
+            "`answer_plan_save`",
+            "`answer_plan_search`",
             "`scratch`",
             "`links`",
             "`link`",
@@ -174,8 +174,10 @@ class TestRunHookResultContract:
         result = session_context.run(None)
         assert result.stdout is not None
         assert result.stdout.startswith("## T1: the working layer this session shares with its subagents")
-        t1_block = "\n".join(session_context._T1_TOP_LINES)
-        assert result.stdout[len(t1_block) + 1:] == session_context.BRIEF_INDEX_LINE
+        # every session gets the dispatch protocol sentence (process, not a person's rule), and an index line with no beads or RDR topic
+        t1_block = "\n".join(session_context._t1_top_lines({}))
+        assert result.stdout[len(t1_block) + 1:] == session_context.brief_index_line(tmp_path / "project")
+        assert "Before a dispatch" in result.stdout and "share_t1" not in result.stdout
         for gone in ("## T2 Memory", "## Ready Beads", "## nx Capabilities", "## Knowledge Map", "## Hygiene"):
             assert gone not in result.stdout
 
@@ -275,7 +277,7 @@ class TestTheIndexLine:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         monkeypatch.chdir(tmp_path)
         out = session_context.run({"session_id": "s1"}).stdout or ""
-        assert out.index("## Due on your") < out.index("Your notes (identity/i5)") < out.index(session_context.BRIEF_INDEX_LINE)
+        assert out.index("## Due on your") < out.index("Your notes (identity/i5)") < out.index(session_context.brief_index_line(tmp_path))
 
 
 class TestWhatStaysAlwaysOnBesidesTheIndex:
@@ -296,7 +298,7 @@ class TestWhatStaysAlwaysOnBesidesTheIndex:
         self._env(monkeypatch, tmp_path)
         monkeypatch.setattr(session_context, "_t2_reachability_lines", lambda project: ["WARNING: T2 memory unreachable: refused"])
         out = session_context.run(None).stdout or ""
-        assert out.index("WARNING: T2 memory unreachable: refused") < out.index(session_context.BRIEF_INDEX_LINE)
+        assert out.index("WARNING: T2 memory unreachable: refused") < out.index(session_context.brief_index_line(tmp_path / "project"))
         monkeypatch.setattr(session_context, "_t2_reachability_lines", lambda project: [])
         assert "WARNING" not in (session_context.run(None).stdout or "")
 
@@ -332,7 +334,7 @@ class TestWhatStaysAlwaysOnBesidesTheIndex:
 
         monkeypatch.setattr(session_context, "run_command", fake)
         out = session_context.run(None).stdout or ""
-        assert out.index("# beads primer") < out.index(session_context.BRIEF_INDEX_LINE)
+        assert out.index("# beads primer") < out.index(session_context.brief_index_line(project))
         assert ["bd", "ready"] not in calls, "the ready list stays behind `nx brief beads`"
 
     def test_bd_prime_is_not_printed_where_the_plugin_is_on_or_outside_a_beads_repo(self, monkeypatch, tmp_path: Path) -> None:

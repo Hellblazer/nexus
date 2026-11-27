@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "conexus",
   "display_name": "Conexus",
-  "version": "8.5.8",
+  "version": "8.5.9",
   "description": "Three-tier semantic memory + knowledge management for Claude Desktop chat. Persistent code/docs/RDR indexing, plan-centric retrieval via nx_answer, and a Postgres-backed storage substrate that interoperates with the Claude Code plugin and the nx CLI on the same host.",
   "long_description": "Conexus is the Claude Desktop Extension form of Nexus. Same MCP tools and storage tiers as the Claude Code plugin and the nx CLI, packaged as a .mcpb bundle that uv resolves on first install. Persistent state is served by the storage service (Postgres), which `nx init` provisions — there is no separate daemon to install or talk to. State is shared with any other consumer on the same host (Claude Code plugin, nx CLI, Cowork via SDK bridge).",
   "author": {
@@ -121,12 +121,28 @@
       "description": "List all T3 collections with document counts and embedding models."
     },
     {
+      "name": "answer_plan_save",
+      "description": "Save a retrieval plan to the T2 answer-plan library for reuse by nx_answer."
+    },
+    {
+      "name": "answer_plan_search",
+      "description": "Search the T2 answer-plan library for similar retrieval plans."
+    },
+    {
+      "name": "answer_plan_delete",
+      "description": "Delete one entry from the T2 answer-plan library by id."
+    },
+    {
       "name": "plan_save",
-      "description": "Save a query execution plan to the T2 plan library for reuse."
+      "description": "Deprecated name of answer_plan_save; removed one client release after this one."
     },
     {
       "name": "plan_search",
-      "description": "Search the T2 plan library for similar query plans."
+      "description": "Deprecated name of answer_plan_search; removed one client release after this one."
+    },
+    {
+      "name": "plan_delete",
+      "description": "Deprecated name of answer_plan_delete; removed one client release after this one."
     },
     {
       "name": "traverse",

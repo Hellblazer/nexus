@@ -20,7 +20,7 @@ $ARGUMENTS
 
 ## Action
 
-**PREREQUISITE**: Plan must be validated by mcp__plugin_conexus_nexus__nx_plan_audit (RDR-080) before implementation.
+**PREREQUISITE**: Plan must be validated by mcp__plugin_conexus_nexus__nx_plan_audit before implementation.
 
 Dispatch the **developer** agent (Agent tool, `subagent_type: conexus:developer`) with the following relay. Answer the five Brief Checklist questions in the `orchestration` skill (consumers, final point, modes, bounds, state) or mark them `UNKNOWN: resolve first`. Fill in dynamic fields from the context above:
 
@@ -34,7 +34,7 @@ Dispatch the **developer** agent (Agent tool, `subagent_type: conexus:developer`
 - Files: [fill from existing files to modify or target package]
 
 ### Plan Context
-[fill from approved mcp__plugin_conexus_nexus__nx_plan_audit (RDR-080) output]
+[fill from approved mcp__plugin_conexus_nexus__nx_plan_audit output]
 
 ### Requirements
 $ARGUMENTS

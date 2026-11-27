@@ -136,6 +136,7 @@ SHA_ALLOWLIST: dict[str, str] = {
     "cbe7290": "rdr-066: feature-branch commit squashed away at merge (2026-04-11)",
     "6cf0703": "rdr-066: feature-branch commit squashed away at merge (2026-04-11)",
     "44e9fe9": "rdr-066: feature-branch commit squashed away at merge (2026-04-11)",
+    "86a5fa0ff1": "rdr-259: the nexus-5y47c guard branch tip its research read, before the 2026-11-26 rebase onto develop; the T2 confirmation record is keyed to it, so the citation keeps the read sha",
 }
 
 #: ``nexus-`` + five letters that are prose, not ids, and ids that are gone.

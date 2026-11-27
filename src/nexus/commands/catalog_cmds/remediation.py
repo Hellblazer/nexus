@@ -240,7 +240,7 @@ def _build_rdr_prefix_index(
     "--rdr-prefix-mode", is_flag=True,
     help="When basename match fails for an RDR file, fall back to matching "
          "by ``rdr-NNN-`` prefix. Catches RDRs renamed end-to-end "
-         "(e.g. rdr-066-enrichment-time.md → rdr-066-composition-smoke.md).",
+         "(e.g. rdr-<n>-enrichment-time.md → rdr-<n>-composition-smoke.md).",
 )
 def remediate_paths_cmd(
     source_dir: Path,

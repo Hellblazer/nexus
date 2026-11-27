@@ -4,14 +4,14 @@ All agent dispatches follow this standardized structure. **Relays are constructe
 
 ## Every Report Ends With a VERIFY Block (MANDATORY)
 
-An agent's hand-back on this relay is not accepted on prose alone (bead nexus-cnzei.6: a 2026-09-13 measurement found reports arriving on time but making false claims — a docs agent reported changing a CLI default it had not touched, and an implementation agent's gate record omitted the one test that would have caught its own NameError). Every Deliverable therefore closes with a VERIFY block, one line per claim, in the exact shape and with the exact checked/not-checked scope that [the orchestration skill](../../skills/orchestration/SKILL.md)'s "VERIFY Line Convention" section owns — read it there rather than here; this file states only that the requirement applies to every relay, not what it says.
+An agent's hand-back on this relay is not accepted on prose alone (a 2026-09-13 measurement found reports arriving on time but making false claims — a docs agent reported changing a CLI default it had not touched, and an implementation agent's gate record omitted the one test that would have caught its own NameError). Every Deliverable therefore closes with a VERIFY block, one line per claim, in the exact shape and with the exact checked/not-checked scope that [the orchestration skill](../../skills/orchestration/SKILL.md)'s "VERIFY Line Convention" section owns — read it there rather than here; this file states only that the requirement applies to every relay, not what it says.
 
 ## Required Fields
 
 | Field | Description | Example |
 |-------|-------------|---------|
 | **Task** | 1-2 sentence summary | "Review code changes for security issues" |
-| **Bead** | Bead ID with status, or 'none' | "Delos-1234 (status: in_progress)" |
+| **Bead** | Bead ID with status, a tracking id, or 'none' | "Delos-1234 (status: in_progress)" |
 | **Input Artifacts** | Context being provided | T3 store docs, files, T2 memory |
 | **Deliverable** | What the agent should produce | "Structured review with findings" |
 | **Quality Criteria** | Checklist for success | Checkboxes of requirements |
@@ -22,7 +22,7 @@ An agent's hand-back on this relay is not accepted on prose alone (bead nexus-cn
 ## Relay: [Target Agent]
 
 **Task**: [1-2 sentence summary of what needs to be done]
-**Bead**: [ID] (status: [status]) or 'none'
+**Bead**: [ID] (status: [status]), [tracking id], or 'none'
 
 ### Input Artifacts
 - nx store: [document titles or "none"]
@@ -55,7 +55,7 @@ An agent's hand-back on this relay is not accepted on prose alone (bead nexus-cn
 ## Relay: [Target Agent]
 
 **Task**: [1-2 sentence summary]
-**Bead**: [ID] (status: [status]) or 'none'
+**Bead**: [ID] (status: [status]), [tracking id], or 'none'
 
 ### Input Artifacts
 - nx store: [document titles or "none"]
@@ -77,6 +77,8 @@ An agent's hand-back on this relay is not accepted on prose alone (bead nexus-cn
 ### Related Beads
 - [Related bead ID and brief description]
 ```
+
+A relay that touches git also says where the worktree is, which git shape to use and who pushes: see the orchestration skill's `reference.md` § Git in an implementer brief.
 
 ## Validation Checklist
 
@@ -159,7 +161,7 @@ Agents receiving relays **MUST validate** before starting work:
 
 Before starting, validate relay contains:
 1. [ ] Non-empty **Task** field (1-2 sentences)
-2. [ ] **Bead** field present (ID with status, or 'none')
+2. [ ] **Bead** field present (ID with status, a tracking id, or 'none')
 3. [ ] **Input Artifacts** section with at least one artifact listed
 4. [ ] **Deliverable** description
 5. [ ] At least one **Quality Criterion** in checkbox format: - [ ]

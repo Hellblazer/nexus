@@ -72,6 +72,27 @@ def _group_reader() -> Any:
     return default_group_reader()
 
 
+def _member_groups() -> Any:
+    """The names of the groups this process's identity belongs to, for the serving check of a ``{serves}`` template. A
+    process with no identity, or an engine that cannot be reached, raises ``GroupUnreadable`` and the check is skipped by
+    name. The one membership seam of the command (RDR-252)."""
+    from nexus.auras.load_gate import GroupUnreadable  # noqa: PLC0415 -- deferred: CLI startup cost
+    from nexus.auras.session import read_memberships  # noqa: PLC0415
+
+    def read() -> list[str]:
+        from nexus.identity import token_header  # noqa: PLC0415
+
+        try:
+            record = token_header.current()
+        except Exception as exc:  # noqa: BLE001 -- an unreadable token is no identity
+            raise GroupUnreadable(f"this process's identity cannot be read: {exc}") from exc
+        if record is None:
+            raise GroupUnreadable("this process holds no identity (nx identity show says whether the session has one)")
+        return read_memberships(record.identity)
+
+    return read
+
+
 def _loaded_inputs() -> tuple[Path, Any, int | None, str | None, Path | None]:
     """What the state-file view needs of this process: the directory of the files, the process table, the pid of the
     nearest Claude ancestor (``None`` with none), the identity this process resolves to (``None`` when it cannot
@@ -158,7 +179,7 @@ def _unscanned_note(count: int) -> str:
 
 @click.group(name="aura")
 def aura_group() -> None:
-    """Declarative auras (RDR-249): check them and list them. Every aura is off until turned on."""
+    """Declarative auras: check them and list them. Every aura is off until turned on."""
 
 
 @aura_group.command(name="check")
@@ -199,7 +220,7 @@ def check_cmd(name: str | None) -> None:
     try:
         results = check_auras(
             entries, cwd=scope.cwd, templates=templates, unavailable=why, only=name, probe=scope.probe,
-            read_group=_group_reader(),
+            read_group=_group_reader(), member_groups=_member_groups(),
         )
     except RepoProbeError as exc:
         raise _fail(f"cannot tell where the repository is: {exc}") from exc
@@ -244,9 +265,32 @@ def _loaded_text(load: dict[str, Any] | None) -> str:
         return ""
     group = f" (group {load['group']})" if load["group"] else ""
     if load["loaded"]:
+        if load.get("bases"):  # a {serves} template: each base with the group that serves it
+            text = "  loaded for " + ", ".join(f"{b['base']} ({b['group']})" if b["group"] else b["base"] for b in load["bases"])
+            return text + "".join(f"; not read: group {g} (reconnect)" for g in load.get("unread", ()))
         return f"  loaded{group}"
     hint = _RECONNECT_HINT if load["reason"] in _RETRY_ON_RECONNECT else ""
     return f"  not loaded: {load['reason']}{group}{hint}"
+
+
+def _template_state(loaded: dict[str, loaded_state.AuraState], name: str) -> dict[str, Any] | None:
+    """What the state file says of a ``{serves}`` template (RDR-252 "Aura per base"), as the ``loaded`` object of a row.
+
+    The server records an expansion as ``<name>@<base>`` and a group it could not read as ``<name>@group:<group>`` (a base
+    holds no colon). The template is loaded when any expansion is, for those bases, each with the group that serves it
+    (``bases``), and ``unread`` names the groups that were not read, which a reconnect retries; otherwise the row carries
+    the reason of the first refused expansion. ``None`` when the file says nothing of the template."""
+    prefix = f"{name}@"
+    rows = {k[len(prefix):]: v for k, v in sorted(loaded.items()) if k.startswith(prefix)}
+    unread = [k[len("group:"):] for k in rows if k.startswith("group:")]
+    expansions = {k: v for k, v in rows.items() if not k.startswith("group:")}
+    up = [{"base": b, "group": v.group} for b, v in expansions.items() if v.loaded]
+    if up:
+        return {"loaded": True, "reason": "loaded", "group": None, "bases": up, "unread": unread}
+    first = next(iter(expansions.values()), None) or next(iter(rows.values()), None)
+    if first is None:
+        return None
+    return {"loaded": False, "reason": first.reason, "group": first.group}
 
 
 def _unclaimed_files_text(listed: tuple[loaded_state.LoadedState, ...]) -> list[str]:
@@ -307,12 +351,15 @@ def list_cmd(json_out: bool) -> None:
         d = states[e.name]
         r = e.result
         seen = loaded.get(e.name) if d.on else None
-        if d.on and view.claimed and view.state is None and isinstance(r, Aura) and r.load_group:
+        template_load: dict[str, Any] | None = None
+        if d.on and isinstance(r, Aura) and r.is_template and seen is None:
+            template_load = _template_state(loaded, e.name)
+        if d.on and view.claimed and view.state is None and isinstance(r, Aura) and (r.load_group or r.is_template):
             unwritten[e.name] = (
-                f"  not loaded: no state file from this session's MCP server (group {r.load_group}); "
+                f"  not loaded: no state file from this session's MCP server{f' (group {r.load_group})' if r.load_group else ''}; "
                 "it has not started or has no identity: reconnect it (/mcp) once the session is bound"
             )
-        load = None if seen is None else {"loaded": seen.loaded, "reason": seen.reason, "group": seen.group}
+        load = template_load if seen is None else {"loaded": seen.loaded, "reason": seen.reason, "group": seen.group}
         if isinstance(r, Aura):
             rows.append({
                 "name": e.name, "root": e.root, "summary": r.summary,

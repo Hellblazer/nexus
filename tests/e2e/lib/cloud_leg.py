@@ -375,6 +375,7 @@ def _load_ledger_module() -> Any:
 
 
 _engine = _load_sibling("cloud_leg_engine")
+_result = _load_sibling("cloud_leg_result")
 parse_engine_version, entry_engine, _ver = _engine.parse_engine_version, _engine.entry_engine, _engine.version_text
 
 
@@ -641,7 +642,7 @@ def run_slot(plan: dict[str, Any], *, runner: str, sandbox: Path, host: str, wor
     results: list[dict[str, Any]] = []
     for n, step in enumerate(plan["steps"]):
         res: dict[str, Any] = {"name": step["name"], "slot": slot, "exit": None, "taps": [], "tap_ready": False,
-                               "stdout_chars": 0, "error": "", "skipped": None, "blocked": None, "attempts": 0,
+                               "stdout_chars": 0, "result": "", "error": "", "skipped": None, "blocked": None, "attempts": 0,
                                "benign": bool(step.get("benign_refusal")), "host": host}
         missing = [v for v in step["needs"] if v not in variables]
         if missing:
@@ -675,7 +676,8 @@ def run_slot(plan: dict[str, Any], *, runner: str, sandbox: Path, host: str, wor
             res["tap_ready"] = tap_ready
             res["taps"] = [[s, m, r] for s, m, r, h in all_rows if h == host]
             res["hosts"] = sorted({h for *_x, h in all_rows if h})
-            res["stdout_chars"] = len(out)  # the output itself is not kept: it carries ids and may carry a token the scrub cannot know
+            res["stdout_chars"] = len(out)  # the rest of the output is not kept: it carries ids and may carry a token the scrub cannot know
+            res["result"] = _result.result_line(out, lambda t: _scrub(t, secrets))  # the `result: ` lines a probe prints are kept, scrubbed, <= 200 chars
             first_err = next((ln for ln in reversed(err.strip().splitlines()) if ln.strip()), "")
             res["error"] = _scrub(first_err, secrets)[:160]
             res["expect_ok"] = True if want is None else (_fill(want, variables) in out)
@@ -803,7 +805,7 @@ class Report:
         w = max([len(r["step"]) for r in self.rows] + [4])
         lines = [f"{'step'.ljust(w)}  {'local':<14} {'cloud':<18} verdict"]
         for r in self.rows:
-            lines.append(f"{r['step'].ljust(w)}  {r['local']:<14} {r['cloud']:<18} {r['verdict']}" + (f"  - {r['reason']}" if r["reason"] else ""))
+            lines.extend(_result.render_row(r, w))
         for msg in self.plan_failures:
             lines.append(f"PLAN FAILURE: {msg}")
         reasons = "; ".join(f"{a}: {b}" for a, b in self.skipped) or "none"
@@ -863,7 +865,7 @@ def compare(plan: dict[str, Any], local: list[dict[str, Any]], cloud: list[dict[
                     verdict, reason = "EXPECTED-RED", f"{reason}; pinned @{','.join(map(str, sorted(pin.statuses)))}: {pin.reason}"
                 else:
                     reason = f"{reason}; cloud statuses {got} are not the pinned {sorted(pin.statuses)} ({pin.reason})"
-        rows.append({"step": name, "local": _cell(lres), "cloud": _cell(cres), "verdict": verdict, "reason": reason})
+        rows.append({"step": name, "local": _cell(lres), "cloud": _cell(cres), "verdict": verdict, "reason": reason, "result": _result.step_results(lres, cres)})
         examined += 1
         if verdict == "FAIL":
             failed += 1

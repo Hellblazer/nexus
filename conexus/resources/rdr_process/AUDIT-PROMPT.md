@@ -1,4 +1,4 @@
-# RDR-067 Canonical Audit Prompt v1 (patch v1.2 — code-verification gate for PARTIAL/SCOPE-REDUCED)
+# Canonical Audit Prompt v1 (patch v1.2 — code-verification gate for PARTIAL/SCOPE-REDUCED)
 
 **Purpose**: Pinned prompt text for the `rdr-audit-checklist` skill. The skill dispatches `deep-research-synthesizer` with the prompt below, substituting `{project}`, `{project_path}`, and `{transcript_excerpts}` before dispatch. This file ships with the plugin so the audit runs on an install whose T2 holds no `nexus_rdr` entries; a T2 entry `nexus_rdr/067-canonical-prompt-v1`, when present, overrides it. The override must keep this file's structure: the prompt is the part after the marker heading further down, and nothing above that heading is sent.
 
@@ -102,7 +102,7 @@ Key semantic distinction: **healthy re-scoping** (plan updated, scope stated cle
 3. If the Grep finds the implementation, the unchecked checkbox is a **documentation gap**, not a scope gap. Classify as CLEAN with a note: "success criteria unchecked but code ships the feature at `<file:line>`."
 4. If the Grep finds nothing, the gap is real. Proceed with PARTIAL or SCOPE-REDUCED classification.
 
-**Rationale**: Two independent audit runs (2026-04-11) classified RDR-056 as SCOPE-REDUCED based on 3/4 unchecked success criteria. Codebase verification showed all 4 were implemented (`probe_hit_rate` in t3.py, `search_clusterer.py`, `distance_threshold` in config.py, `hnsw:search_ef` tuning in doctor.py). The false positive was detected only by manual code inspection after the audit. This gate prevents that class of error.
+**Rationale**: Two independent audit runs (2026-04-11) classified one RDR as SCOPE-REDUCED based on 3/4 unchecked success criteria. Codebase verification showed all 4 were implemented (`probe_hit_rate` in t3.py, `search_clusterer.py`, `distance_threshold` in config.py, `hnsw:search_ef` tuning in doctor.py). The false positive was detected only by manual code inspection after the audit. This gate prevents that class of error.
 
 **Budget impact**: adds ≤3 Grep calls per non-CLEAN candidate. For a typical audit sampling 5-8 RDRs with 1-3 non-CLEAN candidates, this is 3-9 additional tool calls — well within the ≤25 total budget if the auditor stops early on CLEAN cases (which require no code verification).
 

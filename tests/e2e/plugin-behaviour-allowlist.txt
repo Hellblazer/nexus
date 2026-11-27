@@ -1,0 +1,13 @@
+# The behaviour leg's allowlist (tests/e2e/lib/plugin_behaviour.py, nexus-sby49.3, plan section 5 item 2).
+#
+# One line per finding the leg may let through, tab separated:
+#
+#   row <TAB> hit <TAB> until: phase-N | D<n> <TAB> reason
+#
+# row    a manifest row that is not live yet (conexus/hooks/audience.yaml, live: false): a registration key, a constant id
+#        (<module path>:<NAME>) or a rule id. Nothing else may be allowlisted, so a rule that is live cannot hide here.
+# hit    the lexicon term the plain fixture's output carries (a user's output must carry none), exactly as it appears.
+# until  the condition that ends the entry. An entry past it fails the leg, and so does an entry that matched nothing.
+#
+# Empty since Phase 3 (nexus-sby49.4): every manifest row is live and the leg holds every user fixture's output to the lexicon.
+# A new entry needs a `live: false` manifest row, a decision of record, and the pin in tests/test_plugin_behaviour_leg.py.

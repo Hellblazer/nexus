@@ -14,7 +14,7 @@ visible trailing marker.
 This file pins the pure helper's contract, then ``nx_answer``'s use of it
 (the one call site whose structured envelope also carries a
 ``truncated_chars`` field). The other seven call sites (search, query,
-store_list x2, memory_search, plan_search, scratch x2) are integration-
+store_list x2, memory_search, answer_plan_search, scratch x2) are integration-
 tested in ``tests/test_mcp_server.py`` alongside their existing pagination
 tests, reusing that file's real T1/T2/T3 fixtures.
 """
@@ -82,8 +82,8 @@ class TestCapTextResult:
         assert "50 chars dropped" in out
 
     def test_tool_name_appears_in_marker(self) -> None:
-        out = _cap_text_result("c" * 20, "plan_search", cap=10)
-        assert "[plan_search: result capped" in out
+        out = _cap_text_result("c" * 20, "answer_plan_search", cap=10)
+        assert "[answer_plan_search: result capped" in out
 
 
 # ── nx_answer: defense-in-depth cap on final_text ───────────────────────────

@@ -63,11 +63,11 @@ def _own_segment(uri: str) -> str:
     help="Emit JSON instead of the human-readable report.",
 )
 def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
-    """Re-derive ``chroma://`` catalog ``source_uri`` values (nexus-poigc).
+    """Re-derive ``chroma://`` catalog ``source_uri`` values.
 
     A legacy ``chroma://`` spelling was ALSO the store_put-origin marker of
     ``knowledge__`` documents minted via ``nx store put`` / MCP ``store_put``
-    (now ``nx-note://``, RDR-231). Those rows are legacy NOTES: the engine's
+    (now ``nx-note://``). Those rows are legacy NOTES: the engine's
     backfill rewrites them to ``nx-note://``, so this verb leaves them alone.
     This verb ONLY rewrites ``chroma://`` residue of file-routed
     collections: rows that carry a ``chroma://`` identity ONLY because they
@@ -75,7 +75,7 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
     collections (a catalog row saying ``rdr``, ``docs`` or ``code``) routing
     to ``file://`` -- migration residue, not a legitimate origin marker.
 
-    A row is a candidate by the residue's OWN segment (RDR-229 P2.10, T2
+    A row is a candidate by the residue's OWN segment (T2
     ``229-research-65``): the segment of ``chroma://<segment>/<path>`` has a
     ``rdr__``, ``docs__`` or ``code__`` prefix (``FILE_ROUTED_PREFIXES``), or
     the row's collection has content type ``code``, ``docs`` or ``rdr`` in
@@ -264,10 +264,10 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
          "next run's candidates automatically.",
 )
 def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
-    """Capture the ``ETag`` for every ``https://`` reference that lacks one
-    (nexus-0ne1m critique, significant #2).
+    """Capture the ``ETag`` for every ``https://`` reference that lacks one.
 
-    Every ``https://`` reference registered or refreshed BEFORE nexus-0ne1m
+
+    Every ``https://`` reference registered or refreshed BEFORE ETag capture
     shipped has no ``catalog_documents.metadata[HTTPS_ETAG_META_KEY]`` and
     reads 'unknown' forever under ``nx doctor --check-references`` — this is
     the bulk remedy. Candidates: live (non-alias) documents whose
@@ -287,8 +287,7 @@ def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
     catalog write fails is reported and counted as a failure (exit 1),
     without aborting the rest of the run.
 
-    ``NX_REFERENCE_ETAG_CAPTURE=0`` (round-2 critique, nexus-0ne1m/
-    nexus-tb2yj) disables capture here too: ``capture_https_etag`` checks
+    ``NX_REFERENCE_ETAG_CAPTURE=0`` disables capture here too: ``capture_https_etag`` checks
     it before ever touching the shared ``httpx.Client``, so every
     candidate comes back with no ETag and this run makes ZERO outbound
     HEAD requests — the same "no outbound HTTP from capture" promise the
@@ -417,7 +416,7 @@ def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
 )
 @click.option(
     "--list-ttl-first-sign", "list_first_sign", is_flag=True,
-    help="Dry run only: also list the notes whose expiry RDR-236 Step 1 changes (the TTL sweep's guard held them "
+    help="Dry run only: also list the notes whose expiry changes (the TTL sweep's guard held them "
          "by the first sign of catalog_ttl_stale alone), with whether each has already lapsed. Reads the "
          "manifests and chunk rows (text included) of every note with a TTL: see LOAD below. Refused with --apply.",
 )
@@ -430,10 +429,10 @@ def backfill_meta_cmd(
     apply: bool, as_json: bool, batch_size: int, pause_ms: int, max_rps: float | None,
     stop_after_failed_rounds: int, start_after: str, list_first_sign: bool, list_only: bool,
 ) -> None:
-    """Stamp the new catalog meta keys of pre-existing documents from their chunk rows (nexus-6pfgb.10).
+    """Stamp the new catalog meta keys of pre-existing documents from their chunk rows.
 
     One-time and fill-only: a key the entry already holds (a retraction value included) and a non-empty
-    catalog column are never touched, and a key is sent only with a real value. Notes (Sam's option B)
+    catalog column are never touched, and a key is sent only with a real value. Notes
     take ``ttl_days`` and ``put_at`` only from a row they wrote themselves, and ``tags``, ``category`` and
     ``source_agent`` from that row or, failing one, from a piece they solely own. Indexed documents take
     ``extraction_method``, ``quality_gate_overridden``, ``extraction_source``, ``frecency_score`` and the
@@ -455,7 +454,7 @@ def backfill_meta_cmd(
     hooks, ``nx store put``) quiet for the whole of every pass, not only the apply: the write merges a
     key into ``meta`` and overwrites one a writer set after the listing was taken.
 
-    THE FIRST-SIGN LISTING (nexus-6pfgb.65, RDR-236 Phase 4 Step 1) runs only under ``--list-ttl-first-sign``
+    THE FIRST-SIGN LISTING runs only under ``--list-ttl-first-sign``
     (or ``--list-ttl-first-sign-only``), on a dry run; both are refused with ``--apply``. It lists, in the
     summary and under ``ttl_first_sign_only`` in ``--json``, the notes whose expiry Step 1 changes: a note with
     a catalog TTL that ``note_ttl.catalog_ttl_stale`` held by its first sign alone, because a row's TTL differs
@@ -538,10 +537,10 @@ def backfill_meta_cmd(
                 f"  {name}: examined {st.examined}, held {st.present}, skipped (shared) {st.shared}, "
                 f"{'stamped' if apply else 'would stamp'} {st.stamped}, residue {sum(st.residue.values())}{why}"
             )
-        click.echo(f"  {report.repo_owners} repository owner(s) seen for the repo-collection tags rule (nexus-6pfgb.43)"
+        click.echo(f"  {report.repo_owners} repository owner(s) seen for the repo-collection tags rule"
                    + ("; the owner or collection listing FAILED, so the rule was off." if report.repo_listing_failed else "."))
         if report.tags_legacy_strings_left:
-            click.echo(f"  {report.tags_legacy_strings_left} legacy tags strings left for the array rung (nexus-6pfgb.38).")
+            click.echo(f"  {report.tags_legacy_strings_left} legacy tags strings left for the array rung.")
         if report.lookups_failed:
             click.echo(f"  {report.lookups_failed} documents had an owner or row lookup fail; their row-sourced keys were withheld.")
         if report.ttl_first_sign_checked:
@@ -550,7 +549,7 @@ def backfill_meta_cmd(
                 f"  {len(held)} note(s) held today by catalog_ttl_stale's first sign alone (the row's TTL differs from the "
                 "catalog's while the row's indexed_at is not later than put_at plus five minutes, or the row has no "
                 "indexed_at: a pre-.18 import's permanent row, or a note whose owner changed its TTL with a new-client "
-                "re-put). RDR-236 Step 1 stops holding them; the catalog's TTL is the authority."
+                "re-put). The index stops holding them; the catalog's TTL is the authority."
             )
             for n in held:
                 click.echo(

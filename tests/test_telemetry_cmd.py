@@ -171,7 +171,7 @@ class TestConsentLiteral:
         result = CliRunner().invoke(baseline_cmd, ["--json"])
         assert result.exit_code == 0, result.stdout
         payload = json.loads(result.stdout)
-        assert payload["consent"] == "RETIRED (nexus-lqqb2, 2026-08-28)"
+        assert payload["consent"] == "RETIRED"
 
     def test_consent_survives_every_other_reader_failing(self, monkeypatch) -> None:
         from nexus.commands.telemetry_cmd import baseline_cmd
@@ -193,7 +193,7 @@ class TestConsentLiteral:
         result = CliRunner().invoke(baseline_cmd, ["--json"])
         assert result.exit_code == 0, result.stdout
         payload = json.loads(result.stdout)
-        assert payload["consent"] == "RETIRED (nexus-lqqb2, 2026-08-28)"
+        assert payload["consent"] == "RETIRED"
         # Every other figure degraded honestly -- never omitted, never a
         # fabricated zero.
         for group in ("nx_answer_runs", "tier_writes", "relevance_log", "search_telemetry", "drop_meter"):
@@ -326,7 +326,7 @@ class TestNxAnswerRuns:
 
         text_result = CliRunner().invoke(baseline_cmd, [])
         assert "CAVEAT" in text_result.stdout
-        assert "RDR-200" in text_result.stdout
+        assert f"CAVEAT: {_NX_ANSWER_RUNS_CONTINUATION_CAVEAT}" in text_result.stdout
 
     def test_oldest_and_newest_created_at_present_and_correct(self, monkeypatch) -> None:
         """Coordinator fix round 1, item 1 (Critical): this is the

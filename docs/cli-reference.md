@@ -1912,7 +1912,7 @@ Default is report-only; both `--no-dry-run` AND `--yes` are required to actually
 
 Before gate 3 the old name survives the rename as a **superseded tombstone**: its projection row
 stays, carrying `superseded_by` = the new name and a `superseded_at` timestamp, so a
-rename remains auditable after the fact. From gate 3 the rename changes one row's label and leaves
+rename remains auditable after the fact. From gate 3 the rename changes one registry row (its label, and its content type and owner from the new name) and leaves
 no tombstone, and everything below about a tombstoned name applies only to renames made before it. It holds no chunks or documents (everything
 re-homes onto the new name) and `superseded_by` keeps it out of collection-for-tuple
 resolution, so it can never be picked as a write target. Renaming *back* onto a
@@ -1941,7 +1941,7 @@ Target form: `<content_type>__<owner>__<model>__<version>` where content_type co
 
 T3 chunks are NOT moved by this verb. Operators repopulate the target via `nx index` on the source files; old chunks become orphans (catalog now points elsewhere) and get swept by `nx t3 gc` on the next cycle.
 
-If the target label is reserved (a collection was renamed away from it; 409 `label_reserved`), the documents are re-pointed and stay moved, but the source is NOT marked superseded: the verb says so and names the way out (rename the other collection back to the target label, or wait for the engine release that relabels its rows).
+If the target label is reserved (a collection was renamed away from it; 409 `label_reserved`), the documents are re-pointed and stay moved, but the source is NOT marked superseded: the verb says so and names the way out (rename the other collection back to the target label, or wait until the engine drops the name columns, RDR-229 P4.1).
 
 ### nx catalog doctor
 
@@ -2787,7 +2787,7 @@ Deleted K entries with title 'X' from Y.
 
 The count line is omitted when K is 0. Exit is non-zero only when X was not removed as asked: a document whose manifest could not be retracted (left live, named on stderr), or uncataloged chunks that were all kept.
 
-`nx store expire` (removes all TTL-lapsed `knowledge__*` entries, no flags) has the same actual-count contract: it prints `Expired N entries.` where N is the count `batch_delete` actually removed, not the number of lapsed rows it found. The reap-before-delete ordering above applies here too: each expired chash's manifest row is retracted before the chunk delete is attempted, so a genuinely shared chash correctly stays retained and correctly stays out of the reported count, rather than being counted as expired while the chunk survives. Each note is judged by its own TTL and its own put time, kept in its catalog entry (not by the chunk row, which two notes with the same text share): a lapsed note is retired even when a permanent note put later shares its chunk, and the chunk stays served for the permanent one. When that retires notes, a second line says how many (it can exceed N); a note that could not be retired is named on stderr and the command exits non-zero. A lapsed note whose own chunk row records a later put or a different TTL than its catalog keys (the cause may be an older client or an import) is held, not retired: the summary line adds `N lapsed notes held, not retired.`, stderr names each held note, the exit stays 0, and a held note never expires until it is re-put or deleted. See [storage-tiers.md](storage-tiers.md) "A note's own keys in the catalog".
+`nx store expire [--dry-run]` (removes all TTL-lapsed `knowledge__*` entries) has the same actual-count contract: it prints `Expired N entries.` where N is the count `batch_delete` actually removed, not the number of lapsed rows it found. The reap-before-delete ordering above applies here too: each expired chash's manifest row is retracted before the chunk delete is attempted, so a genuinely shared chash correctly stays retained and correctly stays out of the reported count, rather than being counted as expired while the chunk survives. Each note is judged by its own TTL and its own put time, kept in its catalog entry (not by the chunk row, which two notes with the same text share): a lapsed note is retired even when a permanent note put later shares its chunk, and the chunk stays served for the permanent one. Before the totals it prints one line per retired note: `retired  <collection>  '<title>' (<tumbler>)  expired <instant>`, with `(judged by its chunk row)` appended for a note put before the catalog held TTLs. `--dry-run` runs the same judgement, the catalog TTL included (a chunk-row listing misses a note whose row carries no TTL), and writes nothing: it prints `would retire` lines, `Would retire N notes.`, the chunks the real run would send to the delete, and `Dry run: nothing was written.`. When the sweep retires notes, a second line says how many (it can exceed N); a note that could not be retired is named on stderr and the command exits non-zero. A lapsed note whose own chunk row records a later put or a different TTL than its catalog keys (the cause may be an older client or an import) is held, not retired: the summary line adds `N lapsed notes held, not retired.`, stderr names each held note, the exit stays 0, and a held note never expires until it is re-put or deleted. See [storage-tiers.md](storage-tiers.md) "A note's own keys in the catalog".
 
 **`get` flags:**
 
@@ -3171,7 +3171,7 @@ nx collection list
 | `aspects --from-config [--dry-run] [--yes]` | Sync every registered docs__ collection this machine's local `aspects.docs_collections` list matches onto the engine (sets `aspects_enabled=true` there); the migration path off the local-only list. Prompts once for the whole batch unless `--yes`/`-y` is given. `--dry-run` reports without writing and never prompts. Cannot combine with `NAME` or `--enable`/`--disable` |
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
-| `rename OLD NEW` | Rename a collection, never re-embedding; same-prefix renames whose embedding-model segment differs are rejected (6.3.1, nexus-tcvpn). One engine transaction does it. Before gate 3 it rewrites every table that names the collection (chunks, taxonomy, aspects, highlights, telemetry, catalog documents) and leaves the old name as a superseded tombstone; the new collection takes the content type and owner its name implies, and each note's `nx-note://<old>/<title>` source URI follows (a rewrite onto a URI a live document already holds is refused, nexus-sis0m.3). From the gate 3 latch (RDR-229 P3.7) it updates one registry row's label: the collection keeps its `collection_id`, no chunk or child row is rewritten, only note URIs follow the label, and the old label has no row afterwards. From the latch until the engine can do that it answers 409 `rename_refused` and nothing changes, first with `missing=name_key_drop_move` until the name-key drop move finishes, then with `missing=restart` until the engine has been restarted once; `nx doctor`'s "RDR-229 collection rename" row names which, and the operator orders the restart and the rename is run again. Before the latch the rename runs as before and is not refused. The label a collection was renamed away from is reserved (409 `label_reserved`, "Nothing was written") for a registration, a rename target, a re-embed target or an import until a later engine release relabels the rows still carrying it; renaming that collection back is allowed |
+| `rename OLD NEW` | Rename a collection, never re-embedding; same-prefix renames whose embedding-model segment differs are rejected (6.3.1, nexus-tcvpn). One engine transaction does it. Before gate 3 it rewrites every table that names the collection (chunks, taxonomy, aspects, highlights, telemetry, catalog documents) and leaves the old name as a superseded tombstone; the new collection takes the content type and owner its name implies, and each note's `nx-note://<old>/<title>` source URI follows (a rewrite onto a URI a live document already holds is refused, nexus-sis0m.3). From the gate 3 latch (RDR-229 P3.7) it updates one registry row: the label, and the content type and owner its new name implies ([collections.md](collections.md) Rule 3). The collection keeps its `collection_id`, no chunk or child row is rewritten, only note URIs follow the label, and the old label has no row afterwards. From the latch until the engine can do that it answers 409 `rename_refused` and nothing changes, first with `missing=name_key_drop_move` until the name-key drop move finishes, then with `missing=restart` until the engine has been restarted once; `nx doctor`'s "RDR-229 collection rename" row names which, and the operator orders the restart and the rename is run again. Before the latch the rename runs as before and is not refused. From the latch, the label a collection was renamed away from is reserved (409 `label_reserved`, "Nothing was written") for a registration, a rename target, a re-embed target, a supersede successor or an import while a name-keyed table still holds a row under it for another collection; it frees when the engine drops the name columns (RDR-229 P4.1). Renaming that collection back is allowed |
 | `re-embed NAME --to MODEL` | In-place re-embed for Voyage models, `voyage-context-3` included since nexus-tysei (the engine embeds each chunk on its own, so an in-place CCE re-embed writes the vector a fresh index would; it also repairs stored vectors that no longer match their text). Service mode: same-model only — the engine embeds by the model the collection's catalog row records (by the model its name encodes only when no row backs the name or the row records none), so a `--to` that differs from that model fails loud, `--dry-run` included, instead of stamping a model the engine did not use (nexus-dxifx); cross-model moves re-index from source into a collection named for the new model. `--no-dry-run --yes` to apply (6.3.1, nexus-c9xr2/u37lw) |
 | `re-embed --all`, `re-embed NAME --to MODEL` (a different model), `re-embed --status [JOB]`, `--pause JOB`, `--resume JOB`, `--abort JOB` | The cross-model re-embed job (RDR-210 Phase 6, nexus-cnxjk), local engine only: it refuses in any other mode. See [re-embed job](#nx-collection-re-embed-job) |
 | `rewrite-metadata [NAME]` | Rewrite/repair chunk metadata in place; `--all` for every collection, `--source-path` to scope to one source, `--dry-run` to report counts only |
@@ -3179,7 +3179,7 @@ nx collection list
 | `shape [--json] [--full]` | Read-only audit of the whole collection SET against the rules in [docs/collections.md](collections.md): placeholder, date-like, task-or-document-shaped, and source-app subjects, the `default` corpus, likely duplicate subjects (name evidence only; `merge-candidates` is unavailable, so confirm by reading both), a model the install no longer writes with, a stored dimension that disagrees with the name's model (the GH #667 class), thin and one-document collections, fan-out-floor casualties, test residue, ghost rows, grandfathered relics, blank catalog attributes, superseded-but-live, chunks with no catalog row. One finding per violation with a proposed action; the human view lists at most 10 collections per check, `--full` lists every one, `--json` always carries all; never writes, never calls a model; a read failure is an error, never an empty report (nexus-ger23) |
 | `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score (RDR-087 Phase 3.4) |
 | `merge-candidates` | Unavailable. It was the pair-wise cross-collection overlap ranking (RDR-087 Phase 4.3), which ran over the local SQLite taxonomy store deleted at RDR-158 P4, and the engine does not expose the analysis yet (nexus-i711w.1). Since 7.65.0 the verb prints that and exits 1, under `--format json` too (nexus-sis0m.4); before, it exited 0 and the message read as an empty result |
-| `delete NAME` | Delete collection (irreversible) |
+| `delete NAME`, `delete --id N` | Delete collection by label or by its `ID` (irreversible); see the `delete` flags below |
 | `prune` | List collections whose name-declared embedding dim mismatches the ACTIVE serving embedder — orphans from a prior embedder generation that every search silently skips (GH #1113, nexus-9tsdf). Fail-safe: no flags lists only; `--yes` deletes via the same cascade as `delete`; `--dry-run` always wins over `--yes`. An unresolved active-embedder probe lists nothing (never guesses). `nx doctor` names these orphans and points here |
 
 <a id="nx-collection-re-embed-job"></a>
@@ -3283,7 +3283,11 @@ Chunk counts come from T3's live `coll.count()` (same source as `nx collection l
 
 | Flag | Description |
 |------|-------------|
+| `NAME` | The collection's label. Give this or `--id`, never both and never neither (a usage error, exit 2) |
+| `--id N` | The collection's `collection_id`, the `ID` column of `nx collection list` (RDR-229 P3.12, nexus-p2m1x.32). Needs an engine whose `GET /version` carries `catalog_collection_delete_by_id_supported` (engine-service 0.1.203 or later: the flag is in 0.1.202's source, but that release's native binaries lack the `db/rdr229/` resources); on one that does not, or whose `/version` cannot be read, the command refuses before the prompt and sends nothing. The id goes to the engine as it is: no lookup from id to label, since a rename between a lookup and the delete would delete another collection |
 | `-y` / `--yes` / `--confirm` | Skip interactive confirmation prompt |
+
+Refusals, each with nothing removed and a non-zero exit: an unknown id (`no collection with id N`); a label that two live collections hold (the message names both ids; delete one with `--id`); a retired label whose successor is live (the message names the successor's label and id, and the retired row stays as the history), and a retired id (the engine's 409, naming the successor when it has one). A retired label with no live successor is still deleted, so the remedy the `re-embed --all` skip lines print (`nx collection delete SRC`, for a kept source whose target is retired or gone) works; a successor counts as live only when it is the row the tombstone names, not retired and not itself superseded. A delete by a retired label used to remove the tombstone in every case; it is refused now when a live successor exists. The client reads the registry listing before it sends anything; a listing it cannot read, or no catalog client, is always said on stderr, and the delete goes on, the engine being the authority. `Deleted:` names the label and, for `--id`, the id the engine resolved.
 
 With conexus 8.5.6 and engine 0.1.203, a delete (by name or id) is refused with 409 `collection_busy`, and removes nothing, while a re-embed job in `planned`, `running`, `paused`, `cutover` or `failed` state holds the collection as its source or target (RDR-229 P3.5a, engine 0.1.202). The message names the job and the way out: wait for a running or cutover job, resume or abort a paused one, abort a failed one (`nx collection re-embed --status|--resume|--abort JOB`). `prune` and `reindex` meet the same refusal and report it without deleting.
 
@@ -3303,18 +3307,20 @@ nx hooks install [PATH]
 
 | Subcommand | Description |
 |------------|-------------|
-| `install [PATH]` | Install `post-commit`, `post-merge`, `post-rewrite` hooks (default: `.`) |
-| `uninstall [PATH]` | Remove nexus hook stanza; leaves other hook content intact |
+| `install [PATH]` | Install `post-commit`, `post-merge`, `post-rewrite` hooks (default: `.`). `--pre-push` installs only the `pre-push` hook (below), not the three index hooks |
+| `uninstall [PATH]` | Remove nexus hook stanza; leaves other hook content intact (a hook that was there before gets its bytes back). `--pre-push` removes only the `pre-push` stanza |
 | `status [PATH]` | Show hook status for each hook file |
 | `update [PATH]` | Refresh THIS repo's nexus stanza to the current one (default: `.`). The remedy `nx doctor` names when it reports stanza drift. The managed-repo sweep is demoted, not gone — hidden `nx hooks update-all` (see [Internal upgrade primitives](#internal-upgrade-primitives)) still runs it; `nx upgrade` calls it for you, so most operators never need it directly |
 
 Hooks run `nx index repo` in the background after each qualifying git operation, appending output to `~/.config/nexus/index.log`. If a hook file already exists, the nexus stanza is appended (sentinel-bounded) without overwriting existing content.
 
+**The `pre-push` hook (RDR-252, nexus-igea9).** For a repository the CI board covers, a managed `pre-push` stanza runs `nx ci check-hold` for each `develop` or `main` ref a push updates (the branches the CI adapter watches) and refuses the push (exit 13, the command's `PUSH_REFUSED_DEVELOP_RED` lines shown) while a red is open that the pusher did not cause; a refused push writes no record. A check that cannot run (no `nx`, a base it cannot derive, a failed read, `NX_PUSH_GATE_TIMEOUT_S` seconds elapsed, 20 by default; `NX_PRE_PUSH_GATE_S` is read as an alias) holds nobody. The `nx` it runs is the first on PATH that is not under a `.venv` or the repo, as in the push script. A refusal ends with a line naming `NX_PUSH_RED_FIX='<reason>' git push ...`, the channel for a push that is the fix (the hook passes it on as `--red-fix`). Git has no post-push hook, so once every ref is allowed the stanza starts a detached job per ref that waits for the `git push` that ran the hook to exit, then until the remote branch shows the pushed tip (a few checks within 30 seconds of the push exiting, `NX_PRE_PUSH_GRACE_S`), and runs `nx ci record-push`. The whole job is bounded by ten minutes (`NX_PRE_PUSH_WAIT_S`) and each remote call by a watchdog, so a remote that never answers cannot keep it alive; it never holds the push, logs to `pre-push.log` in the nexus config directory (`~/.config/nexus`, or `NEXUS_CONFIG_DIR`; rotated at 1 MiB), and gives up quietly when the tip never shows. `scripts/git-push-develop.sh` sets `NX_PUSH_VIA_SCRIPT=1` on its own push, and the hook then does nothing: the script has already checked the hold and writes its own record. The stanza is placed right after the hook's shebang, ahead of an existing body (a beads shim ending in `exec` still runs after it, and still reads standard input as git sent it), and goes in the directory `core.hooksPath` names (when that file is tracked by the repo, as recording-rig's `.beads/hooks/pre-push` is, the install says so: the stanza shows as a change to it). A `pre-push` hook that is not a shell script is left alone. Because the hook can refuse pushes, `nx upgrade` installs it only in a catalog-registered repo whose base (`<repo>-develop` or `<repo>-main`, from the origin URL) a live group you belong to serves, when the hooks directory is that repo's own (a `core.hooksPath` shared with other repos gets nothing from the upgrade), and installs nothing when the groups cannot be read or the process holds no identity; the upgrade prints one line for each of those and for each non-shell hook it left alone. It still rewrites a `pre-push` stanza that is already there, in any repo. `nx hooks update`, `uninstall` and `status`, and the drift check in `nx doctor`, cover it like the other hooks.
+
 **Hook status values:** `not installed` · `owned` (nexus-created) · `appended` (added to existing hook) · `unmanaged` (no nexus sentinel)
 
 `owned` and `appended` carry `, stanza stale` (and a `!` in place of the `✓`) when the installed stanza differs from the current template. That is the same comparison `nx doctor` uses for its stanza-drift line, and the remedy is the same: `nx hooks update [PATH]`; the repo path in the printed command is shell-quoted.
 
-A hook with a begin sentinel but no end sentinel reports `malformed sentinel (begin without end) — repair by hand: <path>` (also `!`). It is not `stale`: nx cannot tell where the stanza ends, and stripping from the begin marker to end of file could delete your own hook content. `install`, `uninstall` and `update` refuse while any of the three hooks is malformed, naming each file and leaving every hook untouched; `nx doctor` reports the same file as `git hooks (malformed stanza)` with no `nx hooks update` suggestion. Repair the file by hand, then re-run. The hidden `update-all` sweep (and the hook refresh inside `nx upgrade`) skips a malformed hook, prints its path, and reports it as `N malformed hook(s) left for hand repair`, separate from `N repo(s) skipped`; the repo's other hooks are still refreshed. When a repo has both a malformed and a stale hook, `nx doctor`'s drift row says to repair the malformed one first, then run `nx hooks update`.
+A hook with a begin sentinel but no end sentinel reports `malformed sentinel (begin without end) — repair by hand: <path>` (also `!`). It is not `stale`: nx cannot tell where the stanza ends, and stripping from the begin marker to end of file could delete your own hook content. `install`, `uninstall` and `update` refuse while any of the managed hooks (the three index hooks and `pre-push`) is malformed, naming each file and leaving every hook untouched; `nx doctor` reports the same file as `git hooks (malformed stanza)` with no `nx hooks update` suggestion. Repair the file by hand, then re-run. The hidden `update-all` sweep (and the hook refresh inside `nx upgrade`) skips a malformed hook, prints its path, and reports it as `N malformed hook(s) left for hand repair`, separate from `N repo(s) skipped`; the repo's other hooks are still refreshed. When a repo has both a malformed and a stale hook, `nx doctor`'s drift row says to repair the malformed one first, then run `nx hooks update`.
 
 The four verbs that take a `PATH` (`status`, `install`, `uninstall`, `update`) exit with a one-line error instead of a traceback when `PATH` is not a git repository (`Not a git repository: <path>`) or does not exist (`Not a directory: <path>`).
 
@@ -3369,6 +3375,11 @@ plain interactive terminal) is counted in `nx doctor`'s drop meter
 JSONL log — that machinery stays in place only to protect installs still
 running pre-swap code.
 
+**Opt-in:** the routing hooks record an event only when `telemetry` is true in the user's
+`~/.config/nexus/conexus.json` (default false; a project's `.nexus/project.json` cannot turn it on). Otherwise
+`log_routing_event` returns before it resolves an endpoint, so a user's command fragments are never sent to their
+engine, and this report and `--from-store` have nothing to read there.
+
 ---
 
 ### nx hook failures, nx hook replay
@@ -3414,14 +3425,14 @@ convergence failure never fails init — it defers with a pointer at
 
 **Builtin plan-template seeding (nexus-e1ti4):** immediately after the
 ladder converges, `nx init` also seeds/reconciles the builtin plan-template
-library (the same reconcile `nx plan reseed` runs). Before this, a virgin
+library (the same reconcile `nx answer-plan reseed` runs). Before this, a virgin
 install left the global plan tier at zero rows — only the manual
-`nx plan reseed` populated it — so `nx_answer`'s plan-match gate missed
+`nx answer-plan reseed` populated it — so `nx_answer`'s plan-match gate missed
 100% of the time on a fresh box. Idempotent (dedups on the plan's
 `(project, dimensions)` key) and best-effort: a seeding failure is echoed
 to stderr and logged, never silently swallowed, and never fails an
 otherwise-successful init. `nx doctor --check-plan-library` is the durable
-signal if it ever fails; the fix is `nx plan reseed`.
+signal if it ever fails; the fix is `nx answer-plan reseed`.
 
 **Service autostart (RDR-174 P2.4, decide-first):** in local mode `nx init`
 decides autostart *before* starting any supervisor. Interactive runs prompt
@@ -3668,6 +3679,29 @@ nx config set voyage_api_key --from-file ~/.secrets/voyage.key
 
 Resolution is env first, then `config.yml`, for both. See
 [managed-onboarding.md](managed-onboarding.md) for the full greenfield journey.
+
+---
+
+## nx settings
+
+Inspect the conexus plugin's project and user settings files. The project file is `.nexus/project.json` in the repository; the user file is `conexus.json` under `.config/nexus` in your account home. Neither holds a credential, and there is no command that writes them: edit them by hand. The user file is read from the operating system's account home even when `NEXUS_CONFIG_DIR` is set, because that is the file the hooks read. Credentials stay in [`nx config`](#nx-config). The keys, how two values combine and what a bad value does are in [settings.md](settings.md).
+
+```
+nx settings show [--cwd PATH] [--json]
+nx settings check [--cwd PATH]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `show` | Print both file paths and whether each exists, whether the project file at `HEAD` differs from the working tree, every setting's effective value and its source (`default`, `user`, `project`, `project (HEAD)` or `project (cwd checkout)`) plus each file's own value where it differs, every text the hooks print under its label, every problem, the retired files that still exist, and the plugin's and the CLI's versions with a warning when they differ. The plugin's version comes from Claude Code's record of installed plugins; when that record names none, `show` says so and names the plugin's own `python3 <plugin root>/hooks/scripts/_audience.py show`. Its output equals that command's except for the version lines. When `telemetry` is on and no engine is named under the account's config directory, it reports that too. |
+| `check` | Print only the problems, and exit 1 when a settings file has one, so a project can lint its file in CI. A problem in the machine (no account home, a missing remote branch in a shallow clone, no telemetry engine) is printed but does not change the exit code. |
+
+**`show` and `check` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--cwd PATH` | The directory to read the settings for. Defaults to the current directory. |
+| `--json` | (`show` only) Print the same report as JSON. |
 
 ---
 
@@ -3998,7 +4032,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 
 | Flag | Description |
 |------|-------------|
-| `--check-search` | Run probes 3a and 3b: the name-resolution canary from `src/nexus/name_canaries.py`, then a retrieval probe that queries each collection with one of its own chunks and checks that some other chunk survives the distance threshold. A collection whose nearest real neighbours all fall past its threshold is a warning row naming that distance, the threshold, and the sample it rests on. Exits 2 only when a surface raises or a collection's embedding model disagrees with its name (RDR-087 Phase 3) |
+| `--check-search` | Run probes 3a and 3b: the name-resolution canary from `src/nexus/name_canaries.py`, then a retrieval probe that queries each collection with one of its own chunks and checks that some other chunk survives the distance threshold. A collection whose nearest real neighbours all fall past its threshold is a warning row naming that distance, the threshold, and the sample it rests on. Exits 2 only when a surface raises or a collection's registered embedding model disagrees with the model its own catalog row's content type calls for: a row-consistency check, not a compare against the label's model token, which is not authority once the one-row rename is live (8.5.6 and later, after the engine's restart, a rename changes only the label); a collection whose row has no content type is judged by its label (RDR-087 Phase 3) |
 | `--check-resources` | Probe POSIX semaphore headroom and report orphan multiprocessing-tracker pressure. Exits 2 with `Errno 28` when the namespace is exhausted (MinerU workers / trackers re-parented to init after ungraceful MCP shutdowns) |
 | `--check-index-runs` | Run only the three index-run rows (they also run in the default sweep), read from the engine's census routes (engine 0.1.189 or later; an older engine prints them not checked): stale index-run fences, failed index runs with hidden chunks, and tumbler allocator drift (which counts tombstoned children, as the engine's own sweep does). Exits as the default sweep does on a failing row |
 | `--check-taxonomy` | Verify the `topic_links` ≡ projection-assignment invariant (GH #252) against the ENGINE. Exits 1 on drift or an engine-side error, 2 when no engine answers or the deployed engine lacks the `/links/drift` route (unverifiable is not a pass; the frozen-SQLite fallback was deleted 2026-08-29 — there is no path back to that era) |
@@ -4074,15 +4108,15 @@ nexus-p0clh replaced it with an unconditional N/A stub that validated
 nothing. nexus-vl8lk PORTED it: the check now reads the live plan library
 via `HttpPlanLibrary.list_plans` (no new engine route) and renders the same
 census against real service data — exit 1 when the global-tier builtin
-count is below the floor (fix: `nx plan reseed`), exit 2 (counts UNKNOWN)
-when the service is unreachable. No `nx plan repair` hint (that command
-group no longer exists; see [`nx plan repair`](#nx-plan-repair-removed)).
+count is below the floor (fix: `nx answer-plan reseed`), exit 2 (counts UNKNOWN)
+when the service is unreachable. No `nx answer-plan repair` hint (that command
+group no longer exists; see [`nx answer-plan repair`](#nx-answer-plan-repair-removed)).
 
 **Disk-vs-live template parity (nexus-f1mbo).** The count floor above can
 only fail against a library that is nearly empty — it cannot fail against
 one that is the wrong shape. Beside the floor, the check now compares every
 template shipped on disk against its stored row and fails with the same
-exit 1 (fix: `nx plan reseed`, which also rewrites a drifted row — see [`nx plan reseed`](#nx-plan-reseed)) on:
+exit 1 (fix: `nx answer-plan reseed`, which also rewrites a drifted row — see [`nx answer-plan reseed`](#nx-answer-plan-reseed)) on:
 
 - **missing** — a shipped template with no library row at all;
 - **drifted** — a library row whose content no longer matches its
@@ -4090,7 +4124,7 @@ exit 1 (fix: `nx plan reseed`, which also rewrites a drifted row — see [`nx pl
 
 An **orphaned** row (a `builtin-template`-tagged row with no template
 shipped on disk) is reported as a WARN, not a failure — remove it with
-`nx plan delete <id>` if intended. When the live listing hits its page cap,
+`nx answer-plan delete <id>` if intended. When the live listing hits its page cap,
 absence is unprovable — the check reports drift (still trustworthy for the
 rows it did see) but notes that missing templates were not checked, rather
 than silently under-reporting.
@@ -4387,19 +4421,21 @@ After the ownerless-write release, restart every long-lived `nx-mcp` server and 
 
 ---
 
-## nx plan
+## nx answer-plan
 
-Plan library maintenance commands (RDR-092 Phase 0d).
+Answer-plan library maintenance commands (RDR-092 Phase 0d): the library holds the retrieval plans `nx_answer` matches, never implementation plans (those go in beads).
+
+`nx plan` is the old name of this group. It still works, prints a deprecation notice on stderr that names `nx answer-plan`, and is removed one client release after this one.
 
 ```
-nx plan list                     # Tabulate plans in the library
-nx plan show ID_OR_NAME          # Full record for one plan
-nx plan delete PLAN_ID           # Delete a plan row (prompts unless -y)
-nx plan disable PLAN_ID          # Soft-disable a plan without deleting it
-nx plan enable PLAN_ID           # Re-enable a previously disabled plan
-nx plan set-scope PLAN_ID TAGS   # Override a plan's scope_tags
-nx plan reseed [--force] [--insert-only]  # Re-run the builtin seed loader
-nx plan hygiene [--apply]        # Flag/disable bead-dumps, embedded step refs, operator steps missing a claim/evidence/check_instruction, null-verb, always-failing plans
+nx answer-plan list                     # Tabulate plans in the library
+nx answer-plan show ID_OR_NAME          # Full record for one plan
+nx answer-plan delete PLAN_ID           # Delete a plan row (prompts unless -y)
+nx answer-plan disable PLAN_ID          # Soft-disable a plan without deleting it
+nx answer-plan enable PLAN_ID           # Re-enable a previously disabled plan
+nx answer-plan set-scope PLAN_ID TAGS   # Override a plan's scope_tags
+nx answer-plan reseed [--force] [--insert-only]  # Re-run the builtin seed loader
+nx answer-plan hygiene [--apply]        # Flag/disable bead-dumps, embedded step refs, operator steps missing a claim/evidence/check_instruction, null-verb, always-failing plans
 ```
 
 Service mode is the only mode: all verbs (`list` / `show` / `delete` /
@@ -4410,15 +4446,15 @@ group that used to require it was deleted along with the local SQLite plan
 library (RDR-158 P4, nexus-i711w sub-stage A3); see below. `reseed`
 reconciles by default (nexus-f1mbo) — see below.
 
-### nx plan hygiene
+### nx answer-plan hygiene
 
 ```
-nx plan hygiene            # report-only scan
-nx plan hygiene --apply    # disable the flagged plans (reversible)
+nx answer-plan hygiene            # report-only scan
+nx answer-plan hygiene --apply    # disable the flagged plans (reversible)
 ```
 
 Scans the plan library for five pollution classes and, with `--apply`,
-DISABLES them (never deletes; reverse with `nx plan enable ID`):
+DISABLES them (never deletes; reverse with `nx answer-plan enable ID`):
 
 - plans whose `plan_json` is not an executable retrieval DAG (unparseable
   JSON, no/empty `steps`, steps without a `tool`) — the bead-dump class that
@@ -4432,16 +4468,16 @@ DISABLES them (never deletes; reverse with `nx plan enable ID`):
 - always-failing plans (zero recorded successes, 3+ failures) — the matcher
   already skips these live; hygiene retires them durably.
 
-Unlike the retired `nx plan repair` group (see below), this verb works in
+Unlike the retired `nx answer-plan repair` group (see below), this verb works in
 service mode: it routes through the storage facade and cleans the live
 engine-served library on migrated installs. Partial apply failures are
 reported per plan; a scan that hits the 10,000-row limit says so rather than
 silently truncating.
 
-### nx plan list
+### nx answer-plan list
 
 ```
-nx plan list [--scope S] [--origin builtin|grown|user] [--name SUBSTR] [-n N | --limit N] [--json] [--include-disabled]
+nx answer-plan list [--scope S] [--origin builtin|grown|user] [--name SUBSTR] [-n N | --limit N] [--json] [--include-disabled]
 ```
 
 Tabulates plans: id, origin, verb, scope, use count, last used, name. Origin is
@@ -4449,12 +4485,12 @@ read from the row's tag tokens and its answer-kind declaration (nexus-7bwe):
 `grown` for the `grown` tag, a grown declaration, or the legacy shape (project
 `personal`, no tags); `builtin` for the `builtin-template` tag; `user` otherwise. `--include-disabled` also shows soft-disabled rows,
 marked `[D]`. `--json` emits the same fields as a JSON array. Default limit 50.
-See § `nx plan show` below for what `use count` actually counts.
+See § `nx answer-plan show` below for what `use count` actually counts.
 
-### nx plan show
+### nx answer-plan show
 
 ```
-nx plan show ID_OR_NAME [--json]
+nx answer-plan show ID_OR_NAME [--json]
 ```
 
 Prints a plan's full record: metadata, run metrics (use / match / success /
@@ -4481,45 +4517,45 @@ end of a run rather than the start, later by the run's duration (up to about
 only while the plan is inside its TTL: a run on an expired plan counts but
 leaves `last_used` alone, so the plan stays expired (nexus-i1eb4).
 
-### nx plan delete
+### nx answer-plan delete
 
 ```
-nx plan delete PLAN_ID [-y]
+nx answer-plan delete PLAN_ID [-y]
 ```
 
 Deletes the plan row. The numeric id is required (not a name) because deletion
 is destructive and a name-substring lookup is fuzzy; find the id with
-`nx plan list` or `nx plan show <name>` first. Prompts for confirmation unless
+`nx answer-plan list` or `nx answer-plan show <name>` first. Prompts for confirmation unless
 `-y`/`--yes`.
 
-### nx plan disable / enable
+### nx answer-plan disable / enable
 
 ```
-nx plan disable PLAN_ID [--reason TEXT]    # Soft-disable a plan without deleting it
-nx plan enable PLAN_ID                     # Re-enable a previously disabled plan
+nx answer-plan disable PLAN_ID [--reason TEXT]    # Soft-disable a plan without deleting it
+nx answer-plan enable PLAN_ID                     # Re-enable a previously disabled plan
 ```
 
 Introduced 4.18.0 (`nexus-mrzp`). `disable` sets `disabled_at` on the plan row so both matcher lanes (T1 cosine via `list_active_plans`, T2 Postgres full-text via `search_plans`) skip it, without losing its row id, telemetry counters, or T1 cache embedding. `--reason` appends a `disable-reason:<text>` tag as a historical record (preserved even after re-enable). `enable` clears `disabled_at`. Useful for triaging a plan whose match-text is misrouting traffic without committing to a delete + re-seed cycle.
 
-### nx plan set-scope
+### nx answer-plan set-scope
 
 ```
-nx plan set-scope PLAN_ID TAGS
-nx plan set-scope PLAN_ID --from-project
+nx answer-plan set-scope PLAN_ID TAGS
+nx answer-plan set-scope PLAN_ID --from-project
 ```
 
 Explicit admin override of a plan's `scope_tags` (comma-separated; can widen or
 narrow scope). The matcher reads scope_tags fresh on every call, so changes take
-effect immediately. Applies the same normalization as `plan_save`: hash suffixes
+effect immediately. Applies the same normalization as `answer_plan_save`: hash suffixes
 and glob tails stripped, scope-agnostic sentinels (`all`) dropped, stored
 sorted-unique. Idempotent. `--from-project` (mutually exclusive with `TAGS`)
 stamps scope_tags from the plan's own `project` column, the same recovery
 source as the automatic #1069 fallback in `save_plan`.
 
-### plan_save (MCP tool; there is no `nx plan save`)
+### answer_plan_save (MCP tool; there is no `nx answer-plan save`)
 
 ```
-plan_save(query, plan_json, verb, answer_kind, project="", outcome="success", tags="", ttl=None, scope_tags="")
+answer_plan_save(query, plan_json, verb, answer_kind, project="", outcome="success", tags="", ttl=None, scope_tags="")
 ```
 
 `answer_kind` is **required** (nexus-0vh80, Sam 2026-11-03): `lookup`, `synthesis`, `discovery/listing`,
@@ -4536,10 +4572,10 @@ and a caller can still mislabel the kind. `project` is the repository's name (no
 it is not the session's project (its directory name or its primary checkout's) and when the kind is `unknown`. The `grown` and `builtin-template` tags are removed from `tags` (nexus-3ihve). A plan
 saved before this change declares nothing and serves no request; save it again with a kind.
 
-### nx plan reseed
+### nx answer-plan reseed
 
 ```
-nx plan reseed [--force] [--insert-only]
+nx answer-plan reseed [--force] [--insert-only]
 ```
 
 Re-runs the four-tier plan-library seed loader. **Reconciles by default**
@@ -4566,15 +4602,15 @@ practice it serves nothing: those rows are filed under the tier's scope name (`p
 saved plan serves only a request from the project it is filed under, whose name is a repository's. A row written
 before that, still saying `curated`, is rewritten by the next reconcile.
 
-### nx plan repair (removed)
+### nx answer-plan repair (removed)
 
 ```
-nx plan repair scope-tags          # Backfill empty scope_tags + rewash legacy 'all' sentinels
-nx plan repair dimensions          # Backfill verb/name/dimensions on NULL-dimension rows
-nx plan repair match-text          # Populate plans.match_text + refresh plans_fts
-nx plan repair retire-legacy       # Delete pre-RDR-078 'operation'-shape rows
-nx plan repair builtin-bindings    # Patch bindings into pre-4.10.1 builtin rows
-nx plan repair all                 # Every pass, in dependency order
+nx answer-plan repair scope-tags          # Backfill empty scope_tags + rewash legacy 'all' sentinels
+nx answer-plan repair dimensions          # Backfill verb/name/dimensions on NULL-dimension rows
+nx answer-plan repair match-text          # Populate plans.match_text + refresh plans_fts
+nx answer-plan repair retire-legacy       # Delete pre-RDR-078 'operation'-shape rows
+nx answer-plan repair builtin-bindings    # Patch bindings into pre-4.10.1 builtin rows
+nx answer-plan repair all                 # Every pass, in dependency order
 ```
 
 These were consumer-side content-repair verbs (RDR-120 §A8) that mutated row
@@ -4587,7 +4623,7 @@ review), tagging confident matches `backfill` and wh-fallback rows
 The whole group was **deleted in 7.0.0** along with the local SQLite plan
 library (RDR-158 P4, nexus-i711w sub-stage A3); the `NX_STORAGE_BACKEND=sqlite`
 escape hatch that could reach the local file is retired too (RDR-158 P3 —
-setting it is now a hard error). `nx plan repair ...` is no longer a
+setting it is now a hard error). `nx answer-plan repair ...` is no longer a
 registered command. The local file, where present, is a frozen pre-migration
 snapshot.
 
@@ -5523,7 +5559,7 @@ someone read `nx doctor`'s warning and ran `nx agents install` by hand
 **Plan-library precondition runs on every invocation, never skipped.**
 Beside package/engine/process/lockstep, `nx upgrade` also converges the
 builtin plan-template library (reconciling it against the templates this
-build ships, the same reconcile `nx plan reseed` runs) as its own
+build ships, the same reconcile `nx answer-plan reseed` runs) as its own
 precondition axis. Unlike the others, this one is never suppressed by
 `--skip-t3` or `--auto` — it is stateless and recurs on every release that
 edits a template, so it is re-derived every time rather than gated behind a
@@ -7074,7 +7110,7 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   fallback), each `{examined, excluded, reasons}`; a reason is `kind_mismatch`,
   `unknown_request_untrusted_plan`, `unknown_request_narrow_plan`,
   `untrusted_unknown_plan`, `undeclared_builtin` (a builtin seeded before
-  nexus-jypmj.2.1 that `nx plan reseed` has not yet given its declaration),
+  nexus-jypmj.2.1 that `nx answer-plan reseed` has not yet given its declaration),
   `untrusted_curated_claim`, `single_source_synthesis` (a request naming one source refusing
   citation-traversal), `unreviewed_route` (a grown plan whose recorded kind is discounted:
   `eligibility.TRUSTED_ROUTES` is empty until a reviewed decision, nexus-jypmj.2.8,
@@ -7094,7 +7130,7 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `saved_retrieval_only` (a saved plan whose last step is not an operator, declared lookup, synthesis,
   comparison, audit or debug; nexus-0vh80), or `judge_error`
   (judging the candidate failed; kept when not enforcing, dropped when enforcing). A **saved** plan
-  (`plan_save`'s `answer_kind`, or a template in a project, RDR or repo tier) serves only a request of its own
+  (`answer_plan_save`'s `answer_kind`, or a template in a project, RDR or repo tier) serves only a request of its own
   declared kind, none of the compatibility cells a curated plan has and never the `unknown` request (reason
   `unknown_request_untrusted_plan`, a mismatched kind `kind_mismatch`); the request's project is the session's
   directory name (the name a grown plan is filed under) or the name of the primary checkout of its git repository, so
@@ -7121,12 +7157,12 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   answer-kind declaration: `library_check` is `checked`, `builtins_checked` is how
   many builtin rows a reseed can fix were examined, `undeclared_builtins` how many
   of them lack the declaration and `undeclared_builtin_names` names up to 8, each as
-  `<name> (id <n>)` (several builtin rows share a name). Run `nx plan reseed`, or upgrade,
+  `<name> (id <n>)` (several builtin rows share a name). Run `nx answer-plan reseed`, or upgrade,
   which reconciles them. If the state outlives a reseed, the reseed's own warnings say
   why: a `seed load error` for a template means the installed conexus rejects it, and
   only an upgraded conexus clears it; a `not reconciled` warning (`description already
-  belongs to library row id=N`) clears when row N is deleted (`nx plan delete N`) and
-  `nx plan reseed` is run again. The once-per-process warning in the log carries the same
+  belongs to library row id=N`) clears when row N is deleted (`nx answer-plan delete N`) and
+  `nx answer-plan reseed` is run again. The once-per-process warning in the log carries the same
   text as its `remedy`. A builtin-tagged orphan that
   no shipped template describes is not counted: the seed loader leaves it in place, so
   a reseed could not fix it. A library with no such row enforces and says

@@ -36,7 +36,7 @@ def _no_real_catalog_registration(monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture
 def queue(monkeypatch) -> HttpAspectQueue:
     monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
-    return HttpAspectQueue(base_url="http://mock.test")
+    return HttpAspectQueue(base_url="https://mock.test")
 
 
 def _outs(out_mock) -> list[dict]:
@@ -64,7 +64,7 @@ class TestEnqueueManyRealUrlConstruction:
             return httpx.Response(200, json={"id": "task-1", "outcome": "created"})
 
         queue = HttpAspectQueue(
-            base_url="http://mock.test", _token="test-token",
+            base_url="https://mock.test", _token="test-token",
             client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
 

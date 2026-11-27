@@ -196,7 +196,7 @@ class _World:
         monkeypatch.setattr(
             "nexus.catalog.store_hook.reap_catalog_manifest_for_chashes",
             lambda chashes, *, expected_collection: self.reaped_chashes.extend(chashes))
-        monkeypatch.setattr("nexus.db.http_vector_client.datetime", _FrozenDatetime)
+        monkeypatch.setattr("nexus.db.expire_sweep.datetime", _FrozenDatetime)  # the sweep reads the clock here
         self.catalog = catalog
 
     def _post(self, rows):
@@ -946,3 +946,4 @@ def test_expires_at_is_the_clock_plus_the_ttl_and_lapsed_is_true_from_that_insta
     assert note_ttl.expires_at({"ttl_days": 0, "put_at": _ago(2)}, "") is None
     assert note_ttl.expires_at({"ttl_days": 3}, "") is None, "no readable clock"
     assert note_ttl.expires_at({"ttl_days": 3_000_000, "put_at": _ago(2)}, "") is None, "past datetime's range: never"
+

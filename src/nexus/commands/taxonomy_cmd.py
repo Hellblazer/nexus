@@ -930,7 +930,7 @@ def reset_cmd(collection: str, yes: bool) -> None:
     The documents and their chunks are NOT touched -- this is the taxonomy-only
     reset, not `nx collection delete`.
 
-    Exists because a refusal has to name a way through (nexus-dtqd7). When a
+    Exists because a refusal has to name a way through. When a
     collection has migrated embedders, its old centroids and its documents live
     in different spaces, operator labels cannot be carried across, and a rebuild
     refuses rather than dropping them silently. The two ways forward are to
@@ -939,7 +939,7 @@ def reset_cmd(collection: str, yes: bool) -> None:
     a remedy that did not exist, and the only reachable "purge" destroyed the
     whole collection's documents (both reviewers of bad1e8348 caught this).
 
-    A narrower rebuild, exactly (nexus-0v0nj). The engine's purge used to also
+    A narrower rebuild, exactly. The engine's purge used to also
     delete topic_assignments by SOURCE_COLLECTION -- this collection's
     documents' projections onto OTHER collections' topics, which a rebuild
     leaves alone -- making reset strictly more destructive than the operation
@@ -1067,7 +1067,7 @@ def _show_merge_targets(
     "--yes", "-y", is_flag=True,
     help=(
         "No longer sufficient alone to skip the destructive-action "
-        "confirmation (nexus-afnht) — pass --apply-destructive as well. "
+        "confirmation — pass --apply-destructive as well. "
         "Kept for CLI compatibility"
     ),
 )
@@ -1078,7 +1078,7 @@ def _show_merge_targets(
         "Persists the verdicts (per topic, keyed by a content hash of its "
         "id/label/terms) so a subsequent --auto on the same collection "
         "applies THESE verdicts rather than re-sampling claude_dispatch, "
-        "as long as the topic is unchanged (nexus-afnht)"
+        "as long as the topic is unchanged"
     ),
 )
 @click.option(
@@ -1091,7 +1091,7 @@ def _show_merge_targets(
         "Skip the destructive-action (delete/merge) confirmation prompt "
         "and apply unattended (--auto, non-dry-run only). Required in "
         "addition to accept/rename automation — --yes alone no longer "
-        "does this (nexus-afnht)"
+        "does this"
     ),
 )
 @click.option(
@@ -1202,7 +1202,7 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
     if not _DOC_ID_HEX_RE.match(doc_id):
         raise click.UsageError(
             f"DOC_ID {doc_id!r} is not a valid chunk chash: expected 64 lowercase "
-            "hex characters (RDR-194 D1). topic_assignments.doc_id is a chunk "
+            "hex characters. topic_assignments.doc_id is a chunk "
             "chash, not a free-form identifier; pass the chash that "
             "`nx search --json` reports (its id field), not a title or tumbler."
         )
@@ -1223,8 +1223,8 @@ def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
         if not source_collection:
             raise click.UsageError(
                 f"Resolved topic id={topic_id} for label '{topic_label}' has no "
-                "collection on record — cannot assign without a source_collection "
-                "(RDR-194 D1). This indicates a corrupt topics row, not a normal "
+                "collection on record — cannot assign without a source_collection"
+                ". This indicates a corrupt topics row, not a normal "
                 "user error."
             )
         # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
@@ -1248,7 +1248,7 @@ def drain_cmd(collections: tuple[str, ...], all_collections: bool, max_chunks: i
 
     Lists, per collection, the manifest-backed chunks with no assignment to
     the collection's own topics and assigns them through the same retrying
-    path indexing uses (nexus-iygza). Recovers assignments lost to a failed
+    path indexing uses. Recovers assignments lost to a failed
     batch, a crash, or a deferred hook. Collections without topics are
     reported and left alone. Exits 1 when any chunk still failed to assign
     or any collection could not be drained.
@@ -1312,7 +1312,7 @@ def acknowledge_cmd(chashes: tuple[str, ...], collection: str, note: str, remove
     """Record chunks the engine permanently refuses to assign a topic.
 
     A drain lists every unassigned chunk on every run, so one the engine
-    always refuses would fail every `nx index repo` (nexus-j7ae6). After
+    always refuses would fail every `nx index repo`. After
     diagnosing it, acknowledge it with a note: the drain then skips it in
     that collection instead of retrying, names how many it skipped on every
     run, and does not count it as a loss. Scoped per collection (identical
@@ -1386,7 +1386,7 @@ def rename_cmd(
 ) -> None:
     """Rename a topic. By default, also transitions to 'accepted'.
 
-    Code-review finding M-1 + bead nexus-gwhy: the standalone rename
+    The standalone rename
     command previously always transitioned review_status to 'accepted'
     as a side effect of ``rename_topic``. Default behaviour preserved
     (the user typing a new label is an acknowledgement); ``--no-accept``
@@ -1442,7 +1442,7 @@ def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
 def split_cmd(topic_label: str, k: int, collection: str) -> None:
     """Split a topic into k sub-topics via KMeans clustering.
 
-    RDR-151 Phase 3 (nexus-uzay8): the T3 fetch + MiniLM reembed + KMeans
+    The T3 fetch + MiniLM reembed + KMeans
     clustering happens locally (compute phase), then the pure-T2 persist
     (DELETE parent assignments + INSERT children) is routed through the
     daemon via t2_index_write.  Centroid vector operations happen locally
@@ -1646,7 +1646,7 @@ def compute_topic_links(
 def links_cmd(collection: str, refresh: bool) -> None:
     """Show all inter-topic relationships in topic_links.
 
-    Includes cross-collection projection links from RDR-075 (link_types
+    Includes cross-collection projection links from the projection pass (link_types
     contains 'projection' or 'cooccurrence') AND catalog-derived links
     from compute_topic_links (link_types contains 'cites', 'implements',
     etc.).  Use --refresh to recompute catalog-derived links first.
@@ -2177,10 +2177,10 @@ def _review_auto(
     held as a destructive plan requiring ``click.confirm`` or
     ``--apply-destructive`` (``dry_run`` suppresses ALL mutations, including
     accept/rename). ``--yes`` no longer skips the destructive confirmation by
-    itself (nexus-afnht) — see ``--apply-destructive``. Dispatch is
-    sequential per batch — no parallelism (V1 non-goal, nexus-6i01g).
+    itself — see ``--apply-destructive``. Dispatch is
+    sequential per batch — no parallelism (V1 non-goal).
 
-    **Verdict cache (nexus-afnht).** ``--dry-run`` persists every verdict it
+    **Verdict cache.** ``--dry-run`` persists every verdict it
     computes, per topic, keyed by (collection, topic id) plus a content hash
     of that topic's (id, label, terms). A later ``--auto`` on the same
     collection reuses a cached verdict for any topic whose hash still
@@ -2460,7 +2460,7 @@ def _review_auto(
                 click.echo(
                     "NOTE: --yes no longer skips the destructive-action "
                     "confirmation by itself; pass --apply-destructive as "
-                    "well to apply deletes/merges unattended (nexus-afnht).",
+                    "well to apply deletes/merges unattended.",
                     err=True,
                 )
             try:
@@ -2568,7 +2568,7 @@ def relabel_topics(
 ) -> int:
     """Relabel topics using batched ``claude_dispatch`` calls.
 
-    RDR-085 migrates the labeler off its bespoke subprocess shell-out
+    migrates the labeler off its bespoke subprocess shell-out
     onto the shipped ``claude_dispatch`` substrate. Glossary resolution
     runs once per command invocation and is reused across every batch —
     subsequent ThreadPoolExecutor workers each call ``asyncio.run()`` to
@@ -2845,7 +2845,7 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
     help=(
         "Apply ICF (Inverse Collection Frequency) weighting — suppresses "
         "ubiquitous hub topics before threshold + top-k ranking. Stored "
-        "similarity remains raw cosine (RDR-077 RF-8)."
+        "similarity remains raw cosine (RF-8)."
     ),
 )
 def project_cmd(
@@ -2865,7 +2865,7 @@ def project_cmd(
     projection assignments to topic_assignments.
 
     \b
-    Threshold resolution (RDR-077 Phase 4a):
+    Threshold resolution:
       explicit --threshold overrides; otherwise the default of the
       collection's catalog content type applies (see --threshold option for
       the full table).
@@ -3282,7 +3282,7 @@ def hubs_cmd(
     warn_stale: bool,
     explain: bool,
 ) -> None:
-    """List topics that look like cross-collection hubs (RDR-077 Phase 5).
+    """List topics that look like cross-collection hubs.
 
     A hub is a topic whose projection assignments span many source
     collections with low Inverse Collection Frequency — the
@@ -3376,7 +3376,7 @@ def hubs_cmd(
     "--fix-doc-count", is_flag=True, default=False,
     help=(
         "Correct topics.doc_count drift instead of the projection-quality "
-        "report (bead nexus-c0g6e, GH #1529) — the repeatable, on-demand "
+        "report — the repeatable, on-demand "
         "twin of the engine's own boot-time recount (hygiene-007-1), and "
         "the remedy `nx doctor`'s 'topics.doc_count drift' row names. "
         "Dry-run by default (previews what would change); pass --yes to "
@@ -3407,7 +3407,7 @@ def audit_cmd(
     The projection-tuning guide, linked at the end of this help, covers interpretation.
 
     ``--fix-doc-count`` replaces the report above entirely with the
-    doc_count-drift repair (bead nexus-c0g6e, GH #1529) — see that option's
+    doc_count-drift repair — see that option's
     own help text.
     """
     if fix_doc_count:
@@ -3498,8 +3498,7 @@ def _run_fix_doc_count(collection: str, *, apply: bool) -> None:
             if exc.response.status_code == 404:
                 click.echo(
                     "doc_count-drift fix cannot run: the deployed engine has no "
-                    "/topics/recount_doc_count route (bead nexus-c0g6e, GH #1529 — "
-                    "needs the engine tag carrying "
+                    "/topics/recount_doc_count route (needs the engine tag carrying "
                     "taxonomy-016-doc-count-drift-functions.xml; see "
                     "https://github.com/Hellblazer/nexus/blob/main/docs/wire-contract-pending.md). Deploy an engine carrying it "
                     "and re-run.",
@@ -3579,7 +3578,7 @@ def _resolve_prefixes(cli_override: str) -> list[str]:
     show_default=True,
 )
 def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
-    """Scan markdown for stale collection references (RDR-081).
+    """Scan markdown for stale collection references.
 
     For each file, finds references like ``docs__architecture`` and
     chunk-count claims like "12,900 chunks" in the same paragraph, then
@@ -3696,9 +3695,9 @@ def backfill_source_collection_cmd(apply_: bool) -> None:
     """RETIRED: the legacy source_collection backfill has no live substrate.
 
     \b
-    RDR-087 Phase 4.1 filled NULL ``source_collection`` on legacy
+    filled NULL ``source_collection`` on legacy
     hdbscan/centroid ``topic_assignments`` rows via raw SQL under the
-    SQLite store's lock. The store died in the RDR-158 P4 retirement and
+    SQLite store's lock. The store died in the retirement and
     the read-then-UPDATE sequence has no engine API; the verb was also
     live-broken post-deletion (its store arm required a raw ``.conn``) and
     carried zero test coverage — found by the nrxs9/yrm0i final reviews.
@@ -3707,8 +3706,7 @@ def backfill_source_collection_cmd(apply_: bool) -> None:
     """
     raise click.UsageError(
         "taxonomy backfill-source-collection is retired: it ran raw SQL "
-        "over the local SQLite topic_assignments, which was deleted in the "
-        "RDR-158 P4 retirement, and the engine exposes no equivalent "
+        "over the local SQLite topic_assignments, which was deleted in the move to the Postgres service, and the engine exposes no equivalent "
         "read-then-update API. If a pre-migration install still holds "
         "legacy NULL source_collection rows, run the backfill on the last "
         "migration-capable 6.x release before migrating."

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``nx ask``: the mediator's tool and Sam's fallback for structured asks (RDR-245 Step 2, nexus-wc4jj.7).
+"""``nx ask``: the mediator's tool and the user's fallback for structured asks (RDR-245 Step 2, nexus-wc4jj.7).
 
 An ask is a structured block in a session's T2 ``threads`` entry (parsed by ``nexus.console.threads``).
-``list`` and ``show`` read the board; ``answer`` records Sam's answer in T2 project ``asks`` and mails it
+``list`` and ``show`` read the board; ``answer`` records the user's answer in T2 project ``asks`` and mails it
 to the asking session; ``digest`` lists what was answered. The record shape and the mail body are the
 contract pinned by ``tests/fixtures/asks/``.
 
@@ -500,7 +500,7 @@ def _group_line(c: ClassedAsk, width: int, records: dict[str, dict[str, Any]]) -
 
 @click.group(name="ask")
 def ask_group() -> None:
-    """Structured asks on the threads board: list / show / answer / digest (RDR-245)."""
+    """Structured asks on the threads board: list / show / answer / digest."""
 
 
 @ask_group.command(name="list")
@@ -508,7 +508,7 @@ def ask_group() -> None:
 @click.option("--all", "show_all", is_flag=True, help="List the quiet, conditional and answered asks, not only count them.")
 @click.pass_context
 def list_cmd(ctx: click.Context, as_json: bool, show_all: bool) -> None:
-    """What waits on Sam: interrupts, the batch, counts, legacy asks and beads, lint, recent answers."""
+    """What waits on the user: interrupts, the batch, counts, legacy asks and beads, lint, recent answers."""
     s = _seams(ctx)
     now = s.now()
     rows = _read_rows(s)
@@ -718,7 +718,7 @@ def show_cmd(ctx: click.Context, ref: str, as_json: bool) -> None:
 @ask_group.command(name="digest")
 @click.pass_context
 def digest_cmd(ctx: click.Context) -> None:
-    """Every answer of the last seven days, newest first: when, via, Sam's words, the batch reply, the tuple id."""
+    """Every answer of the last seven days, newest first: when, via, the user's words, the batch reply, the tuple id."""
     s = _seams(ctx)
     entries, skipped = _answer_entries(_answer_rows(s), s.now(), DIGEST_WINDOW)
     lines = _digest_lines(entries) if entries else ["no answers in the last 7 days"]
@@ -852,12 +852,12 @@ def _mail_body(ask: Ask, choice: int | None, via: str, answer_id: str) -> str:
 @ask_group.command(name="answer")
 @click.argument("ref")
 @click.argument("reply")
-@click.option("--expect", required=True, metavar="VERSION", help="The version of the ask Sam saw; a different current version is refused.")
-@click.option("--note", default=None, help="A note on a chosen option (recorded as Sam's words for --via cli).")
+@click.option("--expect", required=True, metavar="VERSION", help="The version of the ask the user saw; a different current version is refused.")
+@click.option("--note", default=None, help="A note on a chosen option (recorded as the user's words for --via cli).")
 @click.option("--via", type=click.Choice(["cli", "mediator"]), default="cli", show_default=True,
-              help="cli: Sam at a terminal. mediator: a session relaying Sam's words.")
-@click.option("--sam-words", default=None, help="--via mediator: the contiguous span Sam typed for this ask (1-500 characters).")
-@click.option("--batch-words", default=None, help="--via mediator: Sam's whole reply when it covered several asks (at most 2000 characters).")
+              help="cli: the user at a terminal. mediator: a session relaying the user's words.")
+@click.option("--sam-words", default=None, help="--via mediator: the contiguous span the user typed for this ask (1-500 characters).")
+@click.option("--batch-words", default=None, help="--via mediator: the user's whole reply when it covered several asks (at most 2000 characters).")
 @click.option("--replace", is_flag=True, help="Supersede a sent answer to the same version.")
 @click.pass_context
 def answer_cmd(
@@ -911,13 +911,13 @@ def answer_cmd(
             raise click.UsageError("--sam-words and --batch-words are for --via mediator; --via cli records the note")
         tty = s.tty()
         if tty is None:
-            raise _refuse("--via cli needs stdin to be a TTY; a session relaying Sam's words uses --via mediator")
+            raise _refuse("--via cli needs stdin to be a TTY; a session relaying the user's words uses --via mediator")
         via_value = "cli"
         sender = s.cli_sender()
         words = recorded_note
     else:
         if sam_words is None or not sam_words.strip():
-            raise _refuse("--via mediator needs --sam-words: the words Sam typed for this ask")
+            raise _refuse("--via mediator needs --sam-words: the words the user typed for this ask")
         if len(sam_words) > SAM_WORDS_MAX:
             raise _refuse(f"--sam-words is {len(sam_words)} characters; the limit is {SAM_WORDS_MAX}")
         if batch_words is not None and len(batch_words) > BATCH_WORDS_MAX:

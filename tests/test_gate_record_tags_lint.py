@@ -53,7 +53,7 @@ SCANNED = sorted(
     p for d in ("agents", "skills", "commands") for p in (ROOT / "conexus" / d).rglob("*.md")
 )
 SENTENCE = re.compile(
-    r"A gate record \(a review, critique, confirmation or fix round\) is built by [^\n]*?\(RDR-240 TD6, RDR-209 Amendment A1\)\."
+    r"A gate record \(a review, critique, confirmation or fix round\) is built by [^\n]*?`bead:` and `rdr:` tags\."
 )
 MEMORY_CLAUSES = (
     "never replaces the T2 gate record, which is mandatory",

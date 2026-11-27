@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from tests.hooks.audience_harness import flagged_home
+from tests.hooks.audience_harness import strict_home
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 SCRIPT = (
@@ -57,7 +57,7 @@ _HOME: list[pathlib.Path | None] = [None]
 @pytest.fixture(autouse=True)
 def _account_home(tmp_path):
     home = tmp_path / "acct-home"
-    _HOME[0] = pathlib.Path(flagged_home(home))
+    _HOME[0] = pathlib.Path(strict_home(home))
     yield
     _HOME[0] = None
 

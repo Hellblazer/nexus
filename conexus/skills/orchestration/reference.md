@@ -99,7 +99,7 @@ If the task requires multiple stages:
 
 ### Feature Development Pipeline
 1. strategic-planner: Create plan with beads
-2. `mcp__plugin_conexus_nexus__nx_plan_audit`: Validate plan (RDR-080, no agent spawn)
+2. `mcp__plugin_conexus_nexus__nx_plan_audit`: Validate plan (no agent spawn)
 3. architect-planner: Design architecture
 4. developer: Implement with TDD
 5. code-review-expert: Review implementation (line-level bugs, security, edge cases)
@@ -114,23 +114,23 @@ If the task requires multiple stages:
 5. test-validator: Verify fix and regression tests
 
 ### Catalog Query Pipeline
-Call `mcp__plugin_conexus_nexus__nx_answer` directly (RDR-080; `question`, optional `scope`).
+Call `mcp__plugin_conexus_nexus__nx_answer` directly (`question`, optional `scope`).
 Route here when the question involves: specific authors, paper citations, "what cites X",
 "what research informed Y", corpus-scoped retrieval, or document provenance chains.
 
 ### Research Pipeline
 1. deep-research-synthesizer: Gather information
-2. `mcp__plugin_conexus_nexus__nx_tidy`: Consolidate findings (RDR-080, no agent spawn needed)
+2. `mcp__plugin_conexus_nexus__nx_tidy`: Consolidate findings (no agent spawn needed)
 3. (optional) architect-planner: Apply findings to design
 
 ### Plan Validation Pipeline
 1. strategic-planner or architect-planner: Create plan
-2. `mcp__plugin_conexus_nexus__nx_plan_audit`: Validate technical accuracy (RDR-080, no agent spawn needed)
+2. `mcp__plugin_conexus_nexus__nx_plan_audit`: Validate technical accuracy (no agent spawn needed)
 3. substantive-critic: Critique for gaps and assumptions
 
 ## Pipeline Pattern Catalog
 
-These patterns are stored in the T2 plan library and are returned by `plan_search` when matching queries are detected. Run `mcp__plugin_conexus_nexus__plan_search` for a matching template before dispatching a multi-agent pipeline.
+These patterns are not in the answer-plan library: `mcp__plugin_conexus_nexus__answer_plan_search` returns only the retrieval plans `nx_answer` matches, never an agent pipeline. Pick the pattern from this table.
 
 | Pattern | Agents | When to Use | Prerequisites |
 |---------|--------|-------------|---------------|
@@ -148,13 +148,13 @@ These patterns are stored in the T2 plan library and are returned by `plan_searc
 | developer | Execute implementation plans, write code with TDD |
 | architect-planner | Design architecture, create execution plans |
 | debugger | Complex bugs, non-deterministic failures, performance issues |
-| (none, call `nx_answer`) | Analytical operations are handled by `nx_answer` internally (RDR-080) |
+| (none, call `nx_answer`) | Analytical operations are handled by `nx_answer` internally |
 
 ### Review Agents
 | Agent | When to Use |
 |-------|-------------|
 | code-review-expert | Review implemented code for quality and best practices |
-| `mcp__plugin_conexus_nexus__nx_plan_audit` | Validate plans before implementation (RDR-080, MCP tool, not agent) |
+| `mcp__plugin_conexus_nexus__nx_plan_audit` | Validate plans before implementation (MCP tool, not agent) |
 | substantive-critic | Deep critique of any content (code, docs, designs) |
 
 ### Analysis Agents
@@ -177,7 +177,7 @@ These patterns are stored in the T2 plan library and are returned by `plan_searc
 
 ## Skill Routing (what the SessionStart text points here for)
 
-The six wrapper skills for the agents above are retired (nexus-dg7i6.6); dispatch the agent directly. These skills remain.
+The six wrapper skills for the agents above are retired; dispatch the agent directly. These skills remain.
 
 Before code:
 - About to implement with no design of record: `/conexus:brainstorming-gate`. A locked T2 memo, accepted RDR or reviewed bead is the design of record: implement it without re-gating.
@@ -192,7 +192,7 @@ Retrieval and knowledge:
 - Reduced from many documents (cross-corpus synthesis, ranking or comparing, RDR research): `nx_answer`, or its verb skills `/conexus:analyze`, `/conexus:document`, `/conexus:design-to-code-trace`, `/conexus:why-was-this-written`. Broad research across store, web and code: `/conexus:research-synthesis`.
 - 3+ validated findings to keep: `/conexus:knowledge-tidying`. PDF to index: `/conexus:pdf-process`. Entries, links, tumblers: `/conexus:catalog`.
 
-RDR lifecycle: `/conexus:rdr-create` -> `/conexus:rdr-research` -> `/conexus:rdr-gate` -> (`/conexus:rdr-fix` for a BLOCKED gate's findings, one fix check per fix round, then re-gate) -> `/conexus:rdr-accept` -> implementation phases -> `/conexus:rdr-close`. List: run `nx rdr preamble rdr-list`. Show: `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`. Every phase-review bead runs `/conexus:phase-review-gate` before close: each numbered phase item in the RDR has a closing-bead pointer or an explicit `none` deferral. Nothing enforces it; it prevents silent scope reduction (RDR-112 Phase 1 dropped the T3 daemon from a 6-bead close, found three phases later, 2 to 3 days of replanning).
+RDR lifecycle: `/conexus:rdr-create` -> `/conexus:rdr-research` -> `/conexus:rdr-gate` -> (`/conexus:rdr-fix` for a BLOCKED gate's findings, one fix check per fix round, then re-gate) -> `/conexus:rdr-accept` -> implementation phases -> `/conexus:rdr-close`. List: run `nx rdr preamble rdr-list`. Show: `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`. Every phase-review bead runs `/conexus:phase-review-gate` before close: each numbered phase item in the RDR has a closing-bead pointer or an explicit `none` deferral. Nothing enforces it; it prevents silent scope reduction (one phase once dropped a daemon from a 6-bead close and the loss surfaced three phases later, costing 2 to 3 days of replanning).
 
 Git: isolation `/conexus:git-worktrees`; done `/conexus:finishing-branch`. Another session or agent: `/conexus:peer-messaging`, protocol `/conexus:mailbox`. The user's asks waiting on the threads board: `/conexus:asks`. Reference: `/conexus:nexus`, `/conexus:cli-controller`, `/conexus:writing-nx-skills` (authoring a skill; promoting a memory file into a skill, script or hook).
 
@@ -200,13 +200,13 @@ Git: isolation `/conexus:git-worktrees`; done `/conexus:finishing-branch`. Anoth
 
 For a question whose answer must be REDUCED FROM MANY DOCUMENTS: cross-corpus synthesis over `knowledge__` / `docs__` / `rdr__`, ranking or comparing across documents, RDR research where minutes are acceptable. It matches the plan library (threshold 0.40), runs the matched plan (or plans inline on a miss), and bundles contiguous operators into one `claude -p`.
 
-Not for file:line answers (Serena or Grep), anything already in a local RDR, bead or T2 memory, or single-fact lookups: `search` / `query` answer in seconds (mean about 8s). Measured on 142 runs (2026-04 to 2026-08): p50 80s, p95 217s, max 371s; 35% miss the plan gate and pay about 53s more for the inline planner; a call can hit its 300s timeout and return nothing. Budget minutes. Do not call `plan_match` yourself: you lose run recording and the fallback on miss. `mcp__plugin_conexus_nexus__plan_save` only a genuinely reusable retrieval plan, with a `verb`; implementation and phased-execution plans live in beads and T2.
+Not for file:line answers (Serena or Grep), anything already in a local RDR, bead or T2 memory, or single-fact lookups: `search` / `query` answer in seconds (mean about 8s). Measured on 142 runs (2026-04 to 2026-08): p50 80s, p95 217s, max 371s; 35% miss the plan gate and pay about 53s more for the inline planner; a call can hit its 300s timeout and return nothing. Budget minutes. Do not call `plan_match` yourself: you lose run recording and the fallback on miss. `mcp__plugin_conexus_nexus__answer_plan_save` only a genuinely reusable retrieval plan, with a `verb`; never an implementation or phased-execution plan.
 
 ## Working Rules
 
-- **Sequential thinking** (`mcp__plugin_conexus_sequential-thinking__sequentialthinking`) is a step log any session can use for multi-step work. No conexus rule, agent definition or hook mandates it (a user's own instructions file is outside the plugin and may still). Measured on 2026-11-18 (nexus-cn11i, GH #1661, Opus 5.5, three runs an arm): the API classifier stops a request with `[reasoning_extraction]` when the system prompt carries guidance to log reasoning steps and the task message asks for a number of recorded steps; the stop came with the tool loaded or not, and whether the task named the tool or not. Guidance alone, a demand alone, and guidance with a task that only names the tool all ran clean, and a task that asked for the tool with no guidance made 27 calls with no stop; unprompted use was not measured. So do not add a mandate back, and a brief never asks an agent to record a count of reasoning steps or thoughts; naming the tool is fine.
+- **Sequential thinking** (`mcp__plugin_conexus_sequential-thinking__sequentialthinking`) is a step log any session can use for multi-step work. No conexus rule, agent definition or hook mandates it (a user's own instructions file is outside the plugin and may still). Measured on 2026-11-18 (Opus 5.5, three runs an arm): the API classifier stops a request with `[reasoning_extraction]` when the system prompt carries guidance to log reasoning steps and the task message asks for a number of recorded steps; the stop came with the tool loaded or not, and whether the task named the tool or not. Guidance alone, a demand alone, and guidance with a task that only names the tool all ran clean, and a task that asked for the tool with no guidance made 27 calls with no stop; unprompted use was not measured. So do not add a mandate back, and a brief never asks an agent to record a count of reasoning steps or thoughts; naming the tool is fine.
 - **Storage tiers**, read widest to narrowest before work: T3 `search` (all sessions and projects; check before researching), T2 `memory_search` (project decisions), T1 `scratch` (siblings this session). Write path: T1, then `--persist` to T2, then T3 via `store_put` after `/conexus:knowledge-tidying`. Findings not stored are findings lost: `store_put` or `memory_put` before returning a result a future session would want.
-- **T2 ttl** (nexus-473mx, 2026-09-12): omit `ttl` for a record of record (handoff, decision, directive, ship record, research finding); pass `ttl=N` days for session findings and probes that should expire. A gate record (review, critique, confirmation or fix round) is built by `mcp__plugin_conexus_nexus__procedure_run(name="gate_record", args={...})` and written with `mcp__plugin_conexus_nexus__memory_put` passing the returned `project`, `title`, `tags` and `content` unchanged and no `ttl`; never compose the tag string yourself. The phase-close rollup reads its `kind:gate`, `bead:` and `rdr:` tags and sets its TTL (RDR-240 TD6, RDR-209 Amendment A1). Other entries' `tags` name the bead or RDR they serve.
+- **T2 ttl**: omit `ttl` for a record of record (handoff, decision, directive, ship record, research finding); pass `ttl=N` days for session findings and probes that should expire. A gate record (review, critique, confirmation or fix round) is built by `mcp__plugin_conexus_nexus__procedure_run(name="gate_record", args={...})` and written with `mcp__plugin_conexus_nexus__memory_put` passing the returned `project`, `title`, `tags` and `content` unchanged and no `ttl`; never compose the tag string yourself. The phase-close rollup reads its `kind:gate`, `bead:` and `rdr:` tags and sets its TTL. Other entries' `tags` name the bead or RDR they serve.
 - **`store_put` collection** is a durable subject area a reader would browse (`distributed-systems`), reused before minted (`nx collection list`), never `knowledge`, `default`, `test`, a session or a source app. Rules: [the collection rules](https://github.com/Hellblazer/nexus/blob/main/docs/collections.md).
 
 ## Common Mistakes
@@ -238,3 +238,7 @@ Thoughts that mean STOP, because you are rationalizing past a tier check:
 | "This finding isn't worth storing" | Findings not stored are findings lost. The next session redoes your work. |
 | "I'll file a bead for that and move on" | Filing is deferral that reads as progress. A gap in the work in hand is closed in this session; file only what cannot finish here (blocked on the user, another instance, or evidence that does not exist yet), and a filed bead is the next thing worked. |
 | "One more pass would tighten this" | Execute the plan to done. No new round on finished work, no hop to an adjacent item mid-plan. Rounds are capped (2 for a code review, set in the nexus wheel's `review-rounds.toml` table). |
+
+## Git in an implementer brief
+
+A brief that touches git says: **where** (an absolute worktree root made before dispatch); **shape** (`git -C <root> <verb> <flags in full>` or `cd <root> && git <verb> ...`, chained with `&&`; no heredocs: write the message with the Write tool, then `git commit -F <file>`; checkout, stash, restore, reset --hard and primary-tree writes stay with the orchestrator); **who pushes** (by default the orchestrator, since a push to a PR branch cancels its CI run; else `git -C <root> push -u origin HEAD`, never `develop`, `main`, `--force`).

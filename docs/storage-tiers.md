@@ -152,7 +152,7 @@ T2 is the persistent local layer that bridges sessions. Notes, project state, an
 - **Developer notes**: hypotheses, findings, decisions-in-progress via `nx memory put`
 - **Project memory**: design notes, working state, active decisions. Store with `nx memory put`, retrieve with `nx memory get`. 
 - **RDR metadata**: status, type, priority, dates for each RDR document. See [RDR: Nexus Integration](rdr.md#nexus-integration).
-- **Plan library**: saved query execution plans with project scoping, full-text search, dimensional identity (`verb`, `scope`, `strategy` + optional axes), and optional TTL. Thirteen builtin templates (`conexus/plans/builtin/*.yml`; five `*-default` plans plus eight scenario-strategy plans) are seeded via `nx plan reseed`, idempotent by default: only previously-missing builtins insert, `--force` reloads all of them. Access via `plan_save` / `plan_search` MCP tools, or indirectly via `nx_answer` (the retrieval trunk; see [Plan-Centric Retrieval](plan-centric-retrieval.md)). **Auto-growth (RDR-084, closed/implemented)**: when `nx_answer` falls through the plan-match gate onto an inline `claude -p` planner and the resulting ad-hoc DAG runs without error, the plan is auto-saved via `plan_save` with `scope="personal"` so the next paraphrase of the same question can match it. Best-effort: a save failure never affects the answer already returned. TTL is config-driven (`.nexus.yml#plans.ad_hoc_ttl`, 30-day fallback), separate from the builtin templates' own permanent TTL.
+- **Plan library**: saved query execution plans with project scoping, full-text search, dimensional identity (`verb`, `scope`, `strategy` + optional axes), and optional TTL. Thirteen builtin templates (`conexus/plans/builtin/*.yml`; five `*-default` plans plus eight scenario-strategy plans) are seeded via `nx answer-plan reseed`, idempotent by default: only previously-missing builtins insert, `--force` reloads all of them. Access via `answer_plan_save` / `answer_plan_search` MCP tools, or indirectly via `nx_answer` (the retrieval trunk; see [Plan-Centric Retrieval](plan-centric-retrieval.md)). **Auto-growth (RDR-084, closed/implemented)**: when `nx_answer` falls through the plan-match gate onto an inline `claude -p` planner and the resulting ad-hoc DAG runs without error, the plan is auto-saved via `answer_plan_save` with `scope="personal"` so the next paraphrase of the same question can match it. Best-effort: a save failure never affects the answer already returned. TTL is config-driven (`.nexus.yml#plans.ad_hoc_ttl`, 30-day fallback), separate from the builtin templates' own permanent TTL.
 - **Agent relay**: context passed between agent invocations
 - **Promoted scratch**: T1 entries flagged during a session are auto-flushed to T2 at session end
 
@@ -262,29 +262,47 @@ start` to bring the stack up and `nx daemon service status` to verify health
 
 ### Collections
 
-Collections are namespaced by corpus type using `__` (double underscore) as separator. Each collection's embedding model is fixed; the service routes by collection name:
+A collection is a row in the catalog's registry (`catalog_collections`). The
+row holds the collection's `collection_id`, a number the engine assigns and
+never reuses, and its attributes: content type (`code`, `docs`, `rdr`,
+`knowledge`), owner, embedding model, model version, dimension and
+lifecycle state. Chunks, catalog documents and every other per-collection
+table reference the `collection_id`. The engine reads which model
+embeds a collection, and whether it is live or quarantined, from its row
+(RDR-229).
 
-Conformant collection names (RDR-103) follow a 4-segment shape:
-`<content_type>__<owner_id>__<embedding_model>__v<n>`. That is the shape of the `code`, `docs` and `rdr` collections `nx index repo` mints and of every collection that predates 8.5.6. A **new knowledge subject** since 8.5.6 (RDR-229 P3.8) is registered by its attributes instead, and the engine mints the collection's id and its label, `c` followed by the id (`c4217`); the table below describes its content type, owner (the subject), model and version, which `nx collection list` shows in columns, not in the name. Every registry row now carries a `collection_id`; routes accept the id or the label, and a rename changes the label only. See [Choosing and Naming Collections](collections.md) Rule 3.
+The collection's name is a label, unique among a tenant's collections that are not superseded.
+A new knowledge subject gets a minted label, `c` followed by its id (`c4812`).
+`nx index repo` does not mint: the `code`, `docs` and `rdr` collections it
+creates are labelled in the four-segment shape below. A rename takes
+its content type and owner from the new name and has its own guards
+([Choosing and Naming Collections](collections.md), Rule 3). Existing labels
+stay as they are, typically in one of two older shapes (a `quarantine-`
+collection and a renamed one carry other labels):
 
-| Pattern | Contents | Managed-cloud model | Local model, default | Local model, keyed |
+- the four-segment RDR-103 shape, `<content_type>__<owner_id>__<embedding_model>__v<n>`, for example `knowledge__distributed-systems__voyage-context-3__v1`;
+- the pre-RDR-103 two-segment shape, `<content_type>__<repo>-<hash>`, for example `code__myrepo-a1b2c3`.
+
+| Content type | Contents | Managed-cloud model | Local model, default | Local model, keyed |
 |---------|----------|---------------------|-----------------------|---------------------|
-| `code__<owner_id>__voyage-code-3__v1` | Indexed source code | voyage-code-3 | bge-768 | voyage-code-3 |
-| `docs__<owner_id>__voyage-context-3__v1` | Indexed prose files | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
-| `rdr__<owner_id>__voyage-context-3__v1` | Indexed RDR documents | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
-| `knowledge__<owner_id>__voyage-context-3__v1` | Stored agent outputs and notes | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
+| `code` | Indexed source code | voyage-code-3 | bge-768 | voyage-code-3 |
+| `docs` | Indexed prose files | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
+| `rdr` | Indexed RDR documents | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
+| `knowledge` | Stored agent outputs and notes | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
 
-(`<owner_id>` is a stable slug like `nexus-1-1`. See [RDR-103](rdr/rdr-103-catalog-collection-name-authority.md).)
-
-**Legacy shape (fallback, pre-RDR-103)**: 2-segment `<content_type>__<repo>-<hash>`, e.g. `code__myrepo-a1b2c3`. Still present on collections created before the conformance migration; new repo collections use the 4-segment shape above, and new knowledge subjects the minted `c<id>` label.
+A collection is found by its attributes: `nx index repo` asks for the
+collection with the repo's content type, owner and model, and a `knowledge`
+subject is found the same way, with the subject as its owner. Only a tuple
+with no collection yet gets a new one: a `knowledge` subject a minted label,
+a repo's `code`, `docs` or `rdr` a rendered four-segment name.
 
 A collection is indexed and queried under the same embedding model: mixing models across one vector space produces near-random similarity scores. The same principle is enforced at query time: multi-collection combined queries are dispatched per embedding-model group by the MCP layer (a corpus spanning `voyage-code-3` and `voyage-context-3` collections issues one query per model and merges results, nexus-3l6gz), and the service rejects a mixed-model collection list outright (`requireHomogeneousModel`, engine-service ≥ 0.1.36).
 
-**TTL and expiry**: `nx store expire` removes expired entries from `knowledge` collections only (selected by the collection's content type, so minted `c<id>` collections count). Code, docs, and RDR collections are never expired: they are refreshed via re-indexing.
+**TTL and expiry**: `nx store expire` removes expired entries from `knowledge` collections only (content type `knowledge` on the row). Code, docs, and RDR collections are never expired: they are refreshed via re-indexing.
 
 **Use for**: semantic search across sessions, institutional knowledge.
 
-**Choosing a collection** (which content type, how to name a `knowledge` subject, when to reuse instead of create, what goes where): [Choosing and Naming Collections](collections.md). The short version: `code`/`docs`/`rdr` come from `nx index repo` only; `knowledge` collections are named after a durable subject area, never a document, session, source app, or placeholder; type the bare subject and let the catalog render the model and version.
+**Choosing a collection** (which content type, how to name a `knowledge` subject, when to reuse instead of create, what goes where): [Choosing and Naming Collections](collections.md). The short version: `code`/`docs`/`rdr` come from `nx index repo` only; `knowledge` collections are named after a durable subject area, never a document, session, source app, or placeholder; type the bare subject and let the catalog find or create the collection by its attributes.
 
 ## T3 Backup and Migration (Export/Import)
 

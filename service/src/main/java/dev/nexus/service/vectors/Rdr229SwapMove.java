@@ -162,10 +162,11 @@ public final class Rdr229SwapMove {
     /**
      * One row per leaf of {@code table}'s tree with no valid unique index on exactly the id key's columns (the key's own columns,
      * sorted, so the column order of the index does not matter). Catalog reads only, and only in the table-wide run: a leaf's index is
-     * the table's, not a tenant's.
+     * the table's, not a tenant's, so the text carries {@link dev.nexus.service.datamove.DataMove#TABLE_WIDE_ONLY_MARKER} and the
+     * finisher runs no per-tenant statement for it.
      */
     private static String leafKeyVerification(String table, String keyColumn) {
-        return """
+        return dev.nexus.service.datamove.DataMove.TABLE_WIDE_ONLY_MARKER + "\n" + """
             SELECT 1
               FROM pg_catalog.pg_partition_tree('nexus.%s'::pg_catalog.regclass) pt
              WHERE $1 IS NULL

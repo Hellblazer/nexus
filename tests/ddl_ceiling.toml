@@ -283,7 +283,17 @@ migration_wal_bytes_per_worker = 13411126
 # the child-row name trigger) and vectors-083 +7 (the window restore changeset). vectors-084 (row 19) is CONTINUE-gated and adds 0 to a fresh walk (its 3 functions land at the form-A boot).
 # Measured: qwent lab-m via lab-remote, 2026-11-24, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued
 # on 2c27dcb43d (gate jar rebuilt in the same command): ddl: migration=2954. Later commits on the stack add no changeset.
-migration_ddl_per_worker = 2954
+# 2954 -> 2959 (2026-11-26, nexus-p2m1x.28, the RDR-229 next engine cut, Sam's ruling "Carry 2960 over", T2 nexus/sam-ruling-rdr229-nextcut-ddl-cap-2026-11-26):
+# vectors-085 adds 5, one CREATE OR REPLACE for each of gc_restore_rereferenced, gc_restore_rereferenced_bounded, gc_quarantine_orphans,
+# gc_quarantine_orphans_bounded and reaper_quarantine_chunks (2954 + 5 = 2959, under the 2960 cap).
+# Measured: chas lab-m via lab-remote, 2026-11-26, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued
+# on feature/rdr229-nextcut-quarantine (gate jar rebuilt in the same command): ddl: migration=2959; the assembled stack is re-measured at the same value.
+# 2959 -> 2961 (2026-11-26, nexus-p2m1x.28, linda's fix/rdr229-gc-expire-by-id, Sam's ruling "Cap 2961, ship both", T2
+# nexus/sam-ruling-rdr229-nextcut-ddl-cap-2961-2026-11-26): vectors-086 adds 2, one CREATE OR REPLACE for each of reaper_expire_quarantine and
+# reaper_expire_client_quarantine (a row's own origin id guards it). On develop 3904bdc8a7 without vectors-085 the same changeset measured 2954 -> 2956.
+# Measured: chas lab-m via lab-remote, 2026-11-26, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued
+# on the rebase of that branch onto develop 56c96da4a5 (gate jar rebuilt): ddl: migration=2961.
+migration_ddl_per_worker = 2961
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

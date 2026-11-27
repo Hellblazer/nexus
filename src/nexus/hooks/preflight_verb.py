@@ -192,8 +192,27 @@ def _install_hint(name: str) -> str:
     return hints.get(name, {}).get(plat, "")
 
 
-def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — preflight never reads its payload; see module docstring
-    """Run the preflight checks. Ignores *payload*: this verb never reads
+def _project_has_beads(payload: dict | None) -> bool:
+    """True when the payload's project has a ``.beads/`` directory (nexus-sby49.4): the cwd or a parent up to the
+    repository root, the cwd being the payload's, then ``CLAUDE_PROJECT_DIR``. Never raises."""
+    try:
+        cwd = payload.get("cwd") if isinstance(payload, dict) and isinstance(payload.get("cwd"), str) else ""
+        cwd = cwd or os.environ.get("CLAUDE_PROJECT_DIR", "")
+        if not cwd or not os.path.isabs(cwd):
+            return False
+        here = os.path.realpath(cwd)
+        while True:
+            if os.path.isdir(os.path.join(here, ".beads")):
+                return True
+            if os.path.lexists(os.path.join(here, ".git")) or os.path.dirname(here) == here:
+                return False
+            here = os.path.dirname(here)
+    except (OSError, ValueError):
+        return False
+
+
+def run(payload: dict | None) -> HookResult:
+    """Run the preflight checks. Reads *payload* for its ``cwd`` alone (the beads check); this verb never reads
     stdin, exactly as the original script never did.
     """
     from nexus.util.nx_argv import nx_argv  # noqa: PLC0415 — stdlib-only; kept off the hook's import path
@@ -202,10 +221,11 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — preflight never
         _nx_status_windows() if _platform() == "win32"
         else _probe("nx (conexus CLI)", nx_argv("--version"))
     )
-    checks = [
-        nx_status,
-        _probe("bd (beads, optional)", ["bd", "version"]),
-    ]
+    checks = [nx_status]
+    # bd is checked, and named in the FAILED marker, only where the project has beads (nexus-sby49.4): a user with no
+    # `.beads/` is not told about a tool they do not use.
+    if _project_has_beads(payload):
+        checks.append(_probe("bd (beads, optional)", ["bd", "version"]))
     # bd is optional; only nx-being-broken triggers the degraded
     # marker. A missing bd reduces task-tracking convenience but
     # doesn't make the routing guidance unsafe.

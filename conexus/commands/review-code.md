@@ -26,7 +26,7 @@ Dispatch the **code-review-expert** agent (Agent tool, `subagent_type: conexus:c
 ## Relay: code-review-expert
 
 **Task**: Review the code changes for quality, security, and best practices
-**Bead**: [fill from active bead above or 'none']
+**Bead**: [fill from the active bead or tracking id above, or 'none']
 
 ### Input Artifacts
 - Files: [fill from modified files list above]

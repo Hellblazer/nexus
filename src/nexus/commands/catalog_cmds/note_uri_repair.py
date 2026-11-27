@@ -110,8 +110,8 @@ def _call(writer: Any, verb_args: dict) -> dict:
     except httpx.HTTPStatusError as exc:
         if exc.response is not None and exc.response.status_code == 404:
             raise click.ClickException(
-                "nx catalog repair-note-uris: this engine does not yet expose POST /v1/catalog/note_uri_repair "
-                "(needs the nexus-bivz3.24 engine release). Upgrade the deployed engine-service, then re-run."
+                "nx catalog repair-note-uris: this engine does not yet expose POST /v1/catalog/note_uri_repair"
+                ". Upgrade the deployed engine-service, then re-run."
             ) from exc
         raise
     except httpx.TimeoutException as exc:
@@ -742,7 +742,7 @@ def repair_note_uris_cmd(
     merge_pass: bool,
     ledger_path: str | None,
 ) -> None:
-    """Repair note URIs that name a collection the note no longer lives in (nexus-bivz3.24).
+    """Repair note URIs that name a collection the note no longer lives in.
 
     \b
     Always prints the census first; writes only with --apply.

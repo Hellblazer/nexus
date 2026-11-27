@@ -368,7 +368,9 @@ class TestRegisterEphemeralPathGuard:
             "--file-path", str(worktree_path),
         ])
         assert result.exit_code != 0
-        assert "nexus-u8n4r" in result.output
+        assert "refusing to register" in result.output
+        assert "agent worktree or system temp dir" in result.output
+        assert "permanent orphan" in result.output
 
     def test_bare_relative_worktree_shaped_path_is_refused(
         self, tmp_path, catalog_env, monkeypatch,
@@ -403,7 +405,9 @@ class TestRegisterEphemeralPathGuard:
             "--file-path", ".claude/worktrees/agent-y/docs/bar.md",
         ])
         assert result.exit_code != 0
-        assert "nexus-u8n4r" in result.output
+        assert "refusing to register" in result.output
+        assert "agent worktree or system temp dir" in result.output
+        assert "permanent orphan" in result.output
 
     def test_clean_path_still_registers(self, tmp_path, catalog_env):
         cat = ActiveCatalog()

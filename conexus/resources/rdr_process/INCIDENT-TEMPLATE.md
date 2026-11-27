@@ -1,5 +1,5 @@
 <!--
-rdr_process incident filing template (RDR-067 Phase 3)
+rdr_process incident filing template
 
 Use this template to file a cross-project silent-scope-reduction incident into
 the `rdr_process` T2 collection. Filings from different projects aggregate into
@@ -139,7 +139,7 @@ thing that informs future prevention intervention design.
 
 Examples:
 - "Close-time problem-statement replay would have caught this before the
-  close commit; RDR-065 Step 1.75 prevents recurrence"
+  close commit; the audit's Step 1.75 prevents recurrence"
 - "Integration bead boundary was unclear in the plan; enrichment template
   should require explicit wiring checklists for composition RDRs"
 - "The retcon reframing happened in a single session turn — external check

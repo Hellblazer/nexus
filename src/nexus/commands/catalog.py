@@ -445,9 +445,9 @@ def _echo_document_rows(presented: "DocumentRows") -> None:
               help="Keep documents whose own catalog meta has KEY equal to VALUE (repeatable, ANDed): "
                    "`--meta quality_gate_overridden=true`, `--meta extraction_method=mineru`. "
                    "An absent key matches nothing, except extraction_source, which is `file` when absent. "
-                   f"Asks the engine's metadata route (engine-service {PHASE2_ROUTES_ENGINE} or later), one page at a time (nexus-uwggq.2.14).")
+                   f"Asks the engine's metadata route (engine-service {PHASE2_ROUTES_ENGINE} or later), one page at a time.")
 @click.option("--sensitive", "only_sensitive", is_flag=True,
-              help="Keep only documents flagged sensitive (RDR-243): the list to review before a clear. "
+              help="Keep only documents flagged sensitive: the list to review before a clear. "
                    "Reads the engine's sensitive list (engine-service 0.1.188 or later), not the catalog's documents; "
                    "paging applies to the matches. With --meta, or with --type or a page past the list's 10000 when the "
                    "engine has the metadata route, it asks that route for the sensitive matches. "
@@ -726,7 +726,7 @@ def search_cmd(query: str, limit: int, offset: int, as_json: bool) -> None:
 @click.option(
     "--source-uri", default="",
     help=(
-        "Persistent URI identity (RDR-096 P3.1). Omit to derive "
+        "Persistent URI identity. Omit to derive "
         "'file://<abspath>' from --file-path automatically. Pass an "
         f"explicit URI ({NOTE_URI_SCHEME}, https://, nx-scratch://, "
         "x-devonthink-item://) to store; the engine "
@@ -789,7 +789,7 @@ def register_cmd(
     if should_skip_ephemeral_registration(_registered_path, _owner_repo_root):
         raise click.ClickException(
             f"refusing to register {_registered_path!r}: it sits under an "
-            f"agent worktree or system temp dir (nexus-u8n4r) and owner "
+            f"agent worktree or system temp dir and owner "
             f"{owner!r}'s repo_root is not itself rooted there — the "
             f"ephemeral checkout will vanish and leave a permanent orphan. "
             f"If this is a deliberate throwaway owner rooted in a "
@@ -849,7 +849,7 @@ def register_cmd(
     "--file-path",
     "file_path",
     default="",
-    help="Catalog file_path column (nexus-y8qtj). Recovery path for entries "
+    help="Catalog file_path column. Recovery path for entries "
          "whose recorded path no longer matches disk (e.g. a moved DEVONthink "
          "export) — the engine's UPDATABLE_DOC_COLUMNS already accepted this "
          "column; this flag exposes it on the CLI.",
@@ -858,13 +858,13 @@ def register_cmd(
     "--alias-of",
     "alias_of",
     default="",
-    help="Canonical tumbler this entry is a duplicate of (nexus-bt8w8). "
+    help="Canonical tumbler this entry is a duplicate of. "
          "Sets ONLY the alias pointer — it does NOT move source_uri and "
          "does NOT remap this entry's links onto the canonical, so a "
          "second entry can still surface in search results and its links "
          "still point at the alias. For the atomic path that does both "
          "in one transaction, use `nx catalog merge <dup> <canonical>` "
-         "instead (nexus-z4rpi); reach for --alias-of only when you want "
+         "instead; reach for --alias-of only when you want "
          "the pointer set by itself, e.g. scripting the three-step "
          "recipe merge automates.",
 )
@@ -901,7 +901,7 @@ def update_cmd(
     the canonical. For the atomic path that does all three in one
     transaction (the recipe this flag existed to let an operator hand-
     assemble), use `nx catalog merge <dup> <canonical>` instead
-    (nexus-z4rpi) — that is the recovery path for a duplicate
+    — that is the recovery path for a duplicate
     registration; reach for --alias-of by itself only when you
     deliberately want just the pointer set.
     """
@@ -1013,7 +1013,7 @@ def update_cmd(
 @click.option("--force", is_flag=True, default=False,
               help="Merge even when the duplicate holds chunks and the canonical holds none.")
 def merge_cmd(duplicate: str, canonical: str, force: bool) -> None:
-    """Collapse DUPLICATE into CANONICAL in one transaction (nexus-z4rpi).
+    """Collapse DUPLICATE into CANONICAL in one transaction.
 
     Replaces the manual three-call recipe (--source-uri '' on the
     duplicate, --source-uri on the canonical, --alias-of on the duplicate)
@@ -1036,7 +1036,7 @@ def merge_cmd(duplicate: str, canonical: str, force: bool) -> None:
     duplicate already aliased to some OTHER canonical, or a merge that
     would close an alias cycle.
 
-    The merge never moves chunks or the collection (nexus-bivz3.27): when
+    The merge never moves chunks or the collection: when
     the duplicate holds chunks and the canonical holds none, the merged
     document would read as chunkless, so that case is refused unless
     --force. Both counts are printed on every merge.
@@ -1096,17 +1096,16 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
 
     Accepts a tumbler or title. Prompts for confirmation unless -y is passed.
     The document is soft-tombstoned (``deleted_at`` stamped) — its manifest
-    and T3 chunks are NOT cascaded (nexus-3ck2g: preserves the ``nx catalog
-    restore`` path, nexus-dkymw — the operator-facing caller nexus-xavu7
-    found missing). On an engine carrying the nexus-3ck2g read-side
+    and T3 chunks are NOT cascaded (preserves the ``nx catalog
+    restore`` path). On an engine carrying the read-side
     tombstone filter, the content stops appearing in search results
     immediately; on an older engine it stays fully searchable until that
     filter is deployed. Undo with ``nx catalog restore <tumbler>`` (see
     ``nx catalog trash`` to list what is restorable) until the manifest/T3
     rows are physically reclaimed via ``nx catalog purge-trash --no-dry-run
     --confirm``. That reclaim honors the grace window since catalog-026
-    (nexus-5da44; this docstring described the earlier not-age-gated
-    behaviour for two weeks after the engine retired it — nexus-kcm6c): a
+    (this docstring described the earlier not-age-gated
+    behaviour for two weeks after the engine retired it): a
     tombstoned document inside ``--older-than-days`` keeps its catalog row,
     manifest rows, and chunks TOGETHER, so restore stays possible for the
     whole window, and all three go together once it passes — after which
@@ -1138,7 +1137,7 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
         click.echo(
             f"Deleted: {lines.label(t, flagged, f'{t} ({entry.title})')}. Links preserved. "
             "Content stops appearing in search once the engine's tombstone "
-            "read-filter is deployed (nexus-3ck2g). Undo with "
+            "read-filter is deployed. Undo with "
             f"'nx catalog restore {t}' until 'nx catalog purge-trash' "
             "physically reclaims it — since catalog-026 that keeps this "
             "doc's row, manifest, and chunks together for the whole "
@@ -1206,22 +1205,22 @@ def reconcile_cmd(dry_run: bool) -> None:
     — in the ``document_chunks`` manifest. Such a document silently drops
     out of catalog-aware retrieval even though T3 still has its chunks.
 
-    GH #1397 (nexus-94fxl) added the ghost class: a document registered
+    GH #1397 added the ghost class: a document registered
     with ``chunk_count == 0`` and an empty manifest because the manifest
     hook dropped its batches (missing doc identity). Rows with a recorded
     ``content_hash`` + ``physical_collection`` are candidates for the same
     T3 rebuild; register-only ghosts (no content_hash) are deliberately
     excluded — they were never indexed, so there is nothing to rebuild.
     A document whose first run failed has no ``content_hash`` yet; the
-    hash its run's fence recorded (``index_content_hash``) stands in
-    (nexus-0ntxj), so ``nx doctor``'s "failed index runs with hidden
+    hash its run's fence recorded (``index_content_hash``) stands in,
+   so ``nx doctor``'s "failed index runs with hidden
     chunks" row and this command agree.
 
     This command finds every document with that gap. A document with NO
     manifest rows is rebuilt from the T3 chunks in its ``physical_collection``
     (matched by the whole-file ``content_hash`` recorded on both the document
-    and every one of its chunks, ordered by character/line span — RDR-108
-    Phase 3 dropped ``chunk_index``/``doc_id`` from chunk metadata, so the
+    and every one of its chunks, ordered by character/line span — the manifest
+    rewrite dropped ``chunk_index``/``doc_id`` from chunk metadata, so the
     spans are what is left to reconstruct order). A document that already has
     manifest rows, but fewer than its ``chunk_count``, is not written into:
     the chunk rows carrying its hash cannot say which positions are missing, so

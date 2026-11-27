@@ -15,7 +15,7 @@ INSIDE `nx_answer` — there are no separately exposed `plan_match` /
 
 ## Rule
 
-1. Optional pre-check: `mcp__plugin_conexus_nexus__plan_search(query=<intent>, limit=3)`
+1. Optional pre-check: `mcp__plugin_conexus_nexus__answer_plan_search(query=<intent>, limit=3)`
    to see whether a reusable plan exists (presentational only — `nx_answer`
    re-matches internally either way).
 2. Dispatch `mcp__plugin_conexus_nexus__nx_answer(question=<intent>,
@@ -39,7 +39,7 @@ question. Plans requiring one are not offered unless it is supplied.
 
 - Catalog `content_type` is open-ended: `code`, `prose`, `rdr`, `paper`,
   `knowledge`, `blog_post` all occur. Values are not validated, so a wrong
-  one retrieves nothing (nexus-enrmd).
+  one retrieves nothing.
 - Omitting is always safe — type-agnostic plans still match.
 
 ## When to pin dimensions
@@ -53,6 +53,6 @@ question. Plans requiring one are not offered unless it is supplied.
 ## Exit conditions
 
 - `nx_answer` returned → present its answer; the run is recorded and any new
-  plan is auto-saved (no manual `plan_save` needed for retrieval pipelines).
+  plan is auto-saved (no manual `answer_plan_save` needed for retrieval pipelines).
 - `nx_answer` errored → surface the error verbatim; do not retry with a
   reworded question more than once.

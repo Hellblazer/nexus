@@ -259,8 +259,15 @@ from nexus._log_safe_url import (
 )
 from nexus._winsec import make_user_dir, open_private
 from nexus.db import gateway_hold
+from nexus.db.t2.bearer_transport import bearer_opener
 from nexus.db.request_gate import before_request
 from nexus.db.engine_reasons import error_reason
+from nexus.db.service_endpoint import (
+    InsecureServiceTransportError,
+    bound_mint_credential,
+    is_loopback_host,
+    require_secure_transport,
+)
 from nexus.rate_brake import parse_retry_after
 
 _log = structlog.get_logger(__name__)
@@ -1071,6 +1078,35 @@ def _lease_key(base_url: str, tenant: str) -> str:
     return hashlib.sha256(f"{host}\x00{tenant}".encode("utf-8")).hexdigest()
 
 
+def _lease_scheme_ok(lease_scheme: object, url: str) -> bool:
+    """Whether a lease minted over *lease_scheme* may serve *url* (nexus-ec37o).
+
+    The lease is keyed by netloc, which says nothing of the scheme: ``http://h`` would borrow
+    a token minted over ``https://h`` and send it in cleartext. A lease records the scheme it
+    was minted over and serves only that one; one with no field (written before the field
+    existed) serves https or a loopback host. Judged on ``urlsplit``, the parse the lease's
+    own netloc key (and urllib) use. The same text is in the plugin's
+    ``_endpoint_resolve.lease_scheme_ok`` (``tests/db/test_data_token_origin_binding.py``)."""
+    import urllib.parse  # noqa: PLC0415 -- lazy: a hook's import budget
+
+    try:
+        parts = urllib.parse.urlsplit(url)
+        hostname = parts.hostname or ""
+    except ValueError:
+        return False
+    scheme = parts.scheme.lower()
+    if lease_scheme is None:
+        return scheme == "https" or (scheme == "http" and is_loopback_host(hostname))
+    return isinstance(lease_scheme, str) and lease_scheme == scheme
+
+
+def _url_scheme(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url).scheme.lower()
+    except ValueError:
+        return ""
+
+
 def _data_token_lease_path(base_url: str, tenant: str, config_dir: Path) -> Path:
     return config_dir / f"{_DATA_TOKEN_LEASE_PREFIX}{_lease_key(base_url, tenant)}"
 
@@ -1107,8 +1143,11 @@ def _default_poster(
         method="POST",
     )
     before_request()  # nexus-ldf2s: a mint is a request like any other
+    # nexus-ec37o: the mint credential uses the proxy and CA of config.yml, never the environment's,
+    # and no proxy at all over plain http (loopback only)
+    opener = bearer_opener(url)
     try:
-        with urllib.request.urlopen(req, timeout=_mint_transport_timeout.get()) as resp:  # noqa: S310 — fixed https/http scheme from configured base_url
+        with opener.open(req, timeout=_mint_transport_timeout.get()) as resp:  # noqa: S310 — fixed https/http scheme from configured base_url
             raw = resp.read()
             return resp.status, (json.loads(raw) if raw else {}), dict(resp.headers)
     except urllib.error.HTTPError as exc:
@@ -1265,9 +1304,14 @@ class DataTokenManager:
 
     # ── Credential resolution ────────────────────────────────────────────────
 
-    def _resolve_credential(self) -> str:
+    def _resolve_credential(self, base_url: str | None = None) -> str:
+        """The mint credential. With *base_url* it is the one bound to that origin
+        (nexus-ec37o: a saved ``mint_token`` goes only to the origin it was saved with; ``""``
+        when it was issued for another); without, presence only (:meth:`is_configured`)."""
         if self._mint_credential is not None:
             return (self._mint_credential() or "").strip()
+        if base_url is not None:
+            return (bound_mint_credential(base_url) or "").strip()
         from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
         return (get_credential("mint_token") or "").strip()
@@ -1336,7 +1380,10 @@ class DataTokenManager:
         token still valid returns that token, and only a failure once it has
         expired raises.
         """
-        credential = self._resolve_credential()
+        try:
+            credential = self._resolve_credential(base_url)
+        except InsecureServiceTransportError as exc:
+            raise DataTokenMintError(str(exc)) from None  # no URL in it; no POST was made
         if not credential:
             return None
         with mint_deadline(deadline_s):
@@ -1700,6 +1747,8 @@ class DataTokenManager:
                 return None
             if data.get("base_url_digest") != _lease_key(base_url, tenant):
                 return None
+            if not _lease_scheme_ok(data.get("scheme"), base_url):
+                return None
             token = data["token"]
             expires_at_wall = float(data["expires_at"])
             ttl_seconds = float(data["ttl_seconds"])
@@ -1742,6 +1791,7 @@ class DataTokenManager:
                 "token": cached.token,
                 "tenant": tenant,
                 "base_url_digest": _lease_key(base_url, tenant),
+                "scheme": _url_scheme(base_url),
                 "expires_at": self._wall_clock() + remaining,
                 "ttl_seconds": cached.ttl_seconds,
                 "minted_by_pid": os.getpid(),
@@ -2086,6 +2136,12 @@ class DataTokenManager:
         :class:`DataTokenMintError`.
         """
         url = base_url.rstrip("/") + "/v1/data-tokens/mint"
+        try:
+            # nexus-ec37o: no mint credential over cleartext off this machine, judged by the same
+            # origin rule as every other bearer (a URL it cannot normalize, userinfo included, is refused)
+            require_secure_transport(base_url)
+        except InsecureServiceTransportError as exc:
+            raise DataTokenMintError(str(exc)) from None
         headers = {"Authorization": f"Bearer {credential}"}
         # nexus-ssqk9: the mint BODY tenant is the configured mint_tenant
         # override when set, else the caller-passed tenant (today's

@@ -283,7 +283,7 @@ def link_bulk_delete_cmd(
 ) -> None:
     """Bulk delete links matching filters.
 
-    nexus-9nim: 4.29.1 inverted the default from "delete unless --dry-run"
+    4.29.1 inverted the default from "delete unless --dry-run"
     to "report unless --no-dry-run --confirm".
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -369,12 +369,12 @@ def links_for_file_cmd(file_path: str, for_model: bool) -> None:
     """Show catalog entries linked to a specific file.
 
     A sensitive document (the file's own or a linked one) is the one-line stub under Claude Code and carries a
-    [sensitive] badge in a terminal (RDR-243 Q2).
+    [sensitive] badge in a terminal.
 
     \b
     Examples:
       nx catalog links-for-file src/app/main.py
-      nx catalog links-for-file docs/rdr/rdr-060.md
+      nx catalog links-for-file docs/rdr/rdr-<number>.md
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
     from nexus.sensitive_output import cli_output_posture  # noqa: PLC0415 — deferred to avoid CLI startup cost
@@ -489,7 +489,7 @@ def link_density_cmd(
 
     \b
     Use this before deciding whether a hybrid retrieval plan
-    (RDR-097) makes sense for a given collection. A collection with
+    makes sense for a given collection. A collection with
     median frontier <``--threshold`` nodes is flagged as a poor
     candidate — graph traversal will add latency with little recall
     gain. Vector-only retrieval is the better choice there.
@@ -688,14 +688,14 @@ def generate_links_cmd(
     by creator, and by worst-case source fan-out, writing nothing. Fan-out is
     the number that distinguishes a fix from a flood: a total count hides one
     document proposing thousands of edges, which is how implements-heuristic
-    became a flood that had to be disabled engine-side (nexus-ybj1b).
+    became a flood that had to be disabled engine-side.
 
-    NOTE (nexus-glivh): this command previously ran only 2 of the 4
+    NOTE: this command previously ran only 2 of the 4
     generators, so prose and pdf links were reachable at index time but not
     from the CLI. All four now run; --no-prose / --no-pdf restore the old
     scope.
 
-    RDR-201 P3.2 (nexus-j9z30.21): --rdr-dependency adds a 5th generator,
+    --rdr-dependency adds a 5th generator,
     seeding RDR-to-RDR links (supersedes/relates) from frontmatter that
     already exists on disk. Needs a registered owner for the current repo
     to scope endpoint resolution (rdr_canonical's Finding-4 fragmentation
@@ -830,7 +830,7 @@ def generate_links_cmd(
 @click.option("--dry-run", is_flag=True, default=False, help="Show what would be done without writing")
 @click.pass_context
 def link_generate_cmd(ctx: click.Context, dry_run: bool) -> None:
-    """Deprecated alias for ``nx catalog generate-links`` (nexus-2297).
+    """Deprecated alias for ``nx catalog generate-links``.
 
     Pre-fix this verb generated only the RDR filepath links and emitted
     a different message. To converge on the verb-noun convention used

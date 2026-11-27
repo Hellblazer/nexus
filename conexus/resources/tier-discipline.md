@@ -6,9 +6,9 @@ Apply at session start and before every major step:
    - T3 (cross-project): `mcp__plugin_conexus_nexus__search(...)` for the check itself (tier checks use `search`, not `nx_answer`); reach for `nx_answer` only when the answer must be reduced from many documents.
    - T2 (project): `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`.
    - T1 (siblings, this session): `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`.
-2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_conexus_nexus__plan_search(query="<task>", limit=3)`.
+2. **Reuse retrieval plans** before a multi-source search: `mcp__plugin_conexus_nexus__answer_plan_search(query="<task>", limit=3)` returns saved `nx_answer` retrieval plans, never implementation or agent-dispatch plans.
 3. **Write back at end** — findings not stored are findings lost. Pick the tier that matches the audience:
    - `mcp__plugin_conexus_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
-   - `mcp__plugin_conexus_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2). Omitting `ttl` (or passing `ttl=None`) is now the record-of-record lifetime: permanent (reversed 2026-09-12, nexus-473mx). Pass an explicit `ttl=N` (days) for an interim finding that should expire.
+   - `mcp__plugin_conexus_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2). Omitting `ttl` (or passing `ttl=None`) is now the record-of-record lifetime: permanent (reversed 2026-09-12). Pass an explicit `ttl=N` (days) for an interim finding that should expire.
    - `mcp__plugin_conexus_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
-   - Retrieval pipelines grow the plan library on their own through `nx_answer`; only `plan_save` a genuinely reusable retrieval plan with a required `verb` and a required `answer_kind` (`unknown` allowed; it serves nothing). Implementation, pipeline, and phased-execution plans do not go here — beads and T2 memory.
+   - Retrieval pipelines grow the plan library on their own through `nx_answer`; only `answer_plan_save` a genuinely reusable retrieval plan with a required `verb` and a required `answer_kind` (`unknown` allowed; it serves nothing). Implementation, pipeline, and phased-execution plans do not go here.

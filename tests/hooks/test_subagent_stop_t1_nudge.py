@@ -30,7 +30,7 @@ VERB = "subagent-stop-t1-nudge"
 SCRATCH = "mcp__plugin_conexus_nexus__scratch"
 NUDGE_SENTENCE = (
     "You wrote nothing to T1. Put your findings in T1 "
-    "(mcp__plugin_conexus_nexus__scratch action=put, tagged with your bead id and write-back), "
+    "(mcp__plugin_conexus_nexus__scratch action=put, tagged with the tags your brief names), "
     "then repeat your complete final report unchanged, ending with the T1 id."
 )
 
@@ -83,7 +83,7 @@ def _payload(transcript: Path | str, **over: object) -> dict:
         "session_id": "s1",
         "hook_event_name": "SubagentStop",
         "agent_id": "a1",
-        "agent_type": "developer",
+        "agent_type": "conexus:developer",
         "agent_transcript_path": str(transcript),
         "stop_hook_active": False,
     }
@@ -181,11 +181,45 @@ def test_an_agent_with_no_t1_tool_or_a_parsed_return_is_never_nudged(
     assert result.stdout is None
 
 
-@pytest.mark.parametrize("agent_type", ["conexus:developer", "worktree-developer", "Explore"])
+@pytest.mark.parametrize("agent_type", ["conexus:developer", "conexus:code-review-expert"])
 def test_an_agent_with_the_t1_tool_is_still_nudged(tmp_path: Path, agent_type: str) -> None:
-    """Non-vacuity for the skip list: it names types, it does not silence all."""
+    """Non-vacuity for the skip list: it names types, it does not silence all. A conexus agent is nudged on a plain account."""
     result = nudge.run(_payload(_no_put_transcript(tmp_path), agent_type=agent_type))
     assert result.stdout is not None
+
+
+_BUILT_INS = ["general-purpose", "Explore", "Plan", "claude", "worktree-developer", "developer", "other-plugin:helper"]
+
+
+@pytest.mark.parametrize("agent_type", _BUILT_INS)
+def test_every_agent_type_is_nudged_on_a_plain_account(tmp_path: Path, agent_type: str) -> None:
+    """The ``t1_nudge`` setting defaults to on: a built-in or another plugin's agent is nudged like a conexus agent, whoever the
+    user is."""
+    result = nudge.run(_payload(_no_put_transcript(tmp_path), agent_type=agent_type))
+    assert result.stdout is not None
+    assert json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"] == NUDGE_SENTENCE
+
+
+@pytest.mark.parametrize("agent_type", ["conexus:developer", *_BUILT_INS])
+def test_the_user_setting_turns_the_nudge_off_for_every_agent_type(
+    tmp_path: Path, agent_type: str, src_user_settings
+) -> None:
+    src_user_settings(t1_nudge=False)
+    assert nudge.run(_payload(_no_put_transcript(tmp_path), agent_type=agent_type)).stdout is None
+
+
+def test_a_project_cannot_turn_the_nudge_off(tmp_path: Path, project_settings_repo) -> None:
+    """Tighten-only: a tracked project file that says ``t1_nudge: false`` is ignored."""
+    repo = project_settings_repo(t1_nudge=False)
+    payload = _payload(_no_put_transcript(tmp_path), agent_type="general-purpose", cwd=str(repo))
+    assert nudge.run(payload).stdout is not None
+
+
+def test_the_nudge_names_no_bead_and_nothing_internal() -> None:
+    import re
+
+    assert "bead" not in nudge.NUDGE.lower()
+    assert re.search(r"\bnexus-[a-z0-9]{4,}\b|RDR-\d+|\bSam\b|\bHal\b", nudge.NUDGE) is None
 
 
 @pytest.mark.parametrize(
@@ -338,18 +372,65 @@ def test_a_non_object_payload_fails_open() -> None:
 
 
 def test_the_counter_seam_is_called_once_with_the_put_count(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, src_user_settings
 ) -> None:
+    src_user_settings(telemetry=True)
     calls: list[tuple] = []
     monkeypatch.setattr(nudge, "record_dispatch", lambda *a: calls.append(a))
     nudge.run(_payload(_no_put_transcript(tmp_path)))
     nudge.run(_payload(_put_transcript(tmp_path)))
-    assert calls == [("s1", "a1", "developer", 0), ("s1", "a1", "developer", 1)]
+    assert calls == [("s1", "a1", "conexus:developer", 0), ("s1", "a1", "conexus:developer", 1)]
+
+
+def test_no_dispatch_record_is_sent_by_default_even_for_a_conexus_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``agent_dispatch_record`` sends the agent type and its put count to the user's engine: opt-in, off by default. The
+    session is still nudged."""
+    calls: list[tuple] = []
+    monkeypatch.setattr(nudge, "record_dispatch", lambda *a: calls.append(a))
+    result = nudge.run(_payload(_no_put_transcript(tmp_path)))
+    assert result.stdout is not None
+    assert calls == []
+
+
+def test_a_project_cannot_turn_the_dispatch_record_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_settings_repo
+) -> None:
+    repo = project_settings_repo(telemetry=True)
+    calls: list[tuple] = []
+    monkeypatch.setattr(nudge, "record_dispatch", lambda *a: calls.append(a))
+    nudge.run(_payload(_no_put_transcript(tmp_path), cwd=str(repo)))
+    assert calls == []
+
+
+def test_a_user_with_telemetry_on_and_the_nudge_off_is_recorded_and_not_nudged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, src_user_settings
+) -> None:
+    src_user_settings(telemetry=True, t1_nudge=False)
+    calls: list[tuple] = []
+    monkeypatch.setattr(nudge, "record_dispatch", lambda *a: calls.append(a))
+    assert nudge.run(_payload(_no_put_transcript(tmp_path))).stdout is None
+    assert calls == [("s1", "a1", "conexus:developer", 0)]
+
+
+def test_a_helper_that_cannot_import_leaves_the_nudge_on_and_the_record_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The nudge adds a reminder (its fallback is True); the record sends data (its fallback is False)."""
+    from tests._audience_fixtures import broken_audience_import  # noqa: PLC0415
+
+    with broken_audience_import(nudge) as reloaded:
+        calls: list[tuple] = []
+        monkeypatch.setattr(reloaded, "record_dispatch", lambda *a: calls.append(a))
+        result = reloaded.run(_payload(_no_put_transcript(tmp_path), agent_type="general-purpose"))
+        assert result.stdout is not None and calls == []
 
 
 def test_a_failing_counter_never_costs_the_nudge(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, src_user_settings
 ) -> None:
+    src_user_settings(telemetry=True)
     def boom(*_a: object) -> None:
         raise RuntimeError("engine down")
 

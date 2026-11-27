@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash
-description: Audit a plan using mcp__plugin_conexus_nexus__nx_plan_audit (RDR-080)
+description: Audit a plan using mcp__plugin_conexus_nexus__nx_plan_audit
 disable-model-invocation: true
 ---
 
@@ -14,7 +14,7 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **plan-validation** skill (calls `mcp__plugin_conexus_nexus__nx_plan_audit` directly — RDR-080, no agent spawn):
+Invoke the **plan-validation** skill (calls `mcp__plugin_conexus_nexus__nx_plan_audit` directly, no agent spawn):
 
 ```
 mcp__plugin_conexus_nexus__nx_plan_audit(
@@ -29,4 +29,4 @@ Fill `plan_json` from the plan to validate (`$ARGUMENTS` or strategic-planner ou
 
 Deliverable: validation report with go/no-go decision — assumption verification, dependency confirmation, build/test command validation, risk assessment.
 
-Findings arrive classified (nexus-ll7zm). `BLOCKS-PLANNING` holds the plan; `DISCOVER-AT-IMPLEMENTATION` is recorded and carried into implementation, never re-planned. A `RESIDUALS-ONLY` verdict means the blocking-round cap is reached: record the residuals and start building.
+Findings arrive classified. `BLOCKS-PLANNING` holds the plan; `DISCOVER-AT-IMPLEMENTATION` is recorded and carried into implementation, never re-planned. A `RESIDUALS-ONLY` verdict means the blocking-round cap is reached: record the residuals and start building.

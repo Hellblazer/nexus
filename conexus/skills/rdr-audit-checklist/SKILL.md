@@ -6,7 +6,7 @@ effort: high
 
 # RDR Audit Skill
 
-Wraps the canonical audit pattern proven in Phase 1b (RDR-067) as a one-command skill. Delegates the classification work to the **deep-research-synthesizer** agent, dispatched with `model: "sonnet"`: the classification is a gate, so it does not take the agent's haiku default (nexus-j6un5.1). See [${CLAUDE_PLUGIN_ROOT}/registry.yaml](../../registry.yaml).
+Wraps the canonical audit pattern proven in a validation spike as a one-command skill. Delegates the classification work to the **deep-research-synthesizer** agent, dispatched with `model: "sonnet"`: the classification is a gate, so it does not take the agent's haiku default. See [${CLAUDE_PLUGIN_ROOT}/registry.yaml](../../registry.yaml).
 
 **Phase 2a scope**: default-mode audit dispatch only. The `list` / `status` / `history` management subcommands are added in Phase 2b (`nexus-dqp.4`) and are not implemented here.
 
@@ -45,35 +45,35 @@ Derivation happens in the skill body before anything else runs. The derived name
 The skill body resolves the **absolute filesystem path** to the target project's worktree so the canonical prompt can Glob files via fully-qualified paths. There is no universal convention for where users keep project worktrees, so the resolution precedence is:
 
 1. **Explicit path argument**: if the positional project argument is already an absolute path (e.g. `/conexus:rdr-audit /srv/work/ART`) OR a path containing a `/`, use it directly and derive the project name from its basename.
-2. **The checkout you run in**: when the current git checkout's repo name (the parent of its git common dir, so a linked worktree names its repo, not its directory) equals the project name, that checkout is the worktree, ahead of every root below including an explicit `NEXUS_PROJECT_ROOTS` (nexus-u1jxt.6: the roots alone scanned nothing from a repo outside them, and from a linked worktree they scanned the primary checkout). The env is a standing default; the checkout you stand in is this invocation's intent. The preamble's `**Worktree found:**` line names which source won.
+2. **The checkout you run in**: when the current git checkout's repo name (the parent of its git common dir, so a linked worktree names its repo, not its directory) equals the project name, that checkout is the worktree, ahead of every root below including an explicit `NEXUS_PROJECT_ROOTS` (the roots alone scanned nothing from a repo outside them, and from a linked worktree they scanned the primary checkout). The env is a standing default; the checkout you stand in is this invocation's intent. The preamble's `**Worktree found:**` line names which source won.
 3. **`NEXUS_PROJECT_ROOTS` env var**: colon-separated list of directories under which the user keeps project worktrees. Example: `NEXUS_PROJECT_ROOTS="$HOME/src:$HOME/work"`. The skill body expands `~` and `$HOME`, probes each root for a child directory matching the project name, and uses the first existing match.
 4. **Default candidate roots** (probed in order, used only if `NEXUS_PROJECT_ROOTS` is unset): `$HOME/git`, `$HOME/src`, `$HOME/projects`, `$HOME/code`, `$HOME/work`, `$HOME/dev`, `$HOME/Documents/git`. None of these are authoritative — they are common conventions, not assumptions. Users whose project roots are elsewhere should set `NEXUS_PROJECT_ROOTS`.
 5. **Not found**: if no root/project combination resolves, the audit still runs — it skips the file-based evidence layer and relies on T2 `rdr_process` + RDR cross-references. Surface a user-visible note: "No local worktree for `<project>` found under `NEXUS_PROJECT_ROOTS` or default candidates; proceeding with T2 evidence only. Set `NEXUS_PROJECT_ROOTS` to restore file-based evidence."
 
-The resolved absolute path is what gets substituted into `{project_path}` in the canonical prompt. The relative project name goes into `{project}` separately for display purposes. Never let the canonical prompt Glob a relative path — it will resolve against the main session's CWD (not the target project) and silently audit the wrong files, as surfaced during RDR-067 Phase 5a MVV first-attempt anomaly.
+The resolved absolute path is what gets substituted into `{project_path}` in the canonical prompt. The relative project name goes into `{project}` separately for display purposes. Never let the canonical prompt Glob a relative path — it will resolve against the main session's CWD (not the target project) and silently audit the wrong files, as surfaced in the first validation run.
 
 ## Main-Session PRE-STEP (NOT DELEGATABLE)
 
 **Transcript mining is NOT delegatable to subagents.** The `~/.claude/projects/*.jsonl` tree is not efficiently scannable from a subagent context — subagents do not have the main session's working directory, cannot traverse the directory efficiently with their tool budget, and the JSONL line lengths cause truncation in Grep tool output. The main session must gather transcript excerpts BEFORE dispatching the deep-research-synthesizer agent.
 
-This invariant was verified in RDR-067 Phase 1b. Violating it means the subagent receives an empty evidence layer and degrades silently.
+This invariant was verified in the audit's first validation spike. Violating it means the subagent receives an empty evidence layer and degrades silently.
 
 **Pre-step flow**:
 
 1. If `--no-transcripts` was passed → skip mining, leave the slot empty, proceed to dispatch. The canonical prompt explicitly supports the empty-slot degraded case.
 2. Otherwise, scope the transcript directory: `ls ~/.claude/projects/-Users-<username>-git-<project>/` (path-mangled from the project's git worktree location). If the directory doesn't exist → leave the slot empty and proceed.
 3. Grep the transcript tree for composition-failure indicator patterns (use the pattern list from the canonical prompt's §Indicator patterns section). Filter files by hit count and recency.
-4. **Filter out meta-session noise**: sessions that DISCUSS the failure mode (the session that created this skill, any session working on RDR-065/66/67/68/69) must be excluded. They are self-referential noise, not evidence. The skill heuristic: exclude sessions modified within the last 24h if they contain ≥5 hits on meta-discussion terms (`silent scope reduction`, `composition failure`, `meta-RDR`, `failure mode`).
+4. **Filter out meta-session noise**: sessions that DISCUSS the failure mode (the session that created this skill, any session working on the audit RDR family) must be excluded. They are self-referential noise, not evidence. The skill heuristic: exclude sessions modified within the last 24h if they contain ≥5 hits on meta-discussion terms (`silent scope reduction`, `composition failure`, `meta-RDR`, `failure mode`).
 5. From the filtered candidates, extract up to 3 short decision-point turns (≤20 lines each) — prefer turns showing a retcon framing (`design mistake`, `latent`, `the plan was wrong`) or a reopen decision.
 6. Format the excerpts as the `{transcript_excerpts}` substitution block with session ID and line numbers preserved as citations.
 7. Budget cap on the pre-step: ≤10 main-session tool calls. Hitting the cap → fall back to empty slot + note the truncation in the dispatch record.
 
-## Bead Sweeps (nexus-ayfxh)
+## Bead Sweeps
 
-`bd search` is case-sensitive on RDR tokens: `bd search 'RDR-101'` misses what `bd search 'rdr-101'` finds. Any audit/sweep step that queries beads by RDR id MUST:
+`bd search` is case-sensitive on RDR tokens: `bd search 'RDR-<n>'` misses what `bd search 'rdr-<n>'` finds. Any audit/sweep step that queries beads by RDR id MUST:
 
 1. Query BOTH case forms (`RDR-NNN` and `rdr-NNN`) and union the results — a single-form empty result is NOT a "no open beads" clear.
-2. Never match on the bare number alone: RDR numbers collide across projects (conexus RDR-005 vs nexus RDR-005). Always carry the `RDR-`/`rdr-` prefix, and verify project scope on each hit before counting it.
+2. Never match on the bare number alone: RDR numbers collide across projects (two projects can each hold an RDR numbered the same). Always carry the `RDR-`/`rdr-` prefix, and verify project scope on each hit before counting it.
 
 **Fast path**: if the target project has no `~/.claude/projects/*` directory, or `--no-transcripts` was passed, skip the entire pre-step and dispatch with an empty `{transcript_excerpts}` block. Phase 1b validated that the prompt handles the empty case cleanly.
 
@@ -92,11 +92,11 @@ Do NOT inline the canonical prompt text into this skill file — the shipped res
 ## Behavior — Audit Dispatch (default mode)
 
 1. **Derive project name** (see Current-Project Derivation)
-2. **Seed T1 link context** so the auto-linker ties findings to RDR-067. Tumblers are per install, so look the RDR up first: `mcp__plugin_conexus_nexus-catalog__search(query="RDR-067 cross-project RDR audit loop", content_type="rdr")`, and use the tumbler it returns for RDR-067. If the catalog does not hold RDR-067 on this install, skip the seed (the audit still runs; its findings just are not auto-linked).
+2. **Seed T1 link context** so the auto-linker ties findings to the RDR that defines this audit. Tumblers are per install, so look the RDR up first: `mcp__plugin_conexus_nexus-catalog__search(query="cross-project RDR audit loop", content_type="rdr")`, and use the tumbler it returns. If the catalog does not hold that RDR on this install, skip the seed (the audit still runs; its findings just are not auto-linked).
    ```
    mcp__plugin_conexus_nexus__scratch(
      action="put",
-     content='{"targets": [{"tumbler": "<RDR-067 tumbler from the catalog search>", "link_type": "cites"}], "source_agent": "deep-research-synthesizer"}',
+     content='{"targets": [{"tumbler": "<audit RDR tumbler from the catalog search>", "link_type": "cites"}], "source_agent": "deep-research-synthesizer"}',
      tags="link-context"
    )
    ```
@@ -119,7 +119,7 @@ Do NOT inline the canonical prompt text into this skill file — the shipped res
 
 ## Management Subcommands
 
-Three management subcommands let users and agents inspect scheduled audits from inside Claude Code without shelling out to OS primitives manually. They read triggers a user installed by hand (a launchd job named `com.nexus.rdr-audit.<project>.90d` or a cron line containing `rdr-audit`, as RDR-067 describes); nothing in the plugin or the CLI creates one, so on most machines `list` prints `No audits scheduled`. Invoked as the first positional argument: `/conexus:rdr-audit list`, `/conexus:rdr-audit status <project>`, etc. If the first token is not one of the reserved subcommand words, the argument is treated as a project name and the skill routes to the default audit-dispatch flow instead.
+Three management subcommands let users and agents inspect scheduled audits from inside Claude Code without shelling out to OS primitives manually. They read triggers a user installed by hand (a launchd job named `com.nexus.rdr-audit.<project>.90d` or a cron line containing `rdr-audit`);  nothing in the plugin or the CLI creates one, so on most machines `list` prints `No audits scheduled`. Invoked as the first positional argument: `/conexus:rdr-audit list`, `/conexus:rdr-audit status <project>`, etc. If the first token is not one of the reserved subcommand words, the argument is treated as a project name and the skill routes to the default audit-dispatch flow instead.
 
 ### Safety Split (core user-protection invariant)
 
@@ -195,7 +195,7 @@ See [${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md](../../resou
 ```markdown
 ## Relay: deep-research-synthesizer
 
-**Task**: Execute the RDR-067 canonical audit prompt against `<project>`. Output must conform to the `## Output format (REQUIRED)` section of the prompt (CA-1 structural criteria a-d).
+**Task**: Execute the canonical audit prompt against `<project>`. Output must conform to the `## Output format (REQUIRED)` section of the prompt (CA-1 structural criteria a-d).
 **Bead**: none (or the invoking bead ID if triggered from planning work)
 
 ### Input Artifacts
@@ -226,7 +226,7 @@ Full audit output conforming to the canonical prompt's output-format contract:
 ## Success Criteria
 
 - [ ] Target project name derived (git remote → pwd basename → user prompt)
-- [ ] T1 link context seeded with RDR-067's tumbler as the catalog returns it on this install (or skipped when the catalog has none)
+- [ ] T1 link context seeded with the audit RDR's tumbler as the catalog returns it on this install (or skipped when the catalog has none)
 - [ ] Main-session transcript pre-step completed (or explicitly skipped via `--no-transcripts` / no transcript directory)
 - [ ] Canonical prompt loaded (shipped `AUDIT-PROMPT.md`, or the T2 `nexus_rdr/067-canonical-prompt-v1` override when present) and substituted
 - [ ] deep-research-synthesizer dispatched with the substituted prompt
@@ -253,7 +253,7 @@ Outputs generated across the audit flow:
 
 ## Phase 1b Signals Folded In
 
-This skill incorporates six signals surfaced by the RDR-067 Phase 1b spike:
+This skill incorporates six signals surfaced by the audit's first validation spike:
 
 1. **Skill body owns `memory_put`** — subagents do not reliably self-persist (0/3 Phase 1b runs called memory_put despite explicit instruction). Resolved by moving persistence to the skill body.
 2. **Transcript-mining fast path** — `--no-transcripts` flag + automatic fast path when no transcript directory exists. Resolves the meta-session noise trap identified in Phase 1b.
@@ -264,7 +264,7 @@ This skill incorporates six signals surfaced by the RDR-067 Phase 1b spike:
 
 ## v1.2 Code-Verification Gate (2026-04-11)
 
-Two independent CA-1/CA-2 audit runs against nexus produced a false-positive SCOPE-REDUCED verdict on RDR-056 because 3/4 success-criteria checkboxes were unchecked — but the code had shipped all 4 features (`probe_hit_rate` in t3.py, `search_clusterer.py`, `distance_threshold` in config.py, `hnsw:search_ef` in doctor.py). The audit read RDR text but not code.
+Two independent CA-1/CA-2 audit runs against nexus produced a false-positive SCOPE-REDUCED verdict on one RDR because 3/4 success-criteria checkboxes were unchecked — but the code had shipped all 4 features (`probe_hit_rate` in t3.py, `search_clusterer.py`, `distance_threshold` in config.py, `hnsw:search_ef` in doctor.py). The audit read RDR text but not code.
 
 **Fix**: the canonical prompt (v1.2) now includes a mandatory **code-verification gate** for any non-CLEAN verdict. Before classifying PARTIAL or SCOPE-REDUCED, the auditor must Grep the project source for key identifiers from the success criteria. If the code ships the feature, the unchecked checkbox is a documentation gap, not a scope gap.
 

@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from tests.hooks.audience_harness import flagged_home, mark_nexus
+from tests.hooks.audience_harness import write_user_settings, strict_home, mark_strict
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 ROUTING = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing"
@@ -146,7 +146,7 @@ def _account_home(request, tmp_path):
     home = tmp_path / "acct-home"
     home.mkdir()
     if not {"shared_repo", "linked_worktree"} & set(request.fixturenames):
-        flagged_home(home)
+        strict_home(home)
     _CURRENT_HOME[0] = home
     yield home
     _CURRENT_HOME[0] = None
@@ -158,15 +158,15 @@ def shared_repo(tmp_path: pathlib.Path) -> pathlib.Path:
     repo = tmp_path / "shared"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    mark_nexus(repo)
+    mark_strict(repo)
     return repo
 
 
 @pytest.fixture()
 def linked_worktree(shared_repo: pathlib.Path, tmp_path: pathlib.Path) -> pathlib.Path:
     (shared_repo / "f.txt").write_text("x")
-    # The marker is committed before `worktree add`, so the worktree checkout has it.
-    subprocess.run(["git", "add", "f.txt", "scripts/agent-worktree-preflight.sh"], cwd=shared_repo, check=True)
+    # The project settings file is committed before `worktree add`, so the worktree checkout has it.
+    subprocess.run(["git", "add", "f.txt", ".nexus/project.json"], cwd=shared_repo, check=True)
     subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"],
         cwd=shared_repo, check=True,
@@ -239,11 +239,12 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "git worktree remove w1",
         "git update-ref -d refs/heads/x",
         "git reflog expire --all",
+        "git reflog delete HEAD@{1}",  # nexus-sby49.3: plan 2.1 says the full guard denies it; the verb set missed it
         "git gc",
     ],
-    # nexus-3c92m round 4 retired the read-only-spelling refinement: a
-    # `git stash list` is denied like any other stash.
-    "stash_read_forms_since_round4": ["git stash list", "git stash show -p"],
+    # nexus-3c92m round 4 retired the read-only-spelling refinement; nexus-5y47c admits `git stash list|show`
+    # again, by segment (tests/test_routing_subagent_git_admit.py). A bare `git stash` and every other stash form deny.
+    "stash_read_forms_since_round4": ["git stash", "git stash pop", "git stash -u", "git stash drop", "git stash clear"],
     # Options between `git` and the verb.
     "global_flags": [
         "git -C {repo} commit -m msg",
@@ -558,7 +559,6 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "git $(basename merge-base | cut -c1-5) topic",
         "git status; echo merge-base | cut -c1-5 | xargs -I{} git {} topic",
         "git merge-base A B | sh",
-        "git diff " + D + "(git merge-base A B)",
         "git diff " + BT + "git merge-base A B" + BT,
         "git merge-base A B > /tmp/out.sh; sh /tmp/out.sh",
         "git merge-base A B | tee out.sh",
@@ -581,41 +581,20 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         # the two flags
         "git log --abbrev-commit | sh",
         "git diff-tree --no-commit-id HEAD | xargs -I{} git {}",
-        "git log --no-commit-id " + D + "(basename /x/commit)",
         # a glued or longer token is not the exempt token
-        "git status; ls x.git/hooks/post-commit",
-        "git status; ls .git/hooks/post-commit-x",
         "git status; ls .git/hooks/{post-commit,x}",
         "git status; ls .git/hooks/post-{commit,x}",
-        "git log --abbrev-commit-x",
-        "git log --no-commit-id=1",
-        "git log x--abbrev-commit",
     ],
     # nexus-7mgnd accepted false positives: a verb glued to a path or word
     # character after a git command denies. Over-blocking is the price of not
     # judging text adjacency (see manufactured_verbs). Pinned so a loosening
     # is a visible decision.
     "glued_verbs_accepted_price": [
-        "git log feature/x-add-thing",
-        "git log origin/feature/add-thing",
-        "git log docs/add.md",
-        "git diff docs/add.md",
-        "git show HEAD:src/commit.py",
         "git branch nexus-96-restore",
-        "git log -- scripts/nexus-96-restore",
-        "git status && ls /Users/x/git/nexus-96-restore",
-        "git status && echo ---clean above---",
-        "git show a461db0b7 --stat; ls scratchpad/commit-a461db0b7",
-        "git status && ls hooks/post-merge",
-        "git log ./checkout",
-        "git log ~/commit",
         "git merge-file a b c",
         "git merge-base-foo",
         "git merge-tree.sh a b",
         # an exempt literal inside a command that can rebuild text
-        "git diff " + D + "(git merge-base HEAD origin/develop)..HEAD",
-        "for d in a b; do git status; ls " + D + "d/.git/hooks/post-commit; done",
-        "for s in 1; do git diff-tree --no-commit-id -r " + D + "s; done",
     ],
     # nexus-dsr6a: repo-config writes. `core.hooksPath` redirects which hook
     # code runs on the orchestrator's later commits and checkouts; `user.*`
@@ -1144,28 +1123,24 @@ _DENY_FAMILIES: dict[str, list[str]] = {
     # Text that happens to contain `git` plus a verb. Over-blocking is the
     # design's stated price (a false positive costs a rephrase, a false
     # negative destroys uncommitted work); pin it so a loosening is a
-    # visible decision.
+    # visible decision. nexus-5y47c loosened the read-only and plain-text
+    # members, and they moved to CATALOGUE_NOW_ADMITTED in
+    # tests/test_routing_subagent_git_admit.py; what is left here still denies.
     "accepted_false_positives": [
-        "git log --grep=commit",
         'echo "later run git commit -m x',
         "\n".join(["python3 - <<'EOF'", "print('as text only: git checkout -- t3.py')", "EOF"]),
         "git status && echo add${item} to list",
         "git log file${i}.txt",
         "make i${n}t",
-        "ls ~/git/ && echo add",
-        "cd ~/git && echo add",
         # nexus-dsr6a: `config` after git reads as the verb when it is the
         # subcommand slot's word, wherever the command sits, and a read that
         # pipes into a non-filter is unprovable.
-        "echo git config user.name x",
         "git config --get user.name | sort",
         # nexus-dsr6a: a standalone `config` word reads as the verb in text that
         # can rebuild a word, whatever it follows.
         "git show HEAD:config | sort",
         # nexus-0l6zh: the same no-position-analysis price for gh and hub.
         "echo 'gh pr checkout' > notes.txt",
-        "gh pr view 5 && echo pr checkout",
-        "cd ~/bin/gh && echo repo sync",
     ],
 }
 
@@ -1639,7 +1614,7 @@ def test_the_process_cwd_is_never_the_project(linked_worktree):
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
     env["NX_HOOK_PYTHON"] = sys.executable
     # Flagged: with no project known there is no marker to find, so the account decides.
-    flagged_home(_CURRENT_HOME[0])
+    strict_home(_CURRENT_HOME[0])
     proc = subprocess.run(
         _guard_argv(), input=payload, capture_output=True, text=True,
         timeout=20, env=env, cwd=str(linked_worktree),
@@ -1665,7 +1640,9 @@ def test_an_undeterminable_worktree_fails_closed(cmd, tmp_path):
 
 def test_the_routing_allow_escape_passes_and_is_logged(shared_repo, tmp_path):
     """The escape is auditable: the fire lands in the drop meter (this
-    subprocess has no engine to reach) carrying rule and outcome."""
+    subprocess has no engine to reach) carrying rule and outcome. The meter is the opt-in telemetry's, so the account
+    turns ``telemetry`` on."""
+    write_user_settings(_CURRENT_HOME[0], telemetry=True)
     for cmd in (
         "git commit -m msg # routing-allow: orchestrator sanctioned",
         "git checkout -- x.py  # routing-allow: orchestrator asked me to revert this",
@@ -1687,7 +1664,7 @@ def test_the_deny_message_gives_the_hand_back_protocol(shared_repo):
     assert out["permissionDecision"] == "deny"
     reason = out["permissionDecisionReason"]
     low = reason.lower()
-    for needle in ("orchestrator commits", "uncommitted", "falsify by comparison", "git show head:", "diff"):
+    for needle in ("hand back diffs", "it commits", "git show head:", "diff <scratch>"):
         assert needle in low, f"deny message lost {needle!r}: {reason}"
     # The escape is named for an operator, never handed to the gated agent
     # (nexus-cnzei.2 S8), and the completion wording scopes SendMessage to
@@ -1697,9 +1674,10 @@ def test_the_deny_message_gives_the_hand_back_protocol(shared_repo):
     # nexus-7mgnd/0l6zh review: the tool call's cwd decides the worktree
     # exemption, so a cd inside the command must not be read as one; the one
     # literal `git -C <worktree>` shape is the named carve-out (2026-11-18).
-    assert "cwd of the tool call decides" in low, reason
-    assert "`cd <wt>`" in reason and "`git -C <absolute worktree path>" in reason, reason
-    assert "isolation: worktree" in reason, reason
+    assert "`cd <wt>` counts only before `&&`" in reason, reason
+    assert "`git -C <absolute worktree root>" in reason and "`cd <worktree root> && git" in reason, reason
+    # nexus-5y47c: what was denied, the one allowed shape, who to ask. The base text was 2.9 KB.
+    assert len(reason.encode()) < 1500, len(reason.encode())
 
 
 def test_the_spliced_expansion_deny_names_the_reconstructed_fragment(shared_repo):
@@ -3668,17 +3646,18 @@ def test_a_brace_in_the_subcommand_denies_even_where_the_verb_would_be_the_workt
 def test_the_sidefx_deny_message_names_the_family_and_what_stays_allowed(shared_repo):
     reason = _verdict("git remote set-url origin /tmp/zz", shared_repo)["permissionDecisionReason"]
     assert "remote set-url" in reason, reason
-    assert "nexus-k66o5" in reason, reason
+    assert "Verbs that write `.git/config` by side effect are denied" in reason, reason
     assert "git remote -v" in reason, reason
     assert "help.autocorrect" in reason, reason
+    assert "nexus-" not in reason, "the deny text names no internal id"
     plain = _verdict("git commit -m x", shared_repo)["permissionDecisionReason"]
-    assert "nexus-k66o5" not in plain, "the ordinary verb deny must not carry the note"
+    assert "Verbs that write `.git/config` by side effect" not in plain, "the ordinary verb deny must not carry the note"
     assert "`git config` writes are denied" not in reason, "a remote verb is not a `git config` write"
 
 
 def test_the_sidefx_deny_in_a_worktree_says_it_reaches_the_primary(linked_worktree):
     reason = _verdict("git remote set-url origin /tmp/zz", linked_worktree)["permissionDecisionReason"]
-    assert "linked worktree" in reason and "nexus-k66o5" in reason, reason
+    assert "linked worktree" in reason and "Verbs that write `.git/config` by side effect" in reason, reason
     assert "git config --worktree" not in reason, "the worktree note is about config keys, not remotes"
 
 
@@ -4211,17 +4190,17 @@ def _audience_module():
     return _audience
 
 
-def test_the_fixture_repos_are_maintainer_checkouts_by_their_marker(shared_repo, linked_worktree):
+def test_the_fixture_repos_are_strict_projects_by_their_settings_file(shared_repo, linked_worktree):
     """T1: asserted directly, so no verdict below depends on where the suite runs. It
-    FAILS, never skips, when the marker is missing from the checkout under test."""
+    FAILS, never skips, when the project settings file is missing from the checkout under test."""
     audience = _audience_module()
     for repo in (shared_repo, linked_worktree):
-        assert (repo / "scripts" / "agent-worktree-preflight.sh").is_file(), f"no marker at {repo}"
-        assert audience.nexus_repo({"cwd": str(repo)}) is True, repo
-        assert audience.maintainer({"cwd": str(repo)}) is True, repo
+        assert (repo / ".nexus" / "project.json").is_file(), f"no project settings at {repo}"
+        assert audience.project_settings({"cwd": str(repo)}).get("subagent_git") == "strict", repo
+        assert audience.guard_mode({"cwd": str(repo)}) == "strict", repo
     assert _CURRENT_HOME[0] is not None and not (
-        _CURRENT_HOME[0] / ".config" / "nexus" / "maintainer-profile"
-    ).exists(), "these tests must run unflagged: the marker alone has to carry them"
+        _CURRENT_HOME[0] / ".config" / "nexus" / "conexus.json"
+    ).exists(), "these tests must run with no user settings: the project's file alone has to carry them"
 
 
 def test_a_marked_linked_worktree_keeps_its_exemptions_and_the_config_deny(linked_worktree):
@@ -4231,30 +4210,30 @@ def test_a_marked_linked_worktree_keeps_its_exemptions_and_the_config_deny(linke
     assert out.get("permissionDecision") == "deny", out
 
 
-def test_a_worktree_on_a_branch_older_than_the_marker_gets_the_full_form_only_with_the_flag(
+def test_a_worktree_on_a_branch_older_than_the_settings_file_gets_the_full_form_only_with_the_user_setting(
     shared_repo, linked_worktree, tmp_path,
 ):
-    """T2: the marker is tracked, so a branch that predates it checks out without one."""
+    """T2: the settings file is tracked, so a branch that predates it checks out without one."""
     old = tmp_path / "old-branch-wt"
     subprocess.run(
         ["git", "worktree", "add", "-q", "--orphan", "-b", "old-branch", str(old)],
         cwd=shared_repo, check=True, capture_output=True,
     )
-    assert not (old / "scripts" / "agent-worktree-preflight.sh").exists()
+    assert not (old / ".nexus" / "project.json").exists()
     cmd = "git config user.name someone"
-    assert _verdict(cmd, old).get("permissionDecision") != "deny", "no marker, no flag: a user repo"
-    flagged_home(_CURRENT_HOME[0])
-    assert _verdict(cmd, old).get("permissionDecision") == "deny", "the flag restores the full form"
+    assert _verdict(cmd, old).get("permissionDecision") != "deny", "no settings file, no user setting: the seatbelt"
+    strict_home(_CURRENT_HOME[0])
+    assert _verdict(cmd, old).get("permissionDecision") == "deny", "the user setting restores the full form"
 
 
-def test_a_clone_with_no_origin_is_still_a_maintainer_checkout(shared_repo, linked_worktree, tmp_path):
+def test_a_clone_with_no_origin_still_has_its_projects_strict_setting(shared_repo, linked_worktree, tmp_path):
     """T3: the lab-remote shape (a clone with its origin removed): tracked files are
-    copied, so the marker is there and the guard gets the full form."""
+    copied, so the project's settings file is there and the guard gets the full form."""
     clone = tmp_path / "lab-remote-copy"
     subprocess.run(
         ["git", "clone", "-q", "--no-hardlinks", str(shared_repo), str(clone)], check=True, capture_output=True,
     )
     subprocess.run(["git", "remote", "remove", "origin"], cwd=clone, check=True, capture_output=True)
-    assert _audience_module().maintainer({"cwd": str(clone)}) is True
+    assert _audience_module().guard_mode({"cwd": str(clone)}) == "strict"
     out = _verdict("git commit -m msg", clone)
     assert out.get("permissionDecision") == "deny", out

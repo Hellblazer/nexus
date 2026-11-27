@@ -22,9 +22,9 @@ explicitly for the cheap end of the table below:
 
 ## Code Navigation
 
-**REQUIRED SUB-SKILL (main session):** Use **/conexus:serena-code-nav** for symbol-level architecture discovery before dispatching, and put the symbol map in the relay: architect-planner's frontmatter denies the shared Serena (nexus-j6un5.5). Combine with `nx search --hybrid` for semantic discovery — Serena for precision, nx search for conceptual queries.
+**REQUIRED SUB-SKILL (main session):** Use **/conexus:serena-code-nav** for symbol-level architecture discovery before dispatching, and put the symbol map in the relay: architect-planner's frontmatter denies the shared Serena. Combine with `nx search --hybrid` for semantic discovery — Serena for precision, nx search for conceptual queries.
 
-`--hybrid` and `--lexical` are different flags doing different jobs, and the names invite conflating them. `--hybrid` RE-RANKS vector results by git frecency for code corpora; it never changes which rows come back. `--lexical` ADDS hits from the engine's exact-text indexes (full-text + trigram) to the vector results; it changes which rows come back and is what finds a rare identifier a semantic search misses (measured 0.167 -> 0.698 precision@10 on rare tokens, RDR-217). Reach for `--lexical` when you know the token; `--hybrid` when you want recently-touched code ranked higher.
+`--hybrid` and `--lexical` are different flags doing different jobs, and the names invite conflating them. `--hybrid` RE-RANKS vector results by git frecency for code corpora; it never changes which rows come back. `--lexical` ADDS hits from the engine's exact-text indexes (full-text + trigram) to the vector results; it changes which rows come back and is what finds a rare identifier a semantic search misses (measured 0.167 -> 0.698 precision@10 on rare tokens). Reach for `--lexical` when you know the token; `--hybrid` when you want recently-touched code ranked higher.
 
 - **Map system structure**: `get_symbols_overview` for class/interface inventories without reading files
 - **Find architectural patterns**: `find_referencing_symbols` to trace abstraction usage across the codebase
@@ -87,7 +87,7 @@ Architecture design with execution plan
 ### Quality Criteria
 - [ ] Component boundaries clearly defined
 - [ ] Interfaces specified
-- [ ] Execution plan created with beads
+- [ ] Execution plan created (with beads where the project has a `.beads/` directory)
 ```
 
 For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
@@ -106,10 +106,10 @@ The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-
 - [ ] All requirements addressed in design
 - [ ] Component boundaries clearly defined
 - [ ] Interfaces specified
-- [ ] Execution plan created with beads
-- [ ] Beads created for trackable work
+- [ ] Execution plan created (with beads where the project has a `.beads/` directory)
+- [ ] Where the project has a `.beads/` directory, beads created for trackable work
 - [ ] Risks identified with mitigations
-- [ ] Ready for `mcp__plugin_conexus_nexus__nx_plan_audit` validation (RDR-080)
+- [ ] Ready for `mcp__plugin_conexus_nexus__nx_plan_audit` validation
 
 ## Agent-Specific PRODUCE
 

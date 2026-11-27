@@ -62,6 +62,7 @@ def test_all_command_modules_registered():
         "self_cmd": "self",
         "search_cmd": "search",
         "service_cmd": "service",
+        "settings_cmd": "settings",
         "storage_cmd": "storage",
         "stranded_cmd": "stranded",
         "taxonomy_cmd": "taxonomy",
@@ -147,7 +148,7 @@ def test_nexus_mcp_tools_registered():
         "search", "query", "store_put", "store_get", "store_list",
         "memory_put", "memory_get", "memory_search", "memory_delete",
         "memory_consolidate", "scratch", "scratch_manage",
-        "collection_list", "plan_save", "plan_search",
+        "collection_list", "answer_plan_save", "answer_plan_search",
     }
     missing = expected - tools
     assert not missing, f"Missing nexus MCP tools: {missing}"

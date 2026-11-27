@@ -28,17 +28,17 @@ Stored shape (``ANSWER_KIND_VERSION`` 1)::
   says how that was decided (``explicit``, ``heuristic`` or ``model-assisted``,
   the RDR's three words). With no recorded route the kind is ``unknown``.
 * ``saved`` is a plan a person or an agent put in the library, with the kind the
-  caller declared when saving it (``plan_save``'s ``answer_kind``, ``unknown``
+  caller declared when saving it (``answer_plan_save``'s ``answer_kind``, ``unknown``
   allowed) or a project-tier template. It records no route: the kind is the
   saver's own claim, unreviewed, so eligibility honours it narrowly
   (``nexus.plans.eligibility``; nexus-0vh80).
 
 Who may write a declaration (nexus-jypmj.2.1 fix round, nexus-0vh80). Only the
 seed loader writes ``curated`` (builtin tier) and ``saved`` (the other tiers),
-only the ``nx_answer`` grow site writes ``grown``, and only ``plan_save`` writes
-``saved`` from a caller's argument. The ``plan_save`` door replaces any embedded
+only the ``nx_answer`` grow site writes ``grown``, and only ``answer_plan_save`` writes
+``saved`` from a caller's argument. The ``answer_plan_save`` door replaces any embedded
 ``answer_kind`` with the one the caller declared, so a caller cannot forge
-``curated`` or ``grown``. Read paths (``nx plan hygiene``, the matcher, the
+``curated`` or ``grown``. Read paths (``nx answer-plan hygiene``, the matcher, the
 session cache) never refuse or retire a row for its declaration: a bad one
 decodes to ``unknown``.
 
@@ -319,7 +319,7 @@ def grown_plan_json(
 def saved_plan_json(plan_json: str, kind: PlanAnswerKind) -> str:
     """Return *plan_json* with the ``saved`` declaration of *kind* (nexus-0vh80).
 
-    The ``plan_save`` door calls this with the kind its caller declared. A
+    The ``answer_plan_save`` door calls this with the kind its caller declared. A
     declaration already in *plan_json* is replaced, never trusted, so a caller
     cannot embed a ``curated`` or ``grown`` one. A *plan_json* that is not a
     JSON object comes back unchanged.

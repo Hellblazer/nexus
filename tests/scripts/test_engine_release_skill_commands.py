@@ -263,7 +263,8 @@ def test_step_3h_has_exactly_the_three_legs_each_with_its_own_bound() -> None:
         "A": {
             "--prev-client": "$PREV",
             "--new-jar-commit": "$TAG",
-            "--ceiling": _BOUND,
+            # no --ceiling (total through settle): every leg's byte bound is migrate + ready, and leg A's reboot
+            # (Sam, T2 nexus/sam-ruling-upgrade-gate-move-pacing-2026-11-23); the moves' WAL is move_wal_bytes
             "--ceiling-boot": _BOUND,
             "--ceiling-reboot": _BOUND,
             "--json": "output/gate/A.json",
@@ -277,7 +278,7 @@ def test_step_3h_has_exactly_the_three_legs_each_with_its_own_bound() -> None:
         assert steps[:4] == [
             f"cd ~/src/nexus-wt/engine-cut-$TAG-{name}",
             "uv sync -q",
-            "NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m",
+            "NX_BUILD_LEASE_WAIT=28800 NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh --lab-run lab-m",
             "mkdir -p output/gate",
         ], f"Leg {name} must build the stamped jar in its own tag-tree worktree, lease before grant: {steps}"
         assert opts == expected[name], f"Leg {name} harness options differ:\n{opts}\n!=\n{expected[name]}"

@@ -33,7 +33,7 @@ mcp__plugin_conexus_nexus-catalog__link(from_tumbler="...", to_tumbler="...", li
 
 See SubagentStart hook output for full tool reference.
 
-### Retrieval preference (RDR-080)
+### Retrieval preference
 
 For multi-source or multi-step retrieval, prefer `nx_answer` over hand-rolled
 `search()` / `query()` chains.  It goes through the plan-match gate (saving
@@ -61,7 +61,7 @@ retrieval plan.
 
 Run these four reads BEFORE substantive work. Skipping on the grounds that "this task is structural / direct / tiers won't help here / I can read the code faster" is the rationalization the Red Flags table in the orchestration skill's reference warns about — sibling agents may have just done this work, prior project history may already cover it, and findings caught in passing (bugs noticed while mapping code, races spotted while implementing, perf gaps glimpsed while reviewing) get lost when post-flight write-back is also skipped:
 
-1. **Plan reuse**: `mcp__plugin_conexus_nexus__plan_search(query="<your task>", limit=3)` — if a match returns, reuse it as a starting structure.
+1. **Answer-plan reuse**: `mcp__plugin_conexus_nexus__answer_plan_search(query="<your task>", limit=3)` finds saved retrieval plans for `nx_answer`, never implementation plans; a match can shape your search queries.
 2. **T2 (project)**: `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")` — prior project decisions, findings, session context.
 3. **T3 (cross-project)**: `mcp__plugin_conexus_nexus__search(query="<topic>", corpus="knowledge")` for the check itself; reach for `mcp__plugin_conexus_nexus__nx_answer(question="<question>", scope="<corpus>")` only when the answer must be reduced from many documents (cross-corpus synthesis, ranking/comparing, RDR research) — p50 80s, p95 217s, can time out at 300s.
 4. **T1 (siblings)**: `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")` — sibling agents in the current session may have done this work already.
@@ -75,8 +75,8 @@ Skip the steps here that call conexus nexus tools when those tools are not avail
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
 
 - **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_conexus_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
-- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="deep-research-synthesizer")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
-- **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="deep-research-synthesizer")`. Omit `ttl` — a decision or finding is permanent unless there is a reason it should expire. The `agent` kwarg attributes this write to the deep-research-synthesizer role so `nx tier-status` slices by agent (nexus-9clx).
+- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="deep-research-synthesizer")`. The `agent` kwarg mirrors `memory_put`'s attribution — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
+- **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="deep-research-synthesizer")`. Omit `ttl` — a decision or finding is permanent unless there is a reason it should expire. The `agent` kwarg attributes this write to the deep-research-synthesizer role so `nx tier-status` slices by agent.
 
 **Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting — for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
 
@@ -85,7 +85,7 @@ Skip the steps here that call conexus nexus tools when those tools are not avail
 Before starting, validate the relay contains all required fields per [RELAY_TEMPLATE.md](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md):
 
 1. [ ] Non-empty **Task** field (1-2 sentences)
-2. [ ] **Bead** field present (ID with status, or 'none')
+2. [ ] **Bead** field present (ID with status, a tracking id, or 'none')
 3. [ ] **Input Artifacts** section with at least one artifact
 4. [ ] **Deliverable** description
 5. [ ] At least one **Quality Criterion** in checkbox format

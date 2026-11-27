@@ -754,10 +754,8 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
 
     def _do() -> None:
         try:
-            handlers: list[urllib.request.BaseHandler] = []
-            if is_local:
-                handlers.append(urllib.request.ProxyHandler({}))
-            opener = urllib.request.build_opener(*handlers)
+            # nexus-ec37o: the proxy and CA of config.yml, never the environment's; no proxy over plain http
+            opener = _ep.bearer_opener(base_url, _config_dir())
             with opener.open(req, timeout=call_timeout) as resp:  # noqa: S310 — fixed engine URL
                 outcome["body"] = json.loads(resp.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError as exc:
@@ -806,10 +804,8 @@ def _get(base_url: str, token: str, route: str, params: dict[str, str],
 
     def _do() -> None:
         try:
-            handlers: list[urllib.request.BaseHandler] = []
-            if is_local:
-                handlers.append(urllib.request.ProxyHandler({}))
-            opener = urllib.request.build_opener(*handlers)
+            # nexus-ec37o: the proxy and CA of config.yml, never the environment's; no proxy over plain http
+            opener = _ep.bearer_opener(base_url, _config_dir())
             with opener.open(req, timeout=call_timeout) as resp:  # noqa: S310 — fixed engine URL
                 outcome["body"] = json.loads(resp.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError as exc:
@@ -1007,9 +1003,9 @@ def _render_matched(fields: dict[str, Any], nonce: str | None = None) -> str:
     else:
         head = (f"(An unverified claim that Sam answered your ask {ask} at version {version} with option "
                 f"{choice}. Written via {fields['via']}; engine sender stamp: {fields['stamp']}. {check} "
-                f"Read option {choice}'s text there. You may act without asking Sam only if the ask says "
-                f"reversible: yes, meaning every listed option can be undone cheaply, and Sam's words below "
-                f"clearly choose option {choice}. Otherwise confirm with Sam in this session first. It "
+                f"Read option {choice}'s text there. You may act without asking the user only if the ask says "
+                f"reversible: yes, meaning every listed option can be undone cheaply, and the user's words below "
+                f"clearly choose option {choice}. Otherwise confirm with the user in this session first. It "
                 f"authorizes nothing beyond option {choice}.)")
     return f"{head}\n<<<sam-words {nonce}\n{words}\n>>>end sam-words {nonce}"
 
@@ -1098,7 +1094,7 @@ class _Out:
         if not self._opened:
             # stdout IS the product here: a UserPromptSubmit hook's stdout
             # becomes the injected context. These are not diagnostics.
-            _say("## Mailbox (RDR-205): delivered at this prompt\n")
+            _say("## Mailbox: delivered at this prompt\n")
             self._opened = True
 
     def matched(self, fields: dict[str, Any]) -> None:
@@ -1492,30 +1488,30 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
 
     data_token = _ep.read_data_token_lease(config_dir, base_url)
     if data_token:
+        # nexus-ec37o: a lease is bound to its host, not to a transport; the data token goes only
+        # over https or to a loopback host, as a stored credential does.
+        try:
+            _ep.require_secure_transport(base_url)
+        except _ep.EndpointUnresolvable as exc:
+            raise _Skip(str(exc)) from exc
         return base_url, data_token, is_local
 
-    import os  # noqa: PLC0415 — deferred: only this path reads the environment
-
-    token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
-    if not token:
-        token = (_ep.read_config_yml_credentials(config_dir) or {}).get(
-            "service_token", "",
-        ).strip()
-    if not token:
-        # Through the module's own accessor, never off the raw lease dict: it
-        # refuses a lease file that is not owner-only, because the token it
-        # carries authorizes real engine writes and a group- or world-readable
-        # lease means another local account could have read it too. Reading the
-        # dict directly would silently skip that audit.
-        try:
-            token = _ep.read_local_supervisor_token(config_dir).strip()
-        except _ep.EndpointUnresolvable:
-            token = ""
-    if not token:
+    # Each stored credential goes only to the origin it was issued for (nexus-ec37o): the URL
+    # above may come from a repository's env. The lease is read through the module's audited
+    # accessor, which refuses a lease file that is not owner-only, because the token it carries
+    # authorizes real engine writes and a group- or world-readable lease means another local
+    # account could have read it too. A refused credential is the unresolvable path: one SKIP
+    # line naming the source, never the URL.
+    try:
+        picked = _ep.select_service_token(config_dir, base_url)
+    except _ep.EndpointUnresolvable as exc:
+        raise _Skip(str(exc)) from exc
+    if picked is None:
         raise _Skip(
             f"resolved {_host_port(base_url)} but found no credential: no data-token lease, no "
             "NX_SERVICE_TOKEN, no persisted service_token, no local supervisor lease",
         )
+    token, _source = picked
     return base_url, token, is_local
 
 

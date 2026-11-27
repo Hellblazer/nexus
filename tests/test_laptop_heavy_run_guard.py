@@ -54,7 +54,7 @@ def test_a_mac_xdist_substrate_run_with_no_grant_is_refused_with_the_lab_remote_
             _config(4, "tests/db", "-n", "4", "-k", "a b"), platform="darwin", env={})
     assert err.value.returncode == 75
     assert "laptop heavy run: refusing to start" in err.value.msg
-    assert "lab-remote -c lab-l -- uv run pytest tests/db -n 4 -k 'a b'" in err.value.msg
+    assert "lab-remote -c lab-m -- uv run pytest tests/db -n 4 -k 'a b'" in err.value.msg
     # The predicate is "substrate is not none" (the engine CAN boot), and the message must not claim more.
     assert "NX_TEST_T2_SUBSTRATE is not none" in err.value.msg and "boots the engine" not in err.value.msg
 
@@ -340,7 +340,7 @@ def test_an_n_from_pytest_addopts_is_in_the_lab_remote_line(gate) -> None:
     with pytest.raises(pytest.exit.Exception) as err:
         gate._refuse_heavy_laptop_run(_config(4, "tests/db"), platform="darwin",
                                       env={"PYTEST_ADDOPTS": "-n 4 -k 'a b'"})
-    assert "lab-remote -c lab-l -- uv run pytest -n 4 -k 'a b' tests/db" in err.value.msg
+    assert "lab-remote -c lab-m -- uv run pytest -n 4 -k 'a b' tests/db" in err.value.msg
 
 
 def test_a_pytest_addopts_that_does_not_parse_still_refuses(gate) -> None:
@@ -481,3 +481,56 @@ def test_taking_the_lease_clears_the_mark_of_an_earlier_session(gate, monkeypatc
     monkeypatch.setattr(gate, "_selected_t2_substrate_boots_engine", lambda: False)
     gate._take_suite_lease()
     assert gate._suite_lease_waited is False
+
+
+@pytest.mark.parametrize("args", [
+    (),
+    ("-n", "8"),
+    ("-n", "auto", "-q"),
+    ("tests",),
+    ("tests/",),
+    ("tests", "-n", "8", "--maxfail", "3", "-p", "no:cacheprovider"),
+    ("--maxfail=3", "-x", "tests/"),
+])
+def test_is_full_suite_true_for_a_run_with_no_selection(gate, args) -> None:
+    assert gate._is_full_suite(list(args)) is True
+
+
+@pytest.mark.parametrize("args", [
+    ("-m", "lint"),
+    ("-n", "4", "-m", "lint"),
+    ("-m=lint",),
+    ("-mlint",),
+    ("-k", "foo"),
+    ("-k=foo",),
+    ("-kfoo",),
+    ("tests/db",),
+    ("tests/db/test_x.py",),
+    ("tests/test_x.py::test_a",),
+    ("tests", "tests/db"),
+    ("-n", "8", "tests/db"),
+])
+def test_is_full_suite_false_for_a_selected_run(gate, args) -> None:
+    assert gate._is_full_suite(list(args)) is False
+
+
+def test_an_option_value_is_not_read_as_a_path(gate) -> None:
+    # `8` after -n is the worker count, `3` after --maxfail the failure budget: neither selects a file.
+    assert gate._is_full_suite(["-n", "8", "--maxfail", "3", "tests"]) is True
+
+
+@pytest.mark.parametrize(("args", "klass"), [
+    (("-n", "4"), "lab-l"),
+    (("tests", "-n", "4"), "lab-l"),
+    (("-n", "4", "-m", "lint"), "lab-m"),
+    (("-n", "4", "-k", "foo"), "lab-m"),
+    (("tests/db", "-n", "4"), "lab-m"),
+    (("tests/test_x.py::test_a", "-n", "4"), "lab-m"),
+])
+def test_the_refusal_names_lab_l_only_for_a_full_suite(gate, args, klass) -> None:
+    with pytest.raises(pytest.exit.Exception) as err:
+        gate._refuse_heavy_laptop_run(_config(4, *args), platform="darwin", env={})
+    assert f"lab-remote -c {klass} -- uv run pytest" in err.value.msg
+    other = "lab-m" if klass == "lab-l" else "lab-l"
+    assert f"-c {other} " not in err.value.msg
+    assert "lab-6c18g" not in err.value.msg

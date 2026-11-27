@@ -740,8 +740,28 @@ _FLOW_LINES_MAX = 40
 def read_config_yml_credentials(
     config_dir: Path, keys: tuple[str, ...] = ("service_url", "service_token"),
 ) -> dict[str, str]:
+    """:func:`read_config_yml_section` for the ``credentials:`` block."""
+    return read_config_yml_section(config_dir, "credentials", keys)
+
+
+#: The keys of the ``network:`` section a bearer-carrying request reads (nexus-ec37o); the CLI's
+#: ``nexus.db.t2.bearer_transport.NETWORK_KEYS``.
+NETWORK_KEYS = ("https_proxy", "ca_bundle")
+
+
+def read_config_yml_network(config_dir: Path) -> dict[str, str]:
+    """``{"https_proxy": ..., "ca_bundle": ...}`` from the ``network:`` block of *config_dir*'s
+    ``config.yml`` (``nx config set network.https_proxy``), an absent key absent. The proxy and CA
+    a bearer-carrying request may use come from here and never from the environment."""
+    return read_config_yml_section(config_dir, "network", NETWORK_KEYS)
+
+
+def read_config_yml_section(
+    config_dir: Path, section: str, keys: tuple[str, ...],
+) -> dict[str, str]:
     """Bounded, stdlib-only extraction of ``service_url``/``service_token``
-    (or the other *keys* asked for) from the persisted ``config.yml``.
+    (or the other *keys* asked for) from the *section* block (``credentials``, or ``network``)
+    of the persisted ``config.yml``.
 
     NOT a general YAML parser -- this module cannot import ``nexus`` or a
     third-party YAML library (nexus-vg6d4). It is a line-oriented scan
@@ -791,11 +811,11 @@ def read_config_yml_credentials(
         indent = len(line) - len(line.lstrip(" "))
         stripped = line.strip()
         if not in_credentials:
-            if stripped == "credentials:":
+            if stripped == f"{section}:":
                 in_credentials = True
                 cred_indent = indent
-            elif indent == 0 and stripped.startswith("credentials:") and stripped[len("credentials:"):].strip().startswith("{"):
-                flow = stripped[len("credentials:"):].strip()
+            elif indent == 0 and stripped.startswith(f"{section}:") and stripped[len(f"{section}:"):].strip().startswith("{"):
+                flow = stripped[len(f"{section}:"):].strip()
                 inside = _flow_body(flow)
                 for more in lines[number + 1: number + _FLOW_LINES_MAX]:
                     if inside is not None:
@@ -818,6 +838,28 @@ def read_config_yml_credentials(
             if value:
                 result[key] = value
     return result
+
+
+def lease_scheme_ok(lease_scheme: object, url: str) -> bool:
+    """Whether a lease minted over *lease_scheme* may serve *url* (nexus-ec37o).
+
+    The lease is keyed by netloc, which says nothing of the scheme: ``http://h`` would borrow
+    a token minted over ``https://h`` and send it in cleartext. A lease records the scheme it
+    was minted over and serves only that one; one with no field (written before the field
+    existed) serves https or a loopback host. Judged on ``urlsplit``, the parse the lease's
+    own netloc key (and urllib) use. The same text is in the CLI's
+    ``nexus.db.data_token._lease_scheme_ok`` (``tests/db/test_data_token_origin_binding.py``)."""
+    import urllib.parse  # noqa: PLC0415 -- lazy: a hook's import budget
+
+    try:
+        parts = urllib.parse.urlsplit(url)
+        hostname = parts.hostname or ""
+    except ValueError:
+        return False
+    scheme = parts.scheme.lower()
+    if lease_scheme is None:
+        return scheme == "https" or (scheme == "http" and is_loopback_host(hostname))
+    return isinstance(lease_scheme, str) and lease_scheme == scheme
 
 
 def read_data_token_lease(
@@ -843,6 +885,9 @@ def read_data_token_lease(
     own ``tenant`` field, so a lease for a different tenant on the same
     host still reproduces a matching digest and would otherwise be
     indistinguishable from a same-tenant lease by that check alone.
+
+    A lease also records the scheme it was minted over (nexus-ec37o) and serves *base_url*
+    only over that one; see :func:`lease_scheme_ok` for a lease that has no such field.
     """
     import hashlib  # noqa: PLC0415 -- lazy: the session-start hook's 100 ms; only this reader needs them
     import urllib.parse  # noqa: PLC0415
@@ -866,6 +911,8 @@ def read_data_token_lease(
             digest = hashlib.sha256(f"{host}\x00{lease_tenant}".encode("utf-8")).hexdigest()
             if data.get("base_url_digest") != digest:
                 continue
+            if not lease_scheme_ok(data.get("scheme"), base_url):
+                continue  # minted over another scheme (nexus-ec37o)
             token = str(data["token"])
             expires_at = float(data["expires_at"])
             ttl_seconds = float(data["ttl_seconds"])
@@ -879,6 +926,399 @@ def read_data_token_lease(
         if expires_at > best_expiry:
             best_token, best_expiry = token, expires_at
     return best_token
+
+
+# ── Credential-origin binding (nexus-ec37o) ─────────────────────────────────
+#
+# Stdlib mirror of the pure functions in ``nexus.db.service_endpoint`` under the
+# same section heading. A repository's env reaches the hooks (RDR-259 research
+# 27), so the URL half of an endpoint is attacker-choosable; a credential kept in
+# the account's own store is sent only to the origin it was issued for: a saved
+# ``service_token`` / ``mint_token`` to the saved ``service_url`` (else
+# :data:`DEFAULT_MANAGED_SERVICE_URL`), the supervisor lease token to the lease's
+# own endpoint. An env ``NX_SERVICE_TOKEN`` / ``NX_MINT_TOKEN`` is unbound. The
+# function bodies below are held to the CLI's by an AST comparison and a table of
+# cases in ``tests/hooks/test_origin_binding_parity.py``; change both together.
+
+#: Mirrors ``nexus.db.service_endpoint.DEFAULT_MANAGED_SERVICE_URL``.
+DEFAULT_MANAGED_SERVICE_URL = "https://api.conexus-nexus.com"
+
+_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+
+
+class CredentialRefused(EndpointUnresolvable):
+    """A credential would go to an origin it was not issued for, or over cleartext
+    http off this machine. The message names the credential source and the fix and
+    never the URL."""
+
+
+def normalize_origin(url: str) -> tuple[str, str, int] | None:
+    """``(scheme, host, port)`` of an http(s) URL, or ``None`` when it does not
+    name one this module can compare safely.
+
+    The scheme and host are lowercased, one trailing dot is dropped from the
+    host, an IPv6 literal loses its brackets, and the default ports 80/443 are
+    filled in. ``localhost`` stays ``localhost``: it is NOT 127.0.0.1 (macOS and
+    Windows resolve it to ::1 first, and another local account can bind
+    ``[::1]:<port>``). Hand-parsed so the plugin's stdlib mirror is the same
+    text: a backslash, ``@``, ``%``, whitespace, control or non-ASCII character
+    in the authority, an empty port, or a port outside 1-65535 yields ``None``
+    (two HTTP stacks can read such a URL as different hosts, and a credential
+    is never bound to a host the two might disagree on)."""
+    if not isinstance(url, str):
+        return None
+    scheme, sep, rest = url.strip().partition("://")
+    scheme = scheme.lower()
+    if not sep or scheme not in _DEFAULT_PORTS:
+        return None
+    authority = rest
+    for stop in "/?#":
+        authority = authority.split(stop, 1)[0]
+    if not authority or any(c in "@\\%" or not "!" <= c <= "~" for c in authority):
+        return None
+    if authority.startswith("["):
+        host, close, tail = authority[1:].partition("]")
+        if not close or ":" not in host or (tail and not tail.startswith(":")):
+            return None
+        port_text, has_port = tail[1:], bool(tail)
+    else:
+        host, colon, port_text = authority.rpartition(":") if ":" in authority else (authority, "", "")
+        has_port = bool(colon)
+        if ":" in host:
+            return None
+    if has_port and not (port_text.isascii() and port_text.isdigit() and 1 <= int(port_text) <= 65535):
+        return None
+    host = host.lower()
+    if host.endswith("."):
+        host = host[:-1]
+    if not host:
+        return None
+    return scheme, host, int(port_text) if has_port else _DEFAULT_PORTS[scheme]
+
+
+def origins_equal(a: str | None, b: str | None) -> bool:
+    """True when both URLs normalize and their origins are equal."""
+    left = normalize_origin(a) if a else None
+    right = normalize_origin(b) if b else None
+    return left is not None and left == right
+
+
+def is_loopback_host(host: str) -> bool:
+    """``localhost`` or a loopback IP literal. For the cleartext rule only:
+    origin equality never treats ``localhost`` as a loopback address."""
+    import ipaddress  # noqa: PLC0415 — deferred: stdlib, only the cleartext check needs it
+
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def no_redirect_handler() -> Any:
+    """A urllib handler that follows no redirect: the 3xx answer surfaces as an ``HTTPError``.
+
+    urllib copies ``Authorization`` to a redirect's target, so a bound origin that answers 3xx
+    (or an attacker who can make it) would carry the credential to any host, and an https
+    origin to plain http. Every urllib opener that carries a bearer includes this handler
+    (nexus-ec37o); httpx follows nothing by default, and a lint pins that no bearer client
+    turns it on. Mirror of ``nexus.db.service_endpoint.no_redirect_handler``.
+    """
+    import urllib.request  # noqa: PLC0415 — deferred: stdlib, only a caller that builds an opener needs it
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    return _NoRedirect()
+
+
+def bound_origin_for_saved(saved_service_url: str | None) -> str:
+    """The origin a saved credential was issued for."""
+    return (saved_service_url or "").strip().rstrip("/") or DEFAULT_MANAGED_SERVICE_URL
+
+
+def choose_bound_token(
+    url: str, candidates: list[tuple[str, str, str | None]],
+) -> tuple[tuple[str, str] | None, list[str]]:
+    """First usable candidate for *url*: ``((value, source), refused_sources)``.
+
+    A candidate is ``(value, source, bound_url)``; ``bound_url`` ``None`` means
+    unbound (an env token). A candidate whose bound origin differs from *url*'s
+    is skipped and its source recorded in the second element."""
+    refused: list[str] = []
+    for value, source, bound in candidates:
+        if not value:
+            continue
+        if bound is None or origins_equal(bound, url):
+            return (value, source), refused
+        refused.append(source)
+    return None, refused
+
+
+def mismatch_message(url_source: str, refused: list[str]) -> str:
+    return (
+        f"{url_source} names a service that {' and '.join(refused)} was not issued for, "
+        "so that credential is not sent there. Export NX_SERVICE_TOKEN for this service, or "
+        "point it at the service the credential belongs to (`nx config set service_url`)."
+    )
+
+
+def insecure_message(url_source: str) -> str:
+    return (
+        f"{url_source} is plain http to a host that is not this machine, and a bearer token is "
+        "not sent over that. Use an https URL (or a loopback address for a local service)."
+    )
+
+
+def describe_url_source(saved_url: str = "") -> str:
+    """A fixed label for where the URL in use came from, in the resolvers' order."""
+    if os.environ.get("NX_SERVICE_URL", "").strip():
+        return "NX_SERVICE_URL"
+    if saved_url.strip():
+        return "the saved service_url"
+    if os.environ.get("NX_SERVICE_HOST", "").strip() or os.environ.get("NX_SERVICE_PORT", "").strip():
+        return "NX_SERVICE_HOST / NX_SERVICE_PORT"
+    return "the service URL"
+
+
+def require_secure_transport(url: str, *, url_source: str | None = None) -> None:
+    """Raise :class:`CredentialRefused` unless a bearer may travel to *url*: https, or
+    http to a loopback host. A URL that does not normalize is refused too."""
+    origin = normalize_origin(url)
+    if origin is not None and (origin[0] == "https" or is_loopback_host(origin[1])):
+        return
+    raise CredentialRefused(insecure_message(url_source or describe_url_source()))
+
+
+def bearer_proxy_for(url: str, proxy: str) -> str | None:
+    """*proxy* (``network.https_proxy`` of ``config.yml``) for a bearer request to *url*, else ``None``.
+
+    Only an https endpoint may use a proxy: a plain-http request is sent direct whatever the
+    configuration names, because a proxy would read its ``Authorization`` header (the supervisor
+    lease token travels over loopback http, always). A URL that does not normalize gets no proxy
+    either. The proxy comes from ``config.yml`` and never from the environment (a repository's
+    ``.claude/settings.json`` can set ``HTTPS_PROXY``). Mirrors
+    ``nexus.db.service_endpoint.bearer_proxy_for`` (parity-tested)."""
+    origin = normalize_origin(url)
+    return proxy if proxy and origin is not None and origin[0] == "https" else None
+
+
+#: System CA bundles tried, in order, when the interpreter's own default path (which is where
+#: OpenSSL looks when nothing is set) names no file: a uv or other standalone CPython hard-codes a
+#: build-tree path. System files only; the environment names none of them.
+_SYSTEM_CA_BUNDLES = (
+    "/etc/ssl/cert.pem",                      # macOS, Alpine, OpenBSD
+    "/etc/ssl/certs/ca-certificates.crt",     # Debian, Ubuntu
+    "/etc/pki/tls/certs/ca-bundle.crt",       # RHEL, Fedora
+    "/etc/ssl/ca-bundle.pem",                 # openSUSE
+)
+
+
+def _read_pem(path: str) -> str:
+    """A PEM bundle's text, so OpenSSL loads it from memory: a file BIO on Windows needs an OPENSSL_Applink
+    the host process may not carry (the process dies with "no OPENSSL_Applink")."""
+    with open(path, encoding="ascii", errors="replace") as fh:
+        return fh.read()
+
+
+def bearer_ssl_context(ca_bundle: str = "") -> Any:
+    """A client ``ssl.SSLContext`` for a bearer-carrying request, with NO environment in it.
+
+    ``ssl.create_default_context()`` ends in ``set_default_verify_paths()``, where OpenSSL reads
+    ``SSL_CERT_FILE`` and ``SSL_CERT_DIR``: a repository's env can name a CA there. This context
+    loads the roots the environment would have been the default for instead: the interpreter's
+    compiled-in bundle and directory (``ssl.get_default_verify_paths().openssl_cafile`` and
+    ``openssl_capath``, which no variable changes), else a well-known system bundle, plus the
+    Windows ROOT and CA stores. ``SSLKEYLOGFILE`` is not read. *ca_bundle* (``network.ca_bundle``) adds
+    roots: a file, or a directory of hashed certificates. A failure to load it raises ``OSError``."""
+    import ssl  # noqa: PLC0415 — deferred: only a request builds a context
+
+    paths = ssl.get_default_verify_paths()
+    cafile = next((c for c in (paths.openssl_cafile, *_SYSTEM_CA_BUNDLES) if c and os.path.isfile(c)), None)
+    # Not ``ssl.create_default_context()``: with no cafile it ends in ``set_default_verify_paths()``, where
+    # OpenSSL reads ``SSL_CERT_FILE`` / ``SSL_CERT_DIR``, and it opens the file ``SSLKEYLOGFILE`` names.
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # verify_mode CERT_REQUIRED and check_hostname on
+    if sys.version_info >= (3, 13):  # what create_default_context added in 3.13
+        ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN | ssl.VERIFY_X509_STRICT
+    if cafile is not None:
+        try:
+            ctx.load_verify_locations(cadata=_read_pem(cafile))
+        except (OSError, ssl.SSLError):
+            pass
+    capath = paths.openssl_capath
+    if capath and os.path.isdir(capath):
+        try:
+            ctx.load_verify_locations(capath=capath)
+        except OSError:
+            pass
+    if sys.platform == "win32":
+        for store in ("ROOT", "CA"):
+            try:
+                certs = [c for c, enc, trust in ssl.enum_certificates(store) if enc == "x509_asn" and (trust is True or ssl.Purpose.SERVER_AUTH.oid in trust)]
+            except (OSError, AttributeError):
+                continue
+            if certs:
+                ctx.load_verify_locations(cadata=b"".join(certs))
+    if ca_bundle:
+        if os.path.isdir(ca_bundle):
+            ctx.load_verify_locations(capath=ca_bundle)
+        else:
+            ctx.load_verify_locations(cadata=_read_pem(ca_bundle))
+    return ctx
+
+
+def bearer_opener(url: str, config_dir: Path | None = None) -> Any:
+    """A urllib opener for a bearer-carrying request to *url*: the proxy and extra CA of
+    *config_dir*'s ``config.yml`` (default: :func:`default_config_dir`), never the environment's.
+
+    ``ProxyHandler`` with an explicit mapping reads no proxy variable (``{}`` is no proxy), and the
+    ``HTTPSHandler`` carries :func:`bearer_ssl_context`; no redirect is followed (:func:`no_redirect_handler`). Mirrors
+    ``nexus.db.t2.bearer_transport.bearer_opener``."""
+    import urllib.request  # noqa: PLC0415 — deferred: only a request builds an opener
+
+    net = read_config_yml_network(config_dir if config_dir is not None else default_config_dir())
+    proxy = bearer_proxy_for(url, net.get("https_proxy", ""))
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"https": proxy} if proxy else {}),
+        urllib.request.HTTPSHandler(context=bearer_ssl_context(net.get("ca_bundle", ""))),
+        no_redirect_handler(),
+    )
+
+
+def stored_credential(
+    name: str, env_var: str, saved: dict[str, str],
+) -> tuple[str, str, str | None] | None:
+    """``(value, source, bound_url)`` for a credential in the CLI's precedence (env, then
+    config.yml), or ``None``. An env value is unbound; a saved one is bound to the saved
+    ``service_url`` (else the default managed endpoint). Mirrors
+    ``nexus.db.service_endpoint._stored_credential``."""
+    value = _credential(name, env_var, saved)
+    if not value:
+        return None
+    if os.environ.get(env_var, ""):
+        return value, env_var, None
+    return value, f"the saved {name}", bound_origin_for_saved(saved.get("service_url"))
+
+
+def audited_lease(config_dir: Path) -> dict[str, Any] | None:
+    """The live supervisor lease with its token read through
+    :func:`read_local_supervisor_token` (the owner-only audit), or ``None``."""
+    lease = read_storage_service_lease(config_dir)
+    if lease is None:
+        return None
+    try:
+        token = read_local_supervisor_token(config_dir).strip()
+    except EndpointUnresolvable:
+        token = ""
+    return {"host": lease["host"], "port": lease["port"], "token": token}
+
+
+def host_port_url(host: object, port: object) -> str:
+    """``http://host:port`` for a host the environment or a lease names, an IPv6 literal bracketed.
+
+    The one spelling of that URL: the CLI's and the plugin's copies are held to the same AST
+    (``tests/hooks/test_origin_binding_parity.py``), so an IPv6 lease or env host reads as the
+    same origin on both sides."""
+    shown = str(host)
+    if ":" in shown and not shown.startswith("["):
+        shown = f"[{shown}]"
+    return f"http://{shown}:{port}"
+
+
+def lease_origin(lease: dict[str, Any]) -> str:
+    return host_port_url(lease['host'], lease['port'])
+
+
+def select_service_token(
+    config_dir: Path,
+    url: str,
+    *,
+    saved: dict[str, str] | None = None,
+    lease: dict[str, Any] | None | bool = False,
+    allow_mint: bool = False,
+) -> tuple[str, str] | None:
+    """The bearer for *url*: ``(token, source)``, or ``None`` when no credential is set.
+
+    Order: the env or saved ``service_token``, then the supervisor lease token (a lease
+    the caller has already read may be passed; ``False`` reads it, audited), then, with
+    *allow_mint*, a mint credential, whose presence is reported as ``("", "mint_token")``.
+    Each stored credential is used only for the origin it was issued for. Credentials
+    that exist but were all issued elsewhere raise :class:`CredentialRefused`, as does a
+    token that would travel over cleartext http off this machine."""
+    if saved is None:
+        saved = read_config_yml_credentials(config_dir, ("service_url", "service_token", "mint_token"))
+    label = describe_url_source(saved.get("service_url", ""))
+    candidates: list[tuple[str, str, str | None]] = []
+    stored = stored_credential("service_token", "NX_SERVICE_TOKEN", saved)
+    if stored is not None:
+        candidates.append(stored)
+    picked, refused = choose_bound_token(url, candidates)
+    if picked is None:
+        found = audited_lease(config_dir) if lease is False else lease
+        if found and found.get("token"):
+            picked, more = choose_bound_token(
+                url, [(str(found["token"]), "the supervisor lease token", lease_origin(found))],
+            )
+            refused += more
+    if picked is None and allow_mint:
+        minted = stored_credential("mint_token", "NX_MINT_TOKEN", saved)
+        if minted is not None:
+            mint_pick, more = choose_bound_token(url, [minted])
+            refused += more
+            if mint_pick is not None:
+                require_secure_transport(url, url_source=label)
+                return "", "mint_token"
+    if picked is None:
+        if refused:
+            raise CredentialRefused(mismatch_message(label, refused))
+        return None
+    require_secure_transport(url, url_source=label)
+    return picked
+
+
+def _may_carry_bearer(url: str) -> bool:
+    """Whether a bearer may travel to *url*: https, or http to a loopback host (nexus-ec37o)."""
+    origin = normalize_origin(url)
+    return origin is not None and (origin[0] == "https" or is_loopback_host(origin[1]))
+
+
+def pinned_endpoint(config_dir: Path) -> "tuple[str, str] | tuple[None, None]":
+    """``(base_url, token)`` for the telemetry senders, or ``(None, None)``. Never raises.
+
+    *config_dir* is ``<account home>/.config/nexus``, the account home from the OS account database, which the caller
+    passes in. This reads that directory and nothing else: no environment variable, and it never asks
+    :func:`default_config_dir` or :func:`resolve_base_url`, which do. An engine a repository names through
+    ``NX_SERVICE_URL`` or ``NX_SERVICE_HOST``/``NX_SERVICE_PORT`` is not an engine for telemetry (RDR-259 Decision 9).
+
+    Where telemetry may go, in the CLI's order: the saved ``service_url``, else the live local supervisor lease. A fresh
+    data-token lease for that host wins over a static token. Which credential may go there is the origin binding
+    (nexus-ec37o): a saved ``service_token`` goes with the saved URL, the lease's token only to the lease's own
+    endpoint, and no bearer goes over plain http off this machine. A URL carrying ``user:password@`` is refused, as the
+    CLI refuses it.
+    """
+    try:
+        lease = read_storage_service_lease(config_dir)
+        if lease is not None and not lease.get("token"):
+            lease = None
+        saved = read_config_yml_credentials(config_dir)
+        url = saved.get("service_url", "").strip().rstrip("/")
+        if url:
+            if has_userinfo(url) or not _may_carry_bearer(url):
+                return None, None
+            token = read_data_token_lease(config_dir, url) or saved.get("service_token", "").strip()
+            if not token and lease is not None and origins_equal(url, lease_origin(lease)):
+                token = lease["token"]
+            return (url, token) if token else (None, None)
+        if lease is not None:
+            url = lease_origin(lease)
+            if not _may_carry_bearer(url):
+                return None, None
+            return url, read_data_token_lease(config_dir, url) or lease["token"]
+    except Exception:  # noqa: BLE001 -- telemetry resolution is best effort; unresolvable is the answer
+        pass
+    return None, None
 
 
 def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
@@ -959,11 +1399,11 @@ def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
                 f"not, and no live local supervisor lease at {_shown(lease_path)} "
                 f"supplies a port"
             )
-        return f"http://{host}:{port}", False
+        return host_port_url(host, port), False
 
     lease = read_storage_service_lease(config_dir)
     if lease is not None:
-        return f"http://{lease['host']}:{lease['port']}", True
+        return host_port_url(lease['host'], lease['port']), True
 
     lease_path = _lease_path_or_none(config_dir)
     raise EndpointUnresolvable(
@@ -1022,22 +1462,33 @@ def endpoint_usable(config_dir: Path, *, retry_budget_s: float | None = None, gr
         if url:
             if has_userinfo(url):
                 return False  # the CLI raises ServiceUrlUserinfoError here (nexus-ujbf8)
-            if _credential("service_token", "NX_SERVICE_TOKEN", saved):
-                return True
+            # The credential the drain would send: each stored one only to the origin it was
+            # issued for (nexus-ec37o), so "usable" agrees with what goes on the wire. The grace-read
+            # lease is read only when no stored credential answers first.
+            try:
+                if select_service_token(config_dir, url, saved=saved, lease=None, allow_mint=True) is not None:
+                    return True
+            except CredentialRefused:
+                pass
             lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s, grace=grace)
-            if lease is not None and lease["token"]:
-                return True
-            return bool(_credential("mint_token", "NX_MINT_TOKEN", saved))
+            return select_service_token(config_dir, url, saved=saved, lease=lease, allow_mint=True) is not None
         # The host never decides the answer (it defaults to 127.0.0.1), so a lease is
         # read only when the port or the token is missing.
         port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
         port = int(port_str) if port_str else None
+        host = os.environ.get("NX_SERVICE_HOST", "").strip() or None
         token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or None
+        lease = None
         if port is None or token is None:
             lease = read_storage_service_lease(config_dir, retry_budget_s=retry_budget_s, grace=grace)
             if lease is not None:
                 port = port if port is not None else lease["port"]
-                token = token or lease["token"] or None
-        return port is not None and bool(token)
+                host = host or lease["host"]
+        if port is None:
+            return False
+        # The lease token goes only to the lease's own endpoint, and no bearer over cleartext off
+        # this machine (nexus-ec37o). This leg never read the saved token, so ``saved`` is empty.
+        url = host_port_url(host or '127.0.0.1', port)
+        return select_service_token(config_dir, url, saved={}, lease=lease) is not None
     except Exception:  # noqa: BLE001 -- any failure to resolve is "not usable", as the CLI's raise is
         return False

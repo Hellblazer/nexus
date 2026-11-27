@@ -119,7 +119,10 @@ def _run(args: list[str], root: Path, project: Path) -> subprocess.CompletedProc
         "HOME": os.environ.get("HOME", ""),
         "CLAUDE_PROJECT_DIR": str(project),
         "CLAUDE_PLUGIN_ROOT": str(root),
+        # A once-per-session mark (the settings notice) goes in the temporary directory: keep it in this test's own.
+        "TMPDIR": str(root.parent / "tmp"),
     }
+    (root.parent / "tmp").mkdir(exist_ok=True)
     if any(a.endswith("/launch/nx_launch.py") for a in args):
         # A launcher entry would find this machine's own install and run its real
         # hook verbs (an upgrade, a generation sweep). This file is about which
@@ -142,7 +145,7 @@ def _require_uv() -> None:
 
 
 def test_the_walk_finds_the_uv_entries() -> None:
-    """Non-vacuity: twenty-one conexus entries and four sn entries launch through uv
+    """Non-vacuity: twenty-two conexus entries and four sn entries launch through uv
     (7 until RDR-228, nexus-sv2wx.8, which put the six ``nx-hook`` entries and the
     session-end entry behind the launcher and added the setup notice hook; 15 to 18
     at nexus-3lqxv, the three ``compact_checkpoint.py`` entries; 18 to 19 at
@@ -150,9 +153,9 @@ def test_the_walk_finds_the_uv_entries() -> None:
     nexus-4cgop, the Stop ``stop_wake_guard.py`` entry; 20 to 21 at nexus-qo7ie.36, the
     PreToolUse ``destructive_action_advice.py`` entry; 21 to 22 at RDR-253 Step 6, the SessionEnd
     ``compact_checkpoint.py end`` entry; 22 to 21 at nexus-sby49.5, the PermissionRequest
-    auto-approve entry is removed)."""
+    auto-approve entry is removed; 21 to 22 at nexus-sby49.12, the UserPromptSubmit ``settings_notice.py`` entry)."""
     counts = {p: sum(1 for plugin, _, _ in _uv_entries() if plugin == p) for p in _PLUGINS}
-    assert counts == {"conexus": 21, "sn": 4}, counts
+    assert counts == {"conexus": 22, "sn": 4}, counts
 
 
 def test_a_launcher_entry_really_starts_the_launcher(tmp_path: Path) -> None:

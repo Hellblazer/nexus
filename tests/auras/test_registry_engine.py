@@ -166,6 +166,6 @@ def test_the_shipped_ci_develop_red_passes_every_check_against_the_real_registry
 
     [check] = check_auras(
         entries, cwd=None, templates=templates,
-        read_group=lambda name: GroupRecord(name, serves=("nexus-develop",)),
+        read_group=lambda name: GroupRecord(name, serves=("nexus-develop",)), member_groups=lambda: ["push-train"],
     )
     assert not check.findings and not check.skipped and not check.warnings, (check.findings, check.skipped, check.warnings)

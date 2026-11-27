@@ -119,7 +119,8 @@ class TestAspectsGcRefusesInsteadOfFalseClean:
         combined = (result.output or "") + (result.stderr or "")
         assert "CASCADE" in combined, "must state what the FK DOES guarantee"
         assert "source_uri" in combined, "must state what is NOT certified clean"
-        assert "nexus-ingey" in combined
+        assert "aspects gc is retired" in combined
+        assert "certify that class clean" in combined, "must refuse to certify the uncovered class"
 
     def test_store_refuses_rather_than_returning_a_zero_tuple(self) -> None:
         """Defense in depth: the CLI guard fixes one caller, but (0, 0) is

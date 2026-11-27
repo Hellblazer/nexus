@@ -2,17 +2,19 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-48 registered tools + 13 demoted (plain functions, no @mcp.tool();
+51 registered tools + 13 demoted (plain functions, no @mcp.tool();
 the ten operator_* functions were demoted at nexus-ivi4s). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
-operators toward no longer exists.
+operators toward no longer exists. Three of the 51 are the deprecated plan_save,
+plan_search and plan_delete aliases of the answer_plan_* tools (nexus-sby49.4).
 """
 from __future__ import annotations
 
 import contextlib
 import contextvars
 import dataclasses
+import functools
 import hashlib
 import json
 import re
@@ -65,6 +67,7 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistr
 from nexus.mcp._sdk_patches import apply_sdk_patches as _apply_sdk_patches
 from nexus.mcp._server_version import server_version as _server_version
 from nexus.mcp._tool_failure import fail as _fail
+from nexus.mcp._tool_failure import is_failure
 from nexus.mcp.answer_chunks import cap_chunks, harvest_chunks  # GH #1667
 from nexus.lua_runtime import library as _procedure_library
 from nexus.lua_runtime.runner import (
@@ -237,7 +240,7 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
                 _fail(f"Error: {text}\n"
                 "The borrowed T1 (scratch) session token was revoked (its owner "
                 "exited), and this process re-minted its own token for the "
-                "session (nexus-k9sec) -- the retry on the fresh token still "
+                "session -- the retry on the fresh token still "
                 "failed authorization, so the token was not the cause. Reconnect "
                 "the conexus MCP/extension; if the same failure recurs "
                 "immediately, the service-side auth state needs direct "
@@ -247,7 +250,7 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
             return (
                 _fail(f"Error: {text}\n"
                 "The MCP session's T1 (scratch) session token had rotated, and "
-                "the automatic self-heal (nexus-g5hzk) DID adopt a fresh token "
+                "the automatic self-heal DID adopt a fresh token "
                 "and retry — the retry itself still failed authorization. The "
                 "owner incarnation and its refresh loop are NOT implicated; a "
                 "session token adopted but the request still failed "
@@ -259,8 +262,8 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
         if HEAL_REMINT_SUFFIX in text:
             return (
                 _fail(f"Error: {text}\n"
-                "The session-lease self-heal (nexus-g5hzk) found nothing "
-                "fresher, but the data-token re-mint (nexus-wrwb7) DID mint a "
+                "The session-lease self-heal found nothing "
+                "fresher, but the data-token re-mint DID mint a "
                 "fresh bearer and retried — the retry still failed "
                 "authorization. With the bearer freshly minted, the SESSION "
                 "token in the lease is the likely stale credential (its owner "
@@ -275,7 +278,7 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
                 "The MCP session's T1 (scratch) session token is no longer valid, "
                 "AND the automatic self-heal already failed: on this 401 the store "
                 "re-read the owner-republished session lease and found no fresh "
-                "token to adopt (nexus-g5hzk — no lease, expired, or unchanged). "
+                "token to adopt. "
                 "That means the token's owner incarnation is gone or its refresh "
                 "loop died — reconnect the conexus MCP/extension so a fresh "
                 "session-scoped token is minted. A bare CLI self-heals on its "
@@ -321,7 +324,7 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
 #:
 #: Basis: none of this module's paginated text tools clamp the caller-
 #: supplied ``limit`` (or, for ``store_list(docs=True)``/``memory_search``/
-#: ``plan_search``, some fetch the FULL matching set before any pagination
+#: ``answer_plan_search``, some fetch the FULL matching set before any pagination
 #: at all) — and the audit found the backing pgvector engine does not
 #: either: ``PgVectorRepository#searchWithTokens``'s own javadoc states "No
 #: upper bound is applied to nResults by design: the result-size caps the
@@ -831,8 +834,7 @@ def _retry_deferred_t1_mint() -> None:
         raise RuntimeError(
             "T1 scratch is unavailable: the storage service could not mint a "
             f"session token ({exc}). Start it (`nx daemon service start`) and "
-            "retry — this failure affects T1 scratch only. (In cloud mode T3 "
-            "has a separate probe-cache limitation: nexus-5t1jp.)"
+            "retry — this failure affects T1 scratch only."
         ) from exc
 
     if not _DEFERRED_T1_MINT:
@@ -4743,8 +4745,8 @@ def search_metadata_scoped(
     `structured=True`.
 
     Constraints:
-    - Requires an HttpVectorClient-backed T3 (every local and cloud install
-      since RDR-155 P4b); returns an error string only against the legacy
+    - Requires an HttpVectorClient-backed T3 (every install, local or cloud);
+      returns an error string only against the legacy
       in-memory test double.
     - `ids`/`tumblers` in the structured result are document tumblers, not
       chunk hashes — use the returned `contents`/`chashes`, not
@@ -4872,8 +4874,7 @@ def search_topic_scoped(
     results are chunk-level, not document-level) when `structured=True`.
 
     Constraints:
-    - Requires an HttpVectorClient-backed T3 (every local and cloud install
-      since RDR-155 P4b).
+    - Requires an HttpVectorClient-backed T3 (every install, local or cloud).
     - `ids` are chunk hashes, not document tumblers.
     - A topic label present in more than one collection searches each
       one; the results are the global nearest `limit` rows across them.
@@ -4990,8 +4991,7 @@ def search_graph_hop(
     `structured=True`.
 
     Constraints:
-    - Requires an HttpVectorClient-backed T3 (every local and cloud install
-      since RDR-155 P4b).
+    - Requires an HttpVectorClient-backed T3 (every install, local or cloud).
     - `where` is equality-only; comparison operators are rejected.
     - When `corpus` spans more than one embedding model, distances merge
       across model-specific vector spaces and cross-model ordering can carry
@@ -5151,8 +5151,7 @@ def search_aspect_scoped(
     `structured=True`.
 
     Constraints:
-    - Requires an HttpVectorClient-backed T3 (every local and cloud install
-      since RDR-155 P4b).
+    - Requires an HttpVectorClient-backed T3 (every install, local or cloud).
     - Excludes any document with no `document_aspects` row or a NULL
       `doc_id` there — by design, not a bug; coverage is uneven across
       corpora (weakest for knowledge collections, the notes and papers
@@ -5347,8 +5346,7 @@ def query(
       code/docs; with one, it defaults to the content_type's own corpus
       when that names one and `follow_links` is unset, else every corpus.
     - Every catalog param requires an initialized catalog plus an
-      HttpVectorClient-backed T3 (every local and cloud install since
-      RDR-155 P4b); it errors rather than falling back without one.
+      HttpVectorClient-backed T3 (every install, local or cloud); it errors rather than falling back without one.
     - With a catalog param set, `where` is equality-only; without one,
       comparison operators are supported, one condition per field.
     - Ranking differs by path: the plain corpus path boosts by frecency and
@@ -6353,7 +6351,7 @@ def store_put(
     )] = "",
     sensitive: Annotated[bool, Field(
         description=(
-            "Mark the document sensitive (RDR-243): it is kept from every model-bound surface. "
+            "Mark the document sensitive: it is kept from every model-bound surface. "
             "One-way: no parameter clears it. Refused in cloud mode, where every collection embeds "
             "through Voyage and this tool cannot acknowledge that."
         ),
@@ -8326,7 +8324,7 @@ def memory_consolidate(
         description="Required when a merge would delete more than one entry.",
     )] = False,
 ) -> str:
-    """Find, merge, or flag T2 memory entries within one project (RDR-061 E6).
+    """Find, merge, or flag T2 memory entries within one project.
 
     Use `find-overlaps` to locate near-duplicate entries by Jaccard
     similarity, `merge` to keep one entry and delete the rest, or
@@ -8661,11 +8659,11 @@ def collection_list() -> str:
 # bead-dump that matched at 0.66-0.70 then crashed the runner on an
 # unknown tool).
 @mcp.tool(
-    title="Save Query Plan",
+    title="Save Answer Plan",
     annotations={"readOnlyHint": False, "destructiveHint": False},
     structured_output=False,
 )
-def plan_save(
+def answer_plan_save(
     query: Annotated[str, Field(description="The original natural-language question the plan answers.")],
     plan_json: Annotated[str, Field(
         description=(
@@ -8707,7 +8705,7 @@ def plan_save(
         ),
     )] = "",
 ) -> str:
-    """Save a reusable retrieval query-execution plan to the T2 plan library.
+    """Save an answer plan (a reusable retrieval plan) to the T2 answer-plan library.
 
     Use beads + `memory_put` instead for implementation, pipeline, or
     phased-execution plans — this library is for retrieval plans only,
@@ -8827,7 +8825,7 @@ def plan_save(
                 f"(summarize, generate, extract and the like); this one ends in {_last!r}, which hands back what "
                 "it retrieved. Declare discovery/listing or unknown, or add the step that puts the answer together."
             )
-        # RDR-232 Phase 2 (nexus-jypmj.2.1, nexus-0vh80): plan_save writes the declaration, and only from the
+        # RDR-232 Phase 2 (nexus-jypmj.2.1, nexus-0vh80): answer_plan_save writes the declaration, and only from the
         # caller's argument: provenance `saved`, the saver's own unreviewed claim. Only the seed loader declares
         # curated and only the nx_answer grow site declares grown, so an embedded key (valid, malformed or an
         # unrelated one of the same name) is replaced, never stored or trusted.
@@ -8843,7 +8841,7 @@ def plan_save(
         tags_to_store, _tags_removed = strip_reserved_tags(tags)
         if _tags_removed:
             _log.warning(
-                "plan_save_reserved_tags_removed",
+                "answer_plan_save_reserved_tags_removed",
                 removed=list(_tags_removed), kept=tags_to_store, query=query[:80],
             )
         # nexus-j5geq: route through the T2 daemon (plans.save_plan is in
@@ -8863,7 +8861,7 @@ def plan_save(
             )
         )
         _record_tier_write(
-            tool="plan_save", tier="plan",
+            tool="answer_plan_save", tier="plan",
             project=project, target_title=query[:80],
         )
         saved = f"Saved plan: [{row_id}] {query[:80]}"
@@ -8891,21 +8889,21 @@ def plan_save(
             saved += f" (reserved tags removed: {', '.join(_tags_removed)}; only the grow site and the seed loader set them)"
         return saved
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return _mcp_tool_error("plan_save", e)
+        return _mcp_tool_error("answer_plan_save", e)
 
 
 @mcp.tool(
-    title="Search Plan Library",
+    title="Search Answer Plans",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
-def plan_search(
+def answer_plan_search(
     query: Annotated[str, Field(description="Search query, matched against plan query text and tags.")],
     project: Annotated[str, Field(description="Optional project filter (e.g. \"nexus\").")] = "",
     limit: Annotated[int, Field(description="Maximum results to return.")] = 5,
     offset: Annotated[int, Field(description="Results to skip, for pagination.")] = 0,
 ) -> str:
-    """Search the T2 plan library for similar saved retrieval plans, for a human to browse.
+    """Search the T2 answer-plan library for similar saved retrieval plans, for a human to browse.
 
     Use `nx_answer`'s own plan-match gate instead when you want a plan
     executed automatically rather than reviewed by a person.
@@ -8942,22 +8940,22 @@ def plan_search(
         shown_end = offset + len(results)
         if has_more:
             lines.append(f"\n--- showing {offset + 1}-{shown_end}. may have more: offset={shown_end}")
-        return _cap_text_result("\n\n".join(lines), "plan_search")
+        return _cap_text_result("\n\n".join(lines), "answer_plan_search")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return _mcp_tool_error("plan_search", e)
+        return _mcp_tool_error("answer_plan_search", e)
 
 
 @mcp.tool(
-    title="Delete Query Plan",
+    title="Delete Answer Plan",
     annotations={"readOnlyHint": False, "destructiveHint": True},
     structured_output=False,
 )
-def plan_delete(
-    plan_id: Annotated[int, Field(description="Numeric plan id to delete (from `plan_search` or `nx plan list`).")],
+def answer_plan_delete(
+    plan_id: Annotated[int, Field(description="Numeric plan id to delete (from `answer_plan_search` or `nx answer-plan list`).")],
 ) -> str:
-    """Permanently delete one plan-library entry by id.
+    """Permanently delete one answer-plan library entry by id.
 
-    The counterpart to `plan_save`: removes a throwaway or incorrect entry
+    The counterpart to `answer_plan_save`: removes a throwaway or incorrect entry
     (e.g. a shakeout probe) without direct DB access.
 
     Returns a confirmation naming the deleted plan's query, or an error if
@@ -8975,7 +8973,46 @@ def plan_delete(
         label = row.get("name") or row.get("query") or "(unnamed)"
         return f"Deleted plan id={plan_id}: {label[:80]}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return _mcp_tool_error("plan_delete", e)
+        return _mcp_tool_error("answer_plan_delete", e)
+
+
+# nexus-sby49.4 (Sam, 2026-11-25): the plan-library tools were renamed so an implementation plan cannot be
+# mistaken for what they hold, which is only the retrieval plans `nx_answer` matches. The old names stay for
+# one client release: each runs its answer_plan_* twin and adds a line saying it is deprecated and naming the
+# new tool. They are removed in the release after that one.
+def _deprecated_plan_alias(old: str, target: Callable[..., str]) -> Callable[..., str]:
+    """The old-name twin of `target`: same parameters and result, plus one deprecation line."""
+    note = (
+        f"Deprecated: `{old}` is now `{target.__name__}`. The old name works for one more client "
+        "release and is then removed."
+    )
+
+    @functools.wraps(target)
+    def alias(*args: Any, **kwargs: Any) -> str:
+        result = target(*args, **kwargs)
+        text = f"{result}\n\n{note}"
+        return _fail(text) if is_failure(result) else text
+
+    alias.__name__ = alias.__qualname__ = old
+    alias.__doc__ = f"{note}\n\n{target.__doc__ or ''}"
+    return alias
+
+
+plan_save = mcp.tool(
+    title="Save Answer Plan (deprecated name)",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
+)(_deprecated_plan_alias("plan_save", answer_plan_save))
+plan_search = mcp.tool(
+    title="Search Answer Plans (deprecated name)",
+    annotations={"readOnlyHint": True},
+    structured_output=False,
+)(_deprecated_plan_alias("plan_search", answer_plan_search))
+plan_delete = mcp.tool(
+    title="Delete Answer Plan (deprecated name)",
+    annotations={"readOnlyHint": False, "destructiveHint": True},
+    structured_output=False,
+)(_deprecated_plan_alias("plan_delete", answer_plan_delete))
 
 
 # ── Procedure library (RDR-240 Technical Design 3, bead nexus-qo7ie.31) ──────
@@ -9159,7 +9196,7 @@ def tuple_out(
         description="`replace` rewrites the same-id task (keys+nonce templates only); the result adds the outcome.",
     )] = None,
 ) -> str:
-    """Write a tuple into the RDR-205 Linda tuple space (`out`).
+    """Write a tuple into the shared tuple space (`out`).
 
     The tuple space is a coordination and metadata store, not a value
     store. Keep `body` a short message or signal. Put longer content in T2
@@ -9168,7 +9205,7 @@ def tuple_out(
 
     A `kind=ack` row on a `board/ci/<topic>--owner` subspace gets `from` set
     to the caller's own identity id whatever `dims` says (a hint: the engine
-    counts the sender session); a caller with no identity is refused (RDR-252).
+    counts the sender session); a caller with no identity is refused.
 
     Idempotent by construction: the tuple id is derived from the
     template's `id_from` fields only, so a retry lands on the same tuple.
@@ -9431,7 +9468,7 @@ def tuple_ack(
         ),
     )] = None,
 ) -> str:
-    """Consume a claimed tuple (`ack`), optionally writing a reply in the same transaction (RDR-206).
+    """Consume a claimed tuple (`ack`), optionally writing a reply in the same transaction.
 
     A row that `tuple_out` with mode=replace rewrote while it was claimed
     is not consumed by this ack: it goes back to available carrying the
@@ -9515,7 +9552,7 @@ def tuple_renew(
         ),
     )],
 ) -> dict:
-    """Extend a live claim's lease (`renew`, RDR-206) before it lapses.
+    """Extend a live claim's lease (`renew`) before it lapses.
 
     Returns `{"lease_until": "<ISO-8601>"}`, the engine's own new value —
     never recomputed locally, and can be earlier than `now + lease_s` when
@@ -9541,7 +9578,7 @@ def tuple_release(
     claim_id: Annotated[str, Field(description="The claim id returned by `tuple_in`.")],
     claimant: Annotated[str, Field(description="Must match the identity that made the claim.")],
 ) -> str:
-    """Hand a claimed tuple back (`release`, RDR-211): the row returns to
+    """Hand a claimed tuple back (`release`): the row returns to
     available with its attempt count unchanged and is NOT consumed -- a
     hand-back that is not a failure. Use `tuple_nack` instead when the work genuinely failed and
     should count toward the template's `max_attempts`; `nack` counts one.
@@ -9573,7 +9610,7 @@ def tuple_release(
 def tuple_registry(
     doc: Annotated[bool, Field(description="Also return each template's doc block (summary, writers, readers, fields, body, example).")] = False,
 ) -> dict:
-    """The boot-loaded tuple-space template set (RDR-205).
+    """The boot-loaded tuple-space template set.
 
     Use `tuple_list` instead to see which concrete subspaces currently
     hold rows. Returns `{digest, sources, templates: [...]}`; `digest`
@@ -9699,7 +9736,7 @@ def mailbox_send(
     session directory first (and still works as a `tuple_out` shorthand
     when `to` is already a session or agent id). Returns
     `{"tuple_id": "...", "to": "...", "address_kind": "...", "from": "...", "notice": "..."}`; `notice` is
-    present only when `to` was a renamed seat's old name, still delivering in its 7-day grace (RDR-253).
+    present only when `to` was a renamed seat's old name, still delivering in its 7-day grace.
 
     A name resolves through `alias/<name>` first (a seat's name), then
     `directory/<name>`'s live rows: one live holder gets the mail in its
@@ -9783,7 +9820,7 @@ def tuple_subscribe(
         ),
     )],
 ) -> str:
-    """Add `subspace` to this session's MCP server's subscription list (RDR-211, RDR-213).
+    """Add `subspace` to this session's MCP server's subscription list.
 
     The server waits on its board topics and its own mailbox
     (`mailbox/<session id>`) and pushes what arrives through the Claude Code
@@ -9805,7 +9842,7 @@ def tuple_subscribe(
     is claimed or expires, each row announced at most 5 times
     (`max_announces`, 150 s apart).
 
-    Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>` lease so
+    Subscribing `mailbox/<name>` arms the `directory/<name>` lease so
     `mailbox_send` resolves that name to this session; nothing is pushed or
     drained for it. A `/resume` (same session id) restores this list; a
     `/clear` (new session id) starts clean.
@@ -9836,7 +9873,7 @@ def tuple_subscribe(
 def tuple_unsubscribe(
     subspace: Annotated[str, Field(description="A subspace previously added via `tuple_subscribe`.")],
 ) -> str:
-    """Remove `subspace` from this session's MCP server's subscription list (RDR-211).
+    """Remove `subspace` from this session's MCP server's subscription list.
 
     The session's own mailbox can never be unsubscribed -- it is the
     floor's address. Unsubscribing `mailbox/<name>` for the name this
@@ -9866,12 +9903,11 @@ def tuple_unsubscribe(
     structured_output=False,
 )
 def tuple_subscriptions() -> list[dict]:
-    """List this session's MCP server's subscription set (RDR-211).
+    """List this session's MCP server's subscription set.
 
     Always the session's own mailbox first, then subscribed board topics.
     A leased name never appears here: it is not a delivered mailbox, only
-    a `directory/<name>` lease for `mailbox_send` resolution (RDR-208
-    Phase 3). There is no cursor: the engine keeps
+    a `directory/<name>` lease for `mailbox_send` resolution. There is no cursor: the engine keeps
     every subspace's delivery position (a row stamp for a mailbox, a
     per-subscriber stamp for a board). A board entry carries `since`,
     the time of the subscribe call; push delivery starts 30 seconds
@@ -10610,13 +10646,13 @@ def traverse(
     direction: Annotated[str, Field(description="Traversal direction: \"out\", \"in\", or \"both\".")] = "both",
     policy: Annotated[dict | None, Field(
         description=(
-            "Optional traversal evidence policy (RDR-232): {allowed_collections, allowed_owners, "
+            "Optional traversal evidence policy: {allowed_collections, allowed_owners, "
             "preserve_seed_documents, max_documents, max_chunks, require_link_role}. Absent: the legacy "
             "result, unchanged."
         ),
     )] = None,
 ) -> dict:
-    """Walk the catalog link graph from seed tumblers (RDR-078 P3).
+    """Walk the catalog link graph from seed tumblers.
 
     Use `search_graph_hop` instead when the reachable set should also be
     vector-ranked in one call. Takes `link_types` or `purpose`, never both.
@@ -10633,8 +10669,8 @@ def traverse(
     - `ids` is capped at 300; when capped, `ids_truncated` carries the
       total and kept counts. `tumblers` is not capped.
 
-    Without a `policy` the result is in graph order. With a `policy`
-    (RDR-232 section 3) it runs after the walk, before manifest expansion:
+    Without a `policy` the result is in graph order. With a `policy`,
+    it runs after the walk, before manifest expansion:
     documents outside `allowed_collections` are dropped, the rest ranked by
     link role, distance, then tumbler, and non-seeds capped at
     `max_documents`; only retained manifests are read and `max_chunks` is
@@ -11059,7 +11095,7 @@ THEY DO NOT RETURN CONTENT. To get text, chain into store_get_many.
       - Output: {ids, tumblers, distances, collections}
       - `corpus` accepts the same forms as `search` above: "all", a
         prefix, a full collection name, or a comma-separated list.
-      - Scope filter guidance (bead nexus-sgrg): prefer `corpus=<collection>`
+      - Scope filter guidance: prefer `corpus=<collection>`
         for project scoping. The `author` filter matches the catalog
         `author` column, which is rarely populated for RDR/docs; setting
         `author=<repo-name>` almost always returns zero rows. Only use
@@ -13712,7 +13748,7 @@ async def nx_answer(
             "Caller-supplied plan bindings (e.g. {\"content_type\": \"rdr\"}) "
             "that reach the plan runner and are advertised to the matcher as "
             "available, making type-scoped builtin plans reachable. The keys "
-            "source (an RDR id such as RDR-084, or a catalog tumbler), owner "
+            "source (an RDR id such as RDR-<number>, or a catalog tumbler), owner "
             "(a tumbler or registered owner name) and project (a registered "
             "owner name such as ART) are reserved: they name the document the "
             "question is about and which project's it is, are never plan "
@@ -16973,7 +17009,7 @@ def brief(
 ) -> str:
     """Load reference context that SessionStart no longer injects, one topic at a time.
 
-    Topics: `memory` (T2 notes of this project), `beads` (ready beads and the bd usage primer), `caps` (notes on the nexus tools),
+    Topics: `memory` (T2 notes of this project), `beads` (ready beads when the project tracks them with beads), `caps` (notes on the nexus tools),
     `map` (Knowledge Map topic labels), `rdr` (RDR counts and whether they are indexed), `me` (this seat's own startup
     note, printed as data for you to read and decide on; it is not a command). The same text as `nx brief <topic>`.
     Use `memory_search` or `search` for a specific lookup; use this for the standing overview of a repo.

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""T9 (nexus-sby49): a hook that calls an audience predicate does it safely.
+"""T9 (nexus-sby49): a hook that reads a setting through the audience helper does it safely.
 
 ``conexus/hooks/scripts/_audience.py`` answers in the safe direction on error,
 but a hook that imports it has two ways to defeat that: the import itself can
@@ -13,9 +13,10 @@ For every hook script under ``conexus/hooks/scripts/`` that imports ``_audience`
 1. the import sits in a ``try`` whose handler catches ``Exception`` or
    ``BaseException``;
 2. the handler binds each imported name to a fallback that answers in the safe
-   direction: ``True`` for ``maintainer`` and ``nexus_repo`` (tightening), ``False``
-   for ``account_flag``, an empty set for ``remote_test_hosts`` (both loosening),
-   ``None`` for ``note_marker_only``;
+   direction: ``"strict"`` for ``guard_mode`` and ``True`` for ``t1_nudge_enabled`` (tightening or adding),
+   ``False`` for ``telemetry_enabled``, an empty set for ``advice_blocked`` and ``remote_test_hosts``, ``None`` for
+   ``project_text``, ``provenance_label`` and ``integration_branch`` and an empty list for the brief-question readers (all
+   loosening or adding nothing), an empty string for ``clean_text``, ``None`` for the note writers;
 3. every call to a predicate sits in a covered function: one handed to
    ``_lib.run_hook`` or ``never_fail``, one whose own ``try`` holds the call
    (a standalone ``main()``), or one only ever called from covered functions.
@@ -35,12 +36,25 @@ SCRIPTS = PROJECT_ROOT / "conexus" / "hooks" / "scripts"
 
 #: imported name -> what its fallback must answer.
 SAFE_ANSWER: dict[str, object] = {
-    "maintainer": True,
-    "nexus_repo": True,
-    "account_flag": False,
+    "guard_mode": "strict",
+    "telemetry_enabled": False,
+    "telemetry_child_env": None,
+    "forced_strict_clause": None,
+    "t1_nudge_enabled": True,
+    "project_text": None,
+    "project_brief_questions": "emptylist",
+    "user_brief_questions": "emptylist",
+    "provenance_label": None,
+    "clean_text": "",
+    "integration_branch": None,
+    "note_problems": None,
+    "advice_blocked": "empty",
     "remote_test_hosts": "empty",
-    "note_marker_only": None,
     "note_hook_error": None,
+    "forced_strict_clause": None,
+    "settings_problems": "emptylist",
+    "format_problem": "",
+    "claim_session_once": None,
 }
 WRAPPERS = {"run_hook", "never_fail"}
 
@@ -67,6 +81,8 @@ def _fallback_answer(fn: ast.AST) -> object:
         return None
     if isinstance(ret, ast.Constant):
         return ret.value
+    if isinstance(ret, ast.List) and not ret.elts:
+        return "emptylist"
     if isinstance(ret, ast.Call) and getattr(ret.func, "id", "") in ("frozenset", "set") and not ret.args:
         return "empty"
     return "?"
@@ -194,29 +210,29 @@ def violations(source: str) -> list[str]:
 GOOD = '''
 import _lib
 try:
-    from _audience import maintainer as _maintainer, account_flag as _flag
+    from _audience import guard_mode as _mode, telemetry_enabled as _telemetry
 except BaseException:
-    def _maintainer(payload):
-        return True
-    _flag = lambda: False
+    def _mode(payload):
+        return "strict"
+    _telemetry = lambda: False
 
 def body(payload):
-    if _maintainer(payload):
+    if _mode(payload):
         pass
     helper()
 
 def helper():
-    return _flag()
+    return _telemetry()
 
 _lib.run_hook(body)
 '''
 
 STANDALONE = '''
 try:
-    from _audience import maintainer as _m
+    from _audience import guard_mode as _m
 except Exception:
     def _m(payload):
-        return True
+        return "strict"
 
 def main():
     try:
@@ -236,44 +252,44 @@ def test_the_checker_passes_the_two_accepted_shapes():
     [
         (
             "unguarded import",
-            "from _audience import maintainer\n\ndef body(p):\n    return maintainer(p)\n\n_lib.run_hook(body)\n",
+            "from _audience import guard_mode\n\ndef body(p):\n    return guard_mode(p)\n\n_lib.run_hook(body)\n",
             "not inside a try",
         ),
         (
-            "tightening fallback answers False",
-            "try:\n    from _audience import maintainer\nexcept BaseException:\n"
-            "    def maintainer(p):\n        return False\n\ndef body(p):\n    maintainer(p)\n\n_lib.run_hook(body)\n",
-            "must answer True",
+            "tightening fallback loosens",
+            "try:\n    from _audience import guard_mode\nexcept BaseException:\n"
+            "    def guard_mode(p):\n        return 'seatbelt'\n\ndef body(p):\n    guard_mode(p)\n\n_lib.run_hook(body)\n",
+            "must answer 'strict'",
         ),
         (
             "loosening fallback answers True",
-            "try:\n    from _audience import account_flag\nexcept BaseException:\n"
-            "    def account_flag():\n        return True\n\ndef body(p):\n    account_flag()\n\n_lib.run_hook(body)\n",
+            "try:\n    from _audience import telemetry_enabled\nexcept BaseException:\n"
+            "    def telemetry_enabled():\n        return True\n\ndef body(p):\n    telemetry_enabled()\n\n_lib.run_hook(body)\n",
             "must answer False",
         ),
         (
             "no fallback bound",
-            "try:\n    from _audience import maintainer\nexcept BaseException:\n    pass\n\n"
-            "def body(p):\n    maintainer(p)\n\n_lib.run_hook(body)\n",
+            "try:\n    from _audience import guard_mode\nexcept BaseException:\n    pass\n\n"
+            "def body(p):\n    guard_mode(p)\n\n_lib.run_hook(body)\n",
             "no fallback binds",
         ),
         (
             "call outside any wrapper",
-            "try:\n    from _audience import maintainer\nexcept BaseException:\n"
-            "    def maintainer(p):\n        return True\n\ndef stray(p):\n    return maintainer(p)\n\n"
+            "try:\n    from _audience import guard_mode\nexcept BaseException:\n"
+            "    def guard_mode(p):\n        return 'strict'\n\ndef stray(p):\n    return guard_mode(p)\n\n"
             "def body(p):\n    pass\n\n_lib.run_hook(body)\n",
             "no wrapper covers",
         ),
         (
             "call at module level",
-            "try:\n    from _audience import maintainer\nexcept BaseException:\n"
-            "    def maintainer(p):\n        return True\n\nX = maintainer({})\n",
+            "try:\n    from _audience import guard_mode\nexcept BaseException:\n"
+            "    def guard_mode(p):\n        return 'strict'\n\nX = guard_mode({})\n",
             "module level",
         ),
         (
             "handler catches too little",
-            "try:\n    from _audience import maintainer\nexcept KeyError:\n"
-            "    def maintainer(p):\n        return True\n\ndef body(p):\n    maintainer(p)\n\n_lib.run_hook(body)\n",
+            "try:\n    from _audience import guard_mode\nexcept KeyError:\n"
+            "    def guard_mode(p):\n        return 'strict'\n\ndef body(p):\n    guard_mode(p)\n\n_lib.run_hook(body)\n",
             "not inside a try",
         ),
     ],

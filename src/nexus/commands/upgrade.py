@@ -41,8 +41,8 @@ _log = structlog.get_logger()
     "no_beads_prime",
     is_flag=True,
     default=False,
-    help="Do not install/refresh the user-level beads PRIME.md this run "
-    "(nexus-cnzei.8). Explicit decline always wins; for a standing "
+    help="Do not install/refresh the user-level beads PRIME.md this run. "
+    "Explicit decline always wins; for a standing "
     "opt-out use `nx config set beads_prime.manage false`.",
 )
 def upgrade(
@@ -52,10 +52,10 @@ def upgrade(
     \f
     ``--yes`` is NOT a general "say yes to everything" switch, and must not
     become one: the only prompt the ladder can raise is the billed Voyage
-    re-embed (RDR-185 ## Constraints' third genuine decision; source-gone and
+    re-embed (source-gone and
     rollback DEFER rather than ask). It exists because `nx upgrade` is the one
     verb and an ancient install must still converge UNATTENDED (SC-1) — without
-    a consent channel, making the cost gate actually fire (nexus-k1m2f) traded a
+    a consent channel, making the cost gate actually fire traded a
     silent bill for a silent hang on a `click.confirm` no hook can answer.
     """
     _say_if_the_engine_is_migrating(auto_mode=auto_mode)
@@ -224,8 +224,12 @@ def _upgrade_steps(
         ))
         # Generated agents are composed FROM the installed plugins.
         steps.append(("Refresh the generated agents", None, lambda: _refresh_generated_agents(dry_run=dry_run)))
-    # nexus-cnzei.8: the user-level beads PRIME.md when beads is detected.
-    if not auto_mode and not dry_run:
+    # nexus-cnzei.8: the user-level beads PRIME.md when beads is detected. A file under the user's home is a person's
+    # step: the detached plain `nx upgrade` the lockstep hook starts on a version drift (NX_UPGRADE_UNATTENDED) never
+    # writes it; `nx init` and an interactive `nx upgrade` still do (nexus-sby49.4, S2-9, D3).
+    from nexus.upgrade_ladder.unattended import env_unattended  # noqa: PLC0415 — deferred, keeps the cold start light
+
+    if not auto_mode and not dry_run and not env_unattended():
         steps.append((
             "Install the beads PRIME file", None,
             lambda: _install_beads_prime_best_effort(no_beads_prime=no_beads_prime),
@@ -1055,6 +1059,14 @@ def _refresh_all_git_hooks() -> None:
                 f"\n{summary['malformed']} malformed hook(s) left for hand "
                 "repair (see `nx hooks update-all`)."
             )
+        if summary.get("installed"):
+            # nexus-igea9: the pre-push hold + push-record hook goes into repos a group you belong to serves.
+            click.echo(
+                f"\nInstalled the pre-push hook (hold check and push record) in {summary['installed']} repo(s) "
+                "a group you belong to serves; `nx hooks uninstall --pre-push <path>` removes it."
+            )
+        for note in summary.get("notes") or ():
+            click.echo(f"\n{note}")
     except Exception as exc:  # noqa: BLE001 — best-effort git-hook refresh; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_git_hook_refresh_failed", error=str(exc))
 

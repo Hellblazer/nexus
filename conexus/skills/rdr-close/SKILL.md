@@ -51,7 +51,7 @@ Dispatch `/conexus:substantive-critique <rdr-id>` via the Agent tool and parse t
 
 All three paths give the same enum (`justified` / `partial` / `not-justified`), branched on below.
 
-**Relay framing** (load-bearing, do not vary): the dispatch relay MUST be fixed-shape and minimal. Pass only `{rdr_id}` and the standard input artifacts (T2 RDR record, catalog entry, RDR markdown file). NEVER pass session-generated summaries of what was built, what diverged, or what the user intends. Rationalization bias is the exact failure mode RDR-069 addresses — see RDR-069 §Risks "Dispatch isolation risk".
+**Relay framing** (load-bearing, do not vary): the dispatch relay MUST be fixed-shape and minimal. Pass only `{rdr_id}` and the standard input artifacts (T2 RDR record, catalog entry, RDR markdown file). NEVER pass session-generated summaries of what was built, what diverged, or what the user intends. Rationalization bias is the exact failure mode this isolation prevents.
 
 ```markdown
 ## Relay: substantive-critic
@@ -95,7 +95,7 @@ mcp__plugin_conexus_nexus__memory_put(
 )
 ```
 
-If `{repo}_rdr/*-close-override-*` exceeds 20% of closes in any 30-day window, dispatch degrades to advisory mode (RDR-069 Day 2 Operations).
+If `{repo}_rdr/*-close-override-*` exceeds 20% of closes in any 30-day window, dispatch degrades to advisory mode.
 
 **Scenario 4 — timeout or transport failure**: if the Agent tool dispatch fails, times out (>5 minutes without response), or returns an unparseable response (not just a missing Verdict block, but genuinely malformed output), ask: "Critic dispatch failed. Proceed without critique? (y/N)". Never block or proceed silently; the user chooses.
 
@@ -148,10 +148,10 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
    ```bash
    nx rdr set-status NNN closed
    ```
-   Code-enforced flip: rewrites the RDR file `status -> closed`, adds `closed_date`, and updates the README index-row status cell in one tested action. A record still `draft` (work shipped without the accept gate) closes only with `--reason "<why it shipped without acceptance>"`, the table's guarded `close-unaccepted` edge; without it the command refuses `reason-not-stated`. Hand-edited frontmatter caused the RDR-165/166 ledger drift. (`--date YYYY-MM-DD` overrides the default of today.)
+   Code-enforced flip: rewrites the RDR file `status -> closed`, adds `closed_date`, and updates the README index-row status cell in one tested action. A record still `draft` (work shipped without the accept gate) closes only with `--reason "<why it shipped without acceptance>"`, the table's guarded `close-unaccepted` edge; without it the command refuses `reason-not-stated`. Hand-edited frontmatter caused ledger drift. (`--date YYYY-MM-DD` overrides the default of today.)
 3. (The README index row is updated by the command in step 2 — no separate regen step.)
-3a. Run `nx memory gate-rollup --rdr NNN --all` with `--dry-run` first and tell Sam its count; the real run (`--counted N`) gives the records a 30-day TTL and waits for his word (RDR-209 Phase 3). Nothing blocks the close without it.
-3b. **Tick or annotate every remaining `- [ ]` checkbox in the RDR body** — check it off if done, or replace with `- [deferred: nexus-XXXXX]` / `- [waived: <reason>]`. A closed RDR with unchecked boxes reads as hidden scope loss to every future audit.
+3a. Run `nx memory gate-rollup --rdr NNN --all` with `--dry-run` first and tell the user its count; the real run (`--counted N`) gives the records a 30-day TTL and waits for their word. Nothing blocks the close without it.
+3b. **Tick or annotate every remaining `- [ ]` checkbox in the RDR body** — check it off if done, or replace with `- [deferred: <bead-id>]` / `- [waived: <reason>]`. A closed RDR with unchecked boxes reads as hidden scope loss to every future audit.
 4. **Scoped conditional reindex** — if the RDR body changed during close (e.g. divergence notes added, post-mortem link inserted, or any text outside the frontmatter block modified), run `nx index rdr` **scoped to the single RDR file**, NOT the whole corpus:
 
    ```bash
@@ -173,7 +173,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 The RDR already has a catalog entry from the original accept-time indexing. Create links to capture implementation provenance (if catalog is initialized):
 
-1. **Code→RDR links**: Nothing generates `implements-heuristic` links any more (the pass was turned off at engine v0.1.57, nexus-ybj1b); an older RDR may still carry some. Review them with `nx catalog links <rdr-tumbler> --type implements-heuristic` and promote high-confidence ones to `implements` via `mcp__plugin_conexus_nexus-catalog__link` for link-boost scoring benefit (heuristic links have zero search boost weight). For a new RDR, link the implementing files with `implements` directly.
+1. **Code→RDR links**: Nothing generates `implements-heuristic` links any more (the pass was turned off at engine v0.1.57); an older RDR may still carry some. Review them with `nx catalog links <rdr-tumbler> --type implements-heuristic` and promote high-confidence ones to `implements` via `mcp__plugin_conexus_nexus-catalog__link` for link-boost scoring benefit (heuristic links have zero search boost weight). For a new RDR, link the implementing files with `implements` directly.
 
 2. **RDR→prior-RDR links**: If the RDR's T2 record has a `supersedes` field, create the catalog link:
    ```
@@ -191,7 +191,7 @@ Skip all catalog steps silently if catalog is not initialized. The T2 record and
 
 The main RDR is already in its `rdr__` collection from `nx index repo`, drafts included (and refreshed in Step 4 only if the body changed during close). Do **not** duplicate it with store_put tool — that would create non-CCE blob entries in the same collection, degrading search quality.
 
-Per the collection rules (https://github.com/Hellblazer/nexus/blob/main/docs/collections.md), Rule 1, a knowledge collection is a subject area, never an owner id. The post-mortem's target is the bare subject `{repo}-rdr-research` (per Rule 3, never the four-segment form — `store_put` renders and, on first write, mints it), with `category="rdr_postmortem"` stamped on the chunk metadata so it is queryable as a distinct slice without needing its own collection.
+Per the collection rules (https://github.com/Hellblazer/nexus/blob/main/docs/collections.md), Rule 1, a knowledge collection is a subject area, never an owner id. The post-mortem's target is the bare subject `{repo}-rdr-research` (per Rule 3, never the four-segment form — `store_put` finds the collection by its attributes and, on first write, mints it), with `category="rdr_postmortem"` stamped on the chunk metadata so it is queryable as a distinct slice without needing its own collection.
 
 Check for an existing subject before writing (Rule 2, reuse before create). A new subject's collection is labelled `c<id>` by the engine, so it is found by its CONTENT_TYPE and OWNER columns (OWNER is the subject), not by its name; a live collection named `knowledge__<subject>__...` counts too, and a retired one does not:
 ```bash
@@ -253,7 +253,7 @@ Renamed chunks lack `category="rdr_postmortem"`; they stay findable by their `ta
 
 ## Flow: Reverted or Abandoned
 
-1. Prompt for reason (free text) — e.g. "reverted" (implementation started, then rolled back) or "never going to happen". This reason is recorded in T2 and the post-mortem only; it is NOT a file status. RDR-201's lifecycle table status domain is `{draft, accepted, deferred, closed, superseded, abandoned}` — `reverted` was explicitly retired, so both reasons above close the file to the SAME status, `abandoned`.
+1. Prompt for reason (free text) — e.g. "reverted" (implementation started, then rolled back) or "never going to happen". This reason is recorded in T2 and the post-mortem only; it is NOT a file status. The lifecycle table's status domain is `{draft, accepted, deferred, closed, superseded, abandoned}` — `reverted` was explicitly retired, so both reasons above close the file to the SAME status, `abandoned`.
 2. Offer post-mortem (useful for capturing what was learned, even from abandoned work)
 3. Update T2 record with close reason — record the reason text (e.g. "reverted") even though the file status written in step 4 is always `abandoned`.
 4. **Flip the file frontmatter + README via the CLI (do NOT hand-edit):** run `nx rdr set-status NNN abandoned`. Code-enforced — same ledger-drift fix as the Implemented flow. (`reverted` is not a valid `set-status` target — the CLI exits 2 on it; the T2 reason from step 3 is where "reverted" is recorded.)
@@ -290,9 +290,9 @@ The close operation performs multiple state mutations. If any step fails:
 
 ## Agent Invocation
 
-**Only one agent is dispatched by this skill:** `substantive-critic` (Step 1.75, implemented close only). All other operations use MCP tools directly (RDR-080).
+**Only one agent is dispatched by this skill:** `substantive-critic` (Step 1.75, implemented close only). All other operations use MCP tools directly.
 
-Post-mortem archival calls `mcp__plugin_conexus_nexus__store_put` directly (RDR-080, no agent spawn), as Step 6 shows: the bare subject `{repo}-rdr-research` (never the owner-id-shaped `nx catalog collection-name --content-type knowledge` resolution), `category="rdr_postmortem"`, with link-context seeded first.
+Post-mortem archival calls `mcp__plugin_conexus_nexus__store_put` directly (no agent spawn), as Step 6 shows: the bare subject `{repo}-rdr-research` (never the owner-id-shaped `nx catalog collection-name --content-type knowledge` resolution), `category="rdr_postmortem"`, with link-context seeded first.
 
 ## Success Criteria
 
@@ -317,7 +317,7 @@ Outputs produced by this skill directly:
 - **T3 semantic index**: Conditionally refreshed via `nx index rdr` (CCE embeddings, section-level chunks) — only when the RDR body changed during close; frontmatter-only edits are skipped
 - **Filesystem**: Post-mortem at `$RDR_DIR/post-mortem/NNN-kebab-title.md`, updated README
 
-- **T3 knowledge**: Post-mortem archive via `mcp__plugin_conexus_nexus__store_put`: content=(post-mortem contents), collection="{repo}-rdr-research" (the subject collection, never the owner-id-shaped `nx catalog collection-name --content-type knowledge` resolution), title="RDR-NNN: {title} (post-mortem)", category="rdr_postmortem" (RDR-080, called directly, no agent spawn)
+- **T3 knowledge**: Post-mortem archive via `mcp__plugin_conexus_nexus__store_put`: content=(post-mortem contents), collection="{repo}-rdr-research" (the subject collection, never the owner-id-shaped `nx catalog collection-name --content-type knowledge` resolution), title="RDR-NNN: {title} (post-mortem)", category="rdr_postmortem" (called directly, no agent spawn)
 
 ## Does NOT
 

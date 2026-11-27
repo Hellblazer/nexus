@@ -62,13 +62,14 @@ from nexus.commands.memory import memory
 from nexus.memory_curate.gate_cli import gate_rollup_cmd
 from nexus.commands.migration_cmd import migration_cmd
 from nexus.commands.mineru import mineru_group
-from nexus.commands.plan import plan as plan_group
+from nexus.commands.plan import answer_plan as answer_plan_group, plan as plan_group
 from nexus.commands.rdr import rdr as rdr_group
 from nexus.commands.run_cmd import run_cmd
 from nexus.commands.scratch import scratch
 from nexus.commands.self_cmd import self_group
 from nexus.commands.search_cmd import search_cmd
 from nexus.commands.service_cmd import service
+from nexus.commands.settings_cmd import settings_group
 from nexus.commands.store import store
 from nexus.commands.stranded_cmd import stranded_group
 from nexus.commands.t3 import t3 as t3_group
@@ -358,12 +359,14 @@ main.add_command(memory)
 memory.add_command(gate_rollup_cmd)  # defined beside its logic, not in commands/memory.py (the size cap)
 main.add_command(migration_cmd, name="migration")
 main.add_command(mineru_group, name="mineru")
-main.add_command(plan_group, name="plan")
+main.add_command(answer_plan_group, name="answer-plan")
+main.add_command(plan_group, name="plan")  # deprecated alias of answer-plan, removed one client release after nexus-sby49.4
 main.add_command(rdr_group, name="rdr")
 main.add_command(run_cmd, name="run")
 main.add_command(scratch)
 main.add_command(search_cmd, name="search")
 main.add_command(self_group, name="self")
+main.add_command(settings_group, name="settings")
 main.add_command(service, name="service")
 main.add_command(store)
 main.add_command(stranded_group, name="stranded")

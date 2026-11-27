@@ -383,7 +383,7 @@ def test_traverse_with_no_parseable_seed_fails(monkeypatch: pytest.MonkeyPatch) 
 
 def test_plan_save_refusal_fails() -> None:
     """nexus-4jwr0: a refused save is a failure; the text is unchanged."""
-    result = _call(core.mcp, "plan_save", {"query": "q", "plan_json": "{}", "verb": ""})
+    result = _call(core.mcp, "answer_plan_save", {"query": "q", "plan_json": "{}", "verb": ""})
     assert isinstance(result, CallToolResult) and result.is_error is True
     assert result.content[0].text.startswith("Plan not saved: a 'verb' is required")
 

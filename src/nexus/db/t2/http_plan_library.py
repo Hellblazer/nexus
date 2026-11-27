@@ -126,7 +126,7 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 follow-on): ``plans.verb`` is NOT NULL now
                 (hygiene-001-11) — the library is verb-dimensional
                 (RDR-078) and a verb-less plan pollutes it (the
-                nexus-fiovt class). The MCP ``plan_save`` tool
+                nexus-fiovt class). The MCP ``answer_plan_save`` tool
                 (``mcp/core.py``) already refuses a blank verb with a
                 friendly message before ever calling this method, but
                 this is the actual choke point every ``save_plan``
@@ -398,7 +398,7 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         ``scope_tags`` verbatim (``PlanHandler.handleSetScopeTags`` ->
         ``PlanRepository.setScopeTags``), exactly as it does for
         ``/v1/plans/save`` — where :meth:`save_plan` already normalizes before
-        POSTing. This method did not, so in service mode ``nx plan set-scope``
+        POSTing. This method did not, so in service mode ``nx answer-plan set-scope``
         stored hash suffixes and the ``"all"`` sentinel raw, which the matcher
         then reads as a scope literally named ``all`` (nexus-aqbrk).
         """
@@ -456,7 +456,7 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         ``any_lexeme`` (nexus-vi8fp, decision C): opt-in any-lexeme recall
         fallback when the AND-semantics query matches nothing — for HUMAN
-        browsing surfaces only (the plan_search MCP tool). plan_match MUST
+        browsing surfaces only (the answer_plan_search MCP tool). plan_match MUST
         NOT pass it: measured (T2 [23891]), auto-admitting these rows let
         9/10 unrelated questions run a junk plan. Default False keeps the
         wire byte-identical (the field is omitted, so an old engine sees

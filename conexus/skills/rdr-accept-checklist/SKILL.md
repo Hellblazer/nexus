@@ -46,7 +46,7 @@ In any brief or relay, put the absolute path itself where `<RDR dir>` stands, ne
 0. **T2 idempotency and self-healing** — compare the File Status (RDR frontmatter `status:`) against the T2 metadata status:
    - **Both show `accepted`**: true no-op. Print "RDR is already accepted (file and T2 agree)" and stop.
    - **File shows `accepted`, T2 does not**: self-healing — update T2 to match the file, then stop (no further steps).
-   - **T2 shows `accepted`, file shows `draft`**: self-healing — this is the ledger-drift case (RDR-165/166). Run `nx rdr set-status {id} accepted`, then `git add` the updated file + README, then stop.
+   - **T2 shows `accepted`, file shows `draft`**: self-healing — this is the ledger-drift case. Run `nx rdr set-status {id} accepted`, then `git add` the updated file + README, then stop.
    - **File shows `draft` and T2 shows `draft` (or T2 record not found)**: normal flow — proceed to step 1.
 1. **Verify gate result** — read `{id}-gate-latest` from T2. Block if outcome is not PASSED. Block if the record has a `prior:` chain and no `fix_check:` (a skipped fix check), if its `fix_check:` sha is not the record's `blob:` (its `commit:` when it has no `blob:`; the gate cited a fix check of an older tree), or if the named `{id}-fix-check-<sha>` record does not exist in T2.
 1b. **Disposition residuals** — for every `residuals:` line in the gate record (findings a round-3-or-later gate recorded instead of blocking), name a disposition: the commit sha that fixed it, or the bead id that carries it. A residual classed `DISCOVER-AT-IMPLEMENTATION` is dispositioned by a bead id, and the bead names the Implementation Plan phase whose steps would hit it. A residual classed `BLOCKS-PLANNING`, or an unclassified residual (every line written before the class field existed), needs an explicit author disposition — a sha (with its fix check) or a bead — and the choice is recorded, never defaulted. Record the dispositions in Revision History: one line, naming each residual's disposition (sha or bead id) — never the finding text itself. A residual with no disposition blocks accept.
@@ -56,7 +56,7 @@ In any brief or relay, put the absolute path itself where `<RDR dir>` stands, ne
    ```bash
    nx rdr set-status {id} accepted
    ```
-   This is the code-enforced flip. It rewrites the RDR file `status: draft -> accepted`, adds `accepted_date`, and updates the README index-row status cell in one tested action. Hand-editing frontmatter is the source of the RDR-165/166 ledger drift (T2 advanced, file left at `draft`); always use the command so T2 and the file cannot diverge.
+   This is the code-enforced flip. It rewrites the RDR file `status: draft -> accepted`, adds `accepted_date`, and updates the README index-row status cell in one tested action. Hand-editing frontmatter is the source of ledger drift (T2 advanced, file left at `draft`); always use the command so T2 and the file cannot diverge.
 4. **Update reviewed-by** — set to `self` if empty (frontmatter edit; the CLI does not touch this field).
 5. **Stage files** — `git add` the RDR file and `{rdr_dir}/README.md`.
 7. **Planning handoff** (default: yes) — Auto-detect complexity:
@@ -81,12 +81,12 @@ In any brief or relay, put the absolute path itself where `<RDR dir>` stands, ne
 
 Steps 1-6 execute directly — no agent delegation. Step 7 (planning handoff) uses one agent dispatch and two MCP tool calls **sequentially**:
 1. `strategic-planner` (Agent tool) — creates plan and beads
-2. `mcp__plugin_conexus_nexus__nx_plan_audit` — validates plan against codebase (RDR-080: no agent spawn)
-3. `mcp__plugin_conexus_nexus__nx_enrich_beads` — enriches beads with execution context (RDR-080: no agent spawn)
+2. `mcp__plugin_conexus_nexus__nx_plan_audit` — validates plan against codebase (no agent spawn)
+3. `mcp__plugin_conexus_nexus__nx_enrich_beads` — enriches beads with execution context (no agent spawn)
 
 The accept skill writes a T1 scratch entry tagged `rdr-planning-context` before step 1.
 
-**Important**: Step 2 (T2 `status: accepted` write) must complete before Step 7 (planner dispatch) to satisfy RDR-024 Guardrail 2 (strategic-planner pre-check warns if RDR not accepted).
+**Important**: Step 2 (T2 `status: accepted` write) must complete before Step 7 (planner dispatch) to satisfy the planner guardrail (strategic-planner pre-check warns if RDR not accepted).
 
 ## Success Criteria
 
@@ -112,4 +112,4 @@ Outputs produced directly by this skill (Steps 1-6):
 - **Filesystem**: Updated RDR markdown (frontmatter `status: accepted`, `accepted_date`), regenerated `{rdr_dir}/README.md`
 - **T1 scratch**: mcp__plugin_conexus_nexus__scratch(action="put", content="RDR NNN: accepted YYYY-MM-DD" for ephemeral tracking during multi-step acceptance flow
 - **T1 scratch**: rdr-planning-context tag entry via scratch tool (for nx_plan_audit context)
-- **Agent dispatch + MCP calls**: strategic-planner (Agent tool) → `mcp__plugin_conexus_nexus__nx_plan_audit` → `mcp__plugin_conexus_nexus__nx_enrich_beads` (optional, user-confirmed, orchestrated by this skill — RDR-080)
+- **Agent dispatch + MCP calls**: strategic-planner (Agent tool) → `mcp__plugin_conexus_nexus__nx_plan_audit` → `mcp__plugin_conexus_nexus__nx_enrich_beads` (optional, user-confirmed, orchestrated by this skill)

@@ -20,6 +20,15 @@ need more than the file:
   group with no record, a disbanded one, or one whose ``serves`` lacks ``<base>`` is warned about. A warning does
   not refuse the file. Any other aura is not checked here.
 
+* ``serving_group`` for a ``{serves}`` template (RDR-252 "Aura per base"): the template names no group, so it is checked
+  against the groups the session belongs to (``member_groups``). A session in no group, or in groups that are not live
+  or serve nothing, leaves the template expanding to no aura; that is a :class:`CheckWarning`, as it is for a concrete
+  aura, and never a refusal, so the shipped auras do not turn ``nx aura check`` red in a session outside any serving
+  group. A base whose expansion is rejected (its subspace, threads value or branch breaks a rule) is a
+  :class:`Finding` naming it. The dictionary check then runs on each expansion and names the base in its findings. With
+  no way to read the groups the serving check is :class:`Skipped` and the dictionary check reads one expansion for a
+  sample base.
+
 A check that cannot run is :class:`Skipped` by name, with its reason, and never counts as passed.
 
 The ``[clear]`` rule. A post meets a match when it carries every pair. A post meets both
@@ -32,13 +41,13 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from nexus.auras.aura import Aura, AuraError
+from nexus.auras.aura import Aura, AuraError, expand_template
 from nexus.auras.load_gate import GroupReader, GroupUnreadable, group_is_live
 from nexus.auras.loader import AuraEntry
 from nexus.lua_runtime import library
@@ -194,6 +203,8 @@ def check_serving_group(
     No other aura is checked and no read is made for it. With no reader, or a read that raises
     :class:`~nexus.auras.load_gate.GroupUnreadable`, the check is :class:`Skipped` by name and raises no warning.
     An aura with no ``[load]`` group needs no read: it loads in every session, which is the warning."""
+    if aura.is_template:  # check_template_serving reads its group: a template is refused, not warned about
+        return [], []
     m = _OWNER_RE.fullmatch(aura.subspace)
     if m is None:
         return [], []
@@ -226,6 +237,85 @@ def check_serving_group(
             )
         ], []
     return [], []
+
+
+#: The base a template is expanded for when its group cannot be read, so the dictionary check still has a subspace.
+_SAMPLE_BASE = "x-y"
+
+
+def check_template_serving(
+    aura: Aura, read_group: GroupReader | None, member_groups: Callable[[], Iterable[str]] | None, *,
+    now: datetime | None = None,
+) -> tuple[list[Finding], list[CheckWarning], list[Skipped], list[Aura] | None]:
+    """The serving check of a ``{serves}`` template: findings, warnings, skips and its expansions (``None`` when the groups
+    were not read, so the caller cannot name a base).
+
+    *member_groups* returns the names of the groups the session belongs to (raising
+    :class:`~nexus.auras.load_gate.GroupUnreadable` when it cannot), *read_group* one group's record. With either missing,
+    or a read that raises, the check is :class:`Skipped` by name. Warned: the session is in no group, or no group it is in
+    is live and serves a base. Refused: each base whose expansion is rejected."""
+    key = "load.group"
+    if read_group is None or member_groups is None:
+        return [], [], [Skipped("serving_group", "the session's groups cannot be read here, so the bases the template expands to are unchecked")], None
+    try:
+        names = sorted(set(member_groups()))
+    except GroupUnreadable as exc:
+        return [], [], [Skipped("serving_group", f"the session's groups could not be read: {exc}")], None
+    moment = now if now is not None else datetime.now(timezone.utc)
+    nothing = "so the template expands to no aura"
+    if not names:
+        return [], [CheckWarning("serving_group", key, f"the session belongs to no group, {nothing}")], [], []
+    findings: list[Finding] = []
+    why_not: list[str] = []
+    expansions: list[Aura] = []
+    unreadable: list[str] = []
+    seen: set[str] = set()
+    for group in names:
+        try:
+            record = read_group(group)
+        except GroupUnreadable as exc:
+            unreadable.append(f"{group!r} ({exc})")
+            continue
+        if record is None:
+            why_not.append(f"the group {group!r} has no record")
+        elif not group_is_live(record, moment):
+            why_not.append(f"the group {group!r} is disbanded")
+        elif not record.serves:
+            why_not.append(f"the group {group!r} serves nothing")
+        else:
+            fresh = [b for b in record.serves if b not in seen]
+            seen.update(fresh)
+            made, rejected = expand_template(aura, fresh, group=group)
+            expansions += made
+            findings += [
+                Finding("serving_group", "trigger.subspace", f"the template does not expand for the base {base!r} of group {group!r}: {why}")
+                for base, why in rejected
+            ]
+    skipped = [Skipped("serving_group", f"a group of the session could not be read: {', '.join(unreadable)}")] if unreadable else []
+    warnings: list[CheckWarning] = []
+    if not expansions and not findings and not unreadable:
+        warnings.append(CheckWarning("serving_group", key, f"{'; '.join(why_not)}, {nothing}"))
+    return findings, warnings, skipped, expansions if (expansions or not unreadable) else None
+
+
+def _check_template_dictionary(
+    aura: Aura, expansions: list[Aura] | None, templates: Sequence[dict[str, Any]]
+) -> tuple[list[Finding], list[Skipped]]:
+    """The dictionary check of a template: once for each expansion, its findings naming the base; or once for a sample
+    expansion when the group's bases are unknown. A sample the expansion rules refuse is a finding on the threads value."""
+    if not expansions:
+        sample, rejected = expand_template(aura, (_SAMPLE_BASE,))
+        if not sample:
+            why = rejected[0][1] if rejected else "no base expands"
+            return [Finding("threads", "display.threads", f"the template does not expand even for the sample base {_SAMPLE_BASE!r}: {why}")], []
+        return check_dictionary(sample[0], templates)
+    findings: list[Finding] = []
+    skipped: dict[tuple[str, str], Skipped] = {}
+    for one in expansions:
+        f, sk = check_dictionary(one, templates)
+        findings += [Finding(x.check, x.key, f"[{one.base}] {x.detail}") for x in f]
+        skipped.update({(x.check, x.reason): x for x in sk})
+    return findings, list(skipped.values())
 
 
 def _check_procedure(
@@ -267,6 +357,7 @@ def check_auras(
     only: str | None = None,
     probe: library.ProbeArg = library.UNPROBED,
     read_group: GroupReader | None = None,
+    member_groups: Callable[[], Iterable[str]] | None = None,
     now: datetime | None = None,
 ) -> list[AuraCheck]:
     """Check *entries* (from :func:`~nexus.auras.enumerate_auras`), or only the one named *only*.
@@ -277,7 +368,8 @@ def check_auras(
     The ``threads`` check always looks across every entry, so a filtered run still sees the
     aura that shares its block. A :class:`~nexus.lua_runtime.header.RepoProbeError` from the
     library propagates. *read_group* reads a group's record for the serving-group warning (:func:`check_serving_group`);
-    with ``None`` that check is skipped for an aura that needs it.
+    *member_groups* names the groups the session belongs to, for a ``{serves}`` template (:func:`check_template_serving`); with
+    ``None`` either, that check is skipped for an aura that needs it.
     """
     if templates is not None and not templates:
         templates, unavailable = None, "the registry lists no templates"
@@ -300,15 +392,26 @@ def check_auras(
             if header is not None:
                 findings += check_arguments(result, header)
             findings += check_clear(result)
-            serving_warnings, serving_skipped = check_serving_group(result, read_group, now=now)
-            warnings += serving_warnings
+            expansions: list[Aura] | None = None
+            if result.is_template:
+                serving_findings, serving_warnings, serving_skipped, expansions = check_template_serving(
+                    result, read_group, member_groups, now=now,
+                )
+                findings += serving_findings
+                warnings += serving_warnings
+            else:
+                serving_warnings, serving_skipped = check_serving_group(result, read_group, now=now)
+                warnings += serving_warnings
             skipped += serving_skipped
             if e.name in threads:
                 findings.append(threads[e.name])
             if templates is None:
                 skipped.append(Skipped("dictionary", unavailable))
             else:
-                dict_findings, dict_skipped = check_dictionary(result, templates)
+                dict_findings, dict_skipped = (
+                    _check_template_dictionary(result, expansions, templates) if result.is_template
+                    else check_dictionary(result, templates)
+                )
                 findings += dict_findings
                 skipped += dict_skipped
         out.append(AuraCheck(e.name, e.root, tuple(findings), tuple(skipped), tuple(warnings)))

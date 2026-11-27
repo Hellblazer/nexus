@@ -133,13 +133,13 @@ def _deadline_for() -> Callable[[Any], Any]:
 
 @click.group("group")
 def group_group() -> None:
-    """Groups: who answers a board topic (RDR-252). form, set, disband, override, join, leave, list, ack-times."""
+    """Groups: who answers a board topic. Subcommands: form, set, disband, override, join, leave, list, ack-times."""
 
 
 @group_group.command("form")
 @_name()
 @click.option("--serves", "serves", multiple=True, required=True, callback=_check_topics, metavar="TOPIC",
-              help="A board topic base name this group answers, for example nexus-develop. Repeatable. One live group serves a topic.")
+              help="A board topic base name this group answers, for example <repo>-develop. Repeatable. One live group serves a topic.")
 @click.option("--purpose", default=None, help="What the group is for.")
 @click.option("--ends", default=None, metavar="UTC|open", help="When the group ends, a UTC instant such as 2026-12-01T00:00:00Z, or open.")
 @click.option("--ack-deadline", type=int, default=None, metavar="MINUTES", help="Default acknowledgement deadline, 5 to 240 (the engine's default is 20).")
@@ -279,7 +279,7 @@ def leave_cmd(ctx: click.Context, name: str) -> None:
 def list_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     """Show the group NAME: its record, its leader and its members in join order, by alias, each with its state.
 
-    State is the member's RDR-253 state: unheld, live, lapsed, ended, or unleased (a live binding whose MCP server
+    State is the member's state: unheld, live, lapsed, ended, or unleased (a live binding whose MCP server
     cannot renew, so the engine cannot say whether its holder is alive).
     """
     client = _env(ctx).client
@@ -348,7 +348,7 @@ def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict
     """One entry per red of an ``--owner`` subspace, from its owner, clear and ack rows (:func:`nexus.ci_reds.split`
     says how rows make reds; a hand-off's ``reason`` ties it to the open red, not its new ``episode_at``).
 
-    An ack counts as the engine counts it (RDR-252 "Acknowledgement"): inside the red, for the identity the latest owner
+    An ack counts as the engine counts it: inside the red, for the identity the latest owner
     row named as owner at the ack's time (an ack from one the red was handed away from does not, and none counts once
     the red is escalated with no owner), and for the sha of any red tip of the red. *Who* posted it is what the engine
     reads, the sender-session stamp mapped through the session index; ``dims.from`` is only a label and is never read, so
@@ -419,7 +419,7 @@ def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict
 def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     """Per red on the topics NAME serves: the sha, when its episode began, when the owner acknowledged, and the minutes.
 
-    The Day 2 calibration read for the group's ``ack_deadline`` (RDR-252: review the default against the distribution
+    The Day 2 calibration read for the group's ``ack_deadline`` (review the default against the distribution
     after the first 20 reds or 30 days). It reads the ``--owner`` post of each served topic (``board/ci/<topic>--owner``)
     and counts an ack the way the engine does: the ack whose sender-session stamp maps, through the identity service's
     session index, to the identity that owned the red at that time, for a red tip (``from`` is never read, so an ack with

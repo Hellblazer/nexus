@@ -6,7 +6,7 @@ effort: low
 
 # Tumbler Footnotes
 
-Thin wrapper over `nx catalog footnotes` (GH #896 / nexus-sxiay). No mainstream
+Thin wrapper over `nx catalog footnotes` (GH #896). No mainstream
 markdown renderer resolves the `nx://catalog/<tumbler>` URI scheme, so a doc
 citing the catalog this way reads as a dead hyperlink everywhere except
 `nx doc render`'s own `.rendered.md` sidecar. This command fixes the SOURCE
@@ -15,7 +15,7 @@ file itself, in place.
 ## Convert a file
 
 ```bash
-nx catalog footnotes docs/rdr/rdr-200-example.md
+nx catalog footnotes docs/rdr/rdr-<number>-example.md
 ```
 
 Every `[label](nx://catalog/<tumbler>)` becomes `[label][^tumbler-<slug>]`
@@ -49,7 +49,7 @@ the render-time half of GH #896.
 ## Preview without writing
 
 ```bash
-nx catalog footnotes docs/rdr/rdr-200.md --dry-run
+nx catalog footnotes docs/rdr/rdr-<number>.md --dry-run
 ```
 
 Prints a unified diff of what would change; writes nothing.
@@ -57,7 +57,7 @@ Prints a unified diff of what would change; writes nothing.
 ## Refresh existing footnotes only
 
 ```bash
-nx catalog footnotes docs/rdr/rdr-200.md --refresh
+nx catalog footnotes docs/rdr/rdr-<number>.md --refresh
 ```
 
 Rewrites the bodies of footnotes already in the file against current catalog
@@ -66,7 +66,7 @@ state and adds no new markers; a link not yet converted is left alone.
 ## Shorter footnote bodies
 
 ```bash
-nx catalog footnotes docs/rdr/rdr-200.md --style short
+nx catalog footnotes docs/rdr/rdr-<number>.md --style short
 ```
 
 `--style short` writes title and tumbler only; `long` (the default) adds
@@ -75,7 +75,7 @@ content type, indexed date, link and outbound links.
 ## Reverse conversion
 
 ```bash
-nx catalog footnotes docs/rdr/rdr-200.md --to-links
+nx catalog footnotes docs/rdr/rdr-<number>.md --to-links
 ```
 
 Expands every footnote marker back into its `nx://catalog/<tumbler>` link and

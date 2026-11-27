@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The audience helper's account-home lookup, in the set CI runs on native Windows (nexus-sby49).
+"""The settings helper's account-home lookup, in the set CI runs on native Windows (nexus-sby49).
 
 ``conexus/hooks/scripts/_audience.py`` reads the OS account's home from the account
 database (``pwd`` on POSIX) or the known-folder profile API (Windows), never from
@@ -49,12 +49,14 @@ def test_the_windows_profile_api_answers_a_directory_and_ignores_userprofile(tmp
     assert os.path.normcase(second) == os.path.normcase(first)
 
 
-def test_a_flag_in_a_decoy_home_does_not_make_a_maintainer(tmp_path, monkeypatch):
-    flag = tmp_path / ".config" / "nexus" / "maintainer-profile"
-    flag.parent.mkdir(parents=True)
-    flag.write_text("", encoding="utf-8")
+def test_a_settings_file_in_a_decoy_home_does_not_count(tmp_path, monkeypatch):
+    settings = tmp_path / ".config" / "nexus" / "conexus.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{"telemetry": true}', encoding="utf-8")
     for name in ("HOME", "USERPROFILE"):
         monkeypatch.setenv(name, str(tmp_path))
     real = _audience.account_home()
     assert os.path.normcase(real) != os.path.normcase(str(tmp_path))
-    assert _audience.account_flag() is os.path.isfile(os.path.join(real, ".config", "nexus", "maintainer-profile"))
+    real_file = os.path.join(real, ".config", "nexus", "conexus.json")
+    if not os.path.isfile(real_file):
+        assert _audience.telemetry_enabled() is False

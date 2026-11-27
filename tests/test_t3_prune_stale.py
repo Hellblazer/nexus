@@ -150,7 +150,7 @@ def test_prune_stale_message_names_the_cause_and_the_replacement(t3_db, runner):
     with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(main, ["t3", "prune-stale"])
 
-    assert "nexus-bm8dd" in result.output
+    assert "nx t3 prune-stale is RETIRED" in result.output
     assert "source_path" in result.output, "must name WHY it cannot work"
     assert "nx catalog prune-stale" in result.output
     assert "nx t3 gc" in result.output

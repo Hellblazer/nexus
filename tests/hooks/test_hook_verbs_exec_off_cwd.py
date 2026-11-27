@@ -165,21 +165,28 @@ def test_infer_repo_with_only_a_planted_git_falls_back_to_the_cwd_name(
 # -- preflight_verb ------------------------------------------------------------------
 
 
-def test_preflight_probes_spawn_off_the_cwd(windows_box, spawned, monkeypatch) -> None:
+def _beads_payload(tmp_path) -> dict:
+    """The bd probe runs only in a project with a ``.beads/`` directory (nexus-sby49.4)."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".beads").mkdir()
+    return {"cwd": str(tmp_path)}
+
+
+def test_preflight_probes_spawn_off_the_cwd(windows_box, spawned, monkeypatch, tmp_path) -> None:
 
     windows_box({"git", "bd", "nx"}, {"bd", "nx"})
     monkeypatch.setattr(preflight_verb, "_platform", lambda: "win32")
-    preflight_verb.run(None)
+    preflight_verb.run(_beads_payload(tmp_path))
     assert _heads(spawned) == [rf"{TOOLS}\nx.exe", BD], spawned
 
 
 def test_preflight_with_only_a_planted_bd_reports_it_missing_and_spawns_nothing(
-    windows_box, spawned, monkeypatch,
+    windows_box, spawned, monkeypatch, tmp_path,
 ) -> None:
 
     windows_box({"nx"}, {"bd"})
     monkeypatch.setattr(preflight_verb, "_platform", lambda: "win32")
-    preflight_verb.run(None)
+    preflight_verb.run(_beads_payload(tmp_path))
     assert BD not in _heads(spawned) and "bd" not in _heads(spawned)
     status = preflight_verb._probe("bd (beads, optional)", ["bd", "version"])
     assert (status.available, status.detail) == (False, "not on PATH")

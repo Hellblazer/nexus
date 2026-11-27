@@ -59,9 +59,12 @@ SQL_ASSIGN = ("holds", "P3.5c: TaxonomyRepository.assignFromChashesRetryingDeadl
 
 
 REAPER = ("holds-until-P4.1", "nexus-p2m1x.35, R1 reservation: the reaper calls the function by LABEL (ReaperRepository, ChunkReaper); linda ruled the call safe in Phase 3, out of P3.5c's scope, and it is a P4.1 precondition")
+REAPER_EXPIRY = ("holds-until-P4.1", "nexus-p2m1x.35, R1 reservation: the reaper calls the function by LABEL (ReaperRepository, ChunkReaper) and the function selects rows by the label tag; from vectors-086 (nexus-p2m1x.28) it also guards each row by the row's own origin id, so a label that no longer names the row's origin cannot delete a chunk another collection holds, and the label call stays a P4.1 precondition")
 
 
 def verdict(file, table):
+    if file in ("nexus.reaper_expire_quarantine", "nexus.reaper_expire_client_quarantine"):
+        return REAPER_EXPIRY
     if file.startswith("nexus.reaper_"):
         return REAPER
     if file.startswith("nexus."):

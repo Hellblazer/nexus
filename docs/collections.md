@@ -21,8 +21,8 @@ for you. Where it does not, prefer the broad, boring choice.
 | `knowledge` | Everything else: papers, notes, agent findings, imported documents | You, by naming a subject |
 
 `code`, `docs`, and `rdr` collections are owned by a repository. The
-catalog assigns their owner from the repo's tumbler and renders their full
-name. You do not name them, and you do not write into them directly; you
+catalog assigns their owner from the repo's tumbler and names a new one in
+the four-segment form. You do not name them, and you do not write into them directly; you
 re-index the repo.
 
 `knowledge` is the only content type a person or agent names. Everything
@@ -75,7 +75,7 @@ unsure whether a new document belongs to an existing subject, it does.
 
 ## Rule 3: type the subject, never the machinery
 
-Give the bare subject and let the catalog render the rest:
+Give the bare subject and let the catalog do the rest:
 
 ```bash
 nx store put paper.md --collection distributed-systems
@@ -83,44 +83,109 @@ nx index md notes/overview.md --collection vector-search
 nx index pdf --dir ~/papers/oracles --collection augur-oracle-papers
 ```
 
-A subject that has no collection yet is registered by its attributes
-(content type `knowledge`, owner `distributed-systems`, the model your
-install actually embeds with, version `v1`), and the engine mints the
-collection's id and its label, `c` followed by the id (`c4217`, say). The
-write goes to that label. The client renders no
-`knowledge__distributed-systems__<model>__v1` name for it, and `nx
-collection list` shows the subject in the `OWNER` column, not in `NAME`
-(RDR-229 P3.8). A subject that already has a collection keeps writing
-there: a conformant `knowledge__distributed-systems__<model>__v1` or a
-legacy two-segment collection that holds data is found first, whatever its
-shape, and a recovery-bundle restore keeps the name it restores. Typing
-`knowledge__distributed-systems` takes the same path; only a `docs__X`,
-`code__X` or `rdr__X` name renders as `<type>__X__<model>__v1`. A label of the form `c`
-plus digits is the engine's to mint, so a registration, a rename target or
-a re-embed target of that shape is refused. Never type the four-segment
-form, a model token, or a version yourself. A name that encodes a model the
-install does not use is exactly how local collections once ended up
-labelled with a model that never embedded them (GH #667, RDR-109). RDR-204
-is retiring the encoded name as an authority altogether; a name you type by
-hand today is a name that has to be migrated tomorrow.
+`distributed-systems` is a subject, not a collection name. `nx` looks the
+collection up by its attributes: content type `knowledge`, owner
+`distributed-systems`, and the embedding model your install actually embeds
+with (RDR-229 item 5). If no collection has those attributes, `nx`
+registers one with them, and the engine gives it a label.
+
+**A collection is a registry row, and its name is a label.** Each
+collection has a `collection_id`, a number the engine assigns and never
+reuses, and every table that belongs to a collection points at that id. The
+row also holds the attributes: content type, owner, embedding model, model
+version, dimension and lifecycle state. The name is only a label: the string
+you type and read in a command. The engine reads a collection's content
+type, embedding model and lifecycle state from its row; with no row, only a
+`quarantine-` prefix still marks a quarantine copy. The client reads the row in most paths too; a few still
+read what an older name carries (a four-segment name's model token, a
+two-segment name's type prefix), and a minted `c<id>` label carries
+neither. A few checks still compare a model token read from a name: the
+`nx collection rename` guards compare the new name's type prefix, and its
+model (the token it carries, or the one its prefix implies), with the
+source's; the engine
+refuses a conformant new name whose token disagrees with the source row's
+model; and the re-embed job's foreign-origin check reads a source's name
+when that source's row is gone.
+
+**New knowledge subjects get a minted label.** When `nx` registers a new
+knowledge subject, the engine sets its label to `c` followed by its id
+(`c4812`). The label says nothing about the collection. `nx collection list`
+shows its id, owner, model and state beside it; `nx catalog show` prints a
+document's content type and its collection's label, and no owner, model or
+state. A subject that already has a collection keeps writing there: a
+conformant `knowledge__distributed-systems__<model>__v1` or a legacy
+two-segment collection that holds data is found first, whatever its label,
+and a recovery-bundle restore keeps the name it restores. Typing
+`knowledge__distributed-systems` takes the same path. `nx index repo` does
+not mint: the `code`, `docs` and `rdr` collections it creates are still
+named in the four-segment form, for example `code__1-15__voyage-code-3__v1`,
+and a typed `docs__X`, `code__X` or `rdr__X` renders as
+`<type>__X__<model>__v1`.
+
+**A label is unique among a tenant's collections that are not superseded.**
+Two such collections cannot answer to one label, so a label in a command
+names one collection. A superseded collection keeps its label taken. Commands
+take the label: `c4812` is a label, not the id `4812`, and a bare number is never
+read as an id. The one verb that takes an id is `nx collection delete --id 4812`, by
+its own flag (it needs engine-service 0.1.203 or later); every other `nx collection`
+verb takes the label.
+
+A label must be non-empty UTF-8 with no control characters, at most 255
+bytes, and not the minted form `c<digits>`, which only the engine assigns. It
+may not contain `/` or `,`, and it may not begin or end with whitespace.
+
+To give a collection a readable label, rename it with `nx collection rename
+OLD NEW`. A minted label has no route to a bare readable label without
+`--force-prefix-change`. Three things to know first:
+
+- **A rename sets the collection's content type and owner from the new name.**
+  For a `knowledge` collection the owner is its subject. Renaming `c4812` to
+  `distributed-systems-papers` (possible only with the flag below) makes `distributed-systems-papers` its
+  subject, so a later write to `distributed-systems` no longer finds it and
+  registers a second collection. Rename a subject's collection only to
+  change its subject.
+- **The CLI guards compare the two names.** A minted `c<id>` label has no
+  type prefix, so renaming it to a label without one, or to one the CLI
+  reads as another embedding model (`knowledge__x` reads as
+  voyage-context-3, `c4812` as voyage-code-3), stops with a prefix or
+  model mismatch. `--force-prefix-change` lets it through and switches off
+  the model-token check, so use it only when the new name's type and model
+  are right. A conformant four-segment name whose model token matches the
+  row's model passes without the flag, and sets the owner from its owner
+  segment.
+- **What a rename does depends on the engine's gate 3 latch.** Before it, a
+  rename rewrites every table that names the collection, gives the
+  collection a new registry row and id, and leaves the old name as a
+  superseded row that keeps its label taken. From the latch it is refused
+  (409 `rename_refused`, nothing changes) until the name-key drop move has
+  finished and the engine has restarted once; then it changes one row: the
+  collection keeps its id, no chunk or child row is rewritten (the `nx-note://` source URIs of its
+  notes and its queued aspect tasks follow the label), and the old label has
+  no row. `nx doctor`'s "RDR-229 completion" row counts the gates that
+  hold and its "RDR-229 collection rename" row names what a refused rename
+  waits for. Rule 6 has the rest.
+
+After a one-row rename the old label can stay reserved: from the latch the
+engine refuses it (409 `label_reserved`) for a new registration, a rename
+target, a re-embed target, a supersede successor or an import while a
+name-keyed table still holds a row under it for another collection. It frees when the engine drops the
+name columns (RDR-229 P4.1). Renaming the collection back is allowed.
+
+Never type a four-segment name, a model token or a version to create a
+collection. A name that encoded a model the install did not use is how local
+collections once ended up labelled with a model that never embedded them
+(GH #667, RDR-109). With the subject alone, `nx` finds or creates the right
+collection for the model it embeds with.
 
 Subject names are lowercase, hyphen-separated, two or three words, ASCII.
-The owner segment of the four-segment name (and of the grandfathered
-two-segment form) admits letters, digits, hyphens, and a SINGLE underscore
-between two such tokens — `[a-zA-Z0-9-]+(_[a-zA-Z0-9-]+)*` — never a bare
-`__`, which stays reserved, unconditionally, for the segment separator. The
-engine's attribute-backfill walk (`hygiene-004-owner-grammar-underscore.xml`'s
-`hygiene-004-1`) and the Java test helper that seeds fixtures against it
-(`PgContainerHelper`'s `CONFORMANT_COLLECTION_NAME` /
-`CONFORMANT_QUARANTINE_COLLECTION_NAME`) both use exactly this grammar
-(nexus-ztafa). The client's own collection-name PARSING functions
-(`is_conformant_collection_name` / `parse_conformant_collection_name` in
-`src/nexus/corpus.py`) admit the same single-underscore owner: both match
-against `_CONFORMANT_COLLECTION_RE`, whose owner group is
-`_OWNER_SEGMENT_RE` — the identical grammar, one symbol, widened by
-nexus-ft04v.26. `src/nexus/corpus.py`'s `_COLLECTION_NAME_RE` stays a
-separate, whole-string ChromaDB shape check with no owner-segment
-concept; it is not the parser these two functions use.
+The owner segment of a four-segment name admits letters, digits, hyphens, and
+a single underscore between two such tokens, `[a-zA-Z0-9-]+(_[a-zA-Z0-9-]+)*`,
+never a bare `__`, which stays reserved for the segment separator.
+`is_conformant_collection_name` and `parse_conformant_collection_name` in
+`src/nexus/catalog/rows/legacy_names.py` match against it
+(`_CONFORMANT_COLLECTION_RE`, whose owner group is `_OWNER_SEGMENT_RE`), and
+so does the engine's attribute-backfill walk (`hygiene-004-1`, nexus-ztafa). A
+minted `c<id>` label has no owner segment.
 
 The `owner_id` column is not the name's owner segment for a repo
 collection (nexus-6pbwx). A collection's owner is its source, set once at
@@ -199,12 +264,15 @@ that skips them leaves rows that fail loud on a foreign key later
 (RDR-164). Never write to or delete a `quarantine-*` collection; the orphan
 GC owns those and restores from them.
 
-From RDR-229's gate 3 latch (`nx doctor`'s "RDR-229 completion" row says when) a rename
-changes the collection's label only: it keeps its `collection_id`, and no chunk
-or child row is rewritten. The label it left is reserved, so a registration, a
-rename target or a re-embed target of that label is refused (409
-`label_reserved`, nothing written) until a later release relabels the rows still
-carrying it; renaming the collection back is allowed. Before the latch a rename runs as before and is not refused. From the latch it is
+From RDR-229's gate 3 latch (`nx doctor`'s "RDR-229 completion" row counts the
+gates that hold) a rename changes the row's label, and its content type and
+owner from the new name (Rule 3): it keeps its `collection_id`, and no chunk
+or child row is rewritten. The label it left can
+stay reserved: while a name-keyed table still holds a row under it for another
+collection, a registration, a rename target, a re-embed target, a supersede
+successor or an import of that label is refused (409 `label_reserved`, nothing written) until the engine
+drops the name columns (P4.1); renaming the collection back is allowed. Before
+the latch a rename runs as before and is not refused. From the latch it is
 refused (409 `rename_refused`, nothing changes) until the name-key drop move has
 finished and the engine has restarted once; the doctor row "RDR-229 collection
 rename" names which. A delete, prune or reindex of a collection a

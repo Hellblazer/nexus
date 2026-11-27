@@ -873,7 +873,7 @@ def _measure_eligibility(library, queries, with_clone_selections) -> dict:
     assert fts_probe["examined"] > 0, (
         "no request reached the FTS branch of the matcher on the real substrate, so its eligibility judgement "
         f"is not exercised by this fixture: {fts_probe}")
-    # The same enforcing run over the library as it stands BEFORE `nx plan reseed`: builtins seeded before
+    # The same enforcing run over the library as it stands BEFORE `nx answer-plan reseed`: builtins seeded before
     # nexus-jypmj.2.1 carry no declaration, so with the gate on each reads as an untrusted unknown plan.
     legacy_view = _LegacyBuiltins(library)
     legacy_sel: dict[str, str | None] = {}

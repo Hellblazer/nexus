@@ -77,6 +77,10 @@ class ReapableConsumersScanTest {
         // sweep gate are vectors-069's, untouched.
         SQL_CONSUMERS.put("vectors-077-rdr229-p35b-readers-both.xml#nexus.reaper_quarantine_chunks",
             "same as vectors-069's: only the collection matches changed; grace is injected by tests only, production passes NULL");
+        // RDR-229 P3.8 (vectors-085, nexus-p2m1x.28) redefines it once more to refuse by name where it raised a bare 23505; the grace
+        // handling and the sweep gate are vectors-077's, untouched (the scan below still demands the gate in this unit).
+        SQL_CONSUMERS.put("vectors-085-quarantine-tuple-guards.xml#nexus.reaper_quarantine_chunks",
+            "same as vectors-077's: only the tuple guard changed; grace is injected by tests only, production passes NULL");
     }
 
     private static final Pattern UNIT_START = Pattern.compile(

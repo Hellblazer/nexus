@@ -27,7 +27,7 @@ def _fetch(cat, **filters) -> list[dict]:  # noqa: ANN001 — catalog reader han
         if exc.response is not None and exc.response.status_code == 404:
             raise click.ClickException(
                 "this engine has no /gc_audit/list route (predates "
-                "engine-service-v0.1.62, nexus-jqvzk) — converge it with "
+                "engine-service-v0.1.62) — converge it with "
                 "'nx upgrade' first."
             ) from exc
         raise

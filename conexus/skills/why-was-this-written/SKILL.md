@@ -4,7 +4,7 @@ description: Use when the design intent behind a failing code path must be reduc
 effort: medium
 ---
 
-**Tier-aware discipline** — before starting, check T3 (`search`), T2 (`memory_search`), and T1 (`scratch` search) widest to narrowest so you don't duplicate work already done; reuse a matching plan via `plan_search` before dispatching multiple agents. Before returning, write findings back at the tier matching their audience (`scratch` for siblings this session, `memory_put` for this project, `store_put` for permanent cross-project knowledge). Full checklist: [${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md](../../resources/tier-discipline.md) (shared across every skill that prescribes it — nexus-cnzei.6).
+**Tier-aware discipline** — before starting, check T3 (`search`), T2 (`memory_search`), and T1 (`scratch` search) widest to narrowest so you don't duplicate work already done; check `answer_plan_search` for a saved retrieval plan (never an implementation plan) before a multi-source search. Before returning, write findings back at the tier matching their audience (`scratch` for siblings this session, `memory_put` for this project, `store_put` for permanent cross-project knowledge). Full checklist: [${CLAUDE_PLUGIN_ROOT}/resources/tier-discipline.md](../../resources/tier-discipline.md) (shared across every skill that prescribes it).
 
 # why-was-this-written
 
@@ -35,7 +35,7 @@ falls through to an inline `claude -p` planner.
 
 ## Required bindings
 
-- `symptom` — one-line description of what is failing. The plan searches on it, and `nx_answer` fills it from the question when you do not bind it yourself. A failing file or directory is not a binding (path scoping was removed from the plan, nexus-7y4v0): put it in the question text so it reaches the search.
+- `symptom` — one-line description of what is failing. The plan searches on it, and `nx_answer` fills it from the question when you do not bind it yourself. A failing file or directory is not a binding (path scoping was removed from the plan): put it in the question text so it reaches the search.
 
 ## Typical intent shapes
 

@@ -116,7 +116,7 @@ def mailbox_arm_cmd(session_id: str) -> None:
     (:mod:`nexus.session_marker`) consistent for whichever session next
     reads it.
 
-    RDR-211 nexus-rplay.14: the per-prompt re-arm this command served (a
+    The per-prompt re-arm this command served (a
     live watcher-lock liveness check gating whether to print) was deleted
     with the CLI watcher loop itself; nothing calls this command
     automatically any more (the ``UserPromptSubmit`` drain hook is now the
@@ -144,11 +144,11 @@ def session_end_cmd() -> None:
 
 @hook_group.command("session-end-flush")
 def session_end_flush_cmd() -> None:
-    """Run only the storage-flush portion of SessionEnd (RDR-094 Phase B).
+    """Run only the storage-flush portion of SessionEnd.
 
     Runs T1 scratch flush + T2 expire; does NOT touch T3. The
     nx-session-end-launcher's grandchild dispatches to this entry
-    point (Phase C / nexus-l828); T3/vector teardown is owned by
+    point; T3/vector teardown is owned by
     nx-mcp's lifespan + signal handler + atexit chain.
     """
     output = hooks.session_end_flush()
@@ -157,7 +157,7 @@ def session_end_flush_cmd() -> None:
 
 @hook_group.command("session-end-detach")
 def session_end_detach_cmd() -> None:
-    """Fire-and-forget SessionEnd runner (nexus-99jb Layer 2).
+    """Fire-and-forget SessionEnd runner.
 
     Double-forks into a detached grandchild that runs ``session_end``
     synchronously, then returns control to Claude Code in <50ms. This
@@ -270,7 +270,7 @@ def session_end_detach_cmd() -> None:
     is_flag=True,
     default=False,
     help="Read the durable routing_events engine table (written by every "
-    "routing hook now, nexus-gjv9b PART 2) instead of the JSONL log. "
+    "routing hook now) instead of the JSONL log. "
     "--log-path is ignored.",
 )
 @click.option(
@@ -287,13 +287,13 @@ def routing_stats_cmd(
 ) -> None:
     """Aggregate the routing-hook log into per-rule fire / deny / escape stats.
 
-    RDR-121 Phase 3. Reads JSONL records produced by the routing hook
+    Reads JSONL records produced by the routing hook
     framework (its `log_routing_event` writer) and
     reports per-rule outcomes. Used at the 30-day soak review to spot
     false positives (high escape rate), inert matchers (zero fires), or
     overly broad blocks (high block rate).
 
-    ``--from-store`` (nexus-gjv9b PART 2) reads the ``routing_events``
+    ``--from-store`` reads the ``routing_events``
     engine table that writer swap targets now, instead of the JSONL log
     this command otherwise reads.
     """
@@ -378,8 +378,8 @@ def routing_stats_cmd(
     click.echo()
     if selftest_excluded:
         click.echo(
-            f"Note: {selftest_excluded} fail-ladder self-test event(s) excluded "
-            "(suite-written test_rule/unknown pairs; see nexus-mzvwa.9)."
+            f"Note: {selftest_excluded} fail-ladder self-test event(s) excluded"
+            "."
         )
     if active is None:
         click.echo("Note: no hooks.json found — registration cross-check skipped.")
@@ -389,7 +389,7 @@ def routing_stats_cmd(
 @hook_group.command("failures")
 @click.option("--json", "as_json", is_flag=True, default=False, help="One JSON object per entry.")
 def failures_cmd(as_json: bool) -> None:
-    """List the saved inputs of swallowed hook crashes, newest first (nexus-3ceda.3)."""
+    """List the saved inputs of swallowed hook crashes, newest first."""
     from nexus._hook_runtime import failure_ring  # noqa: PLC0415 -- operator verb, not a hook path
 
     found = list(reversed(failure_ring.entries()))

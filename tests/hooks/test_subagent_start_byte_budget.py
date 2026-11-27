@@ -25,12 +25,22 @@ import subprocess
 import sys
 from pathlib import Path
 from tests._child_encoding import PYTHON_CHILD_ENCODING
+from tests.hooks.audience_harness import SRC_SEAM_PRELUDE, src_seam_env
+from tests.hooks.budget_caps_harness import (
+    _assert_every_subagent_start_text_is_labelled,
+    _project_repo,
+    _user_at_caps,
+    _worktree_of,
+)
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SN_SCRIPT = _REPO_ROOT / "sn" / "hooks" / "scripts" / "subagent_start.py"
 
-_CONEXUS_PY_DRIVER = """
+#: The budget bounds the LARGEST injection: a project whose tracked settings turn every key on (the Git row, the Search scope
+#: row, the Preflight row, the four generic brief-check questions and the project's own) on an account whose user settings are
+#: strict too, named through the seam prelude (the child process cannot reach the in-process one). A plain session's is smaller.
+_CONEXUS_PY_DRIVER = SRC_SEAM_PRELUDE + """
 import json, sys
 import os
 from nexus._hook_runtime._io import never_fail
@@ -204,7 +214,7 @@ _SUBAGENT_START_BUDGET_BYTES = 11850
 _SUBAGENT_START_WORKTREE_BUDGET_BYTES = 13950
 
 
-def _seeded_env(home: Path, cwd: str | None) -> dict[str, str]:
+def _seeded_env(home: Path, cwd: str | None, user_settings: dict | None = None) -> dict[str, str]:
     """The subprocess env with both live-state sections seeded (nexus-wxe50).
 
     The Knowledge Map cache is keyed exactly as
@@ -229,10 +239,15 @@ def _seeded_env(home: Path, cwd: str | None) -> dict[str, str]:
     # nexus-mtheb: the T1 index at its worst case, read by the driver's stub.
     t1_seed = home / "t1-seed.txt"
     t1_seed.write_text(_T1_SEED, encoding="utf-8")
+    # An account with strict user settings, under a home of its own (the seam prelude names it).
+    settings = home / "acct" / ".config" / "nexus" / "conexus.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps(user_settings or {"subagent_git": "strict"}), encoding="utf-8")
     # USERPROFILE: Windows' home for expanduser; NEXUS_CONFIG_DIR: the
     # directory the hook reads the cache from (nexus-3fme8).
     return {
         **os.environ,
+        **src_seam_env(home / "acct"),
         "HOME": str(home),
         "USERPROFILE": str(home),
         "NEXUS_CONFIG_DIR": str(home / ".config" / "nexus"),
@@ -258,9 +273,10 @@ def _assert_seeds_reached(conexus_ctx: str) -> None:
 
 
 def _run_conexus(
-    *, home: Path, cwd: str | None = None, payload: str = _REAL_SHAPE_PAYLOAD, timeout: float = 15
+    *, home: Path, cwd: str | None = None, payload: str = _REAL_SHAPE_PAYLOAD, timeout: float = 15,
+    user_settings: dict | None = None,
 ) -> str:
-    env = _seeded_env(home, cwd)
+    env = _seeded_env(home, cwd, user_settings)
     result = subprocess.run(
         [sys.executable, "-c", _CONEXUS_PY_DRIVER],
         input=payload,
@@ -299,8 +315,14 @@ def test_sn_subagent_start_script_exists() -> None:
 
 @pytest.mark.t2_tenant
 def test_combined_subagent_start_total_under_budget(tmp_path) -> None:
-    conexus_ctx = _run_conexus(home=tmp_path / "home")
+    # cwd names this checkout, whose tracked .nexus/project.json sets every project key: the measured case is the largest.
+    conexus_payload = json.dumps({**json.loads(_REAL_SHAPE_PAYLOAD), "cwd": str(_REPO_ROOT)})
+    conexus_ctx = _run_conexus(home=tmp_path / "home", payload=conexus_payload)
     _assert_seeds_reached(conexus_ctx)
+    assert "| Git |" in conexus_ctx and "| Search scope |" in conexus_ctx and "5. Does it hold in both modes" in conexus_ctx, (
+        "the measured injection is not the full one (every project key on), so the budget bounds a smaller case"
+    )
+    assert "| Preflight |" in conexus_ctx
     sn_ctx = _run_sn()
     conexus_bytes = len(conexus_ctx.encode("utf-8"))
     sn_bytes = len(sn_ctx.encode("utf-8"))
@@ -313,6 +335,20 @@ def test_combined_subagent_start_total_under_budget(tmp_path) -> None:
     # budget "passes" by measuring nothing.
     assert conexus_bytes > 1000, "nexus.hooks.subagent_start produced suspiciously little content"
     assert sn_bytes > 100, "sn subagent_start.py produced suspiciously little content"
+
+    # RDR-259 Decision 2 (nexus-sby49.11): the same hook with every settings key at its cap, in this tenant so the count holds.
+    repo = _project_repo(tmp_path)
+    caps_payload = json.dumps({**json.loads(_REAL_SHAPE_PAYLOAD), "cwd": str(repo)})
+    caps_ctx = _run_conexus(home=tmp_path / "home-caps", cwd=str(repo), payload=caps_payload, user_settings=_user_at_caps())
+    _assert_seeds_reached(caps_ctx)
+    _assert_every_subagent_start_text_is_labelled(caps_ctx)
+    caps_conexus_bytes = len(caps_ctx.encode("utf-8"))
+    caps_sn_bytes = len(_run_sn().encode("utf-8"))
+    caps_total = caps_conexus_bytes + caps_sn_bytes
+    assert caps_total < _SUBAGENT_START_BUDGET_BYTES, (
+        f"every key at its cap: combined SubagentStart total {caps_total}B (conexus {caps_conexus_bytes}B + sn {caps_sn_bytes}B) "
+        f">= budget {_SUBAGENT_START_BUDGET_BYTES}B; the caps shrink, the budget does not rise"
+    )
 
 
 @pytest.mark.t2_tenant
@@ -332,11 +368,15 @@ def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> N
     main_repo = tmp_path / "the-real-project"
     main_repo.mkdir()
     subprocess.run(["git", "init", "-q", str(main_repo)], check=True)
-    # nexus-z7ddd: the worktree Preflight row goes only to a project that has the
-    # script, as the nexus repo does; seed it so this measures the largest case.
-    preflight = main_repo / "scripts" / "agent-worktree-preflight.sh"
-    preflight.parent.mkdir()
-    preflight.write_text("#!/bin/sh\n", encoding="utf-8")
+    # The worktree Preflight row, the strict Git row and the project's brief question come from the project's tracked
+    # settings; committed, the worktree carries them, so this measures the largest case.
+    settings = main_repo / ".nexus" / "project.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({
+        "subagent_git": "strict", "preflight": "scripts/agent-worktree-preflight.sh",
+        "brief_questions": ["Does it hold in both modes, local AND cloud?"],
+    }), encoding="utf-8")
+    subprocess.run(["git", "-C", str(main_repo), "add", ".nexus/project.json"], check=True)
     subprocess.run(
         ["git", "-C", str(main_repo), "-c", "user.name=t", "-c", "user.email=t@t",
          "commit", "-q", "--allow-empty", "-m", "init"],
@@ -348,9 +388,6 @@ def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> N
         check=True,
     )
 
-    conexus_ctx = _run_conexus(home=tmp_path / "home", cwd=str(worktree_dir))
-    _assert_seeds_reached(conexus_ctx)
-    assert "| Preflight |" in conexus_ctx, "the worktree Preflight row is not in the measured injection"
     worktree_payload = json.dumps({
         "session_id": "budget-census-session",
         "hook_event_name": "SubagentStart",
@@ -359,6 +396,10 @@ def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> N
         "prompt_id": "abc123",
         "cwd": str(worktree_dir),
     })
+    conexus_ctx = _run_conexus(home=tmp_path / "home", cwd=str(worktree_dir), payload=worktree_payload)
+    _assert_seeds_reached(conexus_ctx)
+    assert "| Preflight |" in conexus_ctx, "the worktree Preflight row is not in the measured injection"
+    assert "| Git |" in conexus_ctx and "5. Does it hold in both modes" in conexus_ctx, "the measured injection is not the full one"
     sn_ctx = _run_sn(payload=worktree_payload)
     assert "worktree" in sn_ctx.lower(), (
         "sn subagent_start.py did not emit worktree-section.md for a real linked "
@@ -373,4 +414,23 @@ def test_combined_subagent_start_total_under_budget_in_a_worktree(tmp_path) -> N
         f"combined SubagentStart worktree-mode total {total}B (conexus "
         f"{conexus_bytes}B + sn {sn_bytes}B) >= budget "
         f"{_SUBAGENT_START_WORKTREE_BUDGET_BYTES}B"
+    )
+
+    # RDR-259 Decision 2 (nexus-sby49.11): the same worktree dispatch with every settings key at its cap, in this tenant so the
+    # count holds. Its own repo and worktree, committed with the project file at its caps.
+    caps_worktree = _worktree_of(_project_repo(tmp_path), tmp_path)
+    caps_payload = json.dumps({**json.loads(_REAL_SHAPE_PAYLOAD), "cwd": str(caps_worktree)})
+    caps_ctx = _run_conexus(
+        home=tmp_path / "home-caps", cwd=str(caps_worktree), payload=caps_payload, user_settings=_user_at_caps(),
+    )
+    _assert_seeds_reached(caps_ctx)
+    _assert_every_subagent_start_text_is_labelled(caps_ctx)
+    caps_sn_ctx = _run_sn(payload=caps_payload)
+    assert "worktree" in caps_sn_ctx.lower(), "the worktree path did not fire, so this would measure the smaller case"
+    caps_conexus_bytes = len(caps_ctx.encode("utf-8"))
+    caps_sn_bytes = len(caps_sn_ctx.encode("utf-8"))
+    caps_total = caps_conexus_bytes + caps_sn_bytes
+    assert caps_total < _SUBAGENT_START_WORKTREE_BUDGET_BYTES, (
+        f"every key at its cap, worktree: combined total {caps_total}B (conexus {caps_conexus_bytes}B + sn {caps_sn_bytes}B) "
+        f">= budget {_SUBAGENT_START_WORKTREE_BUDGET_BYTES}B; the caps shrink, the budget does not rise"
     )

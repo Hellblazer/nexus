@@ -66,6 +66,7 @@ import ast
 import functools
 import importlib
 import re
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -188,6 +189,21 @@ def _prefix_kind(text: str, start: int) -> str | None:
     return None
 
 
+@functools.cache
+def _gitignored(rel: str, repo_root: Path) -> bool:
+    """Whether git ignores *rel* under *repo_root*. A path that is ignored here is local debris (``.claude/worktrees/``
+    from harness agent worktrees) that a fresh checkout, CI's included, does not have, so it never makes text
+    repo-only. A tracked file is never reported ignored; outside a git repository nothing is ignored."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_root), "check-ignore", "-q", "--", rel],
+            capture_output=True, check=False, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
 def _is_repo_only(token: str, repo_root: Path = REPO_ROOT, *, exists_only: bool = False) -> bool:
     t = token.rstrip(".,;:)'\"`")
     t = _LINE_SUFFIX.sub("", t)
@@ -201,16 +217,20 @@ def _is_repo_only(token: str, repo_root: Path = REPO_ROOT, *, exists_only: bool 
     if "/" not in t:
         return False
     path = repo_root / t
+    # What a gitignored path holds is not in the checkout a user or CI gets: it counts as absent.
+    present = path.exists() and not _gitignored(t, repo_root)
+    is_file = present and path.is_file()
+    is_dir = present and path.is_dir()
     if t == "docs/rdr" or t.startswith("docs/rdr/"):
         # Every project has its own docs/rdr/. A concrete nexus RDR file that exists here is still ours.
-        return bool(re.match(r"docs/rdr/(?:rdr-)?\d{3}[-\w]*\.md$", t)) and path.is_file()
+        return bool(re.match(r"docs/rdr/(?:rdr-)?\d{3}[-\w]*\.md$", t)) and is_file
     if t.split("/", 1)[0] in _FILE_ONLY_ROOTS:
         # A directory counts too when it is a nexus one (``docs/agents/``); the prose-edit genre map names
         # ``docs/exploration/`` and ``docs/runbooks/`` for the USER'S own repository, so those names are theirs.
-        return path.is_file() or (path.is_dir() and t not in _USERS_OWN_DIRS and not exists_only)
+        return is_file or (is_dir and t not in _USERS_OWN_DIRS and not exists_only)
     if exists_only:
-        return path.exists()
-    return path.exists() or Path(t).suffix in _FILE_EXTENSIONS
+        return present
+    return present or Path(t).suffix in _FILE_EXTENSIONS
 
 
 def repo_only_paths(text: str, repo_root: Path = REPO_ROOT) -> list[str]:
@@ -283,10 +303,6 @@ _ALLOWED: dict[str, list[Site]] = {
     "prose-edit/README.md": [
         Site(".claude/skills/site-page/SKILL.md", "A repository with `.claude/skills/site-page/SKILL.md` gets", "names the optional file a USER'S repository may carry; the sentence says a repository without it is fine"),
     ],
-    "src/nexus/hooks/subagent_start.py": [
-        Site("scripts/agent-worktree-preflight.sh", "run `scripts/agent-worktree-preflight.sh [required-sha]`", "the Preflight row text; emitted only when the project has the script (_worktree_preflight_row checks os.path.isfile)"),
-        Site("scripts/agent-worktree-preflight.sh", "_WORKTREE_PREFLIGHT_SCRIPT: str =", "the path the hook probes with os.path.isfile in the project's directory, never printed on its own"),
-    ],
     "src/nexus/catalog/types.py": [
         Site("tests/fixtures", 'FIXTURE_PATH_MARKER: str = "tests/fixtures"', "a path-fragment marker matched against indexed file paths, never shown"),
     ],
@@ -309,12 +325,6 @@ _ALLOWED: dict[str, list[Site]] = {
         Site("reinstall-tool.sh", "a dev checkout uses", "named for the dev-checkout case only, in a sentence conditional on running from one"),
         Site("reinstall-tool.sh", "For a checkout, run", "printed when nx runs from a source checkout, where the script is in the checkout's scripts directory"),
     ],
-    "conexus/hooks/scripts/_audience.py": [
-        Site("scripts/agent-worktree-preflight.sh", "scripts/agent-worktree-preflight.sh", "the marker file the audience helper probes with os.path.isfile in the payload's checkout to tell a nexus checkout from a user's repository, never printed"),
-    ],
-    "conexus/hooks/scripts/routing/credential_print_guard.py": [
-        Site("claude_credentials.py", "blob/main/tests/e2e/lib/claude_credentials.py", "the message links the wrapper in its first sentence; the later mentions are the same file"),
-    ],
     "src/nexus/storage_boundary_lint.py": [
         # Path constants the storage-boundary lint matches against its own checkout; none is printed.
         Site("src/nexus/catalog/", "CATALOG_PHASE_ALLOWLIST_PREFIX", "a prefix matched against scanned file paths, never shown"),
@@ -335,10 +345,6 @@ _ALLOWED: dict[str, list[Site]] = {
     "conexus/commands/continuation.md": [
         Site("tests/e2e/lib/commit_scope_audit.sh", "when the project has", "a guarded conditional: the script runs only in a project that has it; any other project takes the by-hand branch on the same line"),
         Site("tests/e2e/lib/commit_scope_audit.sh", "<session-start-ref>..", "the command for the branch the conditional names; reached only when the project has the script"),
-    ],
-    "conexus/skills/composition-probe/SKILL.md": [
-        Site("scripts/mvnw-leased.sh", "when the project has that script", "a guarded conditional: used only in a project that has the script; any other project takes the ./mvnw branch in the same paragraph"),
-        Site("service/mvnw", "wraps `service/mvnw`", "describes what the nexus script wraps, inside the same guarded conditional"),
     ],
 }
 
@@ -703,6 +709,27 @@ def test_a_root_level_file_and_a_data_directory_are_judged_by_what_exists_here(t
     assert repo_only_paths("the nexus AGENTS.md", tmp_path)
     assert not repo_only_paths("the project's AGENTS.md", tmp_path)
     assert not repo_only_paths("the nexus CHANGELOG.md", tmp_path), "absent here: nothing to point at"
+
+
+def test_a_gitignored_path_that_exists_here_is_not_repo_only(tmp_path: Path) -> None:
+    """Local debris such as ``.claude/worktrees/`` (harness agent worktrees, gitignored) exists on a laptop and not
+    in CI's checkout: the verdict must be the same in both."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".gitignore").write_text(".claude/worktrees/\nscripts/scratch/\n")
+    (repo / ".claude" / "worktrees" / "x").mkdir(parents=True)
+    (repo / ".claude" / "rules").mkdir()
+    (repo / "scripts" / "scratch").mkdir(parents=True)
+    for ignored in (".claude/worktrees/", ".claude/worktrees/x", "scripts/scratch/"):
+        assert not repo_only_paths(f"keep {ignored} out", repo), ignored
+    # An ignored directory does not hide an unignored sibling, or a file named by its extension.
+    assert repo_only_paths("see .claude/rules/", repo)
+    assert repo_only_paths("see .claude/worktrees/notes.md", repo), "a file extension still names a file"
+    # Outside a git repository nothing is ignored: an existing directory still counts.
+    plain = tmp_path / "plain"
+    (plain / ".claude" / "worktrees").mkdir(parents=True)
+    assert repo_only_paths("keep .claude/worktrees/ out", plain)
 
 
 def test_a_url_with_punctuation_glued_on_is_flagged() -> None:
@@ -1274,19 +1301,20 @@ def test_every_github_link_this_lint_asks_for_names_something_in_the_tree() -> N
     assert not missing, "\n".join(missing)
 
 
-def test_the_credential_guard_deny_message_links_the_wrapper_it_names() -> None:
-    """The guard ships to every user of the plugin; the wrapper it names exists only in the nexus repo, so the
-    message carries the GitHub link (a bare file name reads as something to run; the bare-name rule sees it too)."""
+def test_the_credential_guard_deny_message_names_no_repo_only_file() -> None:
+    """The guard ships to every user of the plugin and its deny says what to do in the guard's own neutral voice
+    (RDR-259: a project that has a helper names it in its settings, which the deny prints after a source label). So
+    the one deny constant carries no path into a nexus checkout, and the wrapper the nexus repo uses is not named."""
     src = (REPO_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "credential_print_guard.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     messages = [
         n.value
         for n in ast.walk(tree)
-        if isinstance(n, ast.Constant) and isinstance(n.value, str) and "claude_credentials.py status" in n.value
-        and "Harnesses never read" in n.value
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and "Harnesses never read" in n.value
     ]
     assert len(messages) == 1, messages
-    assert "https://github.com/Hellblazer/nexus/blob/main/tests/e2e/lib/claude_credentials.py" in messages[0]
+    assert "claude_credentials" not in messages[0]
+    assert not repo_only_paths(messages[0], REPO_ROOT)
 
 
 def test_an_installed_users_own_file_of_the_same_name_is_still_a_repo_only_path_when_it_exists_here(tmp_path: Path) -> None:

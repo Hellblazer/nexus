@@ -48,13 +48,13 @@ when it exists, falling back to `strategy:default` otherwise.
 ## Typical intent shapes
 
 - "review this change set for X"
-- "did the auth middleware refactor drift from RDR-053?"
+- "did the auth middleware refactor drift from the auth RDR?"
 - "critique the new taxonomy assignment logic"
 
 ## When direct `search` is fine
 
 If you just need to find the RDR or chunk that defines something — e.g.
-"show me where RDR-053 states the auth middleware contract" —
+"show me where the auth RDR states the middleware contract" —
 `mcp__plugin_conexus_nexus__search` against `rdr__<owner>__<embedding_model>__v1`
 (or the bare `rdr` prefix, which expands to all matching collections)
 is the right tool.

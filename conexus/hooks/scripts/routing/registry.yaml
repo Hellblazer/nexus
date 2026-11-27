@@ -20,6 +20,11 @@
 #   fail_closed:      bool; default false. true means hook crashes deny
 #                     the call rather than allow it. Reserve for safety-
 #                     critical invariants (no rule uses it today).
+#   audience:         who the hook fires for: EVERY-USER (every hook here
+#                     fires for everyone). The registration's audience as
+#                     audience.yaml (in the plugin's hooks directory) declares it; a
+#                     rule inside the hook that a setting turns on (the git
+#                     guard's strict form) is its own entry there.
 #
 # Example shape (commented; not yet active):
 #
@@ -38,9 +43,10 @@ rules:
     matcher: Bash
     mode: block
     rationale: >-
-      for the nexus MAINTAINER (the account flag file, or a checkout carrying
-      the nexus marker; anyone else gets only a short deny list, see
-      _user_git_seatbelt.py), subagents never write the index/history OR
+      where `subagent_git` is `strict` (set in the project's tracked
+      .nexus/project.json or conexus.json, or in the user's own conexus.json;
+      the default is a short deny list, see _user_git_seatbelt.py), subagents
+      never write the index/history OR
       destroy the working tree in the shared tree — hand-back is diffs+paths and the orchestrator commits
       pathspec-limited (RDR-184 Gap-4, nexus-s88vq; verb set widened by
       nexus-ays2l from {commit,add} to also cover checkout/restore/stash/
@@ -48,16 +54,22 @@ rules:
       structure-agnostic proximity scan as the deciding rule, after three
       review rounds each found a new bypass in the structural approach — see
       the hook's own module docstring). Read-only git (status/diff/log/show/
-      blame/rev-parse/ls-files) stays allowed as long as the command text
-      doesn't also contain a write-verb word near `git`; linked-worktree
-      agents are exempt when the worktree is positively proven.
+      blame/rev-parse/ls-files) and text commands (grep, cat, echo, ls) may
+      spell a verb word in their arguments when no interpreter, pipe, file or
+      variable can run it (nexus-5y47c, segment admission in _git_admit.py);
+      writes pass when aimed at a linked worktree git proves, along `&&`
+      chains, with nothing else in the command that could change the cwd, a
+      path, the environment or HEAD first; a command the admission does not
+      read keeps the proximity scan's verdict. Linked-worktree agents are
+      exempt when the worktree is positively proven.
     escape_token: "# routing-allow:"
     # Hook-level: a crash in the guard must not brick every agent's Bash.
     # An UNDETERMINABLE worktree state fails CLOSED for every write verb
     # (nexus-3c92m round 4 retired the older commit/add fail-open split).
-    # The full rule is the maintainer's; other audiences get the short
-    # seatbelt in _user_git_seatbelt.py (nexus-sby49).
+    # The full rule runs where `subagent_git` is strict; elsewhere the short
+    # seatbelt in _user_git_seatbelt.py answers (nexus-sby49).
     fail_closed: false
+    audience: EVERY-USER
   credential_print_guard:
     hook_script: credential_print_guard.py
     matcher: Bash
@@ -77,6 +89,7 @@ rules:
     # all-or-nothing run_hook(fail_closed=...) wrapper stays False here,
     # exactly like subagent_git_write_requires_orchestrator's split above.
     fail_closed: false
+    audience: EVERY-USER
   destructive_action_advice:
     hook_script: destructive_action_advice.py
     matcher: Bash|Edit|Write|MultiEdit
@@ -97,3 +110,4 @@ rules:
     escape_token: "# routing-allow: (deny mode only; advise mode has nothing to escape)"
     # Advice only: a crash must never block or even slow a call.
     fail_closed: false
+    audience: EVERY-USER

@@ -110,11 +110,11 @@ def default_db_path() -> Path:
 def t2_handle() -> Iterator[Any]:
     """Open a T2 handle for the user-facing CLI memory / plan commands.
 
-    RDR-120 P6 follow-up (nexus-w6txl) routed these through a ``T2Client`` so
+    A follow-up routed these through a ``T2Client`` so
     multi-process operators (host CLI + Cowork-bridged MCP server +
     dev-container CLI) shared a single arbitrated SQLite writer rather than
     each opening its own connection and racing the WAL. The daemon that
-    arbitrated them is retired (nexus-i711w Stage 2 sub-stage B); in service
+    arbitrated them is retired (sub-stage B); in service
     mode Postgres is the arbiter and the concern does not arise.
 
     Yields a service-backed ``T2Database``. Tests monkeypatch this helper to
@@ -127,7 +127,7 @@ def t2_handle() -> Iterator[Any]:
     each named in ``storage_boundary_lint.T2DATABASE_CONSTRUCTION_ALLOWLIST``
     — this helper is for the user-facing memory/plan surface only.
 
-    Note: ``nx plan`` commands open T2 directly (named-allowlisted) and
+    Note: ``nx answer-plan`` commands open T2 directly (named-allowlisted) and
     do NOT go through this helper — they must tolerate offline mode.
     """
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
@@ -697,7 +697,7 @@ def _emit_superseded_swept_info() -> bool:
     if swept:
         click.echo(
             f"  swept {swept} superseded T3 chunk(s) left behind by a "
-            f"changed re-index (nexus-39upx)"
+            f"changed re-index"
         )
     # nexus-4pj54: a multi-batch document's sweep is deferred to its
     # completion stamp. A failed or fenced run drops it (discarded); a run
@@ -711,7 +711,7 @@ def _emit_superseded_swept_info() -> bool:
         click.echo(
             f"  superseded-chunk sweep not run for {discarded} failed/fenced "
             f"and {pending} unfinished document(s); their dropped chunks may stay "
-            f"in T3 until the engine reaper collects them (nexus-4pj54)"
+            f"in T3 until the engine reaper collects them"
         )
         pending_ids = stats.get("deferred_pending_doc_ids", [])
         if pending_ids:

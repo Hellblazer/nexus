@@ -488,7 +488,7 @@ service_group.add_command(_note_uri_pairs_cmd, "note-uri-pairs")
 def service_install_cmd(autostart: bool, force: bool) -> None:
     """Install the storage-service autostart entry for the current user.
 
-    RDR-174 P2.1 (nexus-y2yj6): the service that serves every tier (engine
+    The service that serves every tier (engine
     binary + local Postgres) previously had no reboot-persistence. Thin wrapper
     over :func:`nexus.daemon.installer.install_autostart` with ``tier="service"``
     (the same structured-result translation the retired T2 daemon installer used).
@@ -532,7 +532,7 @@ def service_install_cmd(autostart: bool, force: bool) -> None:
 def service_uninstall_cmd(autostart: bool) -> None:
     """Remove the storage-service autostart entry for the current user.
 
-    RDR-174 P2.1: completes the install/uninstall pair so the unit a user
+    Completes the install/uninstall pair so the unit a user
     installs can be cleanly removed via ``nx`` (not stranded). Thin wrapper over
     :func:`nexus.daemon.installer.uninstall_autostart` with ``tier="service"``,
     as the retired T2 daemon uninstaller did.
@@ -1111,11 +1111,11 @@ def service_start_cmd(
     announce_stdout: bool,
     legacy_backup: Path | None = None,
 ) -> None:
-    """Start the native storage-service + Postgres supervisor (RDR-152 P5.1).
+    """Start the native storage-service + Postgres supervisor.
 
     Reads pg_credentials from the config directory (written by 'nx init
     --service'), starts the nx-managed Postgres cluster if it is not
-    running, spawns the native nexus-service binary (RDR-161: the sole launch
+    running, spawns the native nexus-service binary (the sole launch
     artifact; acquire it via 'nx daemon service install-binary'), waits for
     /health to return 200, then publishes the service endpoint to the
     ServiceRegistry under the 'storage_service' scope key.
@@ -1125,7 +1125,7 @@ def service_start_cmd(
     ``--foreground`` the supervisor blocks until SIGTERM/SIGINT.
 
     A service/PG outage is always fatal — there is no direct-mode
-    fallback (per RDR-152 §Approach).
+    fallback.
     """
     from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         StorageServiceStartError,
@@ -1277,7 +1277,7 @@ def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
     "--force",
     is_flag=True,
     default=False,
-    help="Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). Use "
+    help="Override the chash-poison pre-check (GH #1414). Use "
     "ONLY after the operator or maintainer has decided how the rows are handled "
     "(the runbook linked at the end of this help covers a service that will not "
     "start, not these rows). No command repairs them. The rows stay as they "
@@ -1299,7 +1299,7 @@ def service_install_binary_cmd(
     (sha256 + keyless Sigstore signature, pinned to this repo's release workflow
     identity), then placed under <config-dir>/service/. Verification fails closed:
     nothing is installed unless BOTH gates pass. One verified seam covers the
-    binary and the PG bundle (RDR-161).
+    binary and the PG bundle.
     """
     from importlib.metadata import PackageNotFoundError, version as _pkg_version  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
@@ -1560,7 +1560,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     """Stop the running storage-service supervisor (SIGTERM -> SIGKILL).
 
     Postgres is INTENTIONALLY left running (it is independently managed and
-    may serve other clients) — nexus-pebfx.5 makes that visible instead of
+    may serve other clients) — makes that visible instead of
     surprising: the command says so and offers --with-pg.
 
     ``--with-pg`` makes this the full-stack stop: it also ends the MinerU
@@ -1568,7 +1568,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     ``mineru.pid`` the way ``nx mineru stop`` and ``nx uninstall`` find it.
 
     The aspect-worker daemon is likewise left running, on every platform: it
-    belongs to the store path, not to the service (RDR-224), and idles with
+    belongs to the store path, not to the service, and idles with
     the stack down. ``nx daemon restart-stale`` cycles it; ``nx uninstall`` stops it.
     """
     from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
@@ -2174,7 +2174,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
 def aspect_worker_group() -> None:
     """Aspect-worker daemon: a leased, per-tenant host for the aspect-extraction
     loop (claim → claude -p → upsert document_aspects → ack). One more leased
-    tier on the RDR-149 substrate."""
+    tier on the substrate."""
 
 
 def _engine_unreachable_exit_default() -> float:
@@ -2196,7 +2196,7 @@ def _engine_unreachable_exit_default() -> float:
     "--tenant",
     "tenant",
     default="default",
-    help="Tenant scope for the lease (per-tenant; per-host needs BYPASSRLS, forbidden by RDR-152).",
+    help="Tenant scope for the lease (per-tenant; per-host needs BYPASSRLS, forbidden by the service design).",
 )
 @click.option(
     "--engine-unreachable-exit-seconds",
@@ -2216,7 +2216,7 @@ def aspect_worker_start_cmd(
 ) -> None:
     """Start the aspect-worker daemon (foreground; runs until SIGTERM/SIGINT).
 
-    CREDENTIAL MODEL (RDR-173): this MUST be spawned as a CHILD of a process
+    CREDENTIAL MODEL: this MUST be spawned as a CHILD of a process
     that already has ``claude -p`` credentials so it inherits the ``claude``
     binary on ``PATH``, ``~/.claude``, and the Anthropic credential context.
     The enqueue-hook spawn (Phase 2) Popens this command from the storing
@@ -2305,19 +2305,18 @@ def restart_stale_cmd(dry_run: bool) -> None:
 
     After ``uv tool upgrade conexus`` the disk is new but every long-lived
     process (MCP hosts, aspect-worker, MinerU) keeps executing the old
-    code from memory (nexus-4xgfy). This verb restarts the classes that
+    code from memory. This verb restarts the classes that
     are safe to cycle and names the ones only you can close (MCP hosts
     belong to live Claude sessions). It also converges a service-mode
-    install's engine binary to the release's required version (nexus-cfgo9:
-    the ONE-engine model — a version mismatch is fixed here, not merely
+    install's engine binary to the release's required version (the ONE-engine model — a version mismatch is fixed here, not merely
     refused), and repairs ``nexus.diag_chash_conformance`` grant/ownership
     drift (GH #1402's second symptom — GRANT/ALTER OWNER only, no view
     DDL). It also removes a stray ``com.nexus.t2`` LaunchAgent on a
-    service-mode box (nexus-c0vby, GH #1405 defect 2 — a service-mode
+    service-mode box (GH #1405 defect 2 — a service-mode
     box's T2 daemon never starts, so a leftover agent's KeepAlive would
     otherwise respawn an immediately-exiting process forever), and
-    converges a drifted local-mode service-tier autostart unit (nexus-rlp0v
-    — e.g. a stale ``ProcessType=Background``: an installed launchd/systemd
+    converges a drifted local-mode service-tier autostart unit
+    (e.g. a stale ``ProcessType=Background``: an installed launchd/systemd
     unit is a rendered copy that a package upgrade alone does not update;
     this re-renders and re-bootstraps it, bouncing the service). Runs
     automatically on the first ``nx`` invocation after a version change;
@@ -2515,7 +2514,7 @@ def restart_stale_cmd(dry_run: bool) -> None:
         if still:
             click.echo(
                 "engine: the running service is not on the release's engine after every leg ran; "
-                "exiting 1 (nexus-n8gpr).",
+                "exiting 1.",
                 err=True,
             )
             sys.exit(1)

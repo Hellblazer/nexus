@@ -630,7 +630,7 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
             "~/.config/nexus/logs/mcp.log + ~/.config/nexus/logs/watchdog.log"
         )
         click.echo(
-            "  to identify the gap. See RDR-094 §Day 2 Operations."
+            "  to identify the gap. See the Day 2 Operations notes in the docs."
         )
         for hit in payload["silent_deaths"]:
             click.echo(
@@ -657,7 +657,7 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
 
 
 #: Minimum global-tier (``project=''``) builtin plan rows expected after
-#: seeding (``nx plan reseed``, formerly ``nx catalog setup``). RDR-078
+#: seeding (``nx answer-plan reseed``, formerly ``nx catalog setup``). RDR-078
 #: shipped 9; RDR-092 Phase 0a brought that to 12; the live count at
 #: nexus-vl8lk was 15; nexus-h33x8.6 a1 added 2 single-query-step
 #: fast-path templates, bringing it to 17 (``conexus/plans/builtin/
@@ -884,7 +884,7 @@ def _run_check_plan_library() -> None:
             f"< expected {_MIN_GLOBAL_BUILTIN_COUNT}",
             err=True,
         )
-        click.echo("    Fix: run `nx plan reseed`.", err=True)
+        click.echo("    Fix: run `nx answer-plan reseed`.", err=True)
         failed = True
 
     # Disk-vs-live parity (nexus-f1mbo). The count floor above cannot fail
@@ -910,27 +910,27 @@ def _run_check_plan_library() -> None:
                 f"library: {_summarise(parity.missing)}",
                 err=True,
             )
-            click.echo("    Fix: run `nx plan reseed`.", err=True)
+            click.echo("    Fix: run `nx answer-plan reseed`.", err=True)
         if parity.drifted:
             click.echo(
                 f"  FAIL: {len(parity.drifted)} library row(s) no longer "
                 f"match their template: {_summarise(parity.drifted)}",
                 err=True,
             )
-            click.echo("    Fix: run `nx plan reseed`.", err=True)
+            click.echo("    Fix: run `nx answer-plan reseed`.", err=True)
         if parity.orphaned:
             click.echo(
                 f"  WARN: {len(parity.orphaned)} builtin row(s) have no "
                 f"template shipped: {_summarise(parity.orphaned)}. Left in "
-                "place — remove with `nx plan delete <id>` if intended.",
+                "place — remove with `nx answer-plan delete <id>` if intended.",
                 err=True,
             )
             warnings += 1
         failed = failed or parity.failed
     if non_dimensional:
         click.echo(
-            f"  WARN: {non_dimensional} non-dimensional row(s) "
-            "(legacy / pre-RDR-078 seeds).",
+            f"  WARN: {non_dimensional} non-dimensional row(s)"
+            ".",
             err=True,
         )
         warnings += 1
@@ -1786,9 +1786,9 @@ def _run_check_post_store_hooks() -> None:
     install_default_hooks(registry)
 
     chains: list[tuple[str, list]] = [
-        ("Single-doc chain (RDR-070)", registry._single),
-        ("Batch chain (RDR-095)", registry._batch),
-        ("Document-grain chain (RDR-089)", registry._document),
+        ("Single-doc chain", registry._single),
+        ("Batch chain", registry._batch),
+        ("Document-grain chain", registry._document),
     ]
     total = 0
     for label, hooks in chains:
@@ -1852,13 +1852,13 @@ def _run_check_storage_boundary(
         result.catalog_constructions > CATALOG_CONSTRUCTION_BASELINE
     )
     click.echo(
-        f"Storage-boundary lint (RDR-120 P0.A / RDR-128 P0c / RDR-146 P0.1):\n"
+        f"Storage-boundary lint:\n"
         f"  violations:                {result.total_violations}\n"
         f"  catalog-allowlist count:   {result.catalog_allowlist_count}\n"
         f"  sqlite allowlisted connects: {result.sqlite_allowlisted_connects}\n"
         f"  T2Database constructions:  {result.t2database_constructions}\n"
         f"  catalog constructions:     {result.catalog_constructions}"
-        f" (RDR-146 baseline {CATALOG_CONSTRUCTION_BASELINE},"
+        f" (baseline {CATALOG_CONSTRUCTION_BASELINE},"
         f" cutover surface)"
     )
 
@@ -1880,7 +1880,7 @@ def _run_check_storage_boundary(
 
     if catalog_over_baseline:
         click.echo(
-            f"\nRDR-146: catalog constructions ({result.catalog_constructions}) "
+            f"\nCatalog constructions ({result.catalog_constructions}) "
             f"exceed the baseline ({CATALOG_CONSTRUCTION_BASELINE}). A new direct "
             f"Catalog(...) site was added in consumer code — route catalog writes "
             f"through the catalog factory (make_catalog_writer / "
@@ -1920,7 +1920,7 @@ def _run_check_storage_boundary(
         if catalog_over_baseline:
             click.echo(
                 f"FAIL: catalog constructions ({result.catalog_constructions}) "
-                f"exceed the RDR-146 baseline ({CATALOG_CONSTRUCTION_BASELINE}).",
+                f"exceed the baseline ({CATALOG_CONSTRUCTION_BASELINE}).",
                 err=True,
             )
         _sys.exit(1)
@@ -3043,7 +3043,7 @@ def _engine_work_lines() -> list[str]:
          "when the engine is unreachable, 1 on schema_error or zero "
          "applied changesets; an honest N/A (endpoint withholds the "
          "fingerprint by design) exits 0 unless combined with "
-         "--fail-on-violation. nexus-vl8lk, nexus-b1v9z.",
+         "--fail-on-violation.",
 )
 @click.option(
     "--check-search",
@@ -3056,8 +3056,12 @@ def _engine_work_lines() -> list[str]:
          "OTHER chunk survives the distance threshold. A collection whose "
          "nearest real neighbours all fall past its threshold is a WARNING "
          "row naming that distance, the threshold, and the sample it rests "
-         "on. Exits 2 only when a surface raises or a collection's embedding "
-         "model disagrees with its name. RDR-087 Phase 3.",
+         "on. Exits 2 only when a surface raises or a collection's registered "
+         "embedding model disagrees with the model its own catalog row's "
+         "content type calls for (a row-consistency check, not a compare "
+         "against the label's model token, which is not authority once the "
+         "one-row rename is live: 8.5.6 and later, after the engine's restart, "
+         "a rename changes only the label).",
 )
 @click.option(
     "--check-resources",
@@ -3069,7 +3073,7 @@ def _engine_work_lines() -> list[str]:
          "when the namespace is exhausted (known sources: MinerU "
          "workers / orphan chroma children leaking via multiprocessing "
          "/ trackers re-parented to init after ungraceful MCP "
-         "shutdowns). Beads nexus-dc57 + nexus-ze2a + nexus-9h1s.",
+         "shutdowns).",
 )
 @click.option(
     "--check-quotas",
@@ -3080,7 +3084,7 @@ def _engine_work_lines() -> list[str]:
          "Chroma-era reference table), embedder model caps, reranker "
          "substrate, and any transient-error retries observed this "
          "process. Exits 1 when T3 is unreachable in cloud mode "
-         "(nexus-c590; relabeled for the pgvector substrate, nexus-d01js).",
+         "(relabeled for the pgvector substrate).",
 )
 @click.option(
     "--check-taxonomy",
@@ -3106,8 +3110,7 @@ def _engine_work_lines() -> list[str]:
     default=False,
     help="Report plan-library dimensional health: authored vs "
          "backfilled vs non-dimensional row counts, plus global-tier "
-         "builtin count. Exits 1 when builtin count < 9. RDR-092 "
-         "Phase 0c.2.",
+         "builtin count. Exits 1 when builtin count < 9.",
 )
 @click.option(
     "--check-mcp-logs",
@@ -3117,7 +3120,7 @@ def _engine_work_lines() -> list[str]:
     help="Scan Claude Code's per-server MCP cache for nx-mcp "
          "silent-death signatures ('STDIO connection dropped', "
          "'stdio transport error'). macOS only; skips cleanly on "
-         "Linux/Windows. RDR-094 Phase H (nexus-50u5).",
+         "Linux/Windows.",
 )
 @click.option(
     "--check-tier-discipline",
@@ -3126,19 +3129,18 @@ def _engine_work_lines() -> list[str]:
     default=False,
     help="Audit tier-write activity for the current session: prints "
          "the tier-write summary from the tier_writes table and "
-         "warns when a substantive session has no write-back. "
-         "Phase 1B nexus-a52i.",
+         "warns when a substantive session has no write-back.",
 )
 @click.option(
     "--check-storage-boundary",
     "check_storage_boundary",
     is_flag=True,
     default=False,
-    help="RDR-120 P0.A. AST-scan for direct sqlite3.connect / "
+    help="AST-scan for direct sqlite3.connect / "
          "voyageai.Client calls and T2Database/T3Database "
          "constructions outside the named allowlists in "
          "storage_boundary_lint.py. The per-line epsilon-allow "
-         "escape token is RETIRED (RDR-186 P4): surviving sites are "
+         "escape token is RETIRED: surviving sites are "
          "enumerated per file with exact counts; a new site is a "
          "hard violation, not a comment to write. Records "
          "catalog-allowlist count to T2 key 120-phase-<N>-catalog-"
@@ -3154,15 +3156,14 @@ def _engine_work_lines() -> list[str]:
          "found (informational without this flag). With --check-schema, "
          "treat an honest N/A (fingerprint withheld by design) as a "
          "failure too -- for release-gate callers that need an actual "
-         "OK, not an unprovable N/A that reads identically to a pass "
-         "(nexus-b1v9z).",
+         "OK, not an unprovable N/A that reads identically to a pass.",
 )
 @click.option(
     "--phase",
     "phase",
     type=str,
     default=None,
-    help="With --check-storage-boundary, the RDR-120 phase identifier "
+    help="With --check-storage-boundary, the phase identifier "
          "for the T2 metric key (e.g. `0`, `1`, `2`, `3a`, `3b`, "
          "`4`, `5`). Used to record `120-phase-<phase>-catalog-"
          "allowlist-count`. Omit to skip the metric write.",
@@ -3185,7 +3186,7 @@ def _engine_work_lines() -> list[str]:
          "autovacuum, overdue state, pci_ index bytes), read from the engine's "
          "operator-only GET /v1/admin/chunks-leaves; it needs the root service token "
          "and says so when it has none, and against an engine that predates the route "
-         "it prints one line saying so (nexus-i827c). Ignored by the --check-* modes.",
+         "it prints one line saying so. Ignored by the --check-* modes.",
 )
 @click.option(
     "--json",
@@ -3194,8 +3195,7 @@ def _engine_work_lines() -> list[str]:
     default=False,
     help="Emit machine-parseable JSON. Works with the main sweep (no mode "
          "flag) plus --check-search, --check-quotas, --check-mcp-logs. "
-         "Any other mode flag combined with --json is a usage error "
-         "(nexus-0vycz).",
+         "Any other mode flag combined with --json is a usage error.",
 )
 @click.option(
     "--trim-telemetry",
@@ -3203,7 +3203,7 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Delete search_telemetry rows older than --days (default 30) to "
-         "cap T2 disk use. RDR-087 Phase 2.4. Combine with --dry-run to "
+         "cap T2 disk use. Combine with --dry-run to "
          "preview the count without deleting.",
 )
 @click.option(
@@ -3212,7 +3212,7 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Enumerate post-store hooks registered on each of the three "
-         "chains (single-doc / batch / document-grain). nexus-b0ka.",
+         "chains (single-doc / batch / document-grain).",
 )
 @click.option(
     "--check-mineru",
@@ -3220,8 +3220,7 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Verify MinerU is importable. MinerU is part of the on-demand "
-         "pdf extra (nexus-2k66t.4.2; a default dependency from nexus-2fyb "
-         "until then), so on an install without PDF support this reports "
+         "pdf extra, so on an install without PDF support this reports "
          "N/A and names the command that installs it. Otherwise it surfaces "
          "a corrupt install at doctor-time instead of waiting for the first "
          "math-PDF index to fail, including a cv2 that cannot load (MinerU "
@@ -3235,7 +3234,7 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Report the aspect queue's depth: pending, claimed and dead "
-         "tasks of the 'aspects' tuple queue. nexus-1pfq.",
+         "tasks of the 'aspects' tuple queue.",
 )
 @click.option(
     "--check-t1",
@@ -3265,8 +3264,8 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Sample chunks per collection, embed their stored text again with "
-         "the collection's model, and compare with the stored vector "
-         "(nexus-f9duo). Exits 1 when any sampled chunk falls below cosine "
+         "the collection's model, and compare with the stored vector. "
+         "Exits 1 when any sampled chunk falls below cosine "
          "0.99 or any collection could not be probed. Costs one embedding "
          "call per sampled chunk.",
 )
@@ -3302,7 +3301,7 @@ def _engine_work_lines() -> list[str]:
          "cross-collection ('projection') ANN pick (POST /v1/taxonomy/"
          "assignments/cross-preview, never persisted) against an exact "
          "Python recompute over the SAME live foreign-centroid snapshot, "
-         "fetched in the same run (nexus-v4pj4: the engine-service-"
+         "fetched in the same run (the engine-service-"
          "v0.1.132 LATERAL/HNSW ANN rewrite measures equal to exact, but "
          "a future recall drift would be silent). A currently-stored "
          "assignment, if any, is shown in the report as context only, "
@@ -3354,8 +3353,7 @@ def _engine_work_lines() -> list[str]:
     default=False,
     help="Sample reference-only catalog documents (source_uri names an "
          "external, non-file:// resource) and stat each one's CURRENT "
-         "source against its RECORDED mtime/ETag (nexus-tb2yj, RDR-169 "
-         "Gap 6 leg 3). Every scheme but https:// is a cheap local check; "
+         "source against its RECORDED mtime/ETag. Every scheme but https:// is a cheap local check; "
          f"the https:// HEAD is bounded to {_REFERENCES_HTTPS_WORST_CASE_S:.1f}s "
          "worst case per document (aspect_readers.HTTPS_STAT_MAX_ATTEMPTS "
          "attempts, each up to twice HTTPS_STAT_TIMEOUT_S since httpx "
@@ -3405,12 +3403,11 @@ def _engine_work_lines() -> list[str]:
          "pg_ls_waldir(), escalating a nexus_svc session to pg_monitor "
          "with SET ROLE first — unconditionally, since nexus_svc is "
          "NOINHERIT in every deployment posture (cloud measured, local "
-         "provisioning aligned nexus-v80f2), so pg_monitor's privileges "
+         "provisioning aligned), so pg_monitor's privileges "
          "are never ambient without it. Reports UNMEASURED, never a "
          "false clean, when no local nexus_svc credentials exist "
          "(managed/BYO deployment) or the escalation is refused "
-         "(grants-004 not applied). Always exit 0 — informational. "
-         "nexus-bb5c8.",
+         "(grants-004 not applied). Always exit 0 — informational.",
 )
 @click.option(
     "--check-engine-activity",
@@ -3421,7 +3418,7 @@ def _engine_work_lines() -> list[str]:
          "is it actively embedding right now, chunks/s, queue depth, thread "
          "width. Also part of the default sweep. Always exit 0 — "
          "informational, UNKNOWN (never a traceback) when the endpoint is "
-         "unreachable or predates the route. nexus-s71lr.",
+         "unreachable or predates the route.",
 )
 @click.option(
     "--check-index-failures",
@@ -3429,7 +3426,7 @@ def _engine_work_lines() -> list[str]:
     is_flag=True,
     default=False,
     help="Report the durable index-failures backlog (nx index repo's "
-         "per-file failure record, nexus-nukn3). Also part of the default "
+         "per-file failure record). Also part of the default "
          "sweep. Exits 1 with a ✗ FAIL: marker on any nonzero backlog; "
          "UNKNOWN (never a traceback) when the service is unreachable.",
 )
@@ -3446,14 +3443,14 @@ def _engine_work_lines() -> list[str]:
     "probe_edge",
     is_flag=True,
     default=False,
-    help="Prove Idempotency-Key reaches the engine through the edge (nexus-t0ms7, "
-         "RDR-222). Sends ONE keyed expire-quarantine page with cutoff 2000-01-01, "
+    help="Prove Idempotency-Key reaches the engine through the edge. "
+         "Sends ONE keyed expire-quarantine page with cutoff 2000-01-01, "
          "which nothing qualifies for, and requires the key echoed on the 200 and "
          "GET /v1/requests/<key> answering committed; a failure names the hop that "
          "lost the key. OPT-IN and never part of the default sweep: it sends a "
          "mutating request (one request-ledger row per run, nothing deleted). "
          "Exit 1 on any failure, so a scheduler can run it as a smoke step. A second "
-         "row names what the path does to X-Correlation-ID (RDR-167 Phase 2: "
+         "row names what the path does to X-Correlation-ID ("
          "pass-through, inbound strip, overwrite or response strip, which an "
          "engine without Phase 1 also produces); it never changes the exit code.",
 )
@@ -3478,7 +3475,7 @@ def _engine_work_lines() -> list[str]:
          "to $HOME, so a bare sweep run from an isolated automation "
          "sandbox otherwise also sees (and can be reddened by) every "
          "other repo ever indexed on the same machine. Default: unscoped, "
-         "walks every registered repo. nexus-jds59.",
+         "walks every registered repo.",
 )
 def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                fix_paths: bool, dry_run: bool, check_schema: bool,
@@ -4089,14 +4086,14 @@ def _run_check_resources() -> None:
         )
     click.echo(
         "Known sources of POSIX semaphore exhaustion on this project:\n"
-        "  - nexus-ze2a: MinerU workers leak semaphores.\n"
+        "  - MinerU workers leak semaphores.\n"
         "    Workaround: `nx mineru stop` (stops the server's process group but\n"
         "    spares its multiprocessing resource tracker, which unlinks the\n"
         "    group's semaphores as it exits; a tracker that survives is reported,\n"
         "    never SIGKILLed, because killing it leaks them).\n"
-        "  - nexus-dc57: orphan chroma children from earlier nexus sessions.\n"
+        "  - Orphan chroma children from earlier nexus sessions.\n"
         "    Workaround: kill orphan chromas (`ps aux | grep 'chroma run'`).\n"
-        "  - nexus-9h1s: multiprocessing.resource_tracker subprocesses\n"
+        "  - Multiprocessing.resource_tracker subprocesses\n"
         "    re-parented to init (PPID=1) after ungraceful MCP shutdowns.\n"
         "    A tracker ignores SIGTERM by design and exits once the workers\n"
         "    holding its pipe are gone; the sweep kills the workers, waits,\n"
@@ -4295,7 +4292,7 @@ def _run_check_harness_grant() -> None:
     click.echo(
         "[!] Harness dispatch grant: NX_HARNESS_CLAUDE_OAUTH_TOKEN is present -- "
         "LLM dispatch (claude -p children) authenticates via the harness "
-        "grant, not the operator's own login (RDR-219). Expected only "
+        "grant, not the operator's own login. Expected only "
         "under a harness launched through the nexus repo's Claude MCP grant wrapper."
     )
 
@@ -4552,8 +4549,8 @@ def _collect_quota_report() -> dict:
     from nexus.cross_encoder import cross_encoder_available  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
     cross_encoder_info = {
         "available": cross_encoder_available(),
-        "backend": "server-side (engine: voyage-rerank-2.5 or ms-marco cross-encoder, RDR-188)",
-        "client_role": "none (rerank caller retired nexus-9o6y2.19; salience caller retired nexus-0hqez)",
+        "backend": "server-side (engine: voyage-rerank-2.5 or ms-marco cross-encoder)",
+        "client_role": "none (the rerank and salience callers are retired)",
         "default_local_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     }
 
@@ -4572,7 +4569,7 @@ def _collect_quota_report() -> dict:
 def _format_quota_report(report: dict) -> str:
     """Human-readable form of :func:`_collect_quota_report` output."""
     lines: list[str] = []
-    lines.append("Quota headroom report (nexus-c590)")
+    lines.append("Quota headroom report")
     lines.append("")
 
     # ── Vector store ────────────────────────────────────────────────────
@@ -4745,7 +4742,7 @@ def _run_check_taxonomy() -> None:
             # engine carrying /links/drift vs. start one).
             click.echo(
                 "✗ taxonomy check cannot run: the deployed engine has no "
-                "/links/drift route (added for nexus-ypori) — deploy an engine "
+                "/links/drift route — deploy an engine "
                 "carrying it and re-run. Unverifiable is not a pass.",
                 err=True,
             )

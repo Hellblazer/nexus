@@ -76,7 +76,7 @@ COST_INSTRUMENTED_SINCE = "2026-08-22"
 #: no per-row visibility to gate the caveat on presence/absence.
 NX_ANSWER_RUNS_WHOLE_SET_CONTINUATION_CAVEAT = (
     "hit/fallback/total/avg_* above (the WHOLE --since-filtered set) "
-    "have ZERO visibility into RDR-200 continuation rows: every "
+    "have ZERO visibility into continuation rows: every "
     "nx_answer_report completion row is misclassified server-side as "
     "an inline-planner fallback, and a paired continuation call "
     "contributes 2 physical rows for 1 logical invocation — the "
@@ -827,7 +827,7 @@ def _add_predicted_costs(by_plan: dict[str, dict[str, Any]], telemetry_store: An
 @click.option(
     "--before-id", "before_id", type=click.IntRange(min=1), default=None,
     help=(
-        "List only runs with id below N, highest id first (nexus-1ss4n). The engine caps a page at 300 "
+        "List only runs with id below N, highest id first. The engine caps a page at 300 "
         "rows, so --limit alone cannot reach older runs: take the smallest id of the page you have and "
         "pass it here for the next one. Ids do not move while runs are recorded, so pages neither skip nor "
         "repeat. The totals and averages stay those of the whole --since-filtered set, not of this "
@@ -838,8 +838,8 @@ def _add_predicted_costs(by_plan: dict[str, dict[str, Any]], telemetry_store: An
 @click.option(
     "--all", "all_rows", is_flag=True, default=False,
     help=(
-        "List EVERY run in the --since window, newest id first, paging the engine 300 rows at a time "
-        "(nexus-1ss4n). Replaces --limit (not combinable with it, --before-id or --derive-budget). "
+        "List EVERY run in the --since window, newest id first, paging the engine 300 rows at a time. "
+        "Replaces --limit (not combinable with it, --before-id or --derive-budget). "
         "The totals and averages are the whole --since-filtered set, as without --all. Same engine "
         "requirement and refusal as --before-id."
     ),
@@ -851,8 +851,8 @@ def _add_predicted_costs(by_plan: dict[str, dict[str, Any]], telemetry_store: An
         "source llm|sql|bundle — count/sum/median cost+elapsed each — plus "
         "per-plan cost/elapsed medians) for the listed rows, plus a "
         "run-vs-sum(steps) cost-consistency check. Requires an engine "
-        "carrying the nx_answer_steps read route (nexus-lme1s / RDR-196 "
-        ".p1c-b) — an older engine silently ignores the request "
+        "carrying the nx_answer_steps read route; an older engine "
+        "silently ignores the request "
         "server-side, so this command probes the same capability signal "
         "the write side uses and says so explicitly rather than rendering "
         "an empty breakdown indistinguishable from 'no steps were ever "
@@ -872,7 +872,7 @@ def _add_predicted_costs(by_plan: dict[str, dict[str, Any]], telemetry_store: An
 @click.option(
     "--derive-budget", "derive_budget", is_flag=True, default=False,
     help=(
-        "RDR-196 Phase 3 Step 0 (nexus-nyry9.19): derive the default "
+        "Derive the default "
         "budget_usd from recorded POST-FLIP run history. Scans executed-ok "
         "runs (implies --steps), keeps only runs whose flipped-operator "
         "steps recorded a cheap-tier canonical model (pre-flip strong-tier "
@@ -902,7 +902,7 @@ def answer_runs_cmd(
     derive_budget: bool,
     json_out: bool,
 ) -> None:
-    """Read nx_answer_runs: recent runs plus exact aggregates (nexus-eho3u).
+    """Read nx_answer_runs: recent runs plus exact aggregates.
 
     Reports total run count, plan-match hit rate vs. inline-planner
     fallback, average duration/cost, and a fixed-edge latency histogram —
@@ -912,7 +912,7 @@ def answer_runs_cmd(
     correctly excluded by the engine's own AVG-ignores-NULL semantics) —
     plus the last N rows.
 
-    RDR-196 .p1e (nexus-nyry9.11) adds a page-scoped (of the ``--limit``
+    Adds a page-scoped (of the ``--limit``
     rows actually listed, NOT the whole-set block above — the two are
     DIFFERENT populations, printed and labeled separately so neither is
     mistaken for the other) three-way split: executed-ok, executed-failed
@@ -926,7 +926,7 @@ def answer_runs_cmd(
     normal run cost/take". Pass ``--include-failed`` to fold
     executed-failed rows into the ``--steps`` breakdown too.
 
-    RDR-232 Phase 3 (nexus-jypmj.3.3): a partial answer, returned with the
+    A partial answer, returned with the
     ``[insufficient-evidence: <n> unresolved]`` notice ahead of the prose, is
     its own **insufficient-evidence** bucket, in none of the others (and
     so outside the executed-ok latency and ``--steps`` aggregates). A row that
@@ -1039,7 +1039,7 @@ def _emit_budget_derivation(derivation: Any, *, json_out: bool) -> None:
     from nexus.plans.budget_default import MIN_DERIVATION_RUNS  # noqa: PLC0415 - deferred: only on this flag
 
     d = derivation
-    click.echo("budget_usd derivation (RDR-196 .p3a, post-flip executed-ok runs):")
+    click.echo("budget_usd derivation:")
     click.echo(f"  tier config: {d.tier_config}")
     click.echo(f"  rows scanned: {d.n_rows_scanned}   executed-ok: {d.n_executed_ok}")
     click.echo(
@@ -1293,7 +1293,7 @@ def _emit_report(
 
     if handed_off_rows or report_event_rows:
         click.echo(
-            f"  continuation (RDR-200): {continuation_stats['handoff_count']} "
+            f"  continuation: {continuation_stats['handoff_count']} "
             f"handoff(s), {continuation_stats['reported_count']} reported, "
             f"{continuation_stats['unreported_count']} unreported"
         )
@@ -1323,7 +1323,7 @@ def _emit_report(
             click.echo(
                 "  --steps requested but this engine does not support "
                 "include_steps (steps_supported=false) — run/aggregate "
-                "data only; deploy an engine carrying nexus-lme1s to see "
+                "data only; deploy a newer engine to see "
                 "the per-step breakdown."
             )
         else:
@@ -1358,7 +1358,7 @@ def _emit_report(
             if by_plan:
                 click.echo(
                     f"  by plan ({pop_label}, median cost / median elapsed / "
-                    f"predicted cost, RDR-196 Phase 3 Step 1 -- read-time, "
+                    f"predicted cost -- read-time, "
                     f"not persisted):"
                 )
                 for plan_key, agg in sorted(by_plan.items()):

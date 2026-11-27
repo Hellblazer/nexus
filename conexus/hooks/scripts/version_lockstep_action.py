@@ -26,8 +26,9 @@ Flow:
           0.8 GB) outlasts any subprocess timeout, and a kill mid-build
           wastes the download. PLAIN ``nx upgrade``, not ``--auto``: --auto
           skips plugin convergence, the generated-agent and hooks refresh,
-          the repos.json migration, beads PRIME and the engine install, and
-          this action is where those run. See :func:`start_background_upgrade`.
+          the repos.json migration and the engine install, and this action is
+          where those run (not beads PRIME: that file is a person's step, and
+          the unattended child skips it, nexus-sby49.4). See :func:`start_background_upgrade`.
   4. Marker on confirmed work only (nexus-rcngf). The binary must satisfy
      the target (``nx --version`` re-read) before anything is written. Then
      the retry sentinel ``UPGRADE_RETRY_MARKER`` goes into the marker BEFORE
@@ -557,8 +558,9 @@ def start_background_upgrade() -> subprocess.Popen | None:
 
     The child is PLAIN ``nx upgrade``, not ``--auto`` (which the SessionStart
     hook runs): ``--auto`` skips plugin convergence, the generated-agent and
-    hooks refresh, the repos.json migration, beads PRIME, the dimension
-    advisory and the engine install, and this action is where those run. The
+    hooks refresh, the repos.json migration, the dimension advisory and the
+    engine install, and this action is where those run (not beads PRIME: the
+    child's unattended marker makes ``nx upgrade`` skip that file). The
     child gets a session of its own, stdin and stdout on the null device and
     stderr appended to :func:`upgrade_log_path`. It starts in the filesystem
     root with ``NEXUS_REPO_ROOT`` naming this process's cwd (nexus-x3m8e: a

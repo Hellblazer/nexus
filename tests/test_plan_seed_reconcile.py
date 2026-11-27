@@ -525,7 +525,7 @@ def test_no_retired_dimension_is_still_shipped_on_disk():
 #
 # `nx upgrade` converges the library with `seed_plan_templates(reconcile=True)`
 # (upgrade_ladder/preconditions.py `_plan_library_report`), so a builtin shipped in a release
-# lands on every existing install with no switch. `nx plan disable <id>` is the per-install
+# lands on every existing install with no switch. `nx answer-plan disable <id>` is the per-install
 # off. These pins say when it survives the next reconcile and when it does not.
 
 
@@ -545,7 +545,7 @@ def test_a_disabled_builtin_stays_disabled_through_a_reconcile_of_an_unchanged_t
 
 @pytest.mark.t2_tenant
 def test_a_disabled_builtin_with_a_reason_stays_disabled_when_the_reconcile_rewrites_its_tags(tmp_path, library):
-    """`nx plan disable <id> --reason ...` appends a `disable-reason:` tag, which the reconcile reads as drift and
+    """`nx answer-plan disable <id> --reason ...` appends a `disable-reason:` tag, which the reconcile reads as drift and
     rewrites in place. The upsert does not touch `disabled_at`, so the plan stays off; the reason tag is lost."""
     path = _write_template(tmp_path, "off-b")
     load_seed_directory(tmp_path, library=library)
@@ -563,7 +563,7 @@ def test_a_disabled_builtin_with_a_reason_stays_disabled_when_the_reconcile_rewr
 
 @pytest.mark.t2_tenant
 def test_a_disabled_builtin_comes_back_enabled_when_a_release_edits_its_description(tmp_path, library):
-    """The limit of `nx plan disable` as the per-install off: a release that changes a template's description
+    """The limit of `nx answer-plan disable` as the per-install off: a release that changes a template's description
     makes the reconcile delete the row and insert a new one (the description is the upsert key), and the new
     row is enabled. The same holds for any later edit of entity-resolution.yml's description."""
     path = _write_template(tmp_path, "off-c")

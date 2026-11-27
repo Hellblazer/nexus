@@ -90,7 +90,7 @@ SELF_GUARDED_FILES=(
 ALLOWLIST=(
     'tests/e2e/gc-ab/run-ab.sh|-c "./mvnw|host-side build_lease_acquire/build_lease_release wraps this docker run call (build_variant())'
     'service/linux-native-verify.sh|./mvnw -q -Pnative -DskipTests package|host-side build_lease_acquire_wait at the top of the script wraps the docker run this line executes in; released in cleanup() on EXIT (nexus-8qdpe)'
-    'conexus/skills/cli-controller/SKILL.md|mvn clean install|generic tmux-driving example, not scoped to nexus service/ (see inline nx-mvnw-allowlist comment at the site)'
+    'conexus/skills/cli-controller/SKILL.md|mvn clean install|generic tmux-driving example for any project (see inline nx-mvnw-allowlist comment at the site)'
 )
 
 # Files whose ./mvnw or mvn lines need no gate_jar_cache_unshare before them:

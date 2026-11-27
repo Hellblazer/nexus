@@ -1,5 +1,5 @@
-# What cc-validation scenarios 06, 07, 33 and 34 observed, per Claude Code version
-# (nexus-qsmc5; 33 is nexus-xhisb, 34 nexus-kqqxt). Each asks a question whose answer is a
+# What cc-validation scenarios 06, 07, 33, 34 and 35 observed, per Claude Code version
+# (nexus-qsmc5; 33 is nexus-xhisb, 34 nexus-kqqxt, 35 nexus-sby49.15). Each asks a question whose answer is a
 # property of the Claude Code build, so no answer is a durable fact about the product.
 # This table is the baseline a run compares itself with, nothing more:
 #
@@ -9,7 +9,7 @@
 #                                        answer" and passes; add the rows below
 #
 # A Claude Code pin bump (container/Dockerfile ARG CLAUDE_CODE_VERSION) re-runs
-# 06, 07, 33 and 34 and updates this table. Nothing may be deleted, or relied on, on the
+# 06, 07, 33, 34 and 35 and updates this table. Nothing may be deleted, or relied on, on the
 # strength of a row here.
 #
 # Consumed by tests/cc-validation/lib/version_answers.py (stdlib only, so the
@@ -44,6 +44,16 @@
 #              all-ran | all-prompted | mixed
 #            34a and 34c sample a model's (Haiku 5.5 when recorded) and a classifier's
 #            judgement, not a rule.
+# answer_35a, answer_35b
+#            a PreToolUse hook that answers allow (no PermissionRequest hook) against an ask rule
+#            for the same MCP tool, at user scope (35a) and at project scope (35b)
+#              prompted    the ask rule stopped the call at a permission prompt; the tool did not run
+#              overridden  the allow ran the tool with no prompt
+#            35 has no row per version: its baseline reading was first taken on 2.1.332
+#            (nexus_rdr/259-research-51 and -52, 2026-11-26) and its rows name the two versions
+#            of the domain (2.1.302, unrecorded), so any build is compared with that reading.
+#            "overridden" is a changed answer on every build: RDR-259 Decision 9 rests on the
+#            ask rule winning.
 # observed   the day the recorded row was measured (a recorded row only)
 
 [table]
@@ -52,7 +62,7 @@ kind = "decision-table"
 version = 1
 
 [dimensions.scenario]
-domain = ["06", "07", "33a", "33b", "34a", "34b", "34c"]
+domain = ["06", "07", "33a", "33b", "34a", "34b", "34c", "35a", "35b"]
 [dimensions.version]
 domain = ["2.1.302", "unrecorded"]
 [dimensions.answer_06]
@@ -69,6 +79,10 @@ domain = ["retried", "fell-back", "reported"]
 domain = ["blocked", "proceeded"]
 [dimensions.answer_34c]
 domain = ["all-ran", "all-prompted", "mixed"]
+[dimensions.answer_35a]
+domain = ["prompted", "overridden"]
+[dimensions.answer_35b]
+domain = ["prompted", "overridden"]
 
 [[row]]
 id = "06::2.1.302::does-not-match"
@@ -195,3 +209,27 @@ id = "34c::unrecorded"
 match = { scenario = "34c" }
 guard = { version = "unrecorded", answer_34c = ["all-ran", "all-prompted", "mixed"] }
 emit = { verdict = "unrecorded", since = "", observed = "" }
+
+[[row]]
+id = "35a::prompted"
+match = { scenario = "35a" }
+guard = { version = ["2.1.302", "unrecorded"], answer_35a = "prompted" }
+emit = { verdict = "agrees", since = "2.1.332", observed = "2026-11-26" }
+
+[[row]]
+id = "35a::overridden"
+match = { scenario = "35a" }
+guard = { version = ["2.1.302", "unrecorded"], answer_35a = "overridden" }
+emit = { verdict = "changed", since = "2.1.332", observed = "2026-11-26" }
+
+[[row]]
+id = "35b::prompted"
+match = { scenario = "35b" }
+guard = { version = ["2.1.302", "unrecorded"], answer_35b = "prompted" }
+emit = { verdict = "agrees", since = "2.1.332", observed = "2026-11-26" }
+
+[[row]]
+id = "35b::overridden"
+match = { scenario = "35b" }
+guard = { version = ["2.1.302", "unrecorded"], answer_35b = "overridden" }
+emit = { verdict = "changed", since = "2.1.332", observed = "2026-11-26" }

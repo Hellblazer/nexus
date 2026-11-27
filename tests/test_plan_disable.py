@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-mrzp: ``nx plan disable`` / ``enable`` soft-disable a plan row.
+"""nexus-mrzp: ``nx answer-plan disable`` / ``enable`` soft-disable a plan row.
 
 Follow-up to nexus-la28 (PR #345 / #358). The la28 PR shipped
 list/show/delete/reseed but explicitly deferred ``disable`` because it
@@ -22,8 +22,8 @@ This file covers:
   * Matcher integration: ``search_plans`` (FTS lane) and
     ``list_active_plans`` (T1 cosine populate source) skip rows with
     ``disabled_at`` set.
-  * CLI: ``nx plan disable <id>`` / ``nx plan enable <id>``;
-    ``nx plan list`` skips disabled by default and shows them with
+  * CLI: ``nx answer-plan disable <id>`` / ``nx answer-plan enable <id>``;
+    ``nx answer-plan list`` skips disabled by default and shows them with
     ``--include-disabled``.
 """
 from __future__ import annotations
@@ -173,7 +173,7 @@ class TestPlanDisableCli:
     ):
         plan_id = _seed_plan(plan_db, name="cli-target", query="q")
 
-        result = runner.invoke(main, ["plan", "disable", str(plan_id)])
+        result = runner.invoke(main, ["answer-plan", "disable", str(plan_id)])
         assert result.exit_code == 0, result.output
         assert "disabled" in result.output.lower()
 
@@ -186,7 +186,7 @@ class TestPlanDisableCli:
         plan_id = _seed_plan(plan_db, name="cli-r", query="q", tags="orig")
 
         result = runner.invoke(main, [
-            "plan", "disable", str(plan_id),
+            "answer-plan", "disable", str(plan_id),
             "--reason", "regression in Phase 2",
         ])
         assert result.exit_code == 0, result.output
@@ -197,7 +197,7 @@ class TestPlanDisableCli:
     def test_disable_unknown_id_fails(
         self, runner: CliRunner, plan_db: T2Database,
     ):
-        result = runner.invoke(main, ["plan", "disable", "99999"])
+        result = runner.invoke(main, ["answer-plan", "disable", "99999"])
         assert result.exit_code != 0
         assert "no plan" in result.output.lower()
 
@@ -206,9 +206,9 @@ class TestPlanDisableCli:
     ):
         plan_id = _seed_plan(plan_db, name="t", query="q")
 
-        r1 = runner.invoke(main, ["plan", "disable", str(plan_id)])
+        r1 = runner.invoke(main, ["answer-plan", "disable", str(plan_id)])
         assert r1.exit_code == 0, r1.output
-        r2 = runner.invoke(main, ["plan", "enable", str(plan_id)])
+        r2 = runner.invoke(main, ["answer-plan", "enable", str(plan_id)])
         assert r2.exit_code == 0, r2.output
 
         row = plan_db.plans.get_plan(plan_id)
@@ -222,9 +222,9 @@ class TestPlanDisableCli:
             plan_db, name="disabled-row", query="qd", project="p2",
         )
 
-        r1 = runner.invoke(main, ["plan", "disable", str(disabled_id)])
+        r1 = runner.invoke(main, ["answer-plan", "disable", str(disabled_id)])
         assert r1.exit_code == 0, r1.output
-        result = runner.invoke(main, ["plan", "list"])
+        result = runner.invoke(main, ["answer-plan", "list"])
         assert result.exit_code == 0, result.output
         assert "active-row" in result.output
         assert "disabled-row" not in result.output
@@ -234,8 +234,8 @@ class TestPlanDisableCli:
     ):
         disabled_id = _seed_plan(plan_db, name="disabled-row", query="qd")
 
-        r1 = runner.invoke(main, ["plan", "disable", str(disabled_id)])
+        r1 = runner.invoke(main, ["answer-plan", "disable", str(disabled_id)])
         assert r1.exit_code == 0, r1.output
-        result = runner.invoke(main, ["plan", "list", "--include-disabled"])
+        result = runner.invoke(main, ["answer-plan", "list", "--include-disabled"])
         assert result.exit_code == 0, result.output
         assert "disabled-row" in result.output

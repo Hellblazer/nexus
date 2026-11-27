@@ -33,7 +33,8 @@ from typing import Any
 import structlog
 
 from nexus.auras.aura import Aura
-from nexus.auras.load_gate import GroupReader, default_group_reader, group_is_live
+from nexus.auras.load_gate import GroupReader, default_group_reader
+from nexus.auras.load_stage import LoadStage, legacy_blocks
 from nexus.auras.loaded_state import AuraState, LoadedState
 from nexus.db.t2.http_tuple_store import SchemaViolationError
 
@@ -50,6 +51,8 @@ class _Plan:
     pid: int = 0
     identity: str | None = None
     gate: dict[str, AuraState] = dataclasses.field(default_factory=dict)
+    #: Decisions for what the load left out without an aura to carry them: a base of a template that was refused.
+    extra: dict[str, AuraState] = dataclasses.field(default_factory=dict)
     fields: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -94,9 +97,10 @@ class AuraLoader:
         self._make_runtime = make_runtime
         self._attach = attach
         self._identity = identity if identity is not None else (lambda: None)
-        self._memberships = memberships
-        self._read_group = read_group
-        self._now = now if now is not None else (lambda: datetime.now(timezone.utc))
+        self._stage = LoadStage(
+            session_id, memberships=memberships, read_group=read_group,
+            now=now if now is not None else (lambda: datetime.now(timezone.utc)),
+        )
         self._state_sink = state_sink
         #: What each turned-on aura's load came to, by name: loaded or not, why, and its ``[load]`` group.
         self.decisions: dict[str, AuraState] = {}
@@ -204,7 +208,8 @@ class AuraLoader:
         # An identity the lease reported before this load (a pending bind that beat the registry) counts when the token
         # read misses it: the lease wrote the token file before it told us, so a miss is a read that raced the write.
         identity = self._identity_or_none() or self._noted_identity
-        return _Plan("load", auras=auras, pid=pid, identity=identity, gate=self._gate(auras, identity))
+        expanded = self._stage.expand(auras, self._stage.gate(auras, identity))
+        return _Plan("load", auras=expanded.auras, pid=pid, identity=identity, gate=expanded.verdicts, extra=expanded.extra)
 
     def _commit(self, plan: _Plan) -> None:
         """Apply a plan on the loop: the decisions, the subscriptions, the runtime and the state."""
@@ -216,6 +221,7 @@ class AuraLoader:
             return
         self.loaded_identity = plan.identity
         self._discovered = plan.auras
+        self.decisions.update(plan.extra)
         accepted = self._admit(plan.auras, plan.gate)
         self._publish_state(plan.pid, plan.identity)
         if not accepted:
@@ -223,6 +229,7 @@ class AuraLoader:
             return
         self._runtime = self._make_runtime(accepted)
         self._attach(self._runtime)
+        self._retire_legacy(accepted)
         _log.info("auras_loaded", session_id=self.session_id, auras=[a.name for a in accepted])
 
     def _admit(self, auras: Sequence[Aura], gate: dict[str, AuraState]) -> list[Aura]:
@@ -230,6 +237,8 @@ class AuraLoader:
         and subscription refusals. Returns the auras now loaded."""
         accepted: list[Aura] = []
         for aura in auras:
+            if aura.expanded_from is not None:
+                self.decisions.pop(aura.expanded_from, None)  # the template's own row (unbound, before a late bind) is replaced
             verdict = gate.get(aura.name)
             if verdict is not None and not verdict.loaded:
                 self.decisions[aura.name] = verdict
@@ -262,56 +271,18 @@ class AuraLoader:
             _log.warning("auras_identity_unreadable", session_id=self.session_id, error=str(exc))
             return None
 
-    def _gate(self, auras: Sequence[Aura], identity: str | None) -> dict[str, AuraState]:
-        """The verdict of each group-gated aura in *auras*, by name: one membership read, then one group read per
-        distinct group a not-yet-excluded aura names. An ungated aura has no entry and reads nothing."""
-        gated = [a for a in auras if a.load_group is not None]
-        out: dict[str, AuraState] = {}
-        if not gated:
-            return out
-
-        def refuse(aura: Aura, reason: str) -> None:
-            out[aura.name] = AuraState(False, reason, aura.load_group)
-
-        if identity is None:
-            for aura in gated:
-                refuse(aura, "unbound")
-            return out
-        member_of: set[str] | None = None
-        if self._memberships is not None:
-            try:
-                member_of = set(self._memberships(identity))
-            except Exception as exc:  # noqa: BLE001 -- GroupUnreadable, an engine error or a bug: loads nothing gated
-                _log.warning("auras_memberships_unreadable", session_id=self.session_id, error=str(exc))
-        if member_of is None:
-            for aura in gated:
-                refuse(aura, "memberships_unreadable")
-            return out
-        records: dict[str, AuraState] = {}
-        for aura in gated:
-            group = aura.load_group
-            assert group is not None
-            if group not in member_of:
-                refuse(aura, "not_a_member")
-                continue
-            if group not in records:
-                records[group] = self._group_verdict(group)
-            out[aura.name] = records[group]
-        return out
-
-    def _group_verdict(self, group: str) -> AuraState:
-        if self._read_group is None:
-            return AuraState(False, "group_unreadable", group)
+    def _retire_legacy(self, accepted: Sequence[Aura]) -> None:
+        """Ask the runtime to remove the pre-template block of each shipped template that just expanded (a session upgraded
+        mid-life, or one that last loaded before the aura was a template, still has ``## aura: develop CI red`` in its
+        threads entry). Idempotent, off this thread, never raises; a runtime with no such method (a test double) is left."""
+        retire = getattr(self._runtime, "retire_blocks", None)
+        pairs = legacy_blocks(accepted)
+        if retire is None or not pairs:
+            return
         try:
-            record = self._read_group(group)
-        except Exception as exc:  # noqa: BLE001 -- GroupUnreadable, an engine error or a bug
-            _log.warning("auras_group_unreadable", session_id=self.session_id, group=group, error=str(exc))
-            return AuraState(False, "group_unreadable", group)
-        if record is None:
-            return AuraState(False, "no_group_record", group)
-        if not group_is_live(record, self._now()):
-            return AuraState(False, "group_disbanded", group)
-        return AuraState(True, "loaded", group)
+            retire(pairs)
+        except Exception as exc:  # noqa: BLE001 -- an old block left in place is cosmetic
+            _log.warning("auras_legacy_blocks_failed", session_id=self.session_id, error=str(exc))
 
     def _publish_state(self, pid: int, identity: str | None) -> None:
         self._state_pid = pid
@@ -337,7 +308,8 @@ class AuraLoader:
         since nothing else would ever load them in this server's life."""
         pending = self._note(identity)
         if pending:
-            self._regate(pending, identity, self._gate(pending, identity))
+            expanded = self._stage.expand(pending, self._stage.gate(pending, identity))
+            self._regate(expanded.auras, expanded.verdicts, expanded.extra, identity)
         self._rewrite_identity(identity)
 
     async def note_identity_async(self, identity: str | None) -> None:
@@ -349,11 +321,12 @@ class AuraLoader:
         if pending:
             assert identity is not None
             try:
-                gate = await asyncio.to_thread(self._gate, pending, identity)
-            except Exception as exc:  # noqa: BLE001 -- _gate does not raise; a bug here is not the waiter's to die of
+                gate = await asyncio.to_thread(self._stage.gate, pending, identity)
+                expanded = self._stage.expand(pending, gate)
+            except Exception as exc:  # noqa: BLE001 -- the gate does not raise; a bug here is not the waiter's to die of
                 _log.warning("auras_late_gate_failed", session_id=self.session_id, error=str(exc))
                 return
-            self._regate(pending, identity, gate)
+            self._regate(expanded.auras, expanded.verdicts, expanded.extra, identity)
         self._rewrite_identity(identity)
 
     def close(self) -> None:
@@ -384,8 +357,11 @@ class AuraLoader:
         self._state = dataclasses.replace(self._state, identity=identity)
         self._emit_state()
 
-    def _regate(self, pending: list[Aura], identity: str, gate: dict[str, AuraState]) -> None:
+    def _regate(
+        self, pending: list[Aura], gate: dict[str, AuraState], extra: dict[str, AuraState], identity: str,
+    ) -> None:
         self.loaded_identity = identity
+        self.decisions.update(extra)
         accepted: list[Aura] = []
         try:
             accepted = self._admit(pending, gate)
@@ -395,6 +371,7 @@ class AuraLoader:
                 else:
                     self._runtime = self._make_runtime(accepted)
                     self._attach(self._runtime)
+                self._retire_legacy(accepted)
                 _log.info("auras_loaded_after_bind", session_id=self.session_id, auras=[a.name for a in accepted])
         except Exception as exc:  # noqa: BLE001 -- an aura never stops the waiter
             _log.warning("auras_late_load_failed", session_id=self.session_id, error=str(exc))

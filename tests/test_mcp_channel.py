@@ -2579,9 +2579,16 @@ asyncio.run(main())
             [sys.executable, "-c", self._DYING_WAITER, session_id],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
-        time.sleep(2.0)
-        first = tuple_out(addr, {"to": session_id}, {"from": "sender"}, "first", nonce=uuid.uuid4().hex)
-        out, _ = proc.communicate(timeout=60)
+        try:
+            time.sleep(2.0)
+            first = tuple_out(addr, {"to": session_id}, {"from": "sender"}, "first", nonce=uuid.uuid4().hex)
+            out, _ = proc.communicate(timeout=60)
+        finally:
+            # The child loops until it hears of a row; if the put or the wait fails it would outlive this test,
+            # and the engine it polls, indefinitely (two such children ran 41 h after a 2026-11-22 run).
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
         # Non-vacuity: the dying waiter really announced a row and re-parked,
         # so its parked call is the orphan this test is about.
         assert f"SENT {first}" in out, out

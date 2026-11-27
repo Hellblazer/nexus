@@ -18,12 +18,10 @@ spawns under ONE shared deadline of :data:`DEADLINE_S` seconds, and once that
 is spent the answer is "no match". The ``_lib`` framework (and its telemetry)
 is imported only after a row has matched.
 
-MODE. :data:`MODE` is ``"advise"``: a matched call gets the advice as
-``additionalContext`` and NO permission decision (the ordinary permission flow
-decides, exactly like ``_lib.warn``). The hook never denies in this mode. The
-flip to ``"deny"`` is the one line below (or a per-row ``mode=``); the deny
-path is implemented and pinned by tests but is not active. In deny mode the
-usual ``# routing-allow: <reason>`` escape applies to Bash calls.
+BLOCKING. Every row advises: a matched call gets the advice as ``additionalContext`` and NO permission decision (the
+ordinary permission flow decides, exactly like ``_lib.warn``). A row blocks (denies) only when its id is listed in the
+``advice_block`` setting of the project's ``.nexus/project.json`` or of the user's ``conexus.json``; a project can only add
+rows to that list. In deny the usual ``# routing-allow: <reason>`` escape applies to Bash calls.
 
 FALSE POSITIVES only advise, but the predicates are written to keep them rare:
 the command is split on unquoted ``; & | newline``, each segment is tokenised
@@ -56,9 +54,6 @@ RULE_NAME = "destructive_action_advice"
 
 #: Seconds, from the start of the call, that ALL spawns together may take.
 DEADLINE_S = 2.0
-
-#: "advise" (never denies) or "deny". The one-line flip.
-MODE = "advise"
 
 _EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit"})
 _BASH = frozenset({"Bash"})
@@ -819,7 +814,8 @@ class Row(NamedTuple):
     predicate: Callable[[Ctx], bool]
     advice: str
     hints: tuple[str, ...] | None = None  # cheap gate for Bash: one must occur in the command
-    mode: str | None = None  # None = :data:`MODE`
+    #: Who the row fires for, in ``conexus/hooks/audience.yaml``'s vocabulary: every row, for every user.
+    audience: str = "EVERY-USER"
 
 
 ROWS: tuple[Row, ...] = (
@@ -828,12 +824,10 @@ ROWS: tuple[Row, ...] = (
         f"{_SRC} / 'No pattern kills' (R32; R34 pattern forms)",
         _BASH,
         _pattern_kill,
-        "pkill, killall and kill-by-pgrep end every process the pattern matches, on the laptop as on a shared "
-        "host: a laptop `pkill -f` has been used to end an agent's own queued run, and it cannot tell that run "
-        "from a peer's. A single SIGTERM to a pid picked out of `ps` by its command line has ended another "
-        "session's lab-remote run. Signal only a pid you started yourself (`$!` or your own background task "
-        "id), found by its parent pid, and check its parent and its working directory "
-        "(`ps -p <pid> -o pid,ppid,args`, `lsof -a -p <pid> -d cwd`) before `kill <pid>`. "
+        "pkill, killall and kill-by-pgrep end every process the pattern matches, whoever started it: the pattern "
+        "cannot tell your own run from another session's or another user's. Signal only a pid you started "
+        "yourself (`$!` or your own background task id), found by its parent pid, and check its parent and its "
+        "working directory (`ps -p <pid> -o pid,ppid,args`, `lsof -a -p <pid> -d cwd`) before `kill <pid>`. "
         "Never take a pid from ps or pgrep by its command line.",
         hints=("kill",),
     ),
@@ -843,9 +837,8 @@ ROWS: tuple[Row, ...] = (
         _BASH,
         _branch_delete,
         "Deleting branches by glob, from xargs or a command substitution, or with the output hidden can remove "
-        "other sessions' branches with no record of the names (216 branches were lost once; a branch's reflog "
-        "dies with it). Delete only branch names you can name as yours, one `git branch -D <name>` at a time, "
-        "and keep the output visible.",
+        "branches you did not mean to, with no record of the names (a branch's reflog dies with it). Delete only "
+        "branch names you can name, one `git branch -D <name>` at a time, and keep the output visible.",
         hints=("branch",),
     ),
     Row(
@@ -944,21 +937,39 @@ def decide(payload: dict) -> list[Hit]:
     return hits
 
 
-def row_mode(row: Row, mode: str | None = None) -> str:
-    """The mode *row* runs in: its own, else *mode*, else :data:`MODE`; anything unknown is advise."""
-    m = row.mode or mode or MODE
-    return m if m in ("advise", "deny") else "advise"
+def row_mode(row: Row, blocked: "frozenset[str] | set[str]" = frozenset()) -> str:
+    """``"deny"`` when *row*'s id is in *blocked* (the project's and the user's ``advice_block``), else ``"advise"``."""
+    return "deny" if row.id in blocked else "advise"
+
+
+def _blocked_rows(payload: dict, head: bool = False) -> "frozenset[str]":
+    """The advice row ids the project or the user listed to block; empty when the helper is missing or fails (a row advises).
+
+    *head* adds the committed project settings file (RDR-259 Decision 1): ask it only where a matched row would otherwise warn."""
+    try:
+        sys.path.insert(0, _SCRIPTS)
+        try:
+            from _audience import advice_blocked as _advice_blocked  # noqa: PLC0415 -- only a matched call pays for it
+        except BaseException:  # noqa: BLE001
+            def _advice_blocked(payload: object, head: bool = False) -> frozenset[str]:
+                return frozenset()
+        return _advice_blocked(payload, head=head)
+    except BaseException:  # noqa: BLE001
+        return frozenset()
 
 
 def render(hits: list[Hit]) -> str:
     return "\n\n".join(f"destructive-action advice [{h.row.id}]: {h.note}{h.row.advice}" for h in hits)
 
 
-def emit(_lib, payload: dict, hits: list[Hit], mode: str | None = None) -> None:
-    """Log each hit, then advise (never deny in advise mode) or deny."""
+def emit(_lib, payload: dict, hits: list[Hit], blocked: "frozenset[str] | None" = None) -> None:
+    """Log each hit, then advise or, for a row listed in *blocked* (default: the project's and the user's setting), deny."""
     ctx = Ctx(payload)
     escaped = bool(ctx.command) and _lib.should_skip_for_reason(ctx.command)
-    denying = [h for h in hits if row_mode(h.row, mode) == "deny"]
+    rows = _blocked_rows(payload) if blocked is None else blocked
+    if blocked is None and any(row_mode(h.row, rows) != "deny" for h in hits):
+        rows = rows | _blocked_rows(payload, head=True)  # a row that would only warn: the committed copy may list it; the second read only adds
+    denying = [h for h in hits if row_mode(h.row, rows) == "deny"]
     for h in hits:
         if h in denying:
             outcome = "escape" if escaped else "deny"
@@ -980,7 +991,7 @@ def emit(_lib, payload: dict, hits: list[Hit], mode: str | None = None) -> None:
     _lib.warn(text)
 
 
-def main(mode: str | None = None) -> None:
+def main(blocked: "frozenset[str] | None" = None) -> None:
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw else {}
@@ -996,7 +1007,7 @@ def main(mode: str | None = None) -> None:
 
     sys.stdin = io.StringIO(raw)
     def body(p: dict) -> None:
-        emit(_lib, p, hits, mode)
+        emit(_lib, p, hits, blocked)
 
     _lib.run_hook(body, fail_closed=False, rule_name=RULE_NAME)
 

@@ -54,8 +54,7 @@ _log = structlog.get_logger(__name__)
 def _raise_engine_floor(exc: httpx.HTTPStatusError) -> None:
     raise click.ClickException(
         "nx catalog sweep-ghosts: this engine does not yet expose "
-        "POST /v1/catalog/ghost-sweep (needs the nexus-29drn engine "
-        "release). Upgrade the deployed engine-service, then re-run."
+        "POST /v1/catalog/ghost-sweep. Upgrade the deployed engine-service, then re-run."
     ) from exc
 
 
@@ -70,7 +69,7 @@ def _raise_engine_floor(exc: httpx.HTTPStatusError) -> None:
     help="Emit the report as JSON on stdout.",
 )
 def sweep_ghosts_cmd(apply: bool, json_out: bool) -> None:
-    """Sweep RDR-204 ghost + referenced-but-empty collections on demand.
+    """Sweep ghost + referenced-but-empty collections on demand.
 
     \b
     Default is dry-run: reports what the sweep WOULD do without writing.

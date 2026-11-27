@@ -137,7 +137,7 @@ extension points.]
 - State each measured value ONCE, in Research Findings,
   and cite it here and in the plan ("the census count")
   rather than restating the number; a fix then has one
-  site. Two blocked gates on RDR-204 were numbers that
+  site. Two blocked gates in an earlier RDR were numbers that
   had been fixed in one section and not the others.
 - A set the implementation can derive (tables with a
   foreign key into X, call sites of Y) is derived by the

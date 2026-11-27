@@ -109,7 +109,7 @@ def _old_engine_tenant(asked: str, answered: object) -> NoReturn:
     _fail(
         f"This engine cannot sweep another tenant (it answered for tenant {answered!r}, not {asked!r}): the engine must "
         f"be upgraded to a build newer than engine-service-v0.1.178 that carries the root-names-the-target change "
-        f"(nexus-6pfgb.43) AND the client must carry --tenant (this one does); run it with the root service token, "
+        f" AND the client must carry --tenant (this one does); run it with the root service token, "
         f"which is how a mint-locked cloud sweeps a tenant it cannot mint a token for. Nothing was written.",
         EXIT_NO_ROUTE,
     )
@@ -181,8 +181,7 @@ def _engine_error(exc: VectorServiceError, *, swept_before: int = 0,
         )
     if exc.code == 404:
         _fail(
-            "This engine does not carry the retire-keys routes (HTTP 404). Upgrade the engine to the release that "
-            "ships nexus-6pfgb.43.", EXIT_NO_ROUTE,
+            "This engine does not carry the retire-keys routes (HTTP 404). Upgrade the engine to the latest release.", EXIT_NO_ROUTE,
         )
     body = exc.engine_body or {}
     reason = exc.reason or body.get("reason")
@@ -636,7 +635,7 @@ def _run_constraints(client: Any, *, add: bool, replace: bool, as_json: bool) ->
 def retire_keys_cmd(tenant: str | None, operator: str | None, dry_run: bool, apply: bool, accept: tuple[str, ...], collection: str | None,
                     batch_size: int | None, max_rps: float | None, add_check: bool, replace: bool, validate: bool,
                     wait_seconds: int | None, as_json: bool) -> None:
-    """Retire the chunk-row metadata keys: sweep a tenant, then add and validate the CHECKs (nexus-6pfgb.43).
+    """Retire the chunk-row metadata keys: sweep a tenant, then add and validate the CHECKs.
 
     \b
     Order, per install:

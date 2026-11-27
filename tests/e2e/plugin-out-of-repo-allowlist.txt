@@ -28,4 +28,3 @@
 # src/nexus/session_start_guidance.py and src/nexus/hooks/subagent_start.py
 # generate and inject. It is Python source outside every plugin tree.
 conexus | commands/continuation.md | tests/e2e/lib/commit_scope_audit.sh | REPO-ONLY | guarded by 'when the project has' the script, with a by-hand comparison for every other project, so a session outside a nexus checkout takes the other branch
-conexus | skills/composition-probe/SKILL.md | scripts/mvnw-leased.sh | REPO-ONLY | guarded by 'when the project has that script', with ./mvnw or mvn for every other project, so a session outside a nexus checkout takes the other branch

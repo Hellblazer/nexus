@@ -123,15 +123,6 @@ def test_fewer_started_than_the_floor_fails_even_with_no_failures(drive, tmp_pat
     assert "fewer than the floor" in capsys.readouterr().out
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "v8.5.8 plugin-only lane only: hooks.json drops the PermissionRequest auto-approve entry (21 entries) "
-        "but the lane may not change drive.py's DEFAULT_MIN_EXECUTED (22, release machinery). Accepted on the "
-        "record by Sam 2026-11-26 (T2 nexus/sam-ruling-v8.5.8-skew-floor-2026-11-26); develop sets the floor to "
-        "21 with nexus-sby49.14, and the back-merge drops this mark."
-    ),
-)
 def test_the_default_floor_is_the_manifests_command_entry_count(drive) -> None:
     """A floor below the manifest lets entries go unrun; above it fails always.
     Raise DEFAULT_MIN_EXECUTED together with the manifest."""

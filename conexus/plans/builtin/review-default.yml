@@ -24,7 +24,7 @@ default_bindings:
   depth: 1
 # RDR-232 Phase 2: the answer kind this template serves, declared (not inferred from the verb).
 answer_kind: comparison
-tags: builtin-template,rdr-078,review
+tags: builtin-template,review
 plan_json:
   steps:
   - tool: query

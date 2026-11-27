@@ -9,12 +9,13 @@ MVV port A: the first real hook module on the tool tier. Registered as
 ``tool_name`` and ``hook_event_name`` from the payload. On an allowlist match:
 ``PreToolUse`` renders
 ``{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision":
-"allow", "permissionDecisionReason": "plugin allowlist (auto-approve)"}}``; any
-other (or absent) ``hook_event_name`` -- the bash script's own default -- renders
-the ``PermissionRequest`` form
-``{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision":
-{"behavior": "allow"}}}``. No match is **silent** -- ``HookResult()``, not an
-empty envelope. Always exit 0 (``HookResult``'s own default).
+"allow", "permissionDecisionReason": "plugin allowlist (auto-approve)"}}``.
+**Any other ``hook_event_name``, absent or ``PermissionRequest`` included, is
+silent** (RDR-259 S4, nexus-sby49.6): the bash script defaulted an absent event
+to ``PermissionRequest`` and answered it, and an answer on that event overrides
+a user's own ``ask`` rule for the tool, so the verb answers ``PreToolUse`` and
+nothing else. No match is **silent** too -- ``HookResult()``, not an empty
+envelope. Always exit 0 (``HookResult``'s own default).
 
 **One deliberate addition, not a bash behaviour carried forward.** The bash
 script's case list is 62 explicit literal names, reproduced verbatim in
@@ -40,6 +41,11 @@ under that prefix that should have prompted. A one-way door with no one at it.
 The line-per-port cost is the point, not the price: it is what makes each grant
 visible in a diff, and it is what the bash script already paid 62 times.
 
+**Every user.** The seven destructive or other-party tools in the list (``memory_delete``, ``answer_plan_delete`` and its old name
+``plan_delete``, ``memory_consolidate``, ``nx_tidy``, ``tuple_in``, ``mailbox_send``) are auto-approved for everyone: the plugin
+asks nothing about who the user is. A user who wants a prompt for one adds an ``ask`` or ``deny`` rule in their own Claude Code
+settings, which beats a hook's allow.
+
 **AUDIT RESIDUAL (bead nexus-q02nx.4, round 1, Moderate): hook-chain re-entry
 is measured by bead nexus-q02nx.6, not resolved here.** Auto-approving
 a hook tool's own name does not by itself prove a model-initiated call to one
@@ -49,7 +55,7 @@ that bead's job.
 """
 from __future__ import annotations
 
-from nexus._hook_runtime._io import HookResult, permission_decision, permission_request
+from nexus._hook_runtime._io import HookResult, permission_decision
 
 #: Explicit full tool names, no wildcards -- carried byte-for-byte from
 #: auto-approve-nx-mcp.sh's case statement (T2 nexus_rdr/215-hook-contract-map
@@ -84,6 +90,10 @@ _ALLOWED_TOOLS: frozenset[str] = frozenset(
         "mcp__plugin_conexus_nexus__scratch",
         "mcp__plugin_conexus_nexus__scratch_manage",
         "mcp__plugin_conexus_nexus__collection_list",
+        "mcp__plugin_conexus_nexus__answer_plan_save",
+        "mcp__plugin_conexus_nexus__answer_plan_search",
+        "mcp__plugin_conexus_nexus__answer_plan_delete",
+        # The old names stay for one client release (nexus-sby49.4); remove these three with the aliases.
         "mcp__plugin_conexus_nexus__plan_save",
         "mcp__plugin_conexus_nexus__plan_search",
         "mcp__plugin_conexus_nexus__plan_delete",
@@ -144,23 +154,24 @@ def _is_allowed(tool_name: str) -> bool:
 def run(payload: dict | None) -> HookResult:
     """Decide whether *payload*'s ``tool_name`` is auto-approved.
 
-    Mirrors ``auto-approve-nx-mcp.sh`` exactly: a non-match returns
-    ``HookResult()`` (silent -- no stdout at all, not an empty envelope);
-    a match renders the event-appropriate envelope via ``_io``'s shared
-    writers, which reproduce the bash layer's key order byte for byte.
+    Answers only an event that is exactly ``PreToolUse`` (RDR-259 S4,
+    nexus-sby49.6). A non-match, an absent event and a ``PermissionRequest``
+    event all return ``HookResult()`` (silent -- no stdout at all, not an
+    empty envelope); a ``PreToolUse`` match renders the envelope via
+    ``_io``'s shared writer, which reproduces the bash layer's key order byte
+    for byte.
     """
     data = payload or {}
     tool_name = data.get("tool_name", "")
     if not _is_allowed(tool_name):
         return HookResult()
 
-    event = data.get("hook_event_name", "PermissionRequest")
-    if event == "PreToolUse":
-        stdout = permission_decision(
+    if data.get("hook_event_name") != "PreToolUse":
+        return HookResult()
+    return HookResult(
+        stdout=permission_decision(
             "PreToolUse",
             "allow",
             permission_decision_reason="plugin allowlist (auto-approve)",
         )
-    else:
-        stdout = permission_request("allow")
-    return HookResult(stdout=stdout)
+    )

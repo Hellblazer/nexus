@@ -207,16 +207,16 @@ def _t2_project() -> str:
 
 
 def _seed_catalog_and_plans() -> None:
-    """Run `nx plan reseed` so phase 9 plan_match has something to match against."""
+    """Run `nx answer-plan reseed` so phase 9 plan_match has something to match against."""
     step("Setup — seed catalog + plans (required for phase 9 plan_match)")
     # nexus-06aei: was `nx catalog setup`, retired since conexus 7.0.0 and
     # raising unconditionally, so this step asserted returncode == 0 on a
-    # command that can only refuse and the suite could not pass. `nx plan
+    # command that can only refuse and the suite could not pass. `nx answer-plan
     # reseed` calls seed_plan_templates() -- the same function catalog
     # setup used for the plan half, and the one `nx init` calls -- so the
     # step does what its name always claimed. Found by
     # tests/test_retired_command_callers_lint.py.
-    with case("nx plan reseed (plan library)"):
+    with case("nx answer-plan reseed (plan library)"):
         r = subprocess.run(
             ["uv", "run", "nx", "plan", "reseed"],
             capture_output=True, text=True, timeout=60,

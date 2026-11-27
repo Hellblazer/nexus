@@ -835,7 +835,7 @@ REAL_KERNEL_PATTERNS = (
     "test_hard_killing_the_supervisor_takes_its_job_engine_with_it",
     "tests.test_mcpb_bootstrap.TestRealWindows",
     "test_the_credential_guard_still_denies_through_the_launcher",
-    "test_auto_approve_allows_through_uv_and_the_shim",
+    "test_auto_approve_pretooluse_allows_through_uv_and_the_shim",
     "tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows",
     "tests.test_off_cwd_resolver_real_windows.TestRealWindows",
     "tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows",

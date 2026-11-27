@@ -4,9 +4,9 @@ matcher skip of always-failing plans, and the service-capable hygiene verb.
 Drift-audit evidence: 77/116 pre-migration plans were null-verb bead-dumps;
 plan 138 MATCHED at 0.66-0.70 then crashed the runner (unknown tool '').
 Save-time validation kills the class at the door; the matcher skip stops
-already-stored members from re-crashing; `nx plan hygiene` retires them
+already-stored members from re-crashing; `nx answer-plan hygiene` retires them
 durably (disable, never delete) — and works in SERVICE mode, unlike the
-SQLite-only `nx plan repair` group.
+SQLite-only `nx answer-plan repair` group.
 """
 from __future__ import annotations
 
@@ -66,9 +66,9 @@ class TestValidatePlanSteps:
 
 class TestPlanSaveValidation:
     def _save(self, plan_json: str, **kw):
-        from nexus.mcp.core import plan_save
+        from nexus.mcp.core import answer_plan_save
 
-        return plan_save(
+        return answer_plan_save(
             query="q", plan_json=plan_json, verb="research", **kw,
         )
 
@@ -162,7 +162,7 @@ class TestMatcherSkipsAlwaysFailing:
         assert 200 in ids
 
 
-# ── 3. nx plan hygiene (service-capable, disable-not-delete) ─────────────────
+# ── 3. nx answer-plan hygiene (service-capable, disable-not-delete) ─────────────────
 
 
 class TestPlanHygieneVerb:

@@ -231,20 +231,22 @@ H=chas           # the laptop remote; its ssh host is $H-test (chas-test, or qwe
 git push -q "$H" "$TAG:refs/heads/engine-cut-$TAG"
 ssh "$H-test" "cd ~/src/nexus && for L in A B C; do git worktree add -q --detach ../nexus-wt/engine-cut-$TAG-\$L $TAG; done"
 # Leg A: the normal upgrade, then a plain reboot
-ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-A && uv sync -q && NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
+ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-A && uv sync -q && NX_BUILD_LEASE_WAIT=28800 NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
   lab-run -c lab-m -- uv run python scripts/upgrade_boot_writes.py --prev-client '"$PREV"' --new-jar-commit '"$TAG"' \
-  --ceiling 67108864 --ceiling-boot 67108864 --ceiling-reboot 67108864 --json output/gate/A.json'
+  --ceiling-boot 67108864 --ceiling-reboot 67108864 --json output/gate/A.json'
 # Leg B: from before per-collection indexes, queued aspect rows, graceful restart mid-queue
-ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-B && uv sync -q && NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
+ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-B && uv sync -q && NX_BUILD_LEASE_WAIT=28800 NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
   lab-run -c lab-m -- uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
   --collections 7 --rows 30000 --rot pending_aspect_queue \
   --restart-mid-queue 3 --restart-mode graceful --ceiling-boot 67108864 --json output/gate/B.json'
 # Leg C: as Leg B, with a forced kill of the supervisor and engine (PostgreSQL stays up)
-ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-C && uv sync -q && NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
+ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-C && uv sync -q && NX_BUILD_LEASE_WAIT=28800 NX_GATE_JAR_CACHE=off scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
   lab-run -c lab-m -- uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
   --collections 7 --rows 30000 --rot pending_aspect_queue \
   --restart-mid-queue 3 --restart-mode kill --ceiling-boot 67108864 --json output/gate/C.json'
 ```
+
+`NX_GATE_JAR_CACHE=off` makes each leg build its own jar: the gate-jar cache keys on build inputs, so it can hand back a jar stamped with another commit whose build inputs match (on 0.1.202 leg A the tag commit differed from the cached one only in `service/src/test`), and the leg's jar-identity check refuses that jar with exit 2.
 
 Start each leg as a background command (`run_in_background`) with its output
 redirected to a file: the ssh session holds until the leg exits, so the session is woken
@@ -265,11 +267,13 @@ stamp (a plain `mvnw package`).
 
 - **Leg A** is the normal upgrade, from the release users are on now, then a
   plain same-version reboot. `--ceiling-boot` bounds the upgrade boot's migrate
-  and ready, `--ceiling` total WAL through idle (measured 0.80 MB from 8.0.0),
-  and `--ceiling-reboot` the reboot's migrate
-  and ready (measured 0.45-0.59 MB). Every index is valid before the reboot, so
-  nothing legitimate writes in it, and an engine that rewrites data on every
-  boot fails here even if its first boot passes.
+  and ready, and `--ceiling-reboot` the reboot's migrate and ready. The reboot
+  follows an upgrade whose data moves have run to completion, so an engine that
+  rewrites data on every boot fails here even if its first boot passes. The
+  earlier figure of 0.45-0.59 MB was measured before any stamp move completed
+  and is no reference for it: the first leg A run with the completed stamps sets
+  one. A vacuum of the moves' dead tuples that starts after idle can land in the
+  reboot's migrate and ready; read `boots[1].phases` before trusting a red or a green.
 - **Leg B** starts from 7.76.0, the newest release before per-collection
   indexes (`--no-pci-wait`: the old engine builds none), with rows left in the
   retired aspect queue, and restarts the engine while the third index build
@@ -284,10 +288,34 @@ stamp (a plain `mvnw package`).
 - **Leg C** is Leg B with a forced kill, under the same upgrade-boot bound and the
   restart rule.
 
+Data moves (Sam, T2 `nexus/sam-ruling-upgrade-gate-move-pacing-2026-11-23`). The
+harness sets `NX_DATA_MOVE_SLEEP_MS` for every boot of the new engine (`--data-move-sleep-ms`,
+default 0, recorded as `data_move_sleep_ms`), so the registered moves, the RDR-229 stamps
+included, run to completion inside `--max-wait` instead of at production pacing (about 4.8 h
+for the fixture's chunks stamp). A green leg proves the moves complete and the engine
+settles at that pause, and nothing about production pacing, which rests on the
+`DataMoveWorker*IntegrationTest` suites; the harness prints the same note in its output
+(`pacing_note`). Every leg's byte bound covers migrate and ready (`--ceiling-boot`) and the
+reboot (`--ceiling-reboot`) and nothing after ready. `--ceiling`, the old total through
+settle, is retired: the harness refuses it, so never put it on a leg. Reported, never gated:
+`pre_move_wal_bytes` (ready to the first status that shows a move working) and
+`move_wal_bytes` (from that status until idle: the moves, plus whatever else wrote in that
+window, an autovacuum included if it started before idle; about 2.1 GB for the chunks
+stamp). Once ready, the upgrade boot sizes the open moves: ceil(rows / chunk_size) times
+the pause, summed, against the time left before `--max-wait`. It is a lower bound on the
+pauses alone (no compute time; rows counted for the whole table, not per tenant leaf;
+moves parked on a missing prerequisite left out), so it can stop a leg that cannot finish
+(exit 2) and never prove one will. An unreadable registry or count also exits 2. A move
+still working when `--max-wait` runs out is red (exit 1, `data-move-never-finished`) only
+when it is stuck: no working move's done count advanced over the last 150 s of status reads.
+One that is still advancing is exit 2 ("still progressing"): raise `--max-wait` or lower
+`--data-move-sleep-ms`, and rerun. The state comes from the last status read that succeeded.
+
 Every leg must exit 0. Exit 1 is a red (a bound tripped, a boot failed, or the
 restart rule failed): do not tag. Exit 2 is a harness failure with no measurement: fix the
 run and repeat it, never tag on it. Paste each fetched `output/gate/*.json`'s
-`verdict`, `boot_wal_bytes`, `reboot_wal_bytes` (Leg A), `total_wal_bytes`,
+`verdict`, `boot_wal_bytes`, `reboot_wal_bytes` (Leg A), `total_wal_bytes`, `pre_move_wal_bytes`,
+`move_wal_bytes`, `data_move_sleep_ms`, `pacing_note`,
 `ceilings_tripped`, `new_jar_sha256`, `new_jar_commit`, `new_jar_identity` and the
 `resume` block on the cut bead, and check that `new_jar_identity` shows the jar's
 engine tree equals the tag commit's. Not covered by this step: background work
@@ -452,7 +480,7 @@ The size ceilings are enforced BLOCKING in `scripts/promote_engine_release.sh`, 
 uv run python scripts/check_engine_cut_riders.py sizes engine-service-vX.Y.Z
 ```
 
-Add `--windows on` when the Windows legs were on for the cut (repo variable `NX_WINDOWS_RELEASE_LEGS`): the Windows engine archive `nexus-service-windows-x64.txz` is then required and held to its own ceiling (55 MiB; measured 32.1 MiB for an `-Ob` build, the `-O2` release build not yet measured), as `promote_engine_release.sh` already did. Must end `PASSED`. It reads the release's asset sizes (`gh release view`) and fails when a binary is at or near its pre-fix size: v0.1.142 shipped `nexus-service-linux-amd64` at 231.8 MiB, `linux-arm64` at 227.0 and `mac-arm64` at 193.3; nexus-lhr6a measured the fixed build at 150 (amd64) and 154 (mac), and the ceilings are 175, 175 and 175. linux-arm64 was never measured: its expected size is about 147 (an estimate scaled from amd64) and its ceiling uses amd64's margin; replace the estimate with the first published arm64 size. A size back near the old values means the dedup did not take effect in the release build, which the size gate catches after the fact and the embedded-resources checker catches earlier: it now runs as a step on every native release leg (`scripts/check_native_embedded_resources.py --platform <arch>`, nexus-zz2w7), so a build with a doubled or foreign library fails the leg before publish. Step 2b proves the fix was in the tagged commit (ancestry, not content: a later revert leaves it an ancestor); the size gate proves it shipped. Close nexus-ujbz8 after a pass.
+Add `--windows on` when the Windows legs were on for the cut (repo variable `NX_WINDOWS_RELEASE_LEGS`): the Windows engine archive `nexus-service-windows-x64.txz` is then required and held to its own ceiling (55 MiB; measured 32.1 MiB for an `-Ob` build, the `-O2` release build not yet measured), as `promote_engine_release.sh` already did. Must end `PASSED`. It reads the release's asset sizes (`gh release view`) and fails when a binary is at or near its pre-fix size: v0.1.142 shipped `nexus-service-linux-amd64` at 231.8 MiB, `linux-arm64` at 227.0 and `mac-arm64` at 193.3; nexus-lhr6a measured the fixed build at 150 (amd64) and 154 (mac). engine-service-v0.1.202 published at 174.0 (linux-amd64), 172.4 (linux-arm64) and 177.2 (mac-arm64), a uniform +5 MiB of RDR-229 engine code over v0.1.201, and the ceilings are 185, 185 and 185 (Sam, T2 `nexus/sam-ruling-0202-manual-promote-and-size-ceiling-2026-11-24`): still under mac-arm64's pre-fix 193.3, so a lost dedup trips every binary. A size back near the old values means the dedup did not take effect in the release build, which the size gate catches after the fact and the embedded-resources checker catches earlier: it now runs as a step on every native release leg (`scripts/check_native_embedded_resources.py --platform <arch>`, nexus-zz2w7), so a build with a doubled or foreign library fails the leg before publish. Step 2b proves the fix was in the tagged commit (ancestry, not content: a later revert leaves it an ancestor); the size gate proves it shipped. Close nexus-ujbz8 after a pass.
 
 ### 6. Relay deploy + post-deploy cloud validation to conexus
 

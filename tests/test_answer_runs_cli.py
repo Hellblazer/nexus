@@ -191,7 +191,7 @@ class TestPopulatedResult:
         )
         text_result = CliRunner().invoke(answer_runs_cmd, [])
         assert "CAVEAT" in text_result.output
-        assert "RDR-200" in text_result.output
+        assert f"CAVEAT: {NX_ANSWER_RUNS_WHOLE_SET_CONTINUATION_CAVEAT}" in text_result.output
 
         json_result = CliRunner().invoke(answer_runs_cmd, ["--json"])
         payload = json.loads(json_result.stdout)

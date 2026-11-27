@@ -131,7 +131,9 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: resume pointer for a /clear in a session that never compacted).
 #: 23 -> 22 at nexus-sby49.5 (RDR-259 S4): the PermissionRequest auto-approve entry is removed; auto-approve answers on
 #: PreToolUse only, so a user's own ask rule is not overridden.
-EXPECTED_CONEXUS_ENTRIES = 22
+#: 22 -> 23 at nexus-sby49.12 (RDR-259 Decision 4): `settings_notice.py`, the settings problem notice, in a UserPromptSubmit group of its own
+#: (first prompt of a session; Claude Desktop hides a SessionStart systemMessage and shows a UserPromptSubmit one).
+EXPECTED_CONEXUS_ENTRIES = 23
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -187,6 +189,7 @@ PLUGIN_RESIDENT_SCRIPTS = frozenset(
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/stop_wake_guard.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_setup_notice.py",
+        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/settings_notice.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/credential_print_guard.py",

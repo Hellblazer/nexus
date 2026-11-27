@@ -54,7 +54,7 @@ import click
 
 @click.group("stranded")
 def stranded_group() -> None:
-    """Cloud-mode stranded-install de-strand tools (nexus-cmtpa)."""
+    """Cloud-mode stranded-install de-strand tools."""
 
 
 @stranded_group.command("ack")

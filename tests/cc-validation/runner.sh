@@ -327,6 +327,47 @@ cc_preempt_verdict() {
     fi
 }
 
+# cc_ask_rule_verdict <hook_a> <ran_a> <prompt_a> <scope_a> <hook_b> <ran_b> <prompt_b> <scope_b> <hook_c> <ran_c> <prompt_c>
+# The verdict ladder of scenario 35: a PreToolUse hook that answers allow (and no PermissionRequest
+# hook), against an `ask` rule for the same tool. a = the rule at user scope, b = at project scope
+# (scope = the scope the pending prompt names: user | project | none | other), c = the CONTROL, no
+# rule (1/0 flags). The control must run the tool with no prompt: it proves the hook fires, its
+# allow is honoured and the server connects. In a and b the hook must have fired (else the legs
+# prove nothing), and the call must have either run (answer "overridden") or stopped at a prompt
+# naming the right scope (answer "prompted"); the answer is an observation for THIS build, compared
+# with the answer recorded in docs/tables/cc-version-answers.toml (cc_version_check). "overridden"
+# means the allow ran the tool through the user's ask rule, the defect RDR-259 Decision 9 removes
+# from the plugin, so the table records it as a changed answer.
+cc_ask_rule_verdict() {
+    local ha="$1" ra="$2" pa="$3" sa="$4" hb="$5" rb="$6" pb="$7" sb="$8" hc="$9" rc="${10}" pc="${11}"
+    local ver; ver="$(cc_claude_version)"
+    local obs="observed on Claude Code ${ver}"
+    cc_note "35" "35: ${obs}"
+    cc_note "35" "35a (user-scope ask):    hook_fired=$ha tool_ran=$ra prompt_pending=$pa prompt_scope=$sa"
+    cc_note "35" "35b (project-scope ask): hook_fired=$hb tool_ran=$rb prompt_pending=$pb prompt_scope=$sb"
+    cc_note "35" "35c (control, no rule):  hook_fired=$hc tool_ran=$rc prompt_pending=$pc"
+    if [[ "$hc" -ne 1 || "$rc" -ne 1 || "$pc" -ne 0 ]]; then
+        _cc_fail "35" "35: ${obs}: the CONTROL (the PreToolUse allow hook, no ask rule) did not run the tool with no prompt (hook_fired=$hc tool_ran=$rc prompt_pending=$pc): the hook, its allow or the stub server is not working in these sessions, so the ask legs prove nothing"
+        return 0
+    fi
+    local leg hook ran prompt scope expect label what
+    for leg in a b; do
+        if [[ "$leg" == a ]]; then hook=$ha; ran=$ra; prompt=$pa; scope=$sa; expect=user;    label="35a"; what="a user-scope ask rule"
+        else                       hook=$hb; ran=$rb; prompt=$pb; scope=$sb; expect=project; label="35b"; what="a project-scope ask rule"; fi
+        if [[ "$hook" -ne 1 ]]; then
+            _cc_fail "$label" "${label}: ${obs}: the PreToolUse hook did not fire with ${what}: nothing to conclude about whether its allow overrides the rule"
+        elif [[ "$ran" -eq 1 ]]; then
+            cc_version_check "$label" "$ver" "overridden" "the PreToolUse allow hook fired and the tool ran with no prompt although ${what} was set: the allow overrode the rule"
+        elif [[ "$prompt" -ne 1 ]]; then
+            _cc_fail "$label" "${label}: ${obs}: with ${what} the hook fired but the tool neither ran nor stopped at a permission prompt: nothing to conclude"
+        elif [[ "$scope" != "$expect" ]]; then
+            _cc_fail "$label" "${label}: ${obs}: the permission prompt came up but names ${scope} as the rule's scope, not ${expect}: the rule that stopped the call is not the one this leg set"
+        else
+            cc_version_check "$label" "$ver" "prompted" "the PreToolUse allow hook fired, and ${what} still stopped the call at a permission prompt naming ${expect} settings; the tool did not run"
+        fi
+    done
+}
+
 # ─── Live pane capture (CC_VAL_DEBUG_CAPTURE=1) ──────────────────────────────
 # The README's standing lesson is that every cc-val mystery is settled by
 # MEASURING the pane, and that a capture taken after the TUI exits is useless
@@ -578,7 +619,7 @@ cc_keep_evidence() {
     mkdir -p "$d"
     for f in "$TEST_HOME/plugin-list.txt" "$TEST_HOME/plugin-install.log" "$TEST_HOME/.claude/settings.json" \
              "$TEST_HOME/.claude/plugins/installed_plugins.json" "${CC_DEBUG_FILE:-}" \
-             "${STUB_LOG:-}" "${HOOK_LOG:-}" "$TEST_HOME/pane-tail.txt"; do
+             "${STUB_LOG:-}" "${HOOK_LOG:-}" "$TEST_HOME/pane-tail.txt" "$TEST_HOME/project-settings.json"; do
         _cc_evidence_copy "$f" "$d"
     done
     while IFS= read -r f; do

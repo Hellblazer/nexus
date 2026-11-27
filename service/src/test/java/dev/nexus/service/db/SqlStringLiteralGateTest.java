@@ -170,9 +170,13 @@ class SqlStringLiteralGateTest {
         // expected substrings of the insert trigger's clear function body (vectors-061)
         Map.entry("dev/nexus/service/vectors/ChunkOrphanRecordTriggerIntegrationTest.java", 2),
         // an expected substring of the gc function body
-        Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 1));
+        Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 1),
+        // verification texts handed to DataMove#tableWideOnly under test: parsed for the marker, never sent to a database (nexus-p2m1x.21)
+        Map.entry("dev/nexus/service/datamove/RecheckBudgetTest.java", 5),
+        // texts handed to the marker's catalog-only reader check under test: parsed, never sent to a database (nexus-p2m1x.21)
+        Map.entry("dev/nexus/service/datamove/TableWideOnlyMarkerTest.java", 4));
 
-    private static final int TEXT_TOTAL = 105;
+    private static final int TEXT_TOTAL = 114;
 
     /** JDBC calls that take SQL text, per file, exact. Each entry says what the SQL is. */
     private static final Map<String, Integer> JDBC_ENTRY = Map.ofEntries(

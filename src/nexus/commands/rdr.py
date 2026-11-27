@@ -1169,13 +1169,12 @@ def set_status(
 
     The code-enforced half of the accept/close lifecycle: the skills call this
     instead of hand-editing frontmatter, closing the ledger-drift class where
-    T2 was advanced to ``accepted``/``closed`` but the RDR file stayed ``draft``
-    (RDR-165 / RDR-166).
+    T2 was advanced to ``accepted``/``closed`` but the RDR file stayed ``draft``.
 
-    RDR-201 P1.4: the requested *new_status* is resolved to the packaged
+
+    The requested *new_status* is resolved to the packaged
     ``rdr-lifecycle`` state-machine table's ``event`` dimension (derived
-    from the table itself, see :func:`_target_status_to_event`, RDR-201
-    P1.5); the file's current frontmatter status binds ``status``. An
+    from the table itself, see :func:`_target_status_to_event`); the file's current frontmatter status binds ``status``. An
     illegal edge REFUSES with the table row's typed
     reason (``illegal-transition`` / ``gate-not-passed`` /
     ``successor-not-named``) instead of the old unconditional flip. The
@@ -1185,8 +1184,8 @@ def set_status(
     ``rdr-close`` runs depend on this command being idempotent.
 
     ``open`` is a retired status word, but ``nx rdr preamble rdr-accept``
-    still advertises it as a live pre-accept synonym for ``draft``
-    (nexus-qsryj). A file whose current status is ``open`` is read as
+    still advertises it as a live pre-accept synonym for ``draft``.
+   A file whose current status is ``open`` is read as
     ``draft`` for the purpose of this resolution (never written back —
     only the requested *new_status* is ever written to the file); one
     line notes the alias so it is visible, not silent.
@@ -3273,7 +3272,7 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         "   Every `residuals:` line in that record needs a disposition (the commit sha "
         "that fixed it, or the bead id that carries it) recorded in Revision History as "
         "one line naming each residual's disposition — never the finding text itself — "
-        "before the T2 write; a residual with no disposition blocks accept (nexus-g7zgw.2)."
+        "before the T2 write; a residual with no disposition blocks accept."
     )
     print(
         "   A residual dispositioned by a change to the RDR file carries a fix check on "
@@ -3282,7 +3281,7 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         f"{os.path.relpath(str(rdr_file), repo_root)}`) and store the verdict as "
         f"`{t2_key}-fix-check-<sha>` (project `{repo_name}_rdr`), `<sha>` the RDR file's "
         "blob after the disposition (`git rev-parse --short=12 HEAD:<file>`). A residual dispositioned by a bead id "
-        "changed nothing in the file and needs none (nexus-yjf5l.1)."
+        "changed nothing in the file and needs none."
     )
     print(f"   {FIX_CHECK_CONSENSUS_CLAUSE}")
     print(
@@ -3291,7 +3290,7 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         "the Implementation Plan phase whose steps would hit it. A residual classed "
         f"`{BLOCKS_PLANNING}`, or an unclassified residual (every line written before the "
         "class field existed), needs an explicit author disposition — a sha (with its "
-        "fix check) or a bead — and the choice is recorded, never defaulted (nexus-yjf5l.8)."
+        "fix check) or a bead — and the choice is recorded, never defaulted."
     )
     print()
     print(f"**RDR file path:** `{rdr_file}`")
@@ -3300,8 +3299,7 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     print()
     print(
         "After the T2 write, run this to flip the RDR file frontmatter + README "
-        "index row atomically (closes the RDR-165/166 ledger-drift class where "
-        "T2 advanced but the file stayed `draft`):"
+        "index row atomically:"
     )
     print()
     print(f"    nx rdr set-status {t2_key} accepted")
@@ -3443,7 +3441,7 @@ def _rdr_research_add_retired() -> str:
     from nexus.tables import rdr_research_vocab as vocab  # noqa: PLC0415 - deferred: only the refused add needs it
 
     return (
-        "nx rdr preamble rdr-research: the add verb is retired (RDR-240): a finding passed as shell words is split "
+        "nx rdr preamble rdr-research: the add verb is retired: a finding passed as shell words is split "
         "by the shell. Record a finding with `/conexus:rdr-research add <id>`, which runs the "
         "`research_add` procedure and writes the record it returns with `memory_put`. If that skill "
         "still sends you to this add verb, the conexus plugin is older than 8.0.0: "
@@ -3464,7 +3462,7 @@ def _rdr_research_add_retired() -> str:
 def preamble_rdr_research(args: tuple[str, ...]) -> None:
     """Print RDR research context (file Research Findings + T2 entries).
 
-    ``add`` is retired (RDR-240 TD7): it prints the ``research_add`` procedure path and exits nonzero."""
+    ``add`` is retired: it prints the ``research_add`` procedure path and exits nonzero."""
     # Every add form is refused before anything is read or written: split or handed over as one
     # element (nexus-u1jxt.10), with or without text, any case of the verb.
     first = args[0].split()[:1] if args else []
@@ -4793,8 +4791,7 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
                 for number, file_status, t2_status in drift:
                     print(f"- DRIFT: RDR-{number} file=`{file_status}` T2=`{t2_status}`")
                 print(
-                    f"> {len(drift)} file-vs-T2 status disagreement(s) (nexus-e19sa: nothing "
-                    "reconciles these automatically; fix by hand, see nexus-nxn5g)."
+                    f"> {len(drift)} file-vs-T2 status disagreement(s): nothing reconciles them automatically, so fix by hand."
                 )
         marker_rows, marker_error = _t2_needs_reexamination_markers(target)
         print(f"**Needs re-examination (T2 `{target}_rdr` markers):**", end="")

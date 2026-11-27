@@ -29,7 +29,7 @@ These agents **MUST proactively search** for context before starting:
 These agents **rely on relays** for context (do not proactively search):
 - **developer**: Expects architecture/plan in relay
 - **code-review-expert**: Expects files to review in relay
-- **nx_plan_audit** (`mcp__plugin_conexus_nexus__nx_plan_audit`): call with `plan_json` + `context` (RDR-080 — no relay needed)
+- **nx_plan_audit** (`mcp__plugin_conexus_nexus__nx_plan_audit`): call with `plan_json` + `context` (no relay needed)
 - **test-validator**: Expects code/test paths in relay
 - **debugger**: Expects failure description in relay
 
@@ -46,7 +46,7 @@ If results exist, incorporate them as supplementary context. If scratch is empty
 ### Relay Validation (All Agents)
 
 If relay received, verify it contains:
-- [ ] Bead ID(s) with current status (or 'none')
+- [ ] Bead ID(s) with current status, a tracking id, or 'none'
 - [ ] Input Artifacts section (nx store/memory/Files)
 - [ ] Deliverable description
 - [ ] Quality criteria checkboxes
@@ -148,8 +148,8 @@ the lock-holders did.
 
 - Take the lock before the first mutation. The exclusive `pid` write is the
   mutex, not `mkdir` alone: uutils `mkdir` (Ubuntu 26.04) reports a lost
-  create race as success, so every racer "takes" a bare-`mkdir` lock there
-  (nexus-bo01z). `set -C` makes the shell create the file with O_EXCL.
+  create race as success, so every racer "takes" a bare-`mkdir` lock there.
+  `set -C` makes the shell create the file with O_EXCL.
 - Hold it for mutate → run → restore → verify, and nothing else. Never across
   analysis, write-up, or a full suite run you did not need under mutation.
 - Restore from a copy you took yourself, never by hand-reconstructing — and
@@ -177,7 +177,7 @@ whose entire output is "can this check fail?", that yields a confident **"this
 assertion cannot fail"** derived purely from an artifact — the wrong answer,
 stated with evidence, to the exact question the gate exists to answer.
 
-Origin: RG-E (nexus-utpuw.25) on 2026-08-26 dispatched three agents
+Origin: RG-E on 2026-08-26 dispatched three agents
 concurrently — both reviewers plus test-validator, which that gate mandates
 "because the arc's whole safety claim rests on these tests being non-vacuous" —
 every one of them instructed to mutate the same four files. The lock was
@@ -192,7 +192,7 @@ Conexus MCP tools use the full prefix `mcp__plugin_conexus_nexus__` (e.g. `mcp__
 | Tier | Name | Scope | MCP Tools | Use Cases | TTL |
 |------|------|-------|-----------|-----------|-----|
 | T1 | scratch | Session (ephemeral) | `scratch`, `scratch_manage` | Working notes, hypotheses, debug traces | Swept after 24 h idle (flag to survive) |
-| T2 | memory | Per-project, persistent | `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate` | Session state, project context, agent relay, active work. Consolidation: find overlaps, merge duplicates, flag stale entries | Permanent when `ttl` is omitted (nexus-473mx); pass `ttl=N` days to expire. Heat-weighted: highly-accessed entries survive longer |
+| T2 | memory | Per-project, persistent | `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate` | Session state, project context, agent relay, active work. Consolidation: find overlaps, merge duplicates, flag stale entries | Permanent when `ttl` is omitted; pass `ttl=N` days to expire. Heat-weighted: highly-accessed entries survive longer |
 | T3 | store / search | Permanent, cross-session | `search`, `query`, `store_put`, `store_get`, `store_list` | Research findings, architectural decisions, validated patterns. Results include `chunk_text_hash` metadata | `permanent` or explicit TTL |
 | Catalog | document registry | Permanent, cross-session | `search`, `show`, `links`, `link`, `resolve` | Author/corpus/provenance queries; typed links between documents; content-addressed span references | Permanent |
 
@@ -278,7 +278,7 @@ Standard relay structure:
 ## Relay: [Target Agent]
 
 **Task**: [1-2 sentence summary]
-**Bead**: [ID] (status: [status])
+**Bead**: [ID] (status: [status]), [tracking id], or 'none'
 
 ### Input Artifacts
 - nx store: [document titles or "none"]
@@ -372,7 +372,7 @@ mcp__plugin_conexus_nexus__store_list( collection="<subject>"
 ```
 
 ### Metadata
-store_put uses `tags` parameter for categorization (comma-separated strings). Always pass `agent="<your-role>"` (mirrors `memory_put`'s attribution, nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback marker, which defeats `_flag_contradictions`'s agent-diversity precondition for every anonymous MCP writer.
+store_put uses `tags` parameter for categorization (comma-separated strings). Always pass `agent="<your-role>"` (mirrors `memory_put`'s attribution) — an unmarked write collapses onto the shared `"mcp"` fallback marker, which defeats `_flag_contradictions`'s agent-diversity precondition for every anonymous MCP writer.
 
 ## nx Memory Organization
 

@@ -20,7 +20,7 @@ effort: low
 |---|---|
 | T2 `identity/<id>` | this seat's own standing context (open questions, recurring commands, what it owns). Seats only |
 | T2 `{repo}` | a fact other sessions need |
-| memory files | Sam's rules |
+| memory files | the user's own standing rules |
 | threads board | the public cross-session view |
 
 Write yours: `memory_put(project="identity/<id>", ...)`, `<id>` from `nx identity show`.
@@ -28,7 +28,7 @@ Write yours: `memory_put(project="identity/<id>", ...)`, `<id>` from `nx identit
 ## Common Operations
 
 ```
-# Analytical answer (RDR-080) — plan-match-first, falls through to inline planner on miss
+# Analytical answer — plan-match-first, falls through to inline planner on miss
 mcp__plugin_conexus_nexus__nx_answer(question="how does plan matching work"                  # primary front door
 mcp__plugin_conexus_nexus__nx_answer(question="...", dimensions={"verb":"research"}          # pin a verb for the matcher
 mcp__plugin_conexus_nexus__nx_answer(question="...", scope="1.2"                             # catalog subtree: filters query and search_metadata_scoped steps; a search step runs unscoped and the answer says so
@@ -57,7 +57,7 @@ mcp__plugin_conexus_nexus__nx_enrich_beads(bead_description="<title + descriptio
 mcp__plugin_conexus_nexus__nx_plan_audit(plan_json='{"steps": [...]}')                # audits ONE plan against the codebase
 
 # Memory (T2)
-mcp__plugin_conexus_nexus__memory_put(content="content", project="{repo}", title="file.md", ttl=None)   # ttl=None (or omit) for a record of record: permanent, since 2026-09-12 (nexus-473mx); pass ttl=N (days) for a session finding that should expire
+mcp__plugin_conexus_nexus__memory_put(content="content", project="{repo}", title="file.md", ttl=None)   # ttl=None (or omit) for a record of record: permanent; pass ttl=N (days) for a session finding that should expire
 mcp__plugin_conexus_nexus__memory_get(project="{repo}", title="file.md"       # exact-then-unique-prefix match
 mcp__plugin_conexus_nexus__memory_search(query="query", project="{repo}"
 
@@ -69,9 +69,9 @@ mcp__plugin_conexus_nexus__store_list(collection="<subject>"
 mcp__plugin_conexus_nexus__scratch(action="put", content="working note"
 mcp__plugin_conexus_nexus__scratch_manage(action="flag", entry_id="<id>"       # auto-promote to T2 at session end
 
-# Plan library (T2)
-mcp__plugin_conexus_nexus__plan_search(query="retrieval"                       # find reusable plans
-mcp__plugin_conexus_nexus__plan_save(query="...", plan_json="{...}", verb="research", answer_kind="synthesis", project="..."  # persist a reusable RETRIEVAL plan (verb and answer_kind REQUIRED, unknown allowed; impl-plans -> beads/T2)
+# Answer-plan library (T2)
+mcp__plugin_conexus_nexus__answer_plan_search(query="retrieval"                       # find reusable plans
+mcp__plugin_conexus_nexus__answer_plan_save(query="...", plan_json="{...}", verb="research", answer_kind="synthesis", project="..."  # persist a reusable RETRIEVAL plan (verb and answer_kind REQUIRED, unknown allowed; impl-plans -> beads/T2)
 ```
 
 ## When to reach for each
@@ -115,7 +115,7 @@ The `nx_answer` MCP tool handles full catalog-aware plan execution.
 nx index repo <path>                 # index repo (classifies into code + docs collections)
 ```
 
-Run a long `nx` command with its full output going to a log file (`nx ... > run.log 2>&1`) and filter when you read the log, never at launch: `| tail`, `| grep` or `-q` on the command suppresses the progress and error lines the command is there to show, and makes a silent walk look hung, so a duplicate gets stacked on it (feedback_destructive_action_guards).
+Run a long `nx` command with its full output going to a log file (`nx ... > run.log 2>&1`) and filter when you read the log, never at launch: `| tail`, `| grep` or `-q` on the command suppresses the progress and error lines the command is there to show, and makes a silent walk look hung, so a duplicate gets stacked on it.
 
 ## Collection Naming
 

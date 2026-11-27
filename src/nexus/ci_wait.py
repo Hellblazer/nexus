@@ -59,6 +59,7 @@ from urllib.parse import quote
 
 import httpx
 
+from nexus import ci_base
 from nexus.bounded_subprocess import run_bounded
 from nexus.db.t2.records import TupleRow
 
@@ -128,7 +129,7 @@ class DoneRow:
 
 
 def done_subspace(repo: str, branch: str) -> str:
-    return f"board/ci/{repo}-{branch}--done"
+    return f"board/ci/{ci_base.join(repo, branch)}--done"
 
 
 class BoardUnreadableError(RuntimeError):

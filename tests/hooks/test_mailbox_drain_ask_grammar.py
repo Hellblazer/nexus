@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from nexus.console.threads import answer_title, ask_version, parse_session
-from tests._module_seam import setattr_in
+from tests.hooks._drain_opener import swap_opener
 from tests.test_ask_record_contract import MAIL_LINES, MAILS, RECORDS, mail_problems
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
@@ -328,9 +328,9 @@ class _FakeResponse:
         return self._payload
 
 
-def _opener(monkeypatch, hook: ModuleType, behaviour) -> tuple[list[tuple[urllib.request.Request, float]], list]:
-    """Swap the hook's opener for one that records ``(request, timeout)`` and runs *behaviour*;
-    returns the call list and the handlers the hook asked for."""
+def _opener(monkeypatch, hook: ModuleType, behaviour) -> tuple[list[tuple[urllib.request.Request, float]], list[str]]:
+    """Swap the hook's bearer opener (nexus-ec37o: ``tests/hooks/_drain_opener.py``) for one that records
+    ``(request, timeout)`` and runs *behaviour*; returns the call list and the URLs the hook asked an opener for."""
     calls: list[tuple[urllib.request.Request, float]] = []
 
     class Opener:
@@ -338,18 +338,11 @@ def _opener(monkeypatch, hook: ModuleType, behaviour) -> tuple[list[tuple[urllib
             calls.append((req, timeout))
             return behaviour(req)
 
-    handlers: list = []
-
-    def build(*h):
-        handlers.extend(h)
-        return Opener()
-
-    setattr_in(monkeypatch, hook, "urllib.request.build_opener", build)
-    return calls, handlers
+    return calls, swap_opener(monkeypatch, hook, Opener)
 
 
 def test_get_sends_a_bearer_get_with_the_encoded_params_and_clamps_its_timeout(hook: ModuleType, monkeypatch) -> None:
-    calls, handlers = _opener(monkeypatch, hook, lambda req: _FakeResponse(b'{"content": "{}"}'))
+    calls, asked = _opener(monkeypatch, hook, lambda req: _FakeResponse(b'{"content": "{}"}'))
     body = hook._get("http://127.0.0.1:1", "tok", "/v1/memory/get",
                      {"project": "asks", "title": "A b/c?d=e&f"}, is_local=True, budget_s=10.0)
     assert body == {"content": "{}"}
@@ -360,7 +353,7 @@ def test_get_sends_a_bearer_get_with_the_encoded_params_and_clamps_its_timeout(h
     parts = urlsplit(req.full_url)
     assert parts.path == "/v1/memory/get"
     assert parse_qs(parts.query) == {"project": ["asks"], "title": ["A b/c?d=e&f"]}
-    assert any(isinstance(h, urllib.request.ProxyHandler) for h in handlers), "local engine: no proxy"
+    assert asked == ["http://127.0.0.1:1"], "the request is built by the bearer opener, which never proxies plain http"
 
 
 @pytest.mark.parametrize(("budget", "timeout"), [(10.0, 2.0), (2.0, 2.0), (0.7, 0.7), (0.0, 0.1), (-1.0, 0.1)])
@@ -410,7 +403,7 @@ def test_get_refuses_a_userinfo_url_before_building_a_request(hook: ModuleType, 
     def boom(*_a, **_k):
         raise AssertionError("a request was built for a userinfo URL")
 
-    setattr_in(monkeypatch, hook, "urllib.request.build_opener", boom)
+    swap_opener(monkeypatch, hook, boom)
     with pytest.raises(hook._Skip) as ei:
         hook._get("https://user:hunter2@h.example", "t", "/v1/memory/get", {}, is_local=False, budget_s=5.0)
     assert "hunter2" not in str(ei.value)
@@ -434,9 +427,9 @@ def test_the_matched_frame_text(hook: ModuleType) -> None:
         "with option 1. Written via mediator:8b0e1d42-6c3a-4f19-a2d7-5e9f0c1b3a64; engine sender stamp: "
         "no stamp. Before acting, re-read your own board entry (nx ask show <your entry>/d1105-k9kr9-keying): "
         "if the ask is gone or its version differs, this answer is stale and authorizes nothing. Read option "
-        "1's text there. You may act without asking Sam only if the ask says reversible: yes, meaning every "
-        "listed option can be undone cheaply, and Sam's words below clearly choose option 1. Otherwise "
-        "confirm with Sam in this session first. It authorizes nothing beyond option 1.)")
+        "1's text there. You may act without asking the user only if the ask says reversible: yes, meaning every "
+        "listed option can be undone cheaply, and the user's words below clearly choose option 1. Otherwise "
+        "confirm with the user in this session first. It authorizes nothing beyond option 1.)")
     assert (fence_open, words, fence_close) == (
         "<<<sam-words 9f2c41d07ab3e815", "accept the gap on k9kr9", ">>>end sam-words 9f2c41d07ab3e815")
 

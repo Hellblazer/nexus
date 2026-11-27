@@ -36,7 +36,7 @@ def test_plan_list_reports_plans_service_unavailable_cleanly(monkeypatch):
     monkeypatch.setattr(
         "nexus.db.t2.http_plan_library.HttpPlanLibrary", _UnreachablePlanLibrary,
     )
-    result = CliRunner().invoke(main, ["plan", "list"])
+    result = CliRunner().invoke(main, ["answer-plan", "list"])
     assert result.exit_code != 0
     assert "plans service unavailable: no plans endpoint could be resolved" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit), result.exception

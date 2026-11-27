@@ -639,8 +639,8 @@ def build_ref_drift_context(drift: list[tuple[str, str, str]]) -> str:
     nudge above."""
     names = ", ".join(f"{pid} ({was[:7]} -> {now[:7]})" for pid, was, now in drift)
     msg = (
-        f"A plugin-only release moved {names} without changing its version "
-        f"(RDR-197). A background `nx upgrade` reinstall has been "
+        f"A plugin-only release moved {names} without changing its version. "
+        f"A background `nx upgrade` reinstall has been "
         f"dispatched; it takes effect on your next session (or run /mcp). "
         f"No action needed now."
     )
@@ -658,7 +658,7 @@ def _combined_context(target_version: str, drift: list[tuple[str, str, str]]) ->
     msg = (
         f"The conexus CLI (nx) may be out of lockstep with plugin "
         f"v{target_version}, and a plugin-only release moved {names} "
-        f"without changing its version (RDR-197). Both upgrades have been "
+        f"without changing its version. Both upgrades have been "
         f"dispatched in the background; they take effect on your next "
         f"session. No action needed now."
     )

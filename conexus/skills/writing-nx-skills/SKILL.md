@@ -92,7 +92,7 @@ After creating a skill, update [conexus/registry.yaml](https://github.com/Hellbl
 
 ### Routing a new skill
 
-Add it to [conexus/skills/orchestration/reference.md](https://github.com/Hellblazer/nexus/blob/main/conexus/skills/orchestration/reference.md) § Skill Routing so it is discoverable. The SessionStart text (`GUIDANCE_IMPERATIVE` in [src/nexus/session_start_guidance.py](https://github.com/Hellblazer/nexus/blob/main/src/nexus/session_start_guidance.py), PyPI wheel) names only the situations and the handful of skills and agents that answer them; it is not a menu. Add a skill there only when it answers a situation the imperative already lists, and mind its byte budget ([tests/test_session_start_guidance.py](https://github.com/Hellblazer/nexus/blob/main/tests/test_session_start_guidance.py), [tests/hooks/test_session_start_combined_budget.py](https://github.com/Hellblazer/nexus/blob/main/tests/hooks/test_session_start_combined_budget.py)). Wrapper skills that only dispatch an agent the model already dispatches directly do not earn a place: the six that did (code-review, debugging, development, test-validation, query, using-nx-skills) were retired with zero model loads in 30 days (nexus-dg7i6.6).
+Add it to [conexus/skills/orchestration/reference.md](https://github.com/Hellblazer/nexus/blob/main/conexus/skills/orchestration/reference.md) § Skill Routing so it is discoverable. The SessionStart text (`GUIDANCE_IMPERATIVE` in [src/nexus/session_start_guidance.py](https://github.com/Hellblazer/nexus/blob/main/src/nexus/session_start_guidance.py), PyPI wheel) names only the situations and the handful of skills and agents that answer them; it is not a menu. Add a skill there only when it answers a situation the imperative already lists, and mind its byte budget ([tests/test_session_start_guidance.py](https://github.com/Hellblazer/nexus/blob/main/tests/test_session_start_guidance.py), [tests/hooks/test_session_start_combined_budget.py](https://github.com/Hellblazer/nexus/blob/main/tests/hooks/test_session_start_combined_budget.py)). Wrapper skills that only dispatch an agent the model already dispatches directly do not earn a place: the six that did (code-review, debugging, development, test-validation, query, using-nx-skills) were retired with zero model loads in 30 days.
 
 ## Promoting a Memory File
 
@@ -102,6 +102,8 @@ When a memory file's "How to apply" is a procedure, ordered steps, over about 8 
 
 ### bd update --description silently corrupts multi-line content
 
+Only where the project has a `.beads/` directory. Without one, skip this: record notes with `memory_put` or in the hand-back.
+
 **Never** instruct agents to use `bd update <id> --description "..."` for multi-line or markdown content. Shell escaping silently destroys backticks (executed as command substitution), `$variables` (expanded to empty), and nested quotes (break argument boundaries). No error is raised — the command reports success with mangled data.
 
 **Correct pattern**: Write the content to a temp file with the Write tool, then append it through command substitution:
@@ -110,9 +112,7 @@ When a memory file's "How to apply" is a procedure, ordered steps, over about 8 
 bd update <id> --append-notes "$(cat /tmp/bead-<id>.md)"
 ```
 
-`$(cat ...)` inside double quotes keeps the file's backticks and `$variables` literal. Inline multi-line `--notes` or `--design` has the same problem: use a file (`--design-file`, or `--append-notes "$(cat <file>)"`). **Never use `--body-file` or `--description` to add to a bead**: both REPLACE the description.
-
-Short single-phrase values (e.g. `--design "revised scope"`) are safe.
+`$(cat ...)` inside double quotes keeps the file's backticks and `$variables` literal. Inline multi-line `--notes` or `--design` has the same problem: use `--design-file` or the pattern above. **Never use `--body-file` or `--description` to add to a bead**: both REPLACE the description.
 
 ## Quality Checklist
 

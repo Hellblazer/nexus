@@ -10,19 +10,18 @@ Nexus provides MCP tools for semantic search, persistent memory, and knowledge m
 - **T3 knowledge** — pgvector via the nexus service, permanent (`search`,
   `store_put`, `store_get`, `store_list` tools). Local mode uses the bundled
   PG17+pgvector, embedding with bge-768 by default or Voyage when
-  `NX_VOYAGE_API_KEY` reaches the local service (nexus-umm29 carve-out — one
-  posture per boot; RDR-210 tracks a dual-mode engine); cloud mode uses the
+  `NX_VOYAGE_API_KEY` reaches the local service (one posture per boot); cloud mode uses the
   managed service and always embeds with Voyage.
 
-All three tiers are Postgres behind the engine. SQLite is retired (RDR-158 P4)
-and ChromaDB is not a live substrate in any mode (RDR-155 P4b — the dependency
+All three tiers are Postgres behind the engine. SQLite is retired
+and ChromaDB is not a live substrate in any mode (the dependency
 is gone from `uv.lock`); this section described both as current until 7.20.0.
 
 ## MCP Tool Reference
 
 Core tools are prefixed `mcp__plugin_conexus_nexus__`; catalog tools are prefixed `mcp__plugin_conexus_nexus-catalog__`.
 
-The core server registers 46 tools, plus two `hook_*` tools the plugin's hooks call. Not tabled below, each described by its own tool description: scoped search (`search_metadata_scoped`, `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`), `plan_delete`, `procedure_run`, `nx_answer_report`, `brief`, `tuple_*` and `mailbox_send` (see the mailbox skill), `setup`, `setup_status`, `daemon_uninstall`. The analytical operators are plan steps inside `nx_answer`, not tools (see Operators below).
+The core server registers 49 tools, plus two `hook_*` tools the plugin's hooks call. Not tabled below, each described by its own tool description: scoped search (`search_metadata_scoped`, `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`), `answer_plan_delete`, `procedure_run`, `nx_answer_report`, `brief`, `tuple_*` and `mailbox_send` (see the mailbox skill), `setup`, `setup_status`, `daemon_uninstall`. The analytical operators are plan steps inside `nx_answer`, not tools.
 There are 10 catalog tools (nexus-catalog server): `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`.
 
 ### search
@@ -83,7 +82,7 @@ Use `search` for chunk-level retrieval. Use `query` when you need to know **whic
 
 ### nx_answer
 
-Plan-match-first analytical retrieval (RDR-080), for answers that must be reduced from many documents (cross-corpus synthesis, ranking, RDR research), not file:line, single-fact or already-in-T2 questions (use `search`/`query`: seconds). It runs a saved plan from the plan library; on a miss an inline `claude -p` planner grows, runs and saves one (there are no `plan_match`/`plan_run` tools). Every run is logged to T2 `nx_answer_runs`. Cost: p50 80s, p95 217s, can time out at 300s.
+Plan-match-first analytical retrieval, for answers that must be reduced from many documents (cross-corpus synthesis, ranking, RDR research), not file:line, single-fact or already-in-T2 questions (use `search`/`query`: seconds). It runs a saved plan from the plan library; on a miss an inline `claude -p` planner grows, runs and saves one (there are no `plan_match`/`plan_run` tools). Every run is logged to T2 `nx_answer_runs`. Cost: p50 80s, p95 217s, can time out at 300s.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -110,7 +109,7 @@ mcp__plugin_conexus_nexus__nx_answer(question="...", trace=False            # re
 
 ### traverse
 
-Walk the catalog link graph from seed tumblers (RDR-078 P3). Accepts `link_types` **XOR** `purpose` — never both. Returns the standard retrieval step-output contract so downstream plan steps can reference `$stepN.tumblers` / `$stepN.collections` / `$stepN.ids`.
+Walk the catalog link graph from seed tumblers. Accepts `link_types` **XOR** `purpose` — never both. Returns the standard retrieval step-output contract so downstream plan steps can reference `$stepN.tumblers` / `$stepN.collections` / `$stepN.ids`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -129,7 +128,7 @@ Returns `{"tumblers": [...], "ids": [...], "collections": [...]}`.
 
 ### store_get_many
 
-Batch-hydrate document content by ID past the 300-record read cap (MAX_QUERY_RESULTS; RDR-079 hydration primitive). Use after `search(structured=True)` or `traverse` to fetch the actual text.
+Batch-hydrate document content by ID past the 300-record read cap (MAX_QUERY_RESULTS). Use after `search(structured=True)` or `traverse` to fetch the actual text.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -150,7 +149,7 @@ of a plan inside `nx_answer` (or `plan_run`), each a `claude -p` subprocess
 (default timeout 300s); consecutive steps are bundled into one subprocess. A
 plan step names the bare verb, and the plan runner resolves it in-process to
 `operator_<verb>`. To use one, ask `nx_answer` a question its plans cover, or
-save a plan with `plan_save` whose steps name these verbs.
+save a plan with `answer_plan_save` whose steps name these verbs.
 
 | Plan verb | Input | Returns |
 |---|---|---|
@@ -186,11 +185,11 @@ Store content in the T3 permanent knowledge store.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `content` | str | required | Text content to store |
-| `collection` | str | required | The bare subject the note belongs to (`distributed-systems`); the placeholders `default`/`knowledge`/`notes`/`tmp`/`test` are refused (nexus-0fw11; Rule 1 of https://github.com/Hellblazer/nexus/blob/main/docs/collections.md) |
+| `collection` | str | required | The bare subject the note belongs to (`distributed-systems`); the placeholders `default`/`knowledge`/`notes`/`tmp`/`test` are refused (Rule 1 of https://github.com/Hellblazer/nexus/blob/main/docs/collections.md) |
 | `title` | str | `""` | Document title (recommended for dedup) |
 | `tags` | str | `""` | Comma-separated tags |
 | `ttl` | str | `"permanent"` | TTL: `Nd`, `Nw`, or `"permanent"` |
-| `agent` | str | `""` | Subagent/role attribution (mirrors `memory_put`, nexus-4ftd7). Falls back to `NX_AGENT` env, then a distinct `"mcp"` marker — never left empty, never the T3 indexer's own default. Always pass it explicitly; an unmarked write collapses onto `"mcp"` and defeats `_flag_contradictions`'s agent-diversity precondition. |
+| `agent` | str | `""` | Subagent/role attribution (mirrors `memory_put`). Falls back to `NX_AGENT` env, then a distinct `"mcp"` marker — never left empty, never the T3 indexer's own default. Always pass it explicitly; an unmarked write collapses onto `"mcp"` and defeats `_flag_contradictions`'s agent-diversity precondition. |
 | `session` | str | `""` | Deprecated: accepted and ignored |
 
 ```
@@ -240,7 +239,7 @@ Store a memory entry in T2 (service-backed Postgres). Upserts by (project, title
 | `project` | str | required | Project namespace |
 | `title` | str | required | Entry title (unique within project) |
 | `tags` | str | `""` | Comma-separated tags |
-| `ttl` | int \| None | `None` | Time-to-live in days. Omit for permanent (the default, nexus-473mx); a positive integer expires the row in that many days, extended on read. `ttl<=0` (0 included) is refused with a 400 — there is no "0 means permanent" coercion. |
+| `ttl` | int \| None | `None` | Time-to-live in days. Omit for permanent (the default); a positive integer expires the row in that many days, extended on read. `ttl<=0` (0 included) is refused with a 400 — there is no "0 means permanent" coercion. |
 
 ```
 mcp__plugin_conexus_nexus__memory_put(content="content", project="{repo}", title="findings.md"
@@ -298,7 +297,7 @@ mcp__plugin_conexus_nexus__memory_search(query="query", project="{repo}"
 
 ### memory_consolidate
 
-T2 memory hygiene (RDR-061 E6): find overlapping entries, merge duplicates, flag stale entries. Merge is destructive and gated by `dry_run` and `confirm_destructive`.
+T2 memory hygiene: find overlapping entries, merge duplicates, flag stale entries. Merge is destructive and gated by `dry_run` and `confirm_destructive`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -364,7 +363,7 @@ mcp__plugin_conexus_nexus__scratch_manage(action="flag", entry_id="<id>"
 mcp__plugin_conexus_nexus__scratch_manage(action="promote", entry_id="<id>", project="{repo}", title="findings.md"
 ```
 
-**Promote return value** (RDR-057 Phase 1c): The promote action returns a `PromotionReport` rendered in the response string:
+**Promote return value**: The promote action returns a `PromotionReport` rendered in the response string:
 - `(action=new)` — clean write, no overlap detected
 - `(action=overlap_detected)` — the full-text check found a similar existing T2 entry. The new entry is still written as a separate row; the agent must decide whether to also call `memory_consolidate(action="merge")` to dedupe.
 
@@ -380,9 +379,9 @@ mcp__plugin_conexus_nexus__collection_list()
 
 Returns collection names, document counts, and embedding models for every collection in the T3 database.
 
-### plan_save
+### answer_plan_save
 
-Save a query execution plan to the T2 plan library.
+Save a retrieval plan to the T2 answer-plan library.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -395,12 +394,12 @@ Save a query execution plan to the T2 plan library.
 | `tags` | str | `""` | Comma-separated tags |
 
 ```
-Use plan_save tool: query="What does RDR-232 say about plan eligibility?", plan_json='{"steps": [{"tool": "search", "args": {"query": "$intent"}}, {"tool": "summarize", "args": {"inputs": "$step1.ids"}}]}', verb="query", answer_kind="synthesis", project="nexus"
+Use answer_plan_save tool: query="How does plan eligibility work?", plan_json='{"steps": [{"tool": "search", "args": {"query": "$intent"}}, {"tool": "summarize", "args": {"inputs": "$step1.ids"}}]}', verb="query", answer_kind="synthesis", project="nexus"
 ```
 
-### plan_search
+### answer_plan_search
 
-Search the T2 plan library for similar query plans.
+Search the T2 answer-plan library for retrieval plans.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -409,7 +408,7 @@ Search the T2 plan library for similar query plans.
 | `limit` | int | `5` | Maximum results |
 
 ```
-Use plan_search tool: query="enumerate documents", project="nexus"
+Use answer_plan_search tool: query="enumerate documents", project="nexus"
 ```
 
 ## Indexing (CLI only)

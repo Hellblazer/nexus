@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from tests._module_seam import setattr_in
+from tests.hooks._drain_opener import swap_opener
 
 SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
 SID = "11111111-2222-4333-8444-555555555555"
@@ -53,7 +53,7 @@ def hook(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
             sent.append((req.full_url, {k.lower(): v for k, v in req.header_items()}))
             return _Resp(json.dumps({"ok": True}).encode())
 
-    setattr_in(monkeypatch, mod, "urllib.request.build_opener", lambda *_h: _Opener())  # local to the hook module
+    swap_opener(monkeypatch, mod, _Opener)  # the bearer opener, nexus-ec37o
     monkeypatch.setattr(mod, "_IDENTITY_TOKEN", "tok-i12")
     return mod, sent
 

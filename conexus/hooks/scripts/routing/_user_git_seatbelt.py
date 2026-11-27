@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The git guard's user mode: a small seatbelt for a repository that is not nexus.
+"""The git guard's default mode: a small seatbelt.
 
-``subagent_git_write_requires_orchestrator`` keeps its full structure-agnostic
-rule for the maintainer (``_audience.maintainer``). For anyone else this module
-denies only the forms a user would never want an agent to run unasked: they
+``subagent_git_write_requires_orchestrator`` runs its full structure-agnostic
+rule when ``subagent_git`` is set to ``strict`` (``_audience.guard_mode``). By
+default this module denies only the forms a user would never want an agent to run unasked: they
 destroy history or work that cannot be recovered. Commit, add, plain push,
 pull, fetch, rebase, merge, cherry-pick, branch create, tag, ``reset --soft``
 and ``--mixed`` and the like are not touched.

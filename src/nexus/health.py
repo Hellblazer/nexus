@@ -1981,7 +1981,7 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
     from nexus.repos import list_repos_dual_with_catalog_roots  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
-    hook_names = ("post-commit", "post-merge", "post-rewrite")
+    hook_names = _ghm.MANAGED_HOOK_NAMES  # the index hooks and pre-push (nexus-igea9)
     registry_path = nexus_config_dir() / "repos.json"
 
     # nexus-mkj6u shakeout: extract the canonical stanza from the
@@ -2172,8 +2172,8 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                         ))
                     if not malformed and not drifted:
                         out.append(HealthResult(
-                            label="git hooks", ok=True,
-                            detail=f"{repo_path} ({', '.join(installed)})",
+                            label="git hooks", ok=True, detail=_ghm.installed_detail(repo_path, installed),
+                            fix_suggestions=_ghm.index_hint(repo_path, installed),
                         ))
                 else:
                     out.append(HealthResult(
@@ -4185,11 +4185,11 @@ def _check_static_service_token() -> list[HealthResult]:
     if not url:
         return [HealthResult(label=label, ok=True,
                              detail="not applicable — no service_url configured")]
-    token = (get_credential("service_token") or "").strip()
-    if not token:
-        return [HealthResult(label=label, ok=True,
-                             detail="not applicable — no static service_token configured")]
-
+    from nexus.db.t2.bearer_transport import bearer_httpx_kwargs  # noqa: PLC0415 — deferred
+    from nexus.db.service_endpoint import bound_static_service_token  # noqa: PLC0415 — deferred
+    token, refused = bound_static_service_token(url)  # nexus-ec37o: sent only to the origin it was issued for
+    if refused or not token:
+        return [HealthResult(label=label, ok=not refused, detail=f"not probed: {refused}" if refused else "not applicable — no static service_token configured")]
     import hashlib  # noqa: PLC0415 — branch-local
     import httpx  # noqa: PLC0415 — branch-local, avoids module-load cost
 
@@ -4197,7 +4197,7 @@ def _check_static_service_token() -> list[HealthResult]:
     fingerprint = hashlib.sha256(token.encode()).hexdigest()[:8]
     armed = bool((get_credential("mint_token") or "").strip())
     try:
-        resp = httpx.get(f"{url}/v1/_whoami", headers={"Authorization": f"Bearer {token}"}, timeout=10.0, verify=get_shared_ssl_context())
+        resp = httpx.get(f"{url}/v1/_whoami", headers={"Authorization": f"Bearer {token}"}, timeout=10.0, **bearer_httpx_kwargs(url))  # nexus-ec37o: proxy and CA from config.yml, never the env
     except httpx.HTTPError as exc:
         return [HealthResult(label=label, ok=False, warn=True,
                              detail=f"could not verify against {host}: {type(exc).__name__}")]

@@ -402,6 +402,28 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv",
+            "args": [
+              "tool",
+              "run",
+              "--directory",
+              "${CLAUDE_PLUGIN_ROOT}",
+              "--no-config",
+              "--quiet",
+              "--python",
+              ">=3.12",
+              "python",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/settings_notice.py"
+            ],
+            "timeout": 20
+          }
+        ]
       }
     ],
     "PreCompact": [

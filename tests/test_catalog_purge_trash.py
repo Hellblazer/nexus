@@ -502,7 +502,7 @@ class TestOlderThanDaysValidation:
 
 
 class TestEngineFloorDegradation:
-    def test_404_raises_clear_click_exception_naming_3ck2g(self, monkeypatch):
+    def test_404_raises_clear_click_exception_naming_the_missing_route(self, monkeypatch):
         writer = _FakeWriter(raise_exc=_http_status_error(404))
         _patch_writer(monkeypatch, writer)
 
@@ -510,7 +510,8 @@ class TestEngineFloorDegradation:
         result = runner.invoke(main, ["catalog", "purge-trash"])
 
         assert result.exit_code != 0
-        assert "nexus-3ck2g" in result.output
+        assert "does not yet expose POST /v1/catalog/purge-trash" in result.output
+        assert "Upgrade the deployed engine-service" in result.output
         assert "purge-trash" in result.output.lower()
         assert writer.closed  # finally-close still ran
 
@@ -524,7 +525,8 @@ class TestEngineFloorDegradation:
         )
 
         assert result.exit_code != 0
-        assert "nexus-3ck2g" in result.output
+        assert "does not yet expose POST /v1/catalog/purge-trash" in result.output
+        assert "Upgrade the deployed engine-service" in result.output
 
     def test_non_404_http_error_propagates_uncaught_by_this_verb(self, monkeypatch):
         """A 500 (real engine failure) is not the engine-floor case — it must
@@ -537,7 +539,7 @@ class TestEngineFloorDegradation:
         result = runner.invoke(main, ["catalog", "purge-trash"])
 
         assert result.exit_code != 0
-        assert "nexus-3ck2g" not in result.output
+        assert "does not yet expose" not in result.output
 
 
 # ── Whitelist admission (factory.py / catalog_protocol.py) ─────────────────

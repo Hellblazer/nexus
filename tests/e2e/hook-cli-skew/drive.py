@@ -49,10 +49,12 @@ import shutil
 #: SessionStart, nexus-3lqxv, plus the SubagentStop T1 nudge, nexus-mtheb.3, plus
 #: the Stop wake guard, nexus-4cgop, plus the destructive-action advice hook,
 #: nexus-qo7ie.36, plus the SessionEnd(clear) resume-pointer writer, RDR-253 Step 6
-#: part 2; it was 21 before that writer, 20 before the advice hook; it
-#: was 18 while the nexus-i93tz integrity check was registered on
+#: part 2, less the PermissionRequest auto-approve entry removed in 8.5.8,
+#: nexus-sby49.5; it was 22 before that removal, 21 before the resume writer,
+#: 20 before the advice hook; it was 18 while the nexus-i93tz integrity check was registered on
 #: Pre/Post/PostToolUseFailure Bash, removed again 2026-10-25). A stated floor,
 #: not a derived one, on purpose: a derived count falls with the manifest.
+#: 22 with the UserPromptSubmit settings notice, nexus-sby49.12 (21 after the removal above; the notice is a new entry).
 DEFAULT_MIN_EXECUTED = 22
 
 #: What the launcher writes when it finds no CLI (_cli_lookup.missing_note).
@@ -122,7 +124,10 @@ def main(argv: list[str]) -> int:
         "CLAUDE_PLUGIN_ROOT": plugin_root,
         "NX_NO_TELEMETRY": "1",
         "TERM": "dumb",
+        # The settings notice keeps its once-per-session mark in the temporary directory: keep it in the scratch one.
+        "TMPDIR": os.path.join(scratch, "tmp"),
     }
+    os.makedirs(env["TMPDIR"], exist_ok=True)
     # uv's caches live under the caller's, not the scratch HOME: a fresh HOME
     # per CLI would re-resolve and may re-download an interpreter every time.
     for passthrough in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR"):

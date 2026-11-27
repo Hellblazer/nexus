@@ -26,7 +26,11 @@ the workflow file, never copied, so a hand run cannot drift from CI.
 
 Exit codes: pytest's own code; 97 when a setup step failed (clone, fetch,
 checkout, the fixup step, a commit mismatch), so a setup failure is never read
-as a test result; 98 when pytest passed and the floor step failed.
+as a test result; 98 when pytest passed and the floor step failed; 96 when the
+run ended with exit 0 but its output held no pytest summary line ("N passed in
+Ns"): a test that replaced pytest's own process (a hook script's ``execv`` at
+import time) ends the run silently with 0 on Windows, and 0 with no summary is
+not a pass (nexus-sby49.1).
 """
 from __future__ import annotations
 
@@ -54,6 +58,13 @@ LAB_RUN_WIN: str = r"C:\build\lab\lab-run-win.cmd"
 CLONE_URL: str = "https://github.com/Hellblazer/nexus.git"
 SETUP_FAILED: int = 97
 FLOOR_FAILED: int = 98
+#: Exit 0 with no pytest summary line in the output: the run proved nothing.
+NO_SUMMARY: int = 96
+_ANSI_RE = re.compile(rb"\x1b\[[0-9;]*m")
+_SUMMARY_RE = re.compile(
+    rb"(?:(?<!\d)\d+ (?:passed|failed|errors?|skipped|xfailed|xpassed|deselected)\b.* in \d+(?:\.\d+)?s\b"
+    rb"|\bno tests ran in \d)"
+)
 #: An --uncommitted patch above this is refused: an untracked dump, not work.
 MAX_PATCH_BYTES: int = 20 * 1024 * 1024
 
@@ -67,6 +78,33 @@ _WINDOWS_DEVICE_NAMES = frozenset(
 )
 
 Runner = Callable[..., subprocess.CompletedProcess]
+
+
+class SummaryWatch:
+    """Remembers whether the run's output held a pytest summary line.
+
+    Fed the raw bytes of the remote output as they arrive (lines split across chunks are
+    rejoined); :meth:`close` judges a last line with no newline. ``started`` says some
+    output was seen at all, so a run that never started is not blamed for having no summary."""
+
+    def __init__(self) -> None:
+        self.seen = False
+        self.started = False
+        self._tail = b""
+
+    def _judge(self, line: bytes) -> None:
+        if _SUMMARY_RE.search(_ANSI_RE.sub(b"", line)):
+            self.seen = True
+
+    def feed(self, chunk: bytes) -> None:
+        self.started = True
+        *lines, self._tail = (self._tail + chunk).replace(b"\r\n", b"\n").split(b"\n")
+        for line in lines:
+            self._judge(line)
+
+    def close(self) -> None:
+        self._judge(self._tail)
+        self._tail = b""
 
 
 def _workflow(workflow: Path) -> dict:
@@ -229,13 +267,31 @@ def watchdog_lines(session: str) -> list[str]:
 
 
 def run_with_heartbeat(argv: Sequence[str], *, interval: float = HEARTBEAT_S,
-                       popen: Callable[..., subprocess.Popen] = subprocess.Popen) -> int:
+                       popen: Callable[..., subprocess.Popen] = subprocess.Popen,
+                       tee: Callable[[bytes], None] | None = None) -> int:
     """Run *argv* (the run's ssh call) with a byte written to its stdin every *interval* seconds, and return its
     exit code. The remote watchdog (:func:`watchdog_lines`) ends the run on end of file or on silence. The pipe's write end
     lives only in this process, so any death of the client closes it; an exception here (SystemExit from
-    :func:`end_on_signal` included) kills the child first."""
-    proc = popen(list(argv), stdin=subprocess.PIPE)
+    :func:`end_on_signal` included) kills the child first. With *tee*, the child's stdout is read here, written
+    through to this process's stdout as it arrives, and handed to *tee* (the summary watch); without it the child
+    inherits stdout as before."""
+    proc = popen(list(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE if tee is not None else None)
     stop = threading.Event()
+    reader: threading.Thread | None = None
+
+    def copy_output() -> None:
+        out = getattr(sys.stdout, "buffer", None)
+        while True:
+            chunk = proc.stdout.read1(65536)
+            if not chunk:
+                return
+            if out is not None:
+                out.write(chunk)
+                out.flush()
+            else:  # a replaced stdout with no buffer (a test's capture)
+                sys.stdout.write(chunk.decode("utf-8", errors="replace"))
+                sys.stdout.flush()
+            tee(chunk)
 
     def beat() -> None:
         while not stop.wait(interval):
@@ -247,7 +303,13 @@ def run_with_heartbeat(argv: Sequence[str], *, interval: float = HEARTBEAT_S,
 
     try:
         threading.Thread(target=beat, name="windows-hand-heartbeat", daemon=True).start()
-        return proc.wait()
+        if tee is not None:
+            reader = threading.Thread(target=copy_output, name="windows-hand-output", daemon=True)
+            reader.start()
+        code = proc.wait()
+        if reader is not None:
+            reader.join()
+        return code
     except BaseException:
         proc.kill()
         proc.wait()
@@ -412,13 +474,24 @@ def main(argv: Sequence[str] | None = None, *, run: Runner = subprocess.run,
     step fails, so a setup failure is never read as a test result. The run's
     ssh call goes through *beat* (default :func:`run_with_heartbeat`); with an
     injected *run* and no *beat* it goes through *run*, as tests want."""
+    watch: SummaryWatch | None = None
     if beat is None and run is subprocess.run:
-        beat = run_with_heartbeat
+        watch = SummaryWatch()
+
+        def beat(ssh_argv: Sequence[str]) -> int:
+            return run_with_heartbeat(ssh_argv, tee=watch.feed)
     try:
-        return _main(argv, run=run, beat=beat)
+        code = _main(argv, run=run, beat=beat)
     except (subprocess.CalledProcessError, OSError) as exc:
         _say(f"windows_hand_test: setup failed: {exc}", err=True)
         return SETUP_FAILED
+    if watch is not None:
+        watch.close()
+        if code == 0 and watch.started and not watch.seen:
+            _say("windows_hand_test: the run exited 0 but printed no pytest summary line; "
+                 "that is not a pass (something ended pytest early)", err=True)
+            return NO_SUMMARY
+    return code
 
 
 def _main(argv: Sequence[str] | None, *, run: Runner, beat: Callable[[Sequence[str]], int] | None) -> int:

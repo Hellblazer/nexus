@@ -2135,37 +2135,35 @@ class TestSharedSSLContext:
     def test_ssl_context_built_once_across_many_stores(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import ssl as ssl_module
-
-        from nexus.db.t2 import shared_ssl
+        from nexus.db.t2 import bearer_transport, shared_ssl
 
         # Cold-cache state -- deterministic regardless of test order or
         # this module's own import history (the cache is process/module
         # -global by design, so a prior test in the same session must not
         # leave this test seeing a pre-warmed cache).
         monkeypatch.setattr(shared_ssl, "_slot", None)
-        # Pin the exact branch create_ssl_context() takes (the
-        # cafile=certifi.where() default) so this test is not
-        # order-dependent on whatever the ambient env happens to hold.
-        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
-        monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+        monkeypatch.setattr(bearer_transport, "_slot", None)
+        # A bearer-carrying store builds its client on the bearer context (nexus-ec37o: certifi's bundle plus
+        # network.ca_bundle of config.yml, nothing from the environment), so it is that context's builds
+        # that are counted. Pinned to no extra bundle so the test does not depend on the ambient config.
+        monkeypatch.setattr(bearer_transport, "network_settings", lambda: bearer_transport.NetworkSettings("", ""))
 
-        calls: list[tuple[Any, Any]] = []
-        real_create_default_context = ssl_module.create_default_context
+        builds: list[str] = []
+        real_build_context = bearer_transport._build_context
 
-        def _counting_create_default_context(*args: Any, **kwargs: Any) -> ssl.SSLContext:
-            calls.append((args, kwargs))
-            return real_create_default_context(*args, **kwargs)
+        def _counting_build_context(ca_bundle: str) -> ssl.SSLContext:
+            builds.append(ca_bundle)
+            return real_build_context(ca_bundle)
 
-        monkeypatch.setattr(ssl_module, "create_default_context", _counting_create_default_context)
+        monkeypatch.setattr(bearer_transport, "_build_context", _counting_build_context)
 
         for _ in range(5):
             _make_echo_store(base_url="http://127.0.0.1:1", _token="tok")
 
-        assert len(calls) == 1, (
-            f"expected ssl.create_default_context() to run exactly once "
+        assert len(builds) == 1, (
+            f"expected the bearer SSL context to be built exactly once "
             f"across 5 RefreshableHttpStoreMixin-backed store constructions "
-            f"(one shared, process-wide SSL context); it ran {len(calls)} "
+            f"(one shared, process-wide SSL context); it was built {len(builds)} "
             f"times -- each store is still building its own"
         )
 
@@ -2178,9 +2176,10 @@ class TestSharedSSLContext:
         is what actually eliminates the redundant construction cost, and
         it is the concurrency-relevant property (one immutable object read
         by many clients, never rebuilt or mutated per-store)."""
-        from nexus.db.t2 import shared_ssl
+        from nexus.db.t2 import bearer_transport, shared_ssl
 
         monkeypatch.setattr(shared_ssl, "_slot", None)
+        monkeypatch.setattr(bearer_transport, "_slot", None)
 
         stores = [_make_echo_store(base_url="http://127.0.0.1:1", _token="tok") for _ in range(3)]
 

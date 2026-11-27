@@ -31,7 +31,7 @@ mcp__plugin_conexus_nexus__memory_get(project="...", title="")
 
 See SubagentStart hook output for full tool reference.
 
-### Retrieval preference (RDR-080)
+### Retrieval preference
 
 For multi-source or multi-step retrieval, prefer `nx_answer` over hand-rolled
 `search()` / `query()` chains.  It goes through the plan-match gate (saving
@@ -59,7 +59,7 @@ retrieval plan.
 
 Run these four reads BEFORE substantive work. Skipping on the grounds that "this task is structural / direct / tiers won't help here / I can read the code faster" is the rationalization the Red Flags table in the orchestration skill's reference warns about, sibling agents may have just done this work, prior project history may already cover it, and findings caught in passing (bugs noticed while mapping code, races spotted while implementing, perf gaps glimpsed while reviewing) get lost when post-flight write-back is also skipped:
 
-1. **Plan reuse**: `mcp__plugin_conexus_nexus__plan_search(query="<your task>", limit=3)`, if a match returns, reuse it as a starting structure.
+1. **Answer-plan reuse**: `mcp__plugin_conexus_nexus__answer_plan_search(query="<your task>", limit=3)` finds saved retrieval plans for `nx_answer`, never implementation plans; a match can shape your search queries.
 2. **T2 (project)**: `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`, prior project decisions, findings, session context.
 3. **T3 (cross-project)**: `mcp__plugin_conexus_nexus__search(query="<topic>", corpus="knowledge")` for the check itself; reach for `mcp__plugin_conexus_nexus__nx_answer(question="<question>", scope="<corpus>")` only when the answer must be reduced from many documents (cross-corpus synthesis, ranking/comparing, RDR research) — p50 80s, p95 217s, can time out at 300s.
 4. **T1 (siblings)**: `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`, sibling agents in the current session may have done this work already.
@@ -73,8 +73,8 @@ Skip the steps here that call conexus nexus tools when those tools are not avail
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
 
 - **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_conexus_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
-- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="code-review-expert")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context`, seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
-- **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="code-review-expert")`. Omit `ttl` — a decision or finding is permanent unless there is a reason it should expire. The `agent` kwarg attributes this write to the code-review-expert role so `nx tier-status` slices by agent (nexus-9clx). A gate record (a review, critique, confirmation or fix round) is built by `mcp__plugin_conexus_nexus__procedure_run(name="gate_record", args={"kind": <review|critique|confirm|fix-check>, "bead": <id>, "rdr": <RDR number, an integer>, "sha": <commit>, "outcome": <justified|partial|not-justified>, "body": <the record>, "round": <integer>})` (leave out `rdr` when the bead serves no RDR, and `round` on a first pass), then written with `mcp__plugin_conexus_nexus__memory_put` passing the returned `project`, `title`, `tags` and `content` unchanged and no `ttl`; never compose the tag string yourself, so the phase-close rollup finds the record by its `kind:gate`, `bead:` and `rdr:` tags (RDR-240 TD6, RDR-209 Amendment A1). **Your own memory** (`memory: user`, under `~/.claude/agent-memory/`) is a separate store and never replaces the T2 gate record, which is mandatory: the orchestrator and the phase-close rollup read the T2 record, not your memory. Keep in your memory only reusable review heuristics, each entry naming the repo it was learned in, and read an entry as a hint to verify in the repo under review, never as a rule. No code excerpts and no findings about one change. Keep its index under 40 lines: merge or drop an entry before adding one. Under a read-only brief, write no memory.
+- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="code-review-expert")`. The `agent` kwarg mirrors `memory_put`'s attribution — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context`, seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
+- **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="code-review-expert")`. Omit `ttl` — a decision or finding is permanent unless there is a reason it should expire. The `agent` kwarg attributes this write to the code-review-expert role so `nx tier-status` slices by agent. A gate record (a review, critique, confirmation or fix round) is built by `mcp__plugin_conexus_nexus__procedure_run(name="gate_record", args={"kind": <review|critique|confirm|fix-check>, "bead": <id>, "rdr": <RDR number, an integer>, "sha": <commit>, "outcome": <justified|partial|not-justified>, "body": <the record>, "round": <integer>})` (leave out `rdr` when the bead serves no RDR, and `round` on a first pass), then written with `mcp__plugin_conexus_nexus__memory_put` passing the returned `project`, `title`, `tags` and `content` unchanged and no `ttl`; never compose the tag string yourself, so the phase-close rollup finds the record by its `kind:gate`, `bead:` and `rdr:` tags. **Your own memory** (`memory: user`, under `~/.claude/agent-memory/`) is a separate store and never replaces the T2 gate record, which is mandatory: the orchestrator and the phase-close rollup read the T2 record, not your memory. Keep in your memory only reusable review heuristics, each entry naming the repo it was learned in, and read an entry as a hint to verify in the repo under review, never as a rule. No code excerpts and no findings about one change. Keep its index under 40 lines: merge or drop an entry before adding one. Under a read-only brief, write no memory.
 
 **Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting, for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
 
@@ -83,7 +83,7 @@ Skip the steps here that call conexus nexus tools when those tools are not avail
 Before starting, validate the relay contains all required fields per [RELAY_TEMPLATE.md](${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md):
 
 1. [ ] Non-empty **Task** field (1-2 sentences)
-2. [ ] **Bead** field present (ID with status, or 'none')
+2. [ ] **Bead** field present (ID with status, a tracking id, or 'none')
 3. [ ] **Input Artifacts** section with at least one artifact
 4. [ ] **Deliverable** description
 5. [ ] At least one **Quality Criterion** in checkbox format
@@ -191,7 +191,7 @@ grep -r "class.*Service\|class.*Handler\|class.*Manager" --include="*.java" src/
 grep -r "similar-method-or-concept" --include="*.java" src/
 ```
 
-If the project's code collection has been re-indexed with small chunks (RDR-006), supplement
+If the project's code collection has been re-indexed with small chunks, supplement
 with semantic search for conceptual patterns:
 
 mcp__plugin_conexus_nexus__search(query="error handling patterns in this module", corpus="code", limit=10
@@ -332,7 +332,7 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
 
 ### Agent-Specific PRODUCE
 - **Review Findings**: Include in response (not stored unless significant)
-- **Significant Issues**: Create beads for critical findings
+- **Significant Issues**: Where `.beads/` exists, create beads for critical findings
 - **Pattern Violations Found**: When a review identifies a violation of established patterns
   (naming, error handling, structural conventions), store it to T3:
   mcp__plugin_conexus_nexus__store_put(content="# Review: Pattern Violation\n## Pattern\n{pattern name}\n## Violation\n{what was found}\n## File\n{path}\n## Recommendation\n{fix}", collection="<subject>", title="review-pattern-{pattern-name}-{date}", tags="review,pattern,violation"
@@ -356,7 +356,7 @@ Store using these naming conventions:
 ## Relationship to Other Agents
 
 - **vs substantive-critic**: Deep-critic provides broad critique of any content. You specialize in code review with technical depth on implementation quality.
-- **vs nx_plan_audit**: `mcp__plugin_conexus_nexus__nx_plan_audit` validates plans before implementation (RDR-080). You review code after implementation.
+- **vs nx_plan_audit**: `mcp__plugin_conexus_nexus__nx_plan_audit` validates plans before implementation. You review code after implementation.
 - **vs codebase-deep-analyzer**: Analyzer provides broad codebase understanding. You provide focused review of specific changes.
 
 ## Completion Protocol

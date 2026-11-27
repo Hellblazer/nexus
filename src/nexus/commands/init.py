@@ -966,7 +966,7 @@ def _seed_builtin_plans_best_effort() -> None:
 
     A virgin install previously left the global plan tier at zero rows:
     ``nx init``/``nx init --service`` never called the seed loader — only
-    the manual ``nx plan reseed`` verb did
+    the manual ``nx answer-plan reseed`` verb did
     (:func:`nexus.commands.catalog._seed_plan_templates`). Consequences,
     measured on a bare box: ``nx_answer``'s plan-match gate missed 100% of
     the time (~53s / ~1.26 USD inline-planner tax per call, RDR-196
@@ -985,7 +985,7 @@ def _seed_builtin_plans_best_effort() -> None:
     standalone ``nx doctor --check-plan-library`` remain the durable,
     always-visible signal if this best-effort call ever fails.
     """
-    from nexus.commands.catalog import _seed_plan_templates  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps; matches `nx plan reseed`'s own import site
+    from nexus.commands.catalog import _seed_plan_templates  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps; matches `nx answer-plan reseed`'s own import site
 
     try:
         seeded = _seed_plan_templates()
@@ -993,7 +993,7 @@ def _seed_builtin_plans_best_effort() -> None:
         click.echo(
             f"\nWARNING: builtin plan-template seeding failed ({exc}). "
             "`nx_answer` will pay the inline-planner tax on every call "
-            "until this is fixed. Run `nx plan reseed` once the service "
+            "until this is fixed. Run `nx answer-plan reseed` once the service "
             "is reachable, or `nx doctor --check-plan-library` for "
             "diagnostics.",
             err=True,
@@ -1094,7 +1094,7 @@ def _converge_ladder_best_effort() -> None:
     default=False,
     help=(
         "[DEPRECATED — plain `nx init` now does this by default] Provision the "
-        "local Postgres cluster for the RDR-152 Java service backend. Creates "
+        "local Postgres cluster for the Java service backend. Creates "
         "nexus_admin and nexus_svc roles and writes credentials to "
         "~/.config/nexus/pg_credentials. Idempotent: safe to re-run."
     ),
@@ -1104,8 +1104,8 @@ def _converge_ladder_best_effort() -> None:
     "no_beads_prime",
     is_flag=True,
     default=False,
-    help="Do not install/refresh the user-level beads PRIME.md this run "
-    "(nexus-cnzei.8). Explicit decline always wins, like --no-autostart; "
+    help="Do not install/refresh the user-level beads PRIME.md this run. "
+    "Explicit decline always wins, like --no-autostart; "
     "for a standing opt-out use `nx config set beads_prime.manage false`.",
 )
 @click.pass_context
@@ -1119,22 +1119,22 @@ def init_cmd(
 ) -> None:
     """Guided first-run setup — one command that provisions the right backend.
 
-    RDR-174 §1/§3 collapse: ``nx init`` is mode-detecting. ``_resolve_init_mode``
+    ``nx init`` is mode-detecting. ``_resolve_init_mode``
     decides LOCAL vs MANAGED (NX_LOCAL wins; otherwise on a configured
     ``service_url``). In LOCAL mode a plain ``nx init`` provisions and starts the
     local service stack (Postgres + the Java service, provisioned here for
-    bge-768, RDR-160) — the same body the now-deprecated ``--service`` flag
+    bge-768) — the same body the now-deprecated ``--service`` flag
     drives. In MANAGED mode a remote nexus service serves every tier, so there
     is nothing to provision locally (the credential wizard for that path lands
-    in P1.2, nexus-r2auz).
+    in a later release).
 
     ``--embedder`` selects bge-768 vs minilm-384 for the local service-embedder
     step (minilm-384 gets an advisory — this step always fetches the bge-768 ONNX).
-    A separate opt-in (nexus-umm29) switches the running service to Voyage
+    A separate opt-in switches the running service to Voyage
     instead — the page linked at the end of this help ("Local mode with Voyage") has the
     ``local.embed_model`` + ``voyage_api_key`` + restart steps; a later
-    ``nx init`` keeps a voyage-* ``local.embed_model`` and says so
-    (nexus-ddmfg). ``--service`` is still accepted (it
+    ``nx init`` keeps a voyage-* ``local.embed_model`` and says so.
+   ``--service`` is still accepted (it
     forces local provisioning) and is slated for a deprecation notice in P3.1.
     """
     # nexus-gynt2: stranded-install refusal, FIRST — before any provisioning.
@@ -1300,7 +1300,7 @@ def _finish_local_init(reporter: StepReporter) -> None:
         _converge_ladder_best_effort()
     # nexus-e1ti4: seed the builtin plan-template library now that the ladder
     # has converged — a virgin box otherwise pays the inline-planner tax on
-    # every nx_answer call until someone runs `nx plan reseed` by hand.
+    # every nx_answer call until someone runs `nx answer-plan reseed` by hand.
     with reporter.step("Seed the builtin plan library"):
         _seed_builtin_plans_best_effort()
     reporter.summary()

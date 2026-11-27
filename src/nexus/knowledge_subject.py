@@ -77,7 +77,7 @@ def knowledge_subject_label(
     row's attributes, never by rendering (RDR-229 P2.8, item 5).
 
     A knowledge collection's row carries its subject as ``owner_id``
-    (``docs/collections.md``; ``catalog-044`` exempts it from the owner rewrite),
+    (``catalog-044`` exempts it from the owner rewrite; RDR-229 item 5),
     so ``finder('knowledge', subject, <read model>)`` finds it whatever shape
     its label has. Answers the label only when it differs from *rendered*, the
     name the resolution below would try first: a row under the rendered name

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "subagent_git": "strict",
+  "preflight": "scripts/agent-worktree-preflight.sh",
+  "ci_wait": "nx ci wait <sha> --branch develop",
+  "credential_helper": "The nexus wrapper (https://github.com/Hellblazer/nexus/blob/main/tests/e2e/lib/claude_credentials.py) does both safely: `claude_credentials.py status` checks the token, and `claude_credentials.py run -- <command>` runs a child process with it set in the environment.",
+  "brief_questions": ["Does it hold in both modes, local AND cloud?"],
+  "integration_branch": "develop"
+}

@@ -11,6 +11,8 @@ import click
 import structlog
 
 from nexus.collection_errors import LabelReservedError, label_reserved_error_from_body
+from nexus.commands._collection_delete import collection_busy_message as _collection_busy_message
+from nexus.commands._collection_delete import run_delete
 from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.commands.store import _t3
 from nexus.config import DEFAULT_EXTRACTOR
@@ -123,16 +125,16 @@ def _catalog_collection_rows() -> tuple[dict[str, dict], str]:
 def list_cmd(show_all: bool) -> None:
     """List T3 collections: live and stored chunk counts, and the catalog's
     columns (ID, content type, owner, embedding model, dimension, lifecycle
-    state). ID is the registry's ``collection_id`` (RDR-229 P3.12), ``-`` on a
+    state). ID is the registry's ``collection_id``, ``-`` on a
     row no stamp has given one yet.
 
-    RDR-204 Day 2 (nexus-ft04v.32): every column is read from the
+    Every column is read from the
     collection's catalog row, never derived from its name, so a row whose
     name disagrees with its columns is visible rather than hidden behind a
     consistent-looking name. A collection with no catalog row prints ``-``
     in every column; a catalog row with no chunks prints 0.
 
-    nexus-sis0m.3: a collection retired by a re-embed job keeps its catalog
+    A collection retired by a re-embed job keeps its catalog
     row as a tombstone (superseded_by names the successor). An empty tombstone
     is not a collection and is left out unless ``--all``; one still holding
     chunks is listed, with STATE ``superseded-><successor>``. A rename on
@@ -224,7 +226,7 @@ def shape_cmd(as_json: bool, full: bool) -> None:
     """Read-only shape audit of the whole collection SET against the collection rules
     (the page is linked at the end of this help).
 
-    Distinct from ``nx collection audit NAME`` (the RDR-087 deep dive of one
+    Distinct from ``nx collection audit NAME`` (the deep dive of one
     collection).
 
     One finding per rule violation with a proposed action; never writes,
@@ -395,7 +397,7 @@ def aspects_cmd(
 ) -> None:
     """Show or set a collection's engine-side ``aspects_enabled`` attribute.
 
-    nexus-l46pu (follow-up to nexus-kk4ut): the tenant-wide, engine-hosted
+    The tenant-wide, engine-hosted
     home for the docs__ aspect-extraction opt-in, read by every machine
     indexing this collection. Round-2 critic decision (T2 critique-nexus-
     l46pu-tenant-wide-aspects-enabled item 1): the ENGINE IS AUTHORITATIVE
@@ -439,7 +441,7 @@ def aspects_cmd(
             local_answer = docs_collection_opted_in(name)
             click.echo(
                 f"{name}: aspects_enabled has no opinion on this engine yet "
-                "(never set, or an engine older than nexus-l46pu) — falling "
+                " — falling "
                 f"back to local config.yml, which resolves to {local_answer} "
                 "for this machine"
             )
@@ -561,37 +563,22 @@ def _aspects_from_config(*, dry_run: bool, yes: bool = False) -> None:
     )
 
 
-def _collection_busy_message(busy: dict[str, str], retry: str) -> str:
-    """What to tell a person whose delete the engine refused with 409 ``collection_busy`` (engine 0.1.202).
-
-    One wording for ``delete``, ``prune`` and ``reindex``. The fence holds the collection while a job is planned,
-    running, paused, cutover or failed, and the way out depends on which: a running or cutover job ends on its own,
-    a paused one needs ``--resume`` or ``--abort``, a failed one ``--abort`` (``--resume`` retries it). The engine
-    names the state in its text, not in a field; when it is not one the fence holds, the engine's own message goes
-    beside the generic advice. *retry* is the command to run again once the job has ended."""
-    name, job, state, said = busy["collection"], busy.get("job_id", ""), busy.get("state", ""), busy.get("message", "")
-    job_arg = shlex.quote(job) if job else "JOB"
-    status, abort, resume = (f"`nx collection re-embed --{v} {job_arg}`" for v in ("status", "abort", "resume"))
-    head = (f"re-embed job {job or '(unnamed)'}{f' ({state})' if state else ''} holds collection '{name}' as its source "
-            f"or its target, so nothing was deleted.")
-    advice = {
-        "running": f"Wait for it to finish ({status}), or cancel it ({abort}; documents already moved stay moved)",
-        "cutover": f"Wait for it to finish ({status}), or cancel it ({abort}; documents already moved stay moved)",
-        "planned": f"Wait for it to start and finish ({status}), or cancel it ({abort})",
-        "paused": f"Resume it and let it finish ({resume}), or cancel it ({abort}; documents already moved stay moved)",
-        "failed": f"Cancel it ({abort}; documents already moved stay moved); {resume} retries it",
-    }.get(state)
-    if advice is None:
-        advice = (f"The engine said: {said or 'no detail'}. Check the job ({status}); wait for it to finish, or cancel it "
-                  f"({abort}; documents already moved stay moved)")
-    return f"{head} {advice}, then run `{retry}` again."
-
-
 @collection.command("delete")
-@click.argument("name")
+@click.argument("name", required=False)
+@click.option("--id", "collection_id", type=click.IntRange(min=1), default=None,
+              help="Delete the collection with this ID (the ID column of `nx collection list`) instead of a label. Needs an engine "
+                   "that advertises catalog_collection_delete_by_id_supported (engine-service 0.1.203 or later).")
 @click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
-def delete_cmd(name: str, yes: bool) -> None:
+def delete_cmd(name: str | None, collection_id: int | None, yes: bool) -> None:
     """Delete a T3 collection + cascade-purge taxonomy state (irreversible).
+
+    Name the collection by its label (``nx collection delete LABEL``) or by its
+    ID (``nx collection delete --id N``): exactly one. A label held by two live
+    collections is refused, naming their IDs; delete one by ``--id``. A label
+    that a rename or re-embed retired is refused when it has a live successor,
+    which the message names (the retired row stays as history); a retired
+    label with none is deleted. An unknown ID is an error, never a
+    silent no-op.
 
     Deleting an origin also deletes its rows in its ``quarantine-`` siblings
     (one gc_audit row per sibling). Deleting a ``quarantine-*`` collection
@@ -602,76 +589,7 @@ def delete_cmd(name: str, yes: bool) -> None:
     re-embed job holds the collection as its source or target; the message
     says whether to wait, resume or abort the job.
     """
-    if not yes:
-        click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
-
-    # nexus-jm3z / nexus-8a8e / nexus-vxz3: the full delete cascade (T3 +
-    # taxonomy + chash + pipeline + catalog docs + projection) is the
-    # canonical ``purge_collection_cascade`` (RDR-144 nexus-prgf4), shared
-    # with the 384->768 migration so both leave the same clean state.
-    # nexus-lub: a T3 delete may find the collection already absent (a prior
-    # half-delete); the cascade still runs to clean the orphan rows.
-    from nexus.db.collection_purge import purge_collection_cascade  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-    cascade = purge_collection_cascade(_t3(), name)
-    if cascade.t3_absent:
-        click.echo(
-            f"note: T3 collection '{name}' already absent — running cascade anyway",
-            err=True,
-        )
-    if cascade.collection_busy is not None:
-        # RDR-229 P3.5a row 14 (engine 0.1.202): the engine refused with 409 collection_busy; nothing was removed.
-        raise click.ClickException(_collection_busy_message(cascade.collection_busy, f"nx collection delete {shlex.quote(name)}"))
-    # Surface any cascade-step failure to the user (orphan rows may remain).
-    for failure in cascade.failures:
-        click.echo(f"warn: {failure}", err=True)
-    if cascade.service_delete_failed:
-        # nexus-oq5gd: the service never confirmed the delete (a read timeout
-        # makes ONE attempt, so it may or may not have committed). Do not
-        # claim "Deleted:".
-        raise click.ClickException(
-            f"delete of '{name}' is unconfirmed: the service cascade failed. "
-            f"Re-run `nx collection delete {shlex.quote(name)}`."
-        )
-
-    taxonomy_counts = cascade.taxonomy
-    chash_deleted = cascade.chash_deleted
-    pipeline_rows_deleted = cascade.pipeline_rows_deleted
-    catalog_docs_deleted = cascade.catalog_docs_deleted
-    catalog_projection_deleted = cascade.catalog_projection_deleted
-    quarantine_chunks_deleted = cascade.quarantine_chunks_deleted
-
-    from nexus.catalog.chunk_quarantine import is_quarantine_sibling_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-    # The one sanctioned name parser for the quarantine flag (no new raw parse sites, RDR-204).
-    is_quarantine_name = is_quarantine_sibling_name(name)
-    parts: list[str] = []
-    # For a quarantine-* name the engine reports the rows it held under both keys; say them once, below.
-    if cascade.chunks_deleted and not is_quarantine_name:
-        parts.append(f"{cascade.chunks_deleted} chunks")
-    if taxonomy_counts and any(taxonomy_counts.values()):
-        parts.append(
-            f"{taxonomy_counts['topics']} topics, "
-            f"{taxonomy_counts['assignments']} assignments, "
-            f"{taxonomy_counts['links']} links, "
-            f"{taxonomy_counts['meta']} meta"
-        )
-    if chash_deleted:
-        parts.append(f"{chash_deleted} chash rows")
-    if pipeline_rows_deleted:
-        parts.append(f"{pipeline_rows_deleted} pipeline rows")
-    if catalog_docs_deleted:
-        parts.append(f"{catalog_docs_deleted} catalog docs")
-    if catalog_projection_deleted:
-        parts.append(f"{catalog_projection_deleted} catalog projection row")
-    if quarantine_chunks_deleted:
-        # nexus-wbfpw.68/.71: the origin's quarantine rows go with it, audited per sibling.
-        audit_op = "quarantine_collection_delete" if is_quarantine_name else "collection_delete_quarantine"
-        parts.append(f"{quarantine_chunks_deleted} quarantined chunks (gc_audit: {audit_op})")
-    if parts:
-        click.echo(f"Deleted: {name} ({'; '.join(parts)})")
-    else:
-        click.echo(f"Deleted: {name}")
+    run_delete(_t3, name, collection_id, yes)
 
 
 # ── prune (nexus-9tsdf / GH #1113) ──────────────────────────────────────────
@@ -1025,7 +943,7 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     is set; otherwise search hits would be garbage.
 
     A conformant new name is also checked against the source collection's
-    catalog-row ``embedding_model`` (nexus-7f4o4): the engine keeps the
+    catalog-row ``embedding_model``: the engine keeps the
     row's model across a rename, so a ``__<model>__`` token that differs
     from it is refused, naming both models and the name that would be
     accepted, unless ``--force-prefix-change`` is set.
@@ -1112,8 +1030,7 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
                 f"{new!r} encodes {new_model!r}. rename never re-embeds — the "
                 f"vectors would silently stay {old_model!r} under a name claiming "
                 f"{new_model!r}. Cross-model moves re-index from source into the "
-                f"{new_model!r}-named collection (nx index repo / nx index pdf — "
-                f"the RDR-162 vector-ETL pipeline retired at RDR-155 P4b). "
+                f"{new_model!r}-named collection. "
                 f"Pass --force-prefix-change ONLY if you know the vectors are "
                 f"already {new_model!r}."
             )
@@ -2692,7 +2609,7 @@ def reembed_cmd(
       nx collection re-embed --all --skip NAME  the same, leaving NAME out (repeatable)
       nx collection re-embed --status [JOB]     jobs; --pause/--resume/--abort JOB act on one
 
-    nexus-bw65: rebuild embeddings for every chunk in NAME that has a
+    Rebuild embeddings for every chunk in NAME that has a
     live catalog document, using --to MODEL. Chunk ids, document text,
     and metadata are preserved; only the vector changes. A chunk with no
     live document (no owner, or owned only by a deleted document) is left
@@ -2705,10 +2622,10 @@ def reembed_cmd(
 
     Also the repair for stored vectors that no longer match their text:
     re-embedding in place with the collection's own model recomputes every
-    vector server-side (nexus-tysei: voyage-context-3 chunks the retired
+    vector server-side (voyage-context-3 chunks the retired
     client path embedded with document context).
 
-    RDR-210 Phase 6: a different MODEL, or --all, runs a job on the local
+    A different MODEL, or --all, runs a job on the local
     engine. It moves each live document, one transaction apiece, into the
     sibling collection that carries the profile's model, then supersedes and
     deletes the source (--keep-source keeps it). The plan states the token
@@ -2796,8 +2713,7 @@ def reembed_cmd(
                 f"--to {target_model!r} "
                 f"cannot take effect on {name!r}. Cross-model moves "
                 f"re-index from source into a {target_model}-named "
-                f"collection (nx index repo / nx index pdf — the RDR-162 "
-                f"vector-ETL pipeline retired at RDR-155 P4b). Plain "
+                f"collection. Plain "
                 f"'nx collection rename' does NOT re-embed and would "
                 f"corrupt the name-encoded model contract."
             )
@@ -2962,7 +2878,7 @@ def rewrite_metadata_cmd(
     help="Output format.",
 )
 def health_cmd(sort_by: str, fmt: str) -> None:
-    """Composite per-collection health report (RDR-087 Phase 3.4).
+    """Composite per-collection health report.
 
     Folds catalog, T2 telemetry, and topic-assignment signals into one
     row per collection. Use ``--format=json`` for agents and dashboards.
@@ -3002,7 +2918,7 @@ def health_cmd(sort_by: str, fmt: str) -> None:
     help="Number of live-probe samples when --live fires.",
 )
 def audit_cmd(name: str, fmt: str, live: bool, live_n: int) -> None:
-    """Deep-dive audit for a single collection (RDR-087 Phase 4.2).
+    """Deep-dive audit for a single collection.
 
     Four sections: distance histogram (30d telemetry, ``--live`` to
     probe T3 when telemetry is cold), top-5 cross-projections,
@@ -3063,7 +2979,7 @@ def merge_candidates_cmd(
     exclude_hubs: bool, hub_top_n: int,
     limit: int, fmt: str, create_link: bool,
 ) -> None:
-    """(Unavailable) Pair-wise cross-collection overlap ranking (RDR-087 Phase 4.3).
+    """(Unavailable) Pair-wise cross-collection overlap ranking.
 
     Surfaces (a, b) pairs where collection *a* projects into topics in
     collection *b* with high similarity — hints at merge or bridge-
@@ -3072,7 +2988,7 @@ def merge_candidates_cmd(
     """
     if create_link:
         raise click.ClickException(
-            "--create-link is deferred per RDR-087 §bridge-link workflow. "
+            "--create-link is deferred (bridge links are made by hand). "
             "Use `nx catalog link` manually after reviewing the candidates."
         )
     from nexus.merge_candidates import run_merge_candidates  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost

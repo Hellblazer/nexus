@@ -131,8 +131,8 @@ final class CollectionRehomeScope {
             return tenantColumn.eq(tenant).and(collectionColumn.eq(target)).and(idColumn.isDistinctFrom(targetId));
         }
         // The chunk the manifest row points at MOVED: it is at the target now and no longer at the source. Judged by the chunk's id, not by the
-        // manifest row's name column: the mover does not rely on a foreign key's ON UPDATE cascade to carry the manifest (the name key and the
-        // foreign key go at P3.7, and a manifest row the cascade did not carry keeps the source's label). A chunk a collision left behind is
+        // manifest row's name column: the mover does not rely on a foreign key's ON UPDATE cascade to carry the manifest (the chunks' name key and
+        // the manifest's foreign key on it stay until P4.1, and a manifest row the cascade did not carry keeps the source's label). A chunk a collision left behind is
         // still at the source, so its manifest row stays.
         var c = CHUNKS.as("rcm");
         var left = CHUNKS.as("rcl");

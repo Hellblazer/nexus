@@ -79,6 +79,38 @@ from nexus.hooks import subagent_work
 
 __all__ = ["run"]
 
+# Settings the injected text reads (stdlib only): the guard's mode, the project's preflight command and the extra brief
+# questions of the project and the user. ``guard_mode`` tightens (it adds the Git row), so an import failure binds it to
+# "strict"; the settings texts only add, so a failure gives none. Each text is printed after its Provenance label
+# (RDR-259 Decision 2), which ``provenance_label`` builds, and cleaned by ``clean_text``.
+try:
+    from nexus.hooks._audience import (
+        clean_text as _clean_text,
+        guard_mode as _guard_mode,
+        project_brief_questions as _project_brief_questions,
+        project_text as _project_text,
+        provenance_label as _provenance_label,
+        user_brief_questions as _user_brief_questions,
+    )
+except BaseException:  # noqa: BLE001
+    def _guard_mode(payload: object, head: bool = False) -> str:
+        return "strict"
+
+    def _project_text(payload: object, key: str) -> "str | None":
+        return None
+
+    def _project_brief_questions(payload: object) -> "list[str]":
+        return []
+
+    def _user_brief_questions(payload: object = None) -> "list[str]":
+        return []
+
+    def _provenance_label(key: str, source: str, value: "str | None" = None) -> "str | None":
+        return None
+
+    def _clean_text(text: object, limit: int = 60) -> str:
+        return ""
+
 # -- Classification regexes (verbatim; see module docstring) -----------------
 
 #: subagent-start.sh:124
@@ -135,7 +167,7 @@ _RELAY = (
     "| Field | Description |\n"
     "|-------|-------------|\n"
     "| Task | 1-2 sentence summary |\n"
-    "| Bead | Bead ID with status, or 'none' |\n"
+    "| Bead | Bead ID with status, a tracking id, or 'none' |\n"
     "| Input Artifacts | nx store, nx memory, nx scratch, files |\n"
     "| Deliverable | What the agent should produce |\n"
     "| Quality Criteria | Checkbox list |\n\n"
@@ -143,80 +175,55 @@ _RELAY = (
     "blocks for the caller to use.\n"
 )
 
-_ORCH = (
+#: One constant per row of the Orchestration table, each declared in ``conexus/hooks/audience.yaml``. Every reader gets the
+#: head, Completion, Inbox and Search scope rows; the Git row goes where the full guard runs (``subagent_git`` strict).
+_ORCH_HEAD = (
     "\n## Orchestration (Required)\n\n"
     "| Directive | Rule |\n"
     "|-----------|------|\n"
+)
+
+_ORCH_COMPLETION = (
     "| Completion | Background: SubagentHandback (or SendMessage) full result to main "
     "before idling: success/failure/blocked + live task ids. Foreground: final message "
     "IS the hand-back. |\n"
+)
+
+_ORCH_INBOX = (
     "| Inbox | Re-check inbox right before composing any hand-back; newest directive "
     "wins |\n"
-    "| Git | Shared tree: NEVER git add/commit (hook-ENFORCED; linked worktrees "
+)
+
+_ORCH_GIT = (
+    "| Git | Shared tree: NEVER git add/commit (a hook enforces this; linked worktrees "
     "exempt). Hand back diffs+paths; orchestrator commits pathspec-limited |\n"
+)
+
+_ORCH_SEARCH_SCOPE = (
     "| Search scope | Search only under the roots your brief names, or your working "
     "directory; never a whole-disk or whole-home search (`find /`, `find ~`, `grep -r /`, "
-    "`mdfind`). A file you cannot find: hand back naming it (nexus-egv6q) |\n"
+    "`mdfind`). A file you cannot find: hand back naming it |\n"
 )
 
-_WORKTREE_PREFLIGHT = (
-    "| Preflight | If dispatched with isolation:worktree: run "
-    "`scripts/agent-worktree-preflight.sh [required-sha]` as your FIRST action; stop "
-    "on any PREFLIGHT_FAIL line (nexus-5kwkf) |\n"
-)
 
-#: Relative to the project's main repo root. Only the nexus repo ships it.
-_WORKTREE_PREFLIGHT_SCRIPT: str = "scripts/agent-worktree-preflight.sh"
-
-
-def _carries_preflight_script(start: str) -> bool:
-    """True when ``start``, or a directory above it up to the first git checkout, holds the
-    preflight script. The walk stops at a ``.git`` entry (a directory, or a worktree's file), so a
-    project nested under a nexus checkout, or under a stray ``scripts/`` copy, is not told to run it."""
-    if not start or start.startswith("${"):  # an unsubstituted hook template is no path
-        return False
-    try:
-        here = os.path.realpath(start)
-    except Exception:  # noqa: BLE001 — carried: an unresolvable path holds no script
-        return False
-    while True:
-        if os.path.isfile(os.path.join(here, _WORKTREE_PREFLIGHT_SCRIPT)):
-            return True
-        if os.path.lexists(os.path.join(here, ".git")):
-            return False  # the checkout the cwd is in: a project above it is not this one
-        parent = os.path.dirname(here)
-        if parent == here:
-            return False
-        here = parent
+def _orchestration(payload: dict) -> str:
+    """The Orchestration table for this dispatch: the head, Completion, Inbox and Search scope for everyone, and the Git row
+    where the project or the user turned the full subagent git guard on (``subagent_git`` strict)."""
+    rows = [_ORCH_HEAD, _ORCH_COMPLETION, _ORCH_INBOX]
+    if _guard_mode(payload, head=True) == "strict":  # as the guard answers: a repository strict only at HEAD gets the row too
+        rows.append(_ORCH_GIT)
+    rows.append(_ORCH_SEARCH_SCOPE)
+    return "".join(rows)
 
 
-def _process_cwd() -> str:
-    try:
-        return os.getcwd()
-    except OSError:  # a deleted cwd: no checkout to find
+def _worktree_preflight_row(payload: dict) -> str:
+    """The Preflight row: only when the project's settings name a ``preflight`` command, which a worktree agent runs first."""
+    command = _project_text(payload, "preflight")
+    label = _provenance_label("preflight", "project", command) if command else None
+    if not label:
         return ""
+    return f"| Preflight | For an isolation:worktree dispatch: {label} |\n"
 
-
-def _worktree_preflight_row(repo_root: str, cwd: str = "") -> str:
-    """The Preflight row, only for a project that has the script.
-
-    nexus-z7ddd: the row used to go into every dispatch in every project, so a
-    worktree agent outside the nexus repo was told to run, as its first action, a
-    script its project does not have.
-
-    nexus-13mbx: the main repo root alone withheld the row whenever git could not
-    resolve it (a bare repo with worktrees, a git timeout, a hook started outside
-    the checkout). The row is also given when ``cwd`` (the payload's, else the
-    hook process's, tried second) lies in a checkout that carries the script, which
-    keys it on the agent's own worktree as well. A cwd above every checkout still
-    gets no row; a worktree-isolated dispatch, the only one the row is for, runs in
-    its worktree.
-    """
-    if repo_root and os.path.isfile(os.path.join(repo_root, _WORKTREE_PREFLIGHT_SCRIPT)):
-        return _WORKTREE_PREFLIGHT
-    if _carries_preflight_script(cwd):
-        return _WORKTREE_PREFLIGHT
-    return ""
 
 #: nexus-mtheb: the T1 contract, first in every injection, review and code-nav
 #: agents included. Five rounds of T1 design faded because the guidance was
@@ -231,7 +238,7 @@ _NX_T1 = (
     '(action="get", entry_id=...). If your brief says you are an independent '
     "reviewer, read nothing else in T1.\n"
     "- Interim findings and working notes go to T1: scratch put, with the tags your "
-    'brief names (for example tags="nexus-abc,review-r1") and agent="<your role>".\n'
+    'brief names (for example tags="my-task,review-r1") and agent="<your role>".\n'
     "- T2 memory_put only for a record your brief or your agent definition requires "
     "(gate records stay mandatory); never overwrite a T2 record it did not give you. "
     "T3 store_put only for validated, reusable knowledge.\n"
@@ -258,7 +265,7 @@ _NX_T3 = (
     "T3: search (where, cluster_by, topic), query (catalog-aware; follow_links, "
     "depth, subtree),\n"
     "    store_list, store_get, store_put, collection_list\n"
-    "Plans (T2): plan_search, plan_save\n"
+    "Answer plans (T2, retrieval only, never implementation plans): answer_plan_search, answer_plan_save\n"
     'Hint: where="section_type!=references" filters noise.\n\n'
     "WRITE-BACK when your work produced findings: interim findings to "
     "T1 (scratch put, your brief's tags); the record your brief or agent definition requires to T2; only "
@@ -282,7 +289,7 @@ _NX_AUTOLINK = (
     "  3. store_put -- auto-creates catalog links from scratch context\n\n"
     "If link-context already in scratch (sibling agent did 1+2), skip to step 3.\n\n"
     'AGENT TAG: pass agent="<your-role>" to memory_put so nx tier-status slices '
-    "writes by agent (nexus-9clx).\n"
+    "writes by agent.\n"
 )
 
 _PHASE_GATE = (
@@ -291,42 +298,70 @@ _PHASE_GATE = (
     "skill's checklist BEFORE close: list every numbered item of the phase in "
     "the RDR, and for each write `Item N = <closing bead id>` or `Item N = none` "
     "with a one-line reason. Do not close while an item has neither. Nothing "
-    "enforces this; skipping it is the silent-scope-reduction failure mode: "
-    "RDR-112 Phase 1 (nexus-52lb) lost days when the T3 daemon drop surfaced "
-    "three phases later.\n"
+    "enforces this; skipping it is the silent-scope-reduction failure mode"
 )
+#: How the block ends.
+_PHASE_GATE_NEUTRAL = ": a dropped item surfaces phases later.\n"
 
-#: nexus-yjg4v: the five questions behind the review fix rounds of
-#: 2026-10-08 (T2 nexus/critique-4d362d901-contradiction-scope-2026-10-08,
-#: rerank-cap-review-fixes, review-a86acb113-index-workers-length-grouping,
-#: debug-p2c-bench-empty-collections-cache). Each brief stated WHAT to change
-#: and left one of these open; a reviewer then asked it. The development
-#: skill's Pre-Dispatch section carries the same list for the brief's author.
-_BRIEF_CHECK = (
+
+def _phase_gate(payload: dict) -> str:
+    """The Phase Boundary Gate block."""
+    return _PHASE_GATE + _PHASE_GATE_NEUTRAL
+
+#: The four questions behind the review fix rounds that opened on a brief that stated WHAT to change and left one of these
+#: open; a reviewer then asked it. The development skill's Pre-Dispatch section carries the same list for the brief's author.
+#: One constant per question, each declared in ``conexus/hooks/audience.yaml``; every implementer dispatch gets them, and
+#: a project's ``brief_questions`` setting adds its own. They are numbered when the block is assembled.
+_BRIEF_CHECK_HEAD = (
     "\n## Brief check (if you change code)\n\n"
     "Before your first edit, find your brief's answer to each question. Where "
     "it has none or says UNKNOWN, resolve it first (read the code, measure, or "
     "ask the dispatcher) and put the answers at the top of your hand-back. If "
     "you cannot resolve one, stop and report it; do not guess.\n"
-    "1. Consumers: every caller and consumer of what you change, by name, and "
+)
+#: The longest an added question may be (RDR-259 Decision 2); a longer one is already rejected when the file is read.
+_BRIEF_QUESTION_BYTES = 160
+_BRIEF_Q_CONSUMERS = (
+    "Consumers: every caller and consumer of what you change, by name, and "
     "which of them filter, re-rank or page AFTER it.\n"
-    "2. Final point: where the output's real final order or display is decided "
+)
+_BRIEF_Q_FINAL_POINT = (
+    "Final point: where the output's real final order or display is decided "
     "(after boosts, caps, paging), and that your change acts there.\n"
-    "3. Modes: behaviour in local AND cloud mode; a mode nobody measured is "
-    "measured first or left unchanged.\n"
-    "4. Bounds: which pool, permit, memory or thread limit the change draws on, "
+)
+_BRIEF_Q_BOUNDS = (
+    "Bounds: which pool, permit, memory or thread limit the change draws on, "
     "and its size against that limit on small and large boxes.\n"
-    "5. State: every cache or shared state you touch, who invalidates it, the "
+)
+_BRIEF_Q_STATE = (
+    "State: every cache or shared state you touch, who invalidates it, the "
     "invalidate-vs-in-flight-fill race, the first-write and empty cases, and "
     "the test reset hooks.\n"
 )
+
+
+def _brief_check(payload: dict) -> str:
+    """The brief check for an implementer dispatch: the four generic questions, then the project's own, numbered."""
+    questions = [_BRIEF_Q_CONSUMERS, _BRIEF_Q_FINAL_POINT, _BRIEF_Q_BOUNDS, _BRIEF_Q_STATE]
+    out = _BRIEF_CHECK_HEAD + "".join(f"{n}. {q}" for n, q in enumerate(questions, 1))
+    n = len(questions)
+    # The project's questions, then the user's, each list after the label that names its file (Decision 2), numbered on.
+    for source, extra in (("project", _project_brief_questions(payload)), ("user", _user_brief_questions(payload))):
+        label = _provenance_label("brief_questions", source) if extra else None
+        if not label:
+            continue
+        out += label + "\n"
+        for q in extra:
+            n += 1
+            out += f"{n}. {_clean_text(q, _BRIEF_QUESTION_BYTES)}\n"
+    return out
 
 #: GitHub #1656 (2026-11-13): the "Sequential Thinking" section is no longer injected. With it in the hook's
 #: output, subagents were stopped by the API's safety classifier ([reasoning_extraction]); on the reporter's machine
 #: the same prompt went 0 of 11 blocked with it removed (tool absent), against 4 of 8 with it present.
 
 _OPERATORS = (
-    "\n## Analytical operators (RDR-080)\n\n"
+    "\n## Analytical operators\n\n"
     "summarize, extract, rank, compare and generate are plan steps inside "
     "nx_answer,\n"
     "not MCP tools; each wraps claude -p (300s default, ~11s minimum per "
@@ -624,9 +659,8 @@ def run(payload: dict | None) -> HookResult:
     parts.append(_linked_rdrs_section(task_text, env))
 
     parts.append(_RELAY)
-    parts.append(_ORCH)
-    parts.append(_worktree_preflight_row(repo_root, str(data.get("cwd") or ""))
-                 or _worktree_preflight_row("", _process_cwd()))
+    parts.append(_orchestration(data))
+    parts.append(_worktree_preflight_row(data))
 
     skip_storage_docs, skip_operators = _classify(agent_type, task_text)
 
@@ -637,11 +671,11 @@ def run(payload: dict | None) -> HookResult:
         parts.append(_NX_ANSWER)
         parts.append(_NX_AUTOLINK)
         if _PHASE_GATE_TASK_RE.search(task_text):
-            parts.append(_PHASE_GATE)
+            parts.append(_phase_gate(data))
         parts.append(_knowledge_map_section(repo_root))
 
     if _IMPLEMENTER_TYPE_RE.search(agent_type):
-        parts.append(_BRIEF_CHECK)
+        parts.append(_brief_check(data))
 
     if not skip_operators:
         parts.append(_OPERATORS)

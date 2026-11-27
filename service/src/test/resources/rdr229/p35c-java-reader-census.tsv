@@ -142,30 +142,30 @@ service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11774	catalog_
 service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11827	catalog_documents	physical_collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11832	document_aspects	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11837	document_highlights	collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12082	canary_query_ring	collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12110	catalog_document_chunks	collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12524	catalog_collections	name	select	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12593	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12611	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12856	collection_health_meta	collection	where	jooq	not in p31-checks
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12888	catalog_documents	physical_collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13101	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13119	collection_doc_counts	physical_collection	select	jooq	not in p31-checks
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13161	catalog_documents	physical_collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13163	catalog_documents	physical_collection	group_by	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13966	catalog_collections	name	on_conflict	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13969	catalog_collections	name	returning	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13970	catalog_collections	name	result	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14002	catalog_collections	name	select	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14004	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14005	catalog_collections	name	result	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14061	catalog_collections	name	on_conflict	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14064	catalog_collections	name	returning	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14065	catalog_collections	name	result	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14735	catalog_documents	physical_collection	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	15108	gc_audit	collection	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	15109	gc_audit	collection	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/CatalogRepository.java	15111	gc_audit	collection	select	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12087	canary_query_ring	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12115	catalog_document_chunks	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12529	catalog_collections	name	select	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12598	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12616	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12861	collection_health_meta	collection	where	jooq	not in p31-checks
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12893	catalog_documents	physical_collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13106	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13124	collection_doc_counts	physical_collection	select	jooq	not in p31-checks
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13166	catalog_documents	physical_collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13168	catalog_documents	physical_collection	group_by	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13971	catalog_collections	name	on_conflict	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13974	catalog_collections	name	returning	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13975	catalog_collections	name	result	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14007	catalog_collections	name	select	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14009	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14010	catalog_collections	name	result	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14066	catalog_collections	name	on_conflict	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14069	catalog_collections	name	returning	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14070	catalog_collections	name	result	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14740	catalog_documents	physical_collection	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	15113	gc_audit	collection	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	15114	gc_audit	collection	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/CatalogRepository.java	15116	gc_audit	collection	select	jooq	-
 service/src/main/java/dev/nexus/service/db/CatalogSensitiveLocatorReads.java	67	catalog_documents	physical_collection	select	alias	-
 service/src/main/java/dev/nexus/service/db/CatalogSensitiveReads.java	75	catalog_documents	physical_collection	select	jooq	-
 service/src/main/java/dev/nexus/service/db/ChashRepository.java	90	chunks	collection	select	sql	-
@@ -183,14 +183,16 @@ service/src/main/java/dev/nexus/service/db/ChashRepository.java	379	catalog_docu
 service/src/main/java/dev/nexus/service/db/ChashRepository.java	384	catalog_document_chunks	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/ChashRepository.java	460	chunks	collection	where	helper	-
 service/src/main/java/dev/nexus/service/db/ChashRepository.java	500	chunks	collection	where	helper	-
-service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	136	reembed_jobs	source_collection	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	137	reembed_jobs	target_collection	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	142	reembed_jobs	source_collection	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	142	reembed_jobs	target_collection	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	144	reembed_jobs	source_collection	select	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	144	reembed_jobs	target_collection	select	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	177	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	225	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	144	reembed_jobs	source_collection	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	145	reembed_jobs	target_collection	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	150	reembed_jobs	source_collection	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	150	reembed_jobs	target_collection	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	152	reembed_jobs	source_collection	select	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	152	reembed_jobs	target_collection	select	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	185	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	235	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	241	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionDeleteFence.java	242	catalog_collections	superseded_by	where	jooq	-
 service/src/main/java/dev/nexus/service/db/CollectionDeletes.java	86	catalog_collections	name	where	jooq	-
 service/src/main/java/dev/nexus/service/db/CollectionIdLookup.java	40	catalog_collections	name	select	jooq	-
 service/src/main/java/dev/nexus/service/db/CollectionIdLookup.java	42	catalog_collections	name	where	jooq	-
@@ -416,28 +418,29 @@ service/src/main/java/dev/nexus/service/db/PipelineRepository.java	230	pdf_pipel
 service/src/main/java/dev/nexus/service/db/PipelineRepository.java	832	pdf_pipeline	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/PipelineRepository.java	833	pdf_pipeline	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	81	chunks	metadata.origin_collection	accessor_def	metadata_key	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	93	chunks	metadata.origin_collection	expr	bound	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	98	chunks	metadata.origin_collection	expr	bound	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	252	catalog_collections	name	select	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	252	chunks	collection	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	254	catalog_collections	name	expr	alias	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	255	catalog_collections	name	expr	alias	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	257	catalog_collections	superseded_by	expr	alias	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	263	catalog_collections	name	expr	alias	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	273	catalog_collections	name	select	alias	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	273	chunks	collection	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	274	chunks	metadata.origin_collection	expr	bound	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	95	chunks	metadata.origin_collection	expr	bound	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	100	chunks	metadata.origin_collection	expr	bound	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	254	catalog_collections	name	select	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	254	chunks	collection	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	256	catalog_collections	name	expr	alias	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	257	catalog_collections	name	expr	alias	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	259	catalog_collections	superseded_by	expr	alias	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	265	catalog_collections	name	expr	alias	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	275	catalog_collections	name	select	alias	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	275	chunks	collection	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	295	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	296	catalog_collections	superseded_by	where	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	334	chunks	collection	order_by	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	334	chunks	collection	select	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	339	catalog_collections	name	select	alias	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	366	chunks	collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	408	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	429	chunks	collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	430	chunks	metadata.origin_collection	where	bound	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	454	chunks	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	276	chunks	metadata.origin_collection	expr	bound	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	277	chunks	collection	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	297	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	298	catalog_collections	superseded_by	where	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	336	chunks	collection	order_by	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	336	chunks	collection	select	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	341	catalog_collections	name	select	alias	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	368	chunks	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	411	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	432	chunks	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	433	chunks	metadata.origin_collection	where	bound	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	469	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	488	chunks	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/ReembedJobHold.java	36	reembed_jobs	source_collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/ReembedJobHold.java	37	reembed_jobs	target_collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/ReembedJobHold.java	54	catalog_collections	superseded_by	where	alias	-
@@ -477,11 +480,11 @@ service/src/main/java/dev/nexus/service/db/ReembedSourceReader.java	412	catalog_
 service/src/main/java/dev/nexus/service/db/ReembedSourceReader.java	418	document_aspects	collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/ReembedSourceReader.java	420	document_highlights	collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/ReembedSourceReader.java	443	chunks	collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/RegistryRowLocks.java	49	catalog_collections	name	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/RegistryRowLocks.java	50	catalog_collections	name	select	jooq	-
-service/src/main/java/dev/nexus/service/db/RegistryRowLocks.java	52	catalog_collections	superseded_by	select	jooq	-
-service/src/main/java/dev/nexus/service/db/RegistryRowLocks.java	61	catalog_collections	superseded_by	result	jooq	-
-service/src/main/java/dev/nexus/service/db/RegistryRowLocks.java	62	catalog_collections	name	result	jooq	-
+service/src/main/java/dev/nexus/service/db/RegistryRowLocks.java	63	catalog_collections	name	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/RegistryRowLocks.java	64	catalog_collections	name	select	jooq	-
+service/src/main/java/dev/nexus/service/db/RegistryRowLocks.java	66	catalog_collections	superseded_by	select	jooq	-
+service/src/main/java/dev/nexus/service/db/RegistryRowLocks.java	75	catalog_collections	superseded_by	result	jooq	-
+service/src/main/java/dev/nexus/service/db/RegistryRowLocks.java	76	catalog_collections	name	result	jooq	-
 service/src/main/java/dev/nexus/service/db/RemapRepository.java	92	chash_remap	source_collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/RemapRepository.java	96	chash_remap	target_collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/RemapRepository.java	250	chash_remap	source_collection	where	jooq	-
@@ -495,18 +498,18 @@ service/src/main/java/dev/nexus/service/db/RemapRepository.java	351	catalog_coll
 service/src/main/java/dev/nexus/service/db/RenameGuard.java	233	catalog_collections	name	select	jooq	-
 service/src/main/java/dev/nexus/service/db/RenameGuard.java	236	catalog_collections	name	where	jooq	-
 service/src/main/java/dev/nexus/service/db/RenameGuard.java	238	catalog_collections	name	result	jooq	-
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	390	?	metadata.origin_collection	accessor_def	metadata_key	the jsonb column is not bound to a table in this file
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	391	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	395	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	424	?	metadata.origin_collection	accessor_def	metadata_key	the jsonb column is not bound to a table in this file
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	425	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	429	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	470	catalog_collections	name	select	alias	-
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	491	?	superseded_by	expr	literal	0 candidate tables in the statement
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	561	catalog_collections	superseded_by	where	alias	-
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	567	catalog_collections	name	where	alias	-
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	567	catalog_collections	superseded_by	where	alias	-
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	392	?	metadata.origin_collection	accessor_def	metadata_key	the jsonb column is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	393	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	397	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	426	?	metadata.origin_collection	accessor_def	metadata_key	the jsonb column is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	427	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	431	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	472	catalog_collections	name	select	alias	-
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	493	?	superseded_by	expr	literal	0 candidate tables in the statement
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	563	catalog_collections	superseded_by	where	alias	-
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	569	catalog_collections	name	where	alias	-
 service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	569	catalog_collections	superseded_by	where	alias	-
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	571	catalog_collections	superseded_by	where	alias	-
 service/src/main/java/dev/nexus/service/db/TaxonomyAnalytics.java	35	topic_assignments	source_collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/TaxonomyAnalytics.java	114	topic_assignments	source_collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/TaxonomyAnalytics.java	119	topics	collection	select	jooq	-

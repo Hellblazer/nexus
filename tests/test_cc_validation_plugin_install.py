@@ -49,8 +49,9 @@ RUNNER = CCV / "runner.sh"
 CENSUS = {"12", "13", "14", "18", "32", "34"}
 #: Scenarios in tests/cc-validation/scenarios when the census was taken (31 since nexus-xhisb added
 #: 33, which installs nothing: its sn hook is wired from settings.json, as 29's is; 32 since
-#: nexus-kqqxt added 34, which installs sn through cc_plugin_require).
-SCENARIO_COUNT = 32
+#: nexus-kqqxt added 34, which installs sn through cc_plugin_require; 33 since nexus-sby49.15 added 35,
+#: which installs nothing: its hook is wired from settings.json and its server is the stub).
+SCENARIO_COUNT = 33
 
 #: What marks a scenario as plugin-dependent: it installs one through the helper,
 #: or carries any of the hand-written install's markers.

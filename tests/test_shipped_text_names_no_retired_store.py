@@ -41,7 +41,7 @@ _HISTORY: dict[tuple[str, str], str] = {
     ("conexus/skills/upgrade/SKILL.md", "a ChromaDB Cloud key with no mode record"): (
         "names a pre-PG config shape a user may still hold"
     ),
-    ("conexus/skills/nexus/reference.md", "SQLite is retired (RDR-158 P4)"): "says SQLite is retired",
+    ("conexus/skills/nexus/reference.md", "SQLite is retired"): "says SQLite is retired",
     ("conexus/skills/nexus/reference.md", "ChromaDB is not a live substrate in any mode"): "says ChromaDB is gone",
     ("mcp:daemon_uninstall", "any relic Chroma directory from a pre-PG"): (
         "the uninstaller removes a pre-PG leftover directory; naming it says what is deleted"

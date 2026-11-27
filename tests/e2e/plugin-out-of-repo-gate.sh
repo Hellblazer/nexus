@@ -4,7 +4,7 @@
 # user does: from a project that is NOT a nexus checkout (nexus-z7ddd).
 #
 #   tests/e2e/plugin-out-of-repo-gate.sh [--plugin DIR | --all | --installed X.Y.Z]
-#                                        [--static-only | --sweep] [--no-canary]
+#                                        [--static-only | --sweep] [--no-canary] [--no-behaviour]
 #                                        [--allowlist FILE] [--only <name>[,<name>...]]
 #                                        [--jobs N] [--model M] [--timeout SECONDS]
 #                                        [--out DIR] [--keep]
@@ -25,6 +25,7 @@
 #   --sweep            add the live sweep: one claude run per agent and skill
 #                      (opt-in, ADVISORY; --only implies it and skips the canary)
 #   --no-canary        skip the canary (the sweep alone, for an investigation)
+#   --no-behaviour     skip the behaviour pass (below); an investigation only, never a release run
 #   --clean-residue    list, then remove, the project directories earlier runs of this gate left under
 #                      ~/.claude/projects (see Isolation); runs nothing else
 #   --allowlist FILE   reference allowlist (default: plugin-out-of-repo-allowlist.txt
@@ -48,6 +49,15 @@
 #      what Claude Code substitutes). REPO-ONLY, RELATIVE-DEAD, MISSING, OUTSIDE
 #      and UNSUBSTITUTED fail unless the allowlist carries the reference with a
 #      written reason; a stale allowlist entry fails too.
+#   1b. BEHAVIOUR (conexus only, deterministic, needs uv and no claude: it runs in --static-only too). The static
+#      pass reads the plugin's markdown; this runs its hooks (tests/e2e/lib/plugin_behaviour.py, nexus-sby49.3). It
+#      drives every hooks.json registration's real argv under payloads of the shape Claude Code sends, in a scratch
+#      user repository, a marked nexus repository and a flagged account, with no nx on PATH (P0: the nx entries must
+#      exit 0 and print nothing) and with the checkout's nx (P2; --installed uses the installed tool's). A user's
+#      output must carry no internal name and no deny outside D1's list; the maintainer's constants must appear in
+#      the marked and flagged fixtures and never in a user's. The plugin's own hooks/audience.yaml says which is
+#      which, and tests/e2e/plugin-behaviour-allowlist.txt holds the Phase 3 rows still to do. A conexus plugin with
+#      no audience.yaml is UNVERIFIED, never a pass.
 #   2. CANARY. The static classes rest on beliefs about Claude Code (the variable
 #      is substituted in an agent, a skill and a command but NOT in a file the
 #      model Reads; the unbraced form never is; a skill's relative link resolves
@@ -123,6 +133,8 @@ INSTALLED_VERSION=""
 STATIC_ONLY=0
 SWEEP=0
 NO_CANARY=0
+NO_BEHAVIOUR=0
+BEHAVIOUR_NX="checkout"   # checkout | installed: which CLI the P2 posture runs (the parent sets installed under --installed)
 ONLY=""
 JOBS="${NX_GATE_JOBS:-4}"
 MODEL="${NX_GATE_MODEL:-sonnet}"
@@ -146,6 +158,8 @@ while [ $# -gt 0 ]; do
         --static-only) STATIC_ONLY=1; shift ;;
         --sweep) SWEEP=1; shift ;;
         --no-canary) NO_CANARY=1; shift ;;
+        --no-behaviour) NO_BEHAVIOUR=1; shift ;;
+        --behaviour-nx) [ $# -ge 2 ] || usage; BEHAVIOUR_NX="$2"; shift 2 ;;
         --only) [ $# -ge 2 ] || usage; ONLY="$2"; shift 2 ;;
         --jobs) [ $# -ge 2 ] || usage; JOBS="$2"; shift 2 ;;
         --model) [ $# -ge 2 ] || usage; MODEL="$2"; shift 2 ;;
@@ -176,6 +190,7 @@ fi
 e2e_python_resolve 10 || exit 2
 PYMOD="$HERE/lib/plugin_out_of_repo.py"
 CANARY="$HERE/lib/plugin_canary.py"
+BEHAVIOUR="$HERE/lib/plugin_behaviour.py"
 GATE_CLAUDE="${NX_GATE_CLAUDE:-claude}"
 
 # ---------------------------------------------------------------------------
@@ -463,6 +478,8 @@ if [ -n "$MULTI" ]; then
         mkdir -p "$logdir"
         child=(bash "$HERE/plugin-out-of-repo-gate.sh" --plugin "$dir" --jobs "$JOBS" --model "$MODEL" --timeout "$TIMEOUT" --no-canary)
         [ "$STATIC_ONLY" -eq 0 ] || child+=(--static-only)
+        [ "$NO_BEHAVIOUR" -eq 0 ] || child+=(--no-behaviour)
+        [ "$MULTI" != installed ] || child+=(--behaviour-nx installed)
         [ "$SWEEP" -eq 0 ] || child+=(--sweep)
         [ -z "$ALLOWLIST" ] || child+=(--allowlist "$ALLOWLIST")
         [ -z "$OUT" ] || child+=(--out "$logdir")
@@ -553,6 +570,21 @@ CALLS=0
 
 echo "== static pass =="
 "$E2E_PYTHON" -I "$PYMOD" static --plugin "$PLUGIN" ${ALLOWLIST:+--allowlist "$ALLOWLIST"} || FAILED=1
+
+# The behaviour pass: conexus's hooks, run (see the header). It needs uv and PyYAML (the project interpreter), not claude.
+BEHAVIOUR_NOTE=""
+PLUGIN_NAME=""
+IFS=$'\t' read -r PLUGIN_NAME _ < <("$E2E_PYTHON" -I "$PYMOD" meta --plugin "$PLUGIN")
+if [ "$NO_BEHAVIOUR" -eq 0 ] && [ "${PLUGIN_NAME:-}" = conexus ] && [ -f "$PLUGIN/hooks/hooks.json" ]; then
+    echo
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "behaviour pass UNVERIFIED: uv is not on PATH"
+        UNVERIFIED=1
+    else
+        uv run --project "$REPO_ROOT" python "$BEHAVIOUR" run --plugin "$PLUGIN" --nx "$BEHAVIOUR_NX" --jobs "$JOBS"
+        case $? in 0) BEHAVIOUR_NOTE=" + behaviour" ;; 2) UNVERIFIED=1 ;; *) FAILED=1 ;; esac
+    fi
+fi
 
 if [ "$DO_CANARY" -eq 1 ] || [ "$DO_SWEEP" -eq 1 ]; then
     META_VER="$("$E2E_PYTHON" -I "$PYMOD" meta --plugin "$PLUGIN" | cut -f2)"
@@ -647,7 +679,7 @@ if [ "$FAILED" -ne 0 ]; then
     exit 1
 fi
 if [ "$UNVERIFIED" -ne 0 ]; then
-    echo "PLUGIN OUT-OF-REPO GATE UNVERIFIED -- the canary or sweep produced no evidence; $PLUGIN, $CALLS claude call(s), ${WALL}s"
+    echo "PLUGIN OUT-OF-REPO GATE UNVERIFIED -- the canary, sweep or behaviour pass produced no evidence; $PLUGIN, $CALLS claude call(s), ${WALL}s"
     exit 2
 fi
 if [ "$KIND" != APPLICABLE ]; then
@@ -655,12 +687,12 @@ if [ "$KIND" != APPLICABLE ]; then
     exit 0
 fi
 if [ "$STATIC_ONLY" -eq 1 ]; then
-    echo "PLUGIN OUT-OF-REPO GATE PASSED (static pass only) -- $PLUGIN, ${WALL}s"
+    echo "PLUGIN OUT-OF-REPO GATE PASSED (static pass${BEHAVIOUR_NOTE} only) -- $PLUGIN, ${WALL}s"
 elif [ "$DO_SWEEP" -eq 1 ]; then
-    echo "PLUGIN OUT-OF-REPO GATE PASSED (static${CANARY_NOTE} + sweep, advisory) -- $PLUGIN, $CALLS claude call(s), ${WALL}s"
+    echo "PLUGIN OUT-OF-REPO GATE PASSED (static${BEHAVIOUR_NOTE}${CANARY_NOTE} + sweep, advisory) -- $PLUGIN, $CALLS claude call(s), ${WALL}s"
 elif [ -n "$LIVE_NA" ]; then
-    echo "PLUGIN OUT-OF-REPO GATE PASSED (static${CANARY_NOTE}; sweep not applicable: $LIVE_NA) -- $PLUGIN, $CALLS claude call(s), ${WALL}s"
+    echo "PLUGIN OUT-OF-REPO GATE PASSED (static${BEHAVIOUR_NOTE}${CANARY_NOTE}; sweep not applicable: $LIVE_NA) -- $PLUGIN, $CALLS claude call(s), ${WALL}s"
 else
-    echo "PLUGIN OUT-OF-REPO GATE PASSED (static${CANARY_NOTE:- only}) -- $PLUGIN, $CALLS claude call(s), ${WALL}s"
+    echo "PLUGIN OUT-OF-REPO GATE PASSED (static${BEHAVIOUR_NOTE}${CANARY_NOTE:- only}) -- $PLUGIN, $CALLS claude call(s), ${WALL}s"
 fi
 exit 0

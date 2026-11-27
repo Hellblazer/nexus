@@ -42,13 +42,12 @@ write verb. "I could not tell whether this tree is shared" is not a good enough
 reason to permit silent, unrecoverable loss of the orchestrator's uncommitted
 work. The ``# routing-allow:`` escape remains.
 
-Audience (nexus-sby49): everything above and below is the MAINTAINER's rule,
-the full structure-agnostic form. It applies when ``_audience.maintainer`` is
-true: the account flag file exists, or the payload's checkout carries the nexus
-marker. For anyone else ``_user_git_seatbelt`` denies a short list of
-irrecoverable forms and allows the rest (commit, add, push, rebase, merge...).
-A predicate error or a missing helper answers "maintainer", so a broken helper
-restores this full rule.
+Mode: everything above and below is the STRICT form of the rule, the full structure-agnostic
+one. It runs when the project's tracked settings or the user's own settings say
+``subagent_git`` is ``strict`` (``_audience.guard_mode``). Otherwise ``_user_git_seatbelt``, the
+default, denies a short list of irrecoverable forms and allows the rest (commit, add, push,
+rebase, merge...). A read error or a missing helper answers strict, so a broken helper restores
+this full rule.
 
 nexus-3c92m (2026-08-20), corrected root cause: the FIRST hypothesis here
 (that the incident guard was simply an older pinned plugin release predating
@@ -594,6 +593,27 @@ expansion denies, so ``git fetch origin "$BRANCH"`` and ``git fetch origin $(git
 rev-parse --abbrev-ref HEAD)`` are false denials in the shared tree, taken on
 purpose because the text cannot show whether the expansion is a refspec.
 
+nexus-5y47c (2026-11-25, Sam's ruling): the rule above lifted its freeze for six fixes, after 2,199 denials in
+three weeks of which 97% were not the harm it exists for. Everything above still
+decides; ``_git_admit`` (its own module, read its docstring first) only ADDS a pass,
+after the rule above has denied, through ``_admission``. It lexes the command strictly
+(a heredoc, a backtick, a comment, a brace, a backslash outside double quotes, a
+redirect to a file from ``echo``/``printf`` and any word it cannot read leave the
+command to the rule above), then judges each segment: a read-only git shape or a text
+command (``grep``, ``cat``, ``echo``, ``ls``...) may spell a verb word in its
+arguments; ``git fetch`` without a refspec destination passes; a write aimed at a
+linked worktree git proves (``git -C <root> ...``, or ``cd <root> &&`` before a bare
+git command) passes through the flag allowlist ``DASH_C_FLAGS``; ``push [-u] origin
+HEAD`` passes for the branch that worktree has checked out; ``worktree add --detach``
+outside every repository and a scratch repository the same command creates pass; any
+other segment must be clean by THIS rule on its own text (``_legacy_denies``). The
+config and side-effect rules still run on every admitted git segment. An interpreter
+anywhere in the command, text that reaches a command through a pipe or a file, a
+``git config`` segment and a variable that carries verb text keep the command with
+this rule. The adjacency rule stays authoritative. The 30 entries of the old deny
+catalogue this loosens are named in ``tests/test_routing_subagent_git_admit.py``
+(``CATALOGUE_NOW_ADMITTED``); every other family still denies in full.
+
 ``run_hook(fail_closed=False)`` is unchanged: a crash in the hook ITSELF
 still allows, since a broken guard must not brick every agent's Bash.
 """
@@ -621,33 +641,39 @@ _interpreter.reexec_if_needed()
 sys.path.insert(0, os.path.dirname(__file__))
 import _lib  # noqa: E402
 
-# nexus-sby49 audience gate. The predicate answers True on any error, and so does
-# this fallback: a broken or missing helper restores the full guard below, never a
-# wider permission. The user-mode seatbelt is a separate module; when it cannot be
-# imported the full guard runs for everyone.
+# The guard's mode is a setting: the seatbelt (a short deny list) unless the project's tracked
+# settings or the user's own settings say ``strict``. The reader answers strict on any error, and so does
+# this fallback: a broken or missing helper restores the full guard below, never a wider permission. The
+# seatbelt is a separate module; when it cannot be imported the full guard runs for everyone.
 try:
     from _audience import (
-        maintainer as _maintainer,
-        note_marker_only as _note_marker_only,
+        forced_strict_clause as _forced_strict_clause,
+        guard_mode as _guard_mode,
         remote_test_hosts as _remote_hosts_reader,
         note_hook_error as _note_hook_error,
     )
 except BaseException:  # noqa: BLE001
-    def _maintainer(payload: object) -> bool:
-        return True
+    def _guard_mode(payload: object, head: bool = False) -> str:
+        return "strict"
+
+    def _forced_strict_clause(payload: object, head: bool = False) -> "str | None":
+        return None
 
     def _remote_hosts_reader() -> frozenset[str]:  # loosening: no helper, no exempt host
         return frozenset()
 
     def _note_hook_error(payload: object, what: str) -> None:
         return None
-
-    def _note_marker_only(payload: object) -> None:
-        return None
 try:
     import _user_git_seatbelt
 except BaseException:  # noqa: BLE001
     _user_git_seatbelt = None
+# nexus-5y47c: the admission half (segment-level passes). A missing or broken module
+# admits nothing, which leaves every verdict as the guard below gave it.
+try:
+    import _git_admit
+except BaseException:  # noqa: BLE001
+    _git_admit = None
 
 RULE_NAME = "subagent_git_write_requires_orchestrator"
 
@@ -696,7 +722,7 @@ _VERB_ALT_TAIL = (
     r"branch\s+-[dDm]|"
     r"tag\s+-d|"
     r"update-ref|symbolic-ref|filter-branch|"
-    r"reflog\s+expire|gc|prune"
+    r"reflog\s+(?:expire|delete)|gc|prune"
 )
 
 #: nexus-3c92m round 5 (code-review CRITICAL, round-4 re-review): the
@@ -4084,35 +4110,27 @@ def _current_branch(cwd: str) -> str | None:
 
 def _deny_message(agent_type: str, verb_names: str, *,
                   undeterminable: bool = False, in_worktree: bool = False,
-                  sidefx: bool = False) -> str:
-    who = f"you are subagent `{agent_type or 'unknown'}`"
+                  sidefx: bool = False, forced_clause: "str | None" = None) -> str:
     head = (
-        f"Working in your session's linked worktree from the primary cwd? One "
-        f"literal command per call passes: `git -C <absolute worktree root> "
-        f"<verb> ...` with verb add, commit, rm, mv, switch -c, "
-        f"reset (--soft/--mixed), rebase, cherry-pick, revert, merge or branch "
-        f"<new>; every flag spelled out in full and separately (no `-am`, no "
-        f"abbreviations); nothing chained or redirected; any word holding "
-        f"`~ ^ {{ }} ( ) % $ #` or spaces inside single quotes (`'HEAD~1'`); and "
-        f"a commit message that names a git verb goes through `-F <file>`. "
-        f"Discarding changes (reset --hard, restore, checkout), --abort/--skip, "
-        f"stash, tag and branch deletion are never admitted that way: hand those back.\n"
-        f"Subagents never run git write verbs ({verb_names}) in the shared "
-        f"tree ({who}); that includes `gh`/`hub` commands that move HEAD or "
-        f"rewrite the working tree (gh pr checkout, gh repo sync). This guard is intentionally STRUCTURE-AGNOSTIC "
-        f"(nexus-3c92m round 4, after three rounds of a structural parser "
-        f"growing a new bypass every round): it denies whenever `git` "
-        f"appears near a write verb ANYWHERE in the raw command text, "
-        f"regardless of shell structure — heredocs, pipes, substitutions, "
-        f"line-continuations, quoting, and comments create no exemption. "
-        f"A false positive here just costs a rephrase or a hand-back; a "
-        f"false negative destroys uncommitted work outright (this bead's "
-        f"own origin: a reviewer's `git checkout -- <file>` silently wiped "
-        f"three uncommitted production fixes)."
+        f"Denied: subagent `{agent_type or 'unknown'}` may not run git write verbs ({verb_names}) "
+        f"in the shared tree. The guard reads the raw command text, not the command's shape: a "
+        f"verb word that an interpreter, a pipe, a file or a variable could run denies; rephrase.\n"
+        f"Allowed shape, in a linked worktree you were given: `git -C <absolute worktree root> "
+        f"<verb> ...`, or `cd <worktree root> && git <verb> ...` (a `cd <wt>` counts only before "
+        f"`&&`), calls chained with `&&`; verb add, commit, rm, mv, switch -c, reset "
+        f"(--soft/--mixed), rebase, cherry-pick, revert, merge or branch <new>; flags spelled "
+        f"out (no `-am`), `'HEAD~1'` quoted; a commit message that names a git verb goes "
+        f"through `-F <file>`. Also open: read-only git, `git fetch`, `git push [-u] origin "
+        f"HEAD` of that worktree's own branch. Or dispatch with isolation: worktree.\n"
+        f"Not from a subagent: checkout, stash, restore, reset --hard, clean, or any write in "
+        f"the primary checkout (`gh pr checkout` and `gh repo sync` too). "
+        f"Ask the orchestrator (the session that dispatched you): hand back diffs and paths (a background agent does that via SubagentHandback or "
+        f"SendMessage before idling; a foreground agent's final message is the hand-back) and "
+        f"it commits."
     )
     if "config" in verb_names.split(", "):
         head += (
-            "\n`git config` writes are denied (nexus-dsr6a): `core.hooksPath` "
+            "\n`git config` writes are denied: `core.hooksPath` "
             "redirects the hooks that run on the orchestrator's later commits, "
             "and `user.*` rewrites authorship, in this tree and, with "
             "--global/--system, in every repository on the box. Reads stay "
@@ -4146,8 +4164,8 @@ def _deny_message(agent_type: str, verb_names: str, *,
             )
     if sidefx:
         head += (
-            "\nVerbs that write `.git/config` by side effect are denied "
-            "(nexus-k66o5): `git remote add|remove|rm|rename|set-url|set-head|"
+            "\nVerbs that write `.git/config` by side effect are denied: "
+            "`git remote add|remove|rm|rename|set-url|set-head|"
             "set-branches|prune`, `git branch -u|--set-upstream-to|"
             "--unset-upstream|-t|--track`, `git push|fetch|pull -u|"
             "--set-upstream` (shared tree only), `git checkout|switch -t|--track`, `git submodule "
@@ -4201,35 +4219,15 @@ def _deny_message(agent_type: str, verb_names: str, *,
             "licence to proceed."
         )
     head += (
-        "\nNeed to compare working-tree content against a committed ref "
-        "instead of resetting to it? Falsify by comparison, never by "
-        "mutation: `git show HEAD:<path> > /private/tmp/<scratch>/<name>` "
-        "then `diff /private/tmp/<scratch>/<name> <path>`."
+        "\nTo compare a file with a committed ref, `git show HEAD:<path> > <scratch>/<name>` "
+        "then `diff <scratch>/<name> <path>`."
     )
+    if forced_clause:
+        head += "\nNote: " + forced_clause.rstrip(".") + "."
     return (
         f"{head}\n"
-        f"Hand back your changes as diffs + file paths -- a background "
-        f"dispatch does that via SubagentHandback or SendMessage before idling; a foreground "
-        f"one's final message IS the hand-back, no separate report call "
-        f"needed -- so the ORCHESTRATOR commits, pathspec-limited "
-        f"(RDR-184 Gap-4, feedback_orchestration_friction).\n"
-        f"Rephrase without the literal git verb, or hand the edit back to "
-        f"the orchestrator to run.\n"
-        f"Read-only git (status/diff/log/show/blame/rev-parse/ls-files) "
-        f"stays allowed as long as the command text doesn't ALSO contain a "
-        f"write-verb word near `git` (e.g. in a `--grep` pattern or a "
-        f"comment) — that is an accepted false-positive cost of this design, "
-        f"not a bug.\n"
-        f"Worktree-isolated agents are exempt automatically when this guard "
-        f"can POSITIVELY PROVE a linked worktree (a linked worktree is "
-        f"yours to destroy); an undeterminable worktree state does not "
-        f"qualify. The cwd of the tool call decides that, and a `cd <wt>` "
-        f"inside the command does not count; the one exception is the literal "
-        f"`git -C <absolute worktree path>` shape described at the top. Or "
-        f"dispatch with isolation: worktree.\n"
-        f"An escape (`# routing-allow: <reason>`) exists for this "
-        f"guard, but only on the user's explicit instruction to use "
-        f"it -- it is not yours to reach for."
+        f"A `# routing-allow: <reason>` escape exists only on the user's explicit "
+        f"instruction; it is not yours to reach for."
     )
 
 
@@ -4250,7 +4248,7 @@ def _spliced_expansion_deny_message(agent_type: str, detail: str, *,
             f"`worktree remove`, `cherry-pick`, ...) that no finite word "
             f"list can fully enumerate, which is why this denies on the "
             f"GLUE ALONE once `git` is present, rather than trying to "
-            f"guess what the splice spells (nexus-3c92m round 8)."
+            f"guess what the splice spells."
         )
     else:
         head = (
@@ -4258,7 +4256,7 @@ def _spliced_expansion_deny_message(agent_type: str, detail: str, *,
             f"command or hand the edit to the orchestrator ({who}). The "
             f"letters immediately touching an expansion in this command "
             f"(`{detail}`) reconstruct `git` if the expansion resolves the "
-            f"way it looks like it's meant to (nexus-3c92m round 8)."
+            f"way it looks like it's meant to."
         )
     head += (
         f"\nOrdinary interpolation stays allowed: `file${{i}}.txt`, "
@@ -4594,8 +4592,69 @@ def _scan_command(
     return spliced_fragment, primary_match, relaxed, view
 
 
+def _legacy_denies(text: str) -> bool:
+    """True when the guard above, run on *text* alone, would deny it (the adjacency
+    rule or the primary rule). The admission module (``_git_admit``) asks this of
+    every segment it does not recognise, so such a segment passes only when it is
+    clean by the unchanged rule."""
+    spliced, primary, _relaxed, _view = _scan_command(text, _normalize_for_primary_scan(text))
+    return bool(spliced) or primary is not None
+
+
+def _has_verb_word(text: str) -> bool:
+    return _VERB_RE.search(_normalize_for_primary_scan(text)) is not None
+
+
+def _has_git_word(text: str) -> bool:
+    return _first_git_command(_normalize_for_primary_scan(text)) is not None
+
+
+def _admission(command: str, cwd: str = "") -> Any:
+    """The admission module's verdict for *command* (nexus-5y47c), after the config
+    and side-effect rules have run on every git segment it admitted; None when
+    nothing is admitted. Each segment is judged as a worktree command exactly when
+    the module proved its target a linked worktree root."""
+    if _git_admit is None:
+        return None
+    try:
+        return _admission_unguarded(command, cwd)
+    except Exception:  # noqa: BLE001 -- run_hook(fail_closed=False) would ALLOW on a crash; an admission bug must deny
+        return None
+
+
+def _admission_unguarded(command: str, cwd: str) -> Any:
+    proven: dict[str, bool] = {}
+
+    def is_wt_root(path: str) -> bool:
+        if path not in proven:
+            proven[path] = _is_linked_worktree_root(path)
+        return proven[path]
+
+    adm = _git_admit.analyze(
+        command,
+        _git_admit.Hooks(
+            legacy_denies=_legacy_denies, is_wt_root=is_wt_root, branch_of=_current_branch,
+            safe_config_key=_config_worktree_key, has_verb_word=_has_verb_word,
+            has_git_word=_has_git_word, cwd=cwd,
+        ),
+    )
+    if adm is None:
+        return None
+    for chk in adm.checks:
+        normalized = _normalize_for_primary_scan(chk.text)
+        _spliced, _primary, _relaxed, view = _scan_command(chk.text, normalized)
+        root = chk.root
+        hit = _config_hit(normalized, view, worktree=chk.worktree) or _sidefx_hit(
+            normalized, view, worktree=chk.worktree,
+            branch_of=functools.cache(lambda root=root: _current_branch(root)) if root else _no_branch,
+        )
+        if hit is not None:
+            return None
+    return adm
+
+
 def _user_mode(payload: dict[str, Any], command: str) -> None:
-    """The seatbelt for a repository that is not nexus; always exits.
+    """The seatbelt, the guard's default mode: it denies, or returns when it has nothing to deny.
 
     Text-only forms deny in any cwd; git-state forms deny only when the checkout
     has something to lose. No telemetry is recorded for a user's repository.
@@ -4607,7 +4666,7 @@ def _user_mode(payload: dict[str, Any], command: str) -> None:
         _note_hook_error(payload, f"user-mode seatbelt raised {type(exc).__name__}")
         hit = None
     if hit is None:
-        _lib.pass_through()
+        return
     _lib.deny(
         _user_git_seatbelt.deny_text(hit),
         summary=f"subagent git {hit.label} stopped (cannot be undone).",
@@ -4624,13 +4683,21 @@ def body(payload: dict[str, Any]) -> None:
     if not command:
         _lib.pass_through()
 
-    # Audience gate (nexus-sby49). Everything below is the maintainer's full rule.
-    # Anyone else gets the short seatbelt: it denies or passes and never falls
-    # through, unless the seatbelt module could not be imported.
-    if _maintainer(payload):
-        _note_marker_only(payload)
-    elif _user_git_seatbelt is not None:
-        _user_mode(payload, command)
+    # Everything below is the full rule, run only when the project or the user set ``subagent_git`` to
+    # strict. Otherwise the short seatbelt answers: it denies or passes and never falls through, unless
+    # the seatbelt module could not be imported.
+    if _guard_mode(payload) != "strict" and _user_git_seatbelt is not None:
+        _user_mode(payload, command)  # a deny exits; a return means the seatbelt passes the command
+        # RDR-259 Decision 1: the committed project settings file can say strict where the working tree does not. Ask
+        # HEAD only when the answer can change: the strict scan would deny this command. Any other call (nearly all of
+        # them) never starts the read, and a repository with no settings file starts no process at all.
+        if _remote_test_host_command(command) is not None:
+            _lib.pass_through()
+        _spliced, _primary, _relaxed, _view = _scan_command(command, _normalize_for_primary_scan(command))
+        if not _spliced and _primary is None:
+            _lib.pass_through()
+        if _guard_mode(payload, head=True) != "strict":
+            _lib.pass_through()
 
     # The chas carve-out (nexus-yc7fs): one ssh command whose git runs on the
     # test host. Checked before both gates because neither can tell a remote
@@ -4665,6 +4732,18 @@ def body(payload: dict[str, Any]) -> None:
         if dash_c_hit is None:
             _lib.log_routing_event(
                 rule=RULE_NAME, outcome="allow_dash_c_worktree", tool_name="Bash",
+                command_fragment=command,
+            )
+            _lib.pass_through()
+
+    # Segment-level admission (nexus-5y47c): a command whose every segment is a
+    # read-only shape, a text command, a plain fetch, or an allowlisted write aimed
+    # at a worktree git proves. It never overrides the adjacency rule.
+    if not spliced_fragment:
+        admitted = _admission(command, str(payload.get("cwd") or "") or os.environ.get("CLAUDE_PROJECT_DIR", ""))
+        if admitted is not None:
+            _lib.log_routing_event(
+                rule=RULE_NAME, outcome=f"allow_admit_{admitted.kind}", tool_name="Bash",
                 command_fragment=command,
             )
             _lib.pass_through()
@@ -4729,7 +4808,7 @@ def body(payload: dict[str, Any]) -> None:
             summary=(
                 f"subagent Bash command denied: an expansion "
                 f"({'glued to a word char, git present' if git_present else 'reconstructs ' + spliced_fragment}) "
-                f"(nexus-3c92m round 8 adjacency rule)."
+                f"."
             ),
         )
         return
@@ -4759,10 +4838,11 @@ def body(payload: dict[str, Any]) -> None:
         _deny_message(
             agent_type, verb_names, undeterminable=worktree is None,
             in_worktree=wt_config, sidefx=sidefx,
+            forced_clause=_forced_strict_clause(payload, head=True),
         ),
         summary=(
             f"subagent git write verb ({verb_names}) blocked in the shared "
-            f"tree by the structure-agnostic guard (nexus-3c92m round 4)."
+            f"tree by the structure-agnostic guard."
         ),
     )
 

@@ -83,5 +83,5 @@ def test_nothing_but_upgrade_reads_the_consent_env() -> None:
 # F28: the remedy names a command that does something.
 def test_the_plan_parity_remedy_drops_the_no_op_flag() -> None:
     src = inspect.getsource(doctor_cmd)
-    assert "nx plan reseed --force" not in src
-    assert "Fix: run `nx plan reseed`." in src
+    assert "nx answer-plan reseed --force" not in src
+    assert "Fix: run `nx answer-plan reseed`." in src

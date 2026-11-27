@@ -10,7 +10,10 @@ package dev.nexus.service.db;
  * has no timeout on a registry row (it waits for a verb's lock, and a statement bound of its route may still end the wait); two of its waits
  * are bounded: the exclusive sweep gate the gc routes take in Java carries the 2 s bound of the SQL functions it stands in for (SQLSTATE
  * 55P03, the sweep gate's own message), and a write that follows a rename gives up after {@code RenameFollow}'s bounded number of follows with
- * this exception ({@link #renamedRepeatedly}): both retryable.
+ * this exception ({@link #renamedRepeatedly}): both retryable. A gc route's read of the registry row is bounded too, by the route's statement
+ * bound or, when the route sets none, by {@code GcCollectionReads}' 25 s: a verb that holds the row past it ends the wait as
+ * {@link #registryRowHeld}, also 503 {@code rename_busy} and retryable (the quarantine, expire and restore-rereferenced routes;
+ * quarantine-restore answers its own {@code quarantine_restore_busy}).
  */
 public final class RenameBusyException extends RuntimeException {
 

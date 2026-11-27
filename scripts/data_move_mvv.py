@@ -318,6 +318,17 @@ def restore(work: Path, orig: Path) -> None:
     subprocess.run(["rsync", "-a", "--delete", f"{orig}/", f"{work}/"], check=True)
 
 
+# The large seeded collections, by the seed's own documents (``nx-seed://<subject>/<n>``): a pre-8.5.6 client names
+# a collection ``knowledge__<subject>__...``, a later one registers it under an engine-minted ``c<id>`` label, so
+# the name says nothing. The control collection is left out either way.
+SEEDED_COLLECTIONS_SQL = (
+    "select distinct r.name from nexus.catalog_collections r "
+    "left join nexus.catalog_documents d on d.tenant_id = r.tenant_id and d.physical_collection = r.name "
+    "where (r.name like 'knowledge\\_\\_bootw-%' and r.name not like '%control%') "
+    "or (d.source_uri like 'nx-seed://bootw-%' and d.source_uri not like 'nx-seed://bootw-control/%') "
+    "order by 1")
+
+
 def sql(eng: Engine, query: str) -> list[list[str]]:
     rows = eng.inst.sql(query)
     if rows is None:
@@ -816,8 +827,7 @@ def scenario_load(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     eng.start("load")
     sql(eng, f"update nexus.data_moves set paused_at = now(), paused_by = 'mvv-load' where label = '{MOVE_LABEL}'")
     moved_at_pause = moved_rows(eng)
-    cols = [r[0] for r in sql(eng, "select name from nexus.catalog_collections where name like 'knowledge\\_\\_bootw-%' "
-                                   "and name not like '%control%' order by 1")]
+    cols = [r[0] for r in sql(eng, SEEDED_COLLECTIONS_SQL)]
     if not cols:
         raise MvvError("no seeded collections to search")
     wait_quiet(eng)
@@ -889,8 +899,7 @@ def scenario_load2(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     first = wait_move(eng, a.move_timeout)
     if not first["completed"]:
         raise MvvError(f"the boot move did not complete: {first}")
-    cols = [r[0] for r in sql(eng, "select name from nexus.catalog_collections where name like 'knowledge\\_\\_bootw-%' "
-                                   "and name not like '%control%' order by 1")]
+    cols = [r[0] for r in sql(eng, SEEDED_COLLECTIONS_SQL)]
     if not cols:
         raise MvvError("no seeded collections to search")
     t_q0 = time.monotonic()
@@ -1021,8 +1030,7 @@ def scenario_sweep(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     if not first["completed"]:
         raise MvvError(f"the boot move did not complete: {first}")
     upd, hot = _leaf_upd(eng)
-    cols = [r[0] for r in sql(eng, "select name from nexus.catalog_collections where name like 'knowledge\\_\\_bootw-%' "
-                                   "and name not like '%control%' order by 1")]
+    cols = [r[0] for r in sql(eng, SEEDED_COLLECTIONS_SQL)]
     if not cols:
         raise MvvError("no seeded collections to search")
     out: dict = {"rate": a.rate, "threads": a.threads, "collections_searched": len(cols), "window_s": a.window_s,
