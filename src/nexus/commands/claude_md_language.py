@@ -2,30 +2,45 @@
 """Language detection for the preamble's CLAUDE.md agent-readiness check (GH #1689).
 
 Split out of :mod:`nexus.commands.command_context` (over its size cap).
+
+Every name matches case-insensitively on word boundaries, so ``python`` and ``typescript`` in a command line still count
+and ``java`` does not match inside ``JavaScript``, nor ``rust`` inside ``rusty``.  Go is the exception, because "go" is
+also an English verb: it matches only on a cue that cannot be the verb.  The cues are ``Golang``, a version (``Go 1.22``),
+``go.mod``, "written in Go" and "a Go service", and a go tool command (``go build|test|mod|vet|run``) inside a code span or
+at a line start, which covers a fence's lines.  "We go run the suite" and "go run through the list" in prose do not match.
 """
 from __future__ import annotations
 
 import re
 
-# Languages a CLAUDE.md names, each as a case-sensitive proper name with word boundaries (GH #1689: the old
-# case-insensitive alternation reported the verb "go" as Go, Java inside JavaScript, Rust inside "rusty").  Go is also an
-# English word, so it needs a stronger cue than its name: a version, "Golang", ``go.mod`` or a go tool command.
+_GO_TOOLS = r"go (?:build|test|mod|vet|run)\b"
+
 LANGUAGE_CUES: list[tuple[str, re.Pattern[str]]] = [
-    (label, re.compile(pattern))
+    (label, re.compile(pattern, 0 if label == "Go" else re.IGNORECASE))
     for label, pattern in [
-        ("Python", r"\bPython\b"),
-        ("Java", r"\bJava\b"),
-        ("Go", r"\bGolang\b|\bGo\s+\d+(?:\.\d+)*\b|\bgo\.mod\b|\bgo (?:build|test|mod|vet|run)\b"),
-        ("Rust", r"\bRust\b|\bCargo\.toml\b"),
-        ("TypeScript", r"\bTypeScript\b"),
-        ("Node.js", r"\bNode\.js\b"),
+        ("Python", r"\bpython\b"),
+        ("Java", r"\bjava\b"),
+        ("JavaScript", r"\bjavascript\b"),
+        (
+            "Go",
+            r"(?i:\bgolang\b)"
+            r"|\bGo\s+\d+(?:\.\d+)*\b"
+            r"|\bgo\.mod\b"
+            r"|\b(?:written|implemented|built|coded)\s+(?:in|with)\s+Go\b"
+            r"|\b(?i:a)\s+Go\s+(?:service|module|project|codebase|binary|package|library|program)\b"
+            rf"|(?m:^[ \t]*(?:[-*>$][ \t]+)?{_GO_TOOLS})"
+            rf"|`[^`\n]*\b{_GO_TOOLS}[^`\n]*`",
+        ),
+        ("Rust", r"\brust\b|\bCargo\.toml\b"),
+        ("TypeScript", r"\btypescript\b"),
+        ("Node.js", r"\bnode\.?js\b"),
         ("C++", r"C\+\+"),
         ("C#", r"\bC#"),
-        ("Ruby", r"\bRuby\b"),
-        ("Kotlin", r"\bKotlin\b"),
-        ("Swift", r"\bSwift\b"),
-        ("Scala", r"\bScala\b"),
-        ("Lua", r"\bLua\b"),
+        ("Ruby", r"\bruby\b"),
+        ("Kotlin", r"\bkotlin\b"),
+        ("Swift", r"\bswift\b"),
+        ("Scala", r"\bscala\b"),
+        ("Lua", r"\blua\b"),
     ]
 ]
 
