@@ -103,7 +103,8 @@ def test_an_unborn_head_is_no_head_copy(audience, tmp_path, shim, monkeypatch):
 
 
 @pytest.mark.parametrize("blob,what", [
-    ("{not json", "invalid"), ("[1]", "not an object"), ('"x"', "not an object"), (_j() + " " * 70000, "over 64 KiB"),
+    ("{not json", "invalid"), ("[1]", "not an object"), ('"x"', "not an object"),
+    pytest.param(_j() + " " * 70000, "over 64 KiB", id="over-64-KiB"),  # a 70 KB test id overflows Windows' environment variable
 ])
 def test_a_committed_file_that_cannot_be_used_is_strict_and_reported(audience, tmp_path, shim, monkeypatch, blob, what):
     repo = init_repo(tmp_path / "r", {PROJECT: blob})
