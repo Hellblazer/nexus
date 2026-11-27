@@ -1,0 +1,3 @@
+### Fixed
+
+- **`nx collection rename` says to run it again in a minute or two while the engine finishes its post-upgrade background step.** The engine refuses a rename (409 `rename_refused`, `missing: name_key_drop_move`) from the restart that applies RDR-229's changesets until its name-key drop move completes; the client printed the generic "Fix the error and retry". It now says the engine is finishing a short background step and that `nx doctor` shows the wait. `missing: restart` is no longer described as the fresh-install window: it appears only when a listed changeset fails to apply on its own (nexus-p2m1x.48).

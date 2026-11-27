@@ -120,9 +120,11 @@ TENANT_CREATION_BUSY_REASON: str = "tenant_creation_busy"
 COLLECTION_BUSY_REASON: str = "collection_busy"
 
 #: A collection rename (``POST /v1/catalog/collections/rename`` and the per-store rename routes) while the engine cannot yet
-#: run the one-row rename (HTTP 409, RDR-229 P3.5a). Also carries ``error`` and ``missing``: ``restart`` when the engine must
-#: restart to apply a changeset (renames open after the next restart), else ``name_key_drop_move``, ``p35b_list_missing``,
-#: ``readiness_unreadable``, ``p35c_readers_absent`` or ``latch_row_missing``. Nothing was renamed.
+#: run the one-row rename (HTTP 409, RDR-229 P3.5a). Also carries ``error`` and ``missing``. The normal window, on a fresh or
+#: half-stamped install, is ``name_key_drop_move``: after the restart that latches gate 3 the engine runs a short background move for a
+#: minute or two, and a rename run again then succeeds. ``restart`` is not that window: the restart's walk applies every listed
+#: P3.5b changeset, so ``restart`` appears only when one fails to apply on its own and the engine must restart to apply it. The
+#: others are ``p35b_list_missing``, ``readiness_unreadable``, ``p35c_readers_absent`` and ``latch_row_missing``. Nothing was renamed.
 RENAME_REFUSED_REASON: str = "rename_refused"
 
 

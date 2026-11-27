@@ -59,14 +59,9 @@ def _engine_model_mismatch_detail(exc: Exception) -> str | None:
     return str(body.get("error") or COLLECTION_MODEL_MISMATCH_REASON)
 
 
-def _engine_restart_refusal(exc: Exception) -> str | None:
-    """What to say when *exc* is the engine's 409 ``rename_refused`` with ``missing: restart``, else ``None``.
-
-    The engine has a changeset it has not applied yet and refuses every rename until it restarts. Retrying does not help
-    and nothing on the client is wrong, so the usual "fix the error and retry" would send the person looking for a fault.
-    The restart is the operator's to order. Any other ``missing`` value (the engine is missing something a restart does not
-    supply, or could not read it) keeps the generic refusal text with the engine's own reason.
-    """
+def _rename_refused_missing(exc: Exception) -> str | None:
+    """The ``missing`` value of the engine's 409 ``rename_refused`` carried by *exc*, else ``None`` (any other error, an
+    unparseable body, a body of another reason)."""
     import json  # noqa: PLC0415 — stdlib, branch-local
 
     from nexus.db.engine_reasons import RENAME_REFUSED_REASON, error_reason  # noqa: PLC0415 — deferred: error path only
@@ -78,11 +73,42 @@ def _engine_restart_refusal(exc: Exception) -> str | None:
         body = json.loads(response.text)
     except Exception:  # noqa: BLE001 — an unparseable body is simply not ours
         return None
-    if error_reason(body) != RENAME_REFUSED_REASON or body.get("missing") != "restart":
+    if error_reason(body) != RENAME_REFUSED_REASON:
+        return None
+    missing = body.get("missing")
+    return missing if isinstance(missing, str) else None
+
+
+def _engine_restart_refusal(exc: Exception) -> str | None:
+    """What to say when *exc* is the engine's 409 ``rename_refused`` with ``missing: restart``, else ``None``.
+
+    The engine has a listed changeset that failed to apply on its own (on a fresh or half-stamped install the restart's
+    walk applies them all, so this is not the normal window) and refuses every rename until it restarts and applies it.
+    Retrying does not help and nothing on the client is wrong, so the usual "fix the error and retry" would send the
+    person looking for a fault. The restart is the operator's to order. The normal wait after an upgrade is
+    :func:`_engine_drop_move_refusal`'s; any other ``missing`` value keeps the generic refusal text with the engine's
+    own reason.
+    """
+    if _rename_refused_missing(exc) != "restart":
         return None
     return (
         "The engine has a change it has not applied yet, and renames open after its next restart. "
         "The operator orders that restart; run the rename again once it has happened."
+    )
+
+
+def _engine_drop_move_refusal(exc: Exception) -> str | None:
+    """What to say when *exc* is the engine's 409 ``rename_refused`` with ``missing: name_key_drop_move``, else ``None``.
+
+    This is the normal wait after the restart that latches gate 3 (RDR-229 P3.7): the engine runs one short background
+    step for a minute or two and then renames work. Nothing is wrong and no restart is needed, so the generic "fix the
+    error and retry" would send the person looking for a fault.
+    """
+    if _rename_refused_missing(exc) != "name_key_drop_move":
+        return None
+    return (
+        "The engine is finishing a short background step after an upgrade or restart, so renames are refused for now. "
+        "Run the rename again in a minute or two; `nx doctor` shows the wait."
     )
 
 
@@ -238,10 +264,10 @@ def rename_collection_data_plane(
     except LabelReservedError:
         raise  # the engine refused the new label whole (409 label_reserved); its message is the answer, and a retry cannot help
     except Exception as exc:
-        restart = _engine_restart_refusal(exc)
-        if restart is not None:
+        waiting = _engine_restart_refusal(exc) or _engine_drop_move_refusal(exc)
+        if waiting is not None:
             raise click.ClickException(
-                f"service rename refused -- collection {old!r} is unchanged and nothing was renamed. {restart}"
+                f"service rename refused -- collection {old!r} is unchanged and nothing was renamed. {waiting}"
             ) from exc
         detail = _engine_model_mismatch_detail(exc) or _engine_refusal_detail(exc) or str(exc)
         raise click.ClickException(
