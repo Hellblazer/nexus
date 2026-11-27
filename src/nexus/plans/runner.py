@@ -2901,7 +2901,8 @@ def _with_evidence_source(
 
 
 def _single_owner(
-    owner_rows: dict[str, list[dict]] | None, chash: str, collection: str | None, parent: str | None = None,
+    owner_rows: dict[str, list[dict]] | None, chash: str, collection: str | None,
+    parent: tuple[str, str] | None = None,
 ) -> str | None:
     """The one document owning *chash* (in *collection*, when the chunk's collection is known), else ``None``:
     no owner set, no owner, or several (a shared chash is ambiguous, never a guess). With the chunk's
@@ -2909,24 +2910,34 @@ def _single_owner(
     an owner in another collection. Owners are live documents (``chash_positions``); a tombstoned co-owner
     does not make the chash ambiguous.
 
-    *parent* is the document the step's retrieval was confined to (nexus-z1d0l.1.12): it knows its parent the
-    way a tumbler-id hydration does, so a chash several documents own binds to it when it is one of those
-    owners, and stays ambiguous when it is not. A confinement never names an owner the rows do not show."""
+    *parent* is ``(tumbler, collection)`` of the document the run's retrieval was confined to
+    (nexus-z1d0l.1.12): a run so confined knows its parent, as a tumbler-id hydration does, so a chash several
+    documents own binds to that document when it is one of those owners, and stays ambiguous when it is not. The
+    parent binds only on an owner row in the chunk's collection (when known), else in the confinement's own
+    collection; a row in another collection, or naming none, never binds it, and with no collection known at all
+    the parent does not bind. A confinement never names an owner the rows do not show."""
     if not owner_rows:
         return None
+    rows = owner_rows.get(chash, ())
     docs = list(dict.fromkeys(
-        row["doc_id"] for row in owner_rows.get(chash, ())
+        row["doc_id"] for row in rows
         if row.get("doc_id") and (not collection or row.get("collection") == collection)
     ))
-    if parent and parent in docs:
-        return parent
+    if parent:
+        parent_doc, parent_collection = parent
+        want = collection or parent_collection
+        if want and any(r.get("doc_id") == parent_doc and r.get("collection") == want for r in rows):
+            return parent_doc
     return docs[0] if len(docs) == 1 else None
 
 
-def _confined_parent() -> str | None:
-    """The tumbler of the document the run's retrieval is confined to, else ``None`` (no confinement)."""
+def _confined_parent() -> tuple[str, str] | None:
+    """``(tumbler, collection)`` of the document the run is confined to (read from the run's context variable,
+    so it holds for every step of the run), else ``None`` when the run is not confined to one document."""
     confinement = active_confinement()
-    return confinement.tumbler if confinement is not None and confinement.tumbler else None
+    if confinement is None or not confinement.tumbler or not confinement.collection:
+        return None
+    return confinement.tumbler, confinement.collection
 
 
 def _named_collection(collections: Any) -> str | None:
@@ -2953,8 +2964,8 @@ def _position_identities(
     Taken from the hydrated positions BEFORE the empty-content filter, the merges and the cap. A tumbler-id
     position IS its document. A chash position takes its collection from the retrieval step's per-chunk output
     (when that output lines up with *ids*), else the one collection the step names; its tumbler only when the
-    owner rows the hydration fetched show exactly one owning document, or the document the run's retrieval is
-    confined to is one of several (:func:`_single_owner`). The retrieval step's own tumbler is not read: search
+    owner rows the hydration fetched show exactly one owning document, or the document the run is confined to
+    is one of several (:func:`_single_owner`). The retrieval step's own tumbler is not read: search
     may have picked one of several owners of a shared chunk, and the step output does not say."""
     from collections import deque  # noqa: PLC0415 — as the module's other lazy imports
 
@@ -3015,8 +3026,8 @@ def _check_records_for(
     that position's identity (``queues``: shown text -> identities in position order); a reserved item takes its own
     named-source identity; a repair item keeps its chash and collection, but its tumbler came from a search step's
     tumblers (possibly an inferred owner of a shared chunk) and is not read: its tumbler is the one owner *owner_rows*
-    shows (the confined document, when it is one of several), else none. The coverage note is a record the model may cite but not an input to cover
-    (``is_evidence=False``). Any other text has no identity. The record text is the body, without the
+    shows (the document the run is confined to, when it is one of several), else none. The coverage note is a
+    record the model may cite but not an input to cover (``is_evidence=False``). Any other text has no identity. The record text is the body, without the
     ``[source: ...]`` note the hydration prefixes."""
     from nexus.plans.reserved_stream import strip_source_note  # noqa: PLC0415 — as the module's other lazy imports
 
