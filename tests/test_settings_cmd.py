@@ -313,6 +313,17 @@ def test_telemetry_endpoint_missing_reads_only_the_directory_it_is_given(tmp_pat
     assert settings_cmd.telemetry_endpoint_missing(tmp_path) is False
 
 
+def test_telemetry_endpoint_missing_follows_the_origin_binding_of_the_plugins_pinned_endpoint(tmp_path):
+    """nexus-ec37o: no bearer over plain http off this machine, and a lease token only to its own origin."""
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("credentials:\n  service_url: http://engine.example\n  service_token: tok\n")
+    assert settings_cmd.telemetry_endpoint_missing(tmp_path) is True
+    cfg.write_text("credentials:\n  service_url: http://127.0.0.1:9999\n  service_token: tok\n")
+    assert settings_cmd.telemetry_endpoint_missing(tmp_path) is False
+    cfg.write_text("credentials:\n  service_url: https://engine.example\n")
+    assert settings_cmd.telemetry_endpoint_missing(tmp_path) is True, "a saved URL with no token of its own and no lease"
+
+
 # --- the plugin's record of its version -------------------------------------------------------------------------------------
 
 

@@ -211,12 +211,11 @@ class TestNxPermissionHook:
 
 class TestEveryUserHasTheSevenDestructiveAndOtherPartyToolsAutoApproved:
     """nexus-sby49.4, U2b (D2 re-ruled): the plugin asks nothing about who the user is, so the seven tools are allowed for the
-    plain user, on every event the hook is registered for, exactly as every other allowed tool is."""
+    plain user, on PreToolUse (the one event the verb answers, nexus-sby49.6), exactly as every other allowed tool is."""
 
-    @pytest.mark.parametrize("event", [None, "PreToolUse", "PermissionRequest"])
     @pytest.mark.parametrize("tool", _DESTRUCTIVE_AND_OTHER_PARTY)
-    def test_a_plain_user_gets_an_allow(self, tool: str, event: str | None) -> None:
-        out = _run_nx_hook(f"mcp__plugin_conexus_nexus__{tool}", hook_event_name=event)
+    def test_a_plain_user_gets_an_allow(self, tool: str) -> None:
+        out = _run_nx_hook(f"mcp__plugin_conexus_nexus__{tool}", hook_event_name="PreToolUse")
         assert out, f"{tool}: the hook was silent, so Claude Code would prompt"
         data = json.loads(out)["hookSpecificOutput"]
         assert (data.get("permissionDecision") or data["decision"]["behavior"]) == "allow"

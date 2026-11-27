@@ -802,7 +802,7 @@ def test_registry_parses_as_yaml():
 # case, where the static config.yml service_token is a scope=mint-locked
 # credential that gets a real 401 if ever sent to a data path. Before
 # this test, `_read_data_token_lease`'s own return value was exercised
-# only indirectly through `_engine_endpoint()` unit tests -- nothing
+# only indirectly through the endpoint-resolution unit tests -- nothing
 # proved `log_routing_event`'s FULL path (resolve -> POST) actually sends
 # the data token over the wire, which is the exact case the critique
 # named as unverified.

@@ -61,25 +61,34 @@ def telemetry_endpoint_missing(config_dir: Path) -> bool:
 
     This must agree with the plugin's ``_endpoint_resolve.pinned_endpoint(config_dir)`` (nexus-sby49.10): the same three sources and
     no environment leg. An engine is a ``credentials.service_url`` in ``config.yml`` (no ``user:password@`` in it) with a token
-    (a fresh data-token lease for that URL, the file's ``service_token``, or a live lease's token), or a live local supervisor
-    lease alone. Nothing here reads ``NX_SERVICE_*`` or any other environment variable.
+    (a fresh data-token lease for that URL, the file's ``service_token``, or a live lease's token when the lease names that same
+    origin), or a live local supervisor lease alone; and no bearer goes over plain http off this machine (nexus-ec37o), so an
+    ``http`` URL that is not loopback names no engine either. Nothing here reads ``NX_SERVICE_*`` or any other environment variable.
     """
-    from nexus.config import persisted_credentials  # noqa: PLC0415
     from nexus._log_safe_url import has_userinfo  # noqa: PLC0415
+    from nexus.config import persisted_credentials  # noqa: PLC0415
+    from nexus.db.service_endpoint import host_port_url, is_loopback_host, normalize_origin, origins_equal  # noqa: PLC0415
+
+    def carries_a_bearer(url: str) -> bool:
+        origin = normalize_origin(url)
+        return origin is not None and (origin[0] == "https" or is_loopback_host(origin[1]))
 
     lease = _lease(config_dir)
+    if lease is not None and not lease.get("token"):
+        lease = None
+    lease_url = host_port_url(lease["host"], lease["port"]) if lease is not None else ""
     try:
         credentials = persisted_credentials(config_dir)
     except Exception:  # noqa: BLE001 -- an unreadable config.yml names no engine
         credentials = {}
     url = credentials.get("service_url", "").strip().rstrip("/")
     if url:
-        if has_userinfo(url):
+        if has_userinfo(url) or not carries_a_bearer(url):
             return True
-        if credentials.get("service_token", "").strip() or (lease and lease.get("token")):
+        if credentials.get("service_token", "").strip() or (lease is not None and origins_equal(url, lease_url)):
             return False
         return _data_token(config_dir, url) is None
-    return lease is None
+    return lease is None or not carries_a_bearer(lease_url)
 
 
 def _lease(config_dir: Path) -> dict[str, str] | None:

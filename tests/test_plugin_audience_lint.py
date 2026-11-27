@@ -10,6 +10,7 @@ widens a permission (T9). The checker is ``tests/_audience_manifest.py``; the be
 """
 from __future__ import annotations
 
+import ast
 import copy
 import importlib.util
 import json
@@ -19,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from tests import _audience_manifest as am
+from tests import _audience_rules as rules
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "conexus" / "hooks" / "audience.yaml"
@@ -454,3 +456,201 @@ def test_the_real_guard_and_the_real_lib_pass_t9() -> None:
     ):
         found = am.module_problems(rel, (ROOT / rel).read_text(encoding="utf-8"), declared_predicates=preds, wrapper=wrapper, dotted=dotted)
         assert found == [], found
+
+
+# --- the Decision 11 source rules (nexus-sby49.14) -----------------------------------------------------
+
+
+def _read(rel: str) -> str:
+    return (ROOT / rel).read_text(encoding="utf-8")
+
+
+def test_the_plugin_and_src_hooks_carry_no_symbol_of_the_retired_model() -> None:
+    found, examined = rules.retired_symbol_tree_problems(ROOT)
+    assert examined >= 40, f"the sweep examined {examined} files: a lint over a hollow tree is not a pass"
+    assert found == [], "\n".join(found)
+
+
+@pytest.mark.parametrize("source", [
+    "def maintainer():\n    return True\n",
+    "from _audience import account_flag\n",
+    "x = audience.maintainer\n",
+    "def f(account_flag=None):\n    pass\n",
+    "NAME = 'maintainer-profile'\n",
+    "GATE = 'account_flag'\n",
+    "RETIRED = ('x', 'maintainer-profile')\n",
+])
+def test_a_retired_symbol_fails(source: str) -> None:
+    assert rules.retired_symbol_problems(source, "m.py"), source
+
+
+@pytest.mark.parametrize("source", [
+    "RETIRED_USER_FILES = ('maintainer-profile',)\n",
+    "RETIRED_USER_FILES: tuple[str, ...] = ('maintainer-profile',)\n",
+    '"""A docstring may say the maintainer-profile file is retired, and the maintainer."""\nx = 1\n',
+    "# the maintainer is a comment\nx = 1\n",
+])
+def test_the_retired_file_constant_a_docstring_and_a_comment_are_allowed(source: str) -> None:
+    assert rules.retired_symbol_problems(source, "m.py") == []
+
+
+def test_the_retired_file_name_outside_its_constant_fails_even_beside_it() -> None:
+    source = "RETIRED_USER_FILES = ('maintainer-profile',)\nOTHER = 'maintainer-profile'\n"
+    assert len(rules.retired_symbol_problems(source, "m.py")) == 1
+
+
+@pytest.mark.parametrize("rel", rules.AUDIENCE_COPIES)
+def test_audience_reads_only_the_project_dir_variable(rel: str) -> None:
+    assert rules.audience_environ_problems(_read(rel), rel) == []
+    assert 'os.environ.get("CLAUDE_PROJECT_DIR"' in _read(rel), "the one allowed read is the thing this rule examined"
+
+
+@pytest.mark.parametrize("snippet", [
+    'os.environ.get("HOME", "")',
+    'os.environ["USERPROFILE"]',
+    'os.getenv("XDG_CONFIG_HOME")',
+    "dict(os.environ)",
+    "os.environ.get(name)",
+    "os.environ",
+])
+def test_audience_reading_any_other_environment_fails(snippet: str) -> None:
+    source = f"import os\n\ndef f(name):\n    return {snippet}\n"
+    assert rules.audience_environ_problems(source), snippet
+    assert rules.audience_environ_problems("import os\nfrom os import environ\n"), "from os import environ"
+
+
+def test_audience_reading_the_project_dir_variable_passes() -> None:
+    assert rules.audience_environ_problems('import os\nx = os.environ.get("CLAUDE_PROJECT_DIR", "")\ny = os.environ["CLAUDE_PROJECT_DIR"]\n') == []
+
+
+def test_the_telemetry_call_path_reads_no_endpoint_token_mint_or_proxy_variable() -> None:
+    ep, lib = _read(rules.ENDPOINT_RESOLVE), _read(rules.ROUTING_LIB)
+    ep_path = rules.call_path(ep, rules.ENDPOINT_ROOTS)
+    lib_path = rules.call_path(lib, rules.poster_roots(lib), rules.DROP_METER_FUNCTIONS)
+    assert "read_data_token_lease" in ep_path and len(ep_path) >= 5, sorted(ep_path)
+    assert {"_poster_main", "_post_routing_event_once", "_spawn_poster"} <= set(lib_path), sorted(lib_path)
+    found = rules.telemetry_read_problems(ep, rules.ENDPOINT_ROOTS, rules.ENDPOINT_RESOLVE)
+    found += rules.telemetry_read_problems(lib, rules.poster_roots(lib), rules.ROUTING_LIB)
+    assert found == [], "\n".join(found)
+
+
+def test_the_routing_library_no_longer_resolves_an_endpoint_from_the_environment() -> None:
+    present = {n.name for n in ast.parse(_read(rules.ROUTING_LIB)).body if hasattr(n, "name")}
+    assert not present & set(rules.RETIRED_RESOLVERS), sorted(present & set(rules.RETIRED_RESOLVERS))
+
+
+_ENV_VARS = ["NX_SERVICE_URL", "NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN", "NX_MINT_TOKEN", "NX_MINT_TENANT",
+             "NX_CONFIG_DIR", "XDG_CONFIG_HOME", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR"]
+
+
+@pytest.mark.parametrize("var", _ENV_VARS)
+def test_a_forbidden_variable_read_on_the_pinned_endpoint_path_fails(var: str) -> None:
+    source = _read(rules.ENDPOINT_RESOLVE).replace(
+        'def pinned_endpoint(config_dir: Path) -> "tuple[str, str] | tuple[None, None]":\n',
+        f'def pinned_endpoint(config_dir: Path) -> "tuple[str, str] | tuple[None, None]":\n    os.environ.get("{var}")\n', 1)
+    assert var in source
+    assert rules.telemetry_read_problems(source, rules.ENDPOINT_ROOTS, "ep"), var
+
+
+def test_a_forbidden_read_in_a_helper_the_pinned_endpoint_calls_fails() -> None:
+    source = _read(rules.ENDPOINT_RESOLVE).replace(
+        "def has_userinfo(url: str) -> bool:\n", 'def has_userinfo(url: str) -> bool:\n    os.environ.get("NX_SERVICE_URL")\n', 1)
+    assert rules.telemetry_read_problems(source, rules.ENDPOINT_ROOTS, "ep")
+
+
+@pytest.mark.parametrize("var", _ENV_VARS)
+def test_a_forbidden_variable_read_in_the_poster_fails(var: str) -> None:
+    lib = _read(rules.ROUTING_LIB)
+    source = lib.replace(
+        '"""One POST attempt; returns the cause string (``""`` on 2xx). Never raises."""\n',
+        f'"""One POST attempt."""\n    os.environ.get("{var}")\n', 1)
+    assert var in source
+    assert rules.telemetry_read_problems(source, rules.poster_roots(source), "lib"), var
+
+
+def test_a_retired_resolver_that_comes_back_is_in_scope_and_fails() -> None:
+    source = _read(rules.ROUTING_LIB) + '\n\ndef _engine_endpoint():\n    return os.environ.get("NX_SERVICE_URL", "")\n'
+    assert "_engine_endpoint" in rules.poster_roots(source)
+    assert rules.telemetry_read_problems(source, rules.poster_roots(source), "lib")
+
+
+def test_the_drop_meter_log_path_reads_and_the_dispatch_counter_are_allowed() -> None:
+    lib = _read(rules.ROUTING_LIB)
+    assert 'os.environ.get("NX_DROPPED_WRITES_LOG_PATH"' in lib and 'os.environ.get("NEXUS_CONFIG_DIR"' in lib
+    source = lib.replace(
+        '"""One POST attempt; returns the cause string (``""`` on 2xx). Never raises."""\n',
+        '"""One POST attempt."""\n    os.environ.get("NX_DISPATCH_COUNTER")\n    os.environ.get("NX_DROPPED_WRITES_LOG_PATH")\n', 1)
+    assert rules.telemetry_read_problems(source, rules.poster_roots(source), "lib") == []
+
+
+def test_a_call_path_root_that_does_not_exist_is_an_error_not_a_pass() -> None:
+    with pytest.raises(LookupError):
+        rules.call_path("def other():\n    pass\n", ("pinned_endpoint",))
+
+
+@pytest.mark.parametrize("rel,expected", [(rules.ROUTING_LIB, 3), (rules.DISPATCH_RECORD, 1)])
+def test_every_telemetry_child_starts_with_the_environment_telemetry_child_env_builds(rel: str, expected: int) -> None:
+    found, seen = rules.telemetry_child_problems(_read(rel), rel)
+    assert seen == expected, f"{rel} has {seen} Popen calls, the rule expected {expected}: the rule examined the wrong thing"
+    assert found == [], "\n".join(found)
+
+
+@pytest.mark.parametrize("old,new", [
+    ("env=env,", "env=os.environ,"),
+    ("env=env,", ""),
+])
+def test_a_telemetry_child_started_with_another_environment_fails(old: str, new: str) -> None:
+    source = _read(rules.ROUTING_LIB).replace(old, new)
+    assert source != _read(rules.ROUTING_LIB)
+    found, _ = rules.telemetry_child_problems(source, "lib")
+    assert found
+
+
+def test_the_dispatch_record_child_with_no_env_fails() -> None:
+    source = _read(rules.DISPATCH_RECORD).replace('"env": env,', "")
+    assert source != _read(rules.DISPATCH_RECORD), "the dispatch record passes env through its options dict"
+    found, _ = rules.telemetry_child_problems(source, "dispatch")
+    assert found
+
+
+def test_hooks_json_registers_no_permission_request_answer_for_the_conexus_matcher(manifest, hooks_json) -> None:
+    assert rules.permission_request_problems(hooks_json, manifest) == []
+    assert any(r["event"] == "PreToolUse" and r["matcher"].startswith("mcp__plugin_conexus_") for r in manifest["registrations"]), \
+        "the PreToolUse auto-approve entry is the other half of this rule"
+    assert any(r["event"] == "PreToolUse" and r["matcher"].startswith(rules.CONEXUS_MATCHER) for r in am.registrations(hooks_json))
+
+
+def test_a_permission_request_registration_for_the_conexus_matcher_fails(manifest, hooks_json) -> None:
+    hj = copy.deepcopy(hooks_json)
+    hj["hooks"]["PermissionRequest"] = [{"matcher": "mcp__plugin_conexus_.*", "hooks": [{"type": "command", "command": "uv", "args": []}]}]
+    assert rules.permission_request_problems(hj)
+    m = _mutated(manifest, lambda m: m["registrations"].append({"event": "PermissionRequest", "matcher": "mcp__plugin_conexus_.*"}))
+    assert rules.permission_request_problems(hooks_json, m)
+    other = copy.deepcopy(hooks_json)
+    other["hooks"]["PermissionRequest"] = [{"matcher": "mcp__plugin_sn_.*", "hooks": []}]
+    assert rules.permission_request_problems(other) == [], "the sn plugin's own pair is not this rule's"
+
+
+def test_settings_the_manifest_and_the_readers_agree(manifest) -> None:
+    for rel in rules.AUDIENCE_COPIES:
+        assert rules.settings_problems(_read(rel), manifest) == [], rel
+
+
+def test_a_setting_key_nothing_uses_fails(manifest) -> None:
+    source = _read(rules.AUDIENCE_COPIES[0]).replace(
+        'Setting("t1_nudge", "bool", True, False, True, "user only", True),',
+        'Setting("t1_nudge", "bool", True, False, True, "user only", True),\n        Setting("orphan", "bool", False, False, True, "user only", False),')
+    assert "orphan" in source
+    found = rules.settings_problems(source, manifest)
+    assert any("orphan" in p for p in found), found
+
+
+def test_a_setting_audience_that_names_no_key_of_settings_fails(manifest) -> None:
+    m = _mutated(manifest, lambda m: m["constants"][0].update({"audience": "SETTING:ghost", "gate": "setting"}))
+    assert any("ghost" in p for p in rules.settings_problems(_read(rules.AUDIENCE_COPIES[0]), m))
+
+
+def test_a_reader_fallback_that_disagrees_with_the_failure_value_fails(manifest, monkeypatch) -> None:
+    monkeypatch.setitem(am.PREDICATES, "telemetry_enabled", "True")
+    found = rules.settings_problems(_read(rules.AUDIENCE_COPIES[0]), manifest)
+    assert any("telemetry_enabled" in p for p in found), found

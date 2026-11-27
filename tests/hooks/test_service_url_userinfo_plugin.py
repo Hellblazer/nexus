@@ -109,13 +109,17 @@ def test_endpoint_usable_is_false_for_saved_userinfo_even_with_a_token(ep: Modul
     assert ep.endpoint_usable(tmp_path) is False
 
 
-def test_routing_engine_endpoint_is_unresolved_for_userinfo(tmp_path: Path, monkeypatch) -> None:
-    lib = _load(_SCRIPTS / "routing" / "_lib.py", "nx_routing_lib_userinfo")
+def test_the_pinned_telemetry_endpoint_is_unresolved_for_saved_userinfo(ep: ModuleType, tmp_path: Path) -> None:
+    _save_raw(tmp_path, service_url=BAD, service_token="t")
+    assert ep.pinned_endpoint(tmp_path) == (None, None)
+    _save_raw(tmp_path, service_url=GOOD, service_token="t")
+    assert ep.pinned_endpoint(tmp_path) == (GOOD, "t")
+
+
+def test_the_pinned_telemetry_endpoint_ignores_an_env_url(ep: ModuleType, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("NX_SERVICE_URL", BAD)
     monkeypatch.setenv("NX_SERVICE_TOKEN", "t")
-    assert lib._engine_endpoint() == (None, None)
-    monkeypatch.setenv("NX_SERVICE_URL", GOOD)
-    assert lib._engine_endpoint() == (GOOD, "t")
+    assert ep.pinned_endpoint(tmp_path) == (None, None)
 
 
 # -- the mailbox drain hook: the plugin copy and the wheel copy ------------------------------------
