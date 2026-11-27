@@ -63,7 +63,8 @@ def test_a_server_error_body_is_not_shown_as_a_reason() -> None:
 
 def test_a_rename_refused_for_a_restart_says_renames_open_after_the_next_restart() -> None:
     """RDR-229 P3.5a: 409 ``rename_refused`` with ``missing: restart`` is not a fault to fix and retry: the engine opens
-    renames after its next restart, and the operator orders that."""
+    renames after its next restart, and the operator orders that. On the real chain this value appears only when a listed
+    P3.5b changeset fails to apply on its own (Rdr229P37RestartValueTest), never in a fresh install's normal window."""
     body = (b'{"error":"a collection rename is refused until the engine restarts to apply the P3.5b changesets",'
             b'"reason":"rename_refused","missing":"restart"}')
     msg = _message(_refusal(409, body))
@@ -73,7 +74,24 @@ def test_a_rename_refused_for_a_restart_says_renames_open_after_the_next_restart
     assert "Fix the error and retry" not in msg, "a retry cannot help before the restart"
 
 
-@pytest.mark.parametrize("missing", ["name_key_drop_move", "p35b_list_missing", "readiness_unreadable",
+def test_a_rename_refused_while_the_name_key_drop_move_runs_says_to_run_it_again_in_a_minute_or_two() -> None:
+    """RDR-229 P3.7, the real fresh-install and half-stamped window (measured on chas, nexus-p2m1x.48): after the restart that
+    latches gate 3 the engine refuses a rename with ``missing: name_key_drop_move`` for a minute or two while it runs a short
+    background step. Nothing is wrong and nothing needs fixing, so the generic "Fix the error and retry" would send the person
+    looking for a fault, and a restart is not the remedy either."""
+    body = (b'{"error":"a collection rename is refused until the name-key drop move completes",'
+            b'"reason":"rename_refused","missing":"name_key_drop_move"}')
+    msg = _message(_refusal(409, body))
+    assert "short background step" in msg, msg
+    assert "after an upgrade or restart" in msg, msg
+    assert "again in a minute or two" in msg, msg
+    assert "nx doctor" in msg, msg
+    assert "unchanged" in msg and "nothing was renamed" in msg, msg
+    assert "Fix the error and retry" not in msg, "a retry in a minute is the remedy, not a fix"
+    assert "operator orders" not in msg and "restart the engine" not in msg, "no restart is needed for this wait"
+
+
+@pytest.mark.parametrize("missing", ["p35b_list_missing", "readiness_unreadable",
                                      "p35c_readers_absent", "latch_row_missing"])
 def test_a_rename_refused_for_any_other_missing_value_keeps_the_generic_text_and_the_engines_reason(missing: str) -> None:
     body = ('{"error":"a collection rename is refused: ' + missing + ' is the missing condition",'
