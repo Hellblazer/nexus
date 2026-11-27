@@ -255,7 +255,8 @@ def test_an_engine_without_the_routes_is_a_clean_error(runner: CliRunner, args: 
     store.find_quarantined.return_value = None
     out = _nx(runner, MagicMock(memory=store), *args)
     assert out.exit_code == 1, out.output
-    assert "predates RDR-207 quarantine" in out.output
+    assert "the engine predates quarantine (no such route)" in out.output
+    assert "needs a newer engine" in out.output
     assert "Traceback" not in out.output
 
 

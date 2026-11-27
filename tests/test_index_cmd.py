@@ -1271,7 +1271,7 @@ def test_ephemeral_registration_skip_collector_round_trips_reason():
 def test_ephemeral_skip_summary_silent_on_no_skips(runner, repo_dir, mock_reg):
     result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
     assert result.exit_code == 0, result.output
-    assert "nexus-u8n4r" not in result.output
+    assert "skipped — not registered" not in result.output
 
 
 @pytest.mark.t2_tenant
@@ -1295,7 +1295,7 @@ def test_ephemeral_skip_summary_surfaces_per_reason_breakdown(
     result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
     assert result.exit_code == 0, result.output
     assert (
-        "5 file(s) skipped — not registered (nexus-u8n4r): "
+        "5 file(s) skipped — not registered: "
         "3 worktree/temp-marker, 2 worktree-unique (no main mirror)"
     ) in result.output
 
@@ -1312,7 +1312,7 @@ def test_ephemeral_skip_summary_labels_unknown_reason_verbatim(
     )
     result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
     assert result.exit_code == 0, result.output
-    assert "1 file(s) skipped — not registered (nexus-u8n4r): 1 some_new_reason" in result.output
+    assert "1 file(s) skipped — not registered: 1 some_new_reason" in result.output
 
 
 # ── RDR monitor behaviour ───────────────────────────────────────────────────

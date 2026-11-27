@@ -152,8 +152,16 @@ def decoy() -> Iterator[_Server]:
 # ── the stored credentials ───────────────────────────────────────────────────
 
 
+def _account_home(tmp_path: Path) -> Path:
+    """The account home the routing poster child is given through ``_audience._ACCOUNT_HOME_OVERRIDE``, the in-process
+    seam, since the poster reads the account's own config directory and no environment variable (RDR-259 Decision 9)."""
+    return tmp_path / "acct"
+
+
 def _config_dir(tmp_path: Path) -> Path:
-    cfg = tmp_path / "config"
+    """The one config directory every caller reads: the nexus callers through ``NEXUS_CONFIG_DIR``, the routing poster as
+    ``<account home>/.config/nexus``."""
+    cfg = _account_home(tmp_path) / ".config" / "nexus"
     cfg.mkdir(parents=True, exist_ok=True)
     return cfg
 
@@ -297,7 +305,8 @@ except Exception as exc:
 """
 
 _ROUTING = (
-    "import sys; sys.path.insert(0, sys.argv[1]); import _lib; "
+    "import sys; sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[1] + '/..'); "
+    "import _audience; _audience._ACCOUNT_HOME_OVERRIDE = sys.argv[2]; import _lib; "
     "_lib._send_routing_event({'rule': 'r', 'outcome': 'allow'})"
 )
 
@@ -314,6 +323,9 @@ class _Caller:
     sends_nothing_for: frozenset[str] = frozenset()
     #: wait for a detached child (the routing poster) before reading the servers
     after: Callable[[Path, _Server, _Server, bool], None] | None = None
+    #: False for the routing poster: an env URL, host or port names no endpoint for it at all (RDR-259 Decision 9), so in
+    #: every env leg it posts to the origin the account's config binds the credential to, and never to the env's
+    reads_env_endpoint: bool = True
     extra: dict[str, object] = field(default_factory=dict)
 
 
@@ -340,7 +352,10 @@ def _bearer_for(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProc
 
 
 def _routing(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return _spawn([sys.executable, "-c", _ROUTING, str(_ROUTING_DIR)], tmp_path, env)
+    """``_NX_TEST_ACCOUNT_HOME`` in *env* names the account home (default :func:`_account_home`); it is not passed on."""
+    home = env.get("_NX_TEST_ACCOUNT_HOME") or str(_account_home(tmp_path))
+    child = {k: v for k, v in env.items() if k != "_NX_TEST_ACCOUNT_HOME"}
+    return _spawn([sys.executable, "-c", _ROUTING, str(_ROUTING_DIR), home], tmp_path, child)
 
 
 def _wait_for_poster(tmp_path: Path, real: _Server, decoy: _Server, expects_real: bool) -> None:
@@ -360,7 +375,10 @@ CALLERS: tuple[_Caller, ...] = (
     _Caller("drain_plugin_script", _drain(_PLUGIN_ARGV), tuple(KINDS), sends_nothing_for=frozenset({"saved_mint_token"})),
     _Caller("t2_prefix_scan_hook", _py(_PREFIX_SCAN), tuple(KINDS)),
     _Caller("mcp_t2_construction", _py(_MCP_T2), tuple(KINDS)),
-    _Caller("routing_telemetry_poster", _routing, tuple(KINDS), sends_nothing_for=frozenset({"saved_mint_token"}), after=_wait_for_poster),
+    _Caller(
+        "routing_telemetry_poster", _routing, tuple(KINDS), sends_nothing_for=frozenset({"saved_mint_token"}), after=_wait_for_poster,
+        reads_env_endpoint=False,
+    ),
     _Caller("doctor_whoami_probe", _py(_WHOAMI), ("saved_service_token_with_url", "saved_service_token_no_url"), legs=URL_LEGS),
     _Caller("mint_armed_bearer_for", _bearer_for, ("saved_mint_token", "data_token_lease"), legs=URL_LEGS),
 )
@@ -425,7 +443,8 @@ def test_a_decoy_gets_no_credential_and_the_bound_origin_does(tmp_path, real, de
         env = {**env, "_NX_TEST_REAL_URL": real.url}
     proc = caller.run(tmp_path, env)
 
-    names_bound = _env_names_the_bound_origin(kind, leg)
+    # the poster takes no endpoint from the env, so every leg reaches the bound origin; a token saved with no URL still has none
+    names_bound = _env_names_the_bound_origin(kind, leg) if caller.reads_env_endpoint else kind != "saved_service_token_no_url"
     expected = KINDS[kind].header if names_bound and kind not in caller.sends_nothing_for else None
     if caller.after is not None:
         caller.after(tmp_path, real, decoy, expected is not None)
@@ -518,7 +537,7 @@ def test_a_planted_config_dir_never_gets_the_users_credential(tmp_path, real, de
     _write_config(home / ".config" / "nexus", {"service_url": real.url, "service_token": "SAVED-SERVICE-TOKEN"})  # the user's own
     planted = tmp_path / "planted"
     planted_config = {"service_url": decoy.url, "service_token": "PLANTED-TOKEN"}
-    env: dict[str, str] = {"HOME": str(home), "USERPROFILE": str(home), "NEXUS_CONFIG_DIR": ""}
+    env: dict[str, str] = {"HOME": str(home), "USERPROFILE": str(home), "NEXUS_CONFIG_DIR": "", "_NX_TEST_ACCOUNT_HOME": str(home)}
     if variant == "NEXUS_CONFIG_DIR":
         _write_config(planted, planted_config)
         env["NEXUS_CONFIG_DIR"] = str(planted)
@@ -533,6 +552,12 @@ def test_a_planted_config_dir_never_gets_the_users_credential(tmp_path, real, de
         _wait_for_either(tmp_path, real, decoy)
     context = (proc.returncode, proc.stdout[-300:], proc.stderr[-300:], real.requests, decoy.requests)
 
+    if not caller.reads_env_endpoint:
+        # RDR-259 Decision 9: the poster reads the account's own directory, whatever HOME or NEXUS_CONFIG_DIR the repository
+        # names, so the planted config and its token are never read, and the user's own token goes to its own origin only
+        assert decoy.auth == [] and PLANTED not in real.auth, context
+        assert set(real.auth) == {SAVED}, context  # non-vacuity: the account's config was read and its credential sent
+        return
     assert SAVED not in decoy.auth + real.auth or variant == "XDG_CONFIG_HOME", context  # the user's own is never read from a planted dir
     assert SAVED not in decoy.auth, context  # and never reaches the decoy, whichever way the repository points the caller
     assert set(decoy.auth) <= {PLANTED}, context  # the decoy gets at most the token the planted config itself carries

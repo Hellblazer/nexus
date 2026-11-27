@@ -278,7 +278,8 @@ def test_index_repo_fails_when_the_drain_loses_a_chunk(tmp_path, monkeypatch, t2
     out = _index_repo(tmp_path, monkeypatch)
 
     assert out.exit_code != 0, out.output
-    assert "3 chunk(s) affected" in out.output and "(nexus-7lw6a)" in out.output, out.output
+    assert "3 chunk(s) affected" in out.output, out.output
+    assert "taxonomy_assign_batch_failed log events" in out.output, out.output
 
 
 def test_index_repo_passes_when_the_drain_assigns_everything(tmp_path, monkeypatch, t2_service_env) -> None:

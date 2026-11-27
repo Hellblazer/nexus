@@ -1031,6 +1031,9 @@ def _unexplained_tmpdir_message(unexplained: dict[str, int]) -> str:
 #: reason; an entry that no longer matches a site is a failure too, so the list cannot rot.
 _TMPDIR_OVERRIDE_EXEMPT: dict[str, str] = {
     "tests/e2e/lib/setup_journey.py::sandbox_env": _FROM_SCRATCH,
+    # nexus-sby49.12: a scratch TMPDIR for the settings notice's once-per-session mark, in a literal env; the child is a hook entry.
+    "tests/e2e/hook-cli-skew/drive.py::main": _FROM_SCRATCH + " (the hook-skew driver's per-entry env)",
+    "tests/hooks/test_hook_launcher_cwd.py::_run": _FROM_SCRATCH + " (PATH, HOME and the two CLAUDE_ variables only)",
     # nexus-igea9: the push-gate tests run scripts/git-push-develop.sh over a fixture repository; the gate's stub pytest runs in a
     # fixture tree with no tests/conftest.py, so neither imports tests.* (the only readers of NX_TEST_TMP_ORIG).
     "tests/scripts/test_git_push_develop_sh_checks.py::_push": _NOT_NEXUS_TEST_CODE + " (git-push-develop.sh over a fixture repo)",

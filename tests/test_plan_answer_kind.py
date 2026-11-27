@@ -100,22 +100,25 @@ _BEFORE: dict[str, tuple[str, str, str, str, str, str]] = {
 #: row builder): (sha256[:12] of the tags string, sha256[:12] of the default_bindings JSON or None when the
 #: template has none, parent_dims). Literals, so a change to the YAML tags or bindings cannot hide behind a
 #: comparison of the template with itself.
+#: The tags moved once on purpose: RDR-259 Phase 3 (nexus-sby49.4) dropped the internal ids (rdr-078, nexus-h33x8, ...)
+#: from every builtin's tags, since a user reads them through answer_plan_search (tests/test_user_wording_lexicon.py).
+#: Each new tags string is the 4898d437d one with those id tokens removed and nothing else changed.
 _BEFORE_ROW: dict[str, tuple[str, str | None, str | None]] = {
-    "abstract-themes.yml": ('672aaa7f76d1', '8449582a6db2', None),
-    "analyze-default.yml": ('40977f44f3c4', '179e669c10c9', None),
-    "citation-traversal.yml": ('4f0ba286d45b', 'b1d8cdcd7a35', None),
-    "corpus-coverage-check.yml": ('9e573813441e', 'f4c503fae815', None),
-    "debug-default.yml": ('5441d9457bc5', None, None),
-    "document-default.yml": ('cf5058035213', '7d0587b5acc4', None),
-    "document-discovery.yml": ('9e573813441e', 'f4c503fae815', None),
-    "find-by-author.yml": ('77b33f7be6df', '7d0587b5acc4', None),
+    "abstract-themes.yml": ('e1c164f1bf67', '8449582a6db2', None),
+    "analyze-default.yml": ('661ea9bed6bf', '179e669c10c9', None),
+    "citation-traversal.yml": ('b3a3fecb9018', 'b1d8cdcd7a35', None),
+    "corpus-coverage-check.yml": ('cf6309727e73', 'f4c503fae815', None),
+    "debug-default.yml": ('e0858c745adc', None, None),
+    "document-default.yml": ('c728d99aff2d', '7d0587b5acc4', None),
+    "document-discovery.yml": ('cf6309727e73', 'f4c503fae815', None),
+    "find-by-author.yml": ('0b202a0a8b83', '7d0587b5acc4', None),
     # bindings moved on purpose: vector_budget_chunks 6 -> 20 (RDR-250; Sam, 2026-11-15, ask rdr250-lever option 2).
-    "hybrid-factual-lookup.yml": ('19689799e542', 'bec2e263208d', None),
-    "research-default.yml": ('7a87d6cc0664', '7d0587b5acc4', None),
-    "review-default.yml": ('2534dd636291', 'a4f389eb2c29', None),
-    "type-scoped-search.yml": ('f20f6848e2a3', '7d0587b5acc4', None),
+    "hybrid-factual-lookup.yml": ('c6e8f6b3b881', 'bec2e263208d', None),
+    "research-default.yml": ('6270ef68fafe', '7d0587b5acc4', None),
+    "review-default.yml": ('d6bb7d7937b4', 'a4f389eb2c29', None),
+    "type-scoped-search.yml": ('bb02a02bc3a8', '7d0587b5acc4', None),
     # FREEZE PIN, as in _BEFORE: tags now carry `cosine-only`; the bindings are hybrid-factual-lookup's.
-    "entity-resolution.yml": ('dcbdb52917d7', 'bec2e263208d', None),
+    "entity-resolution.yml": ('339a73896970', 'bec2e263208d', None),
 }
 
 
@@ -178,7 +181,7 @@ class TestBuiltinDeclarations:
         assert canonical_dimensions_json(template["dimensions"]) == dims
         assert (_h(row.query), row.name, row.verb, row.scope) == (desc_h, plan_name, verb, scope)
         tags_h, bindings_h, parent_dims = _BEFORE_ROW[name]
-        assert _h(row.tags) == tags_h, "tags are byte-identical to the captured literal (develop 4898d437d; entity-resolution: its freeze pin)"
+        assert _h(row.tags) == tags_h, "tags are byte-identical to the captured literal (4898d437d less the internal ids; entity-resolution: its freeze pin)"
         assert (_h(row.default_bindings) if row.default_bindings is not None else None) == bindings_h
         assert row.parent_dims == parent_dims
         stored = json.loads(row.plan_json)

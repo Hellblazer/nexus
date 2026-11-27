@@ -455,7 +455,8 @@ class TestRunCheckMcpLogs:
         out = capsys.readouterr().out
         assert "Silent-death signatures: 1" in out
         assert "Cross-reference these timestamps" in out
-        assert "RDR-094" in out
+        assert "watchdog.log" in out
+        assert "See the Day 2 Operations notes in the docs." in out
         # Session ID prefix should be visible for cross-referencing.
         assert "0c700072" in out
 

@@ -133,7 +133,8 @@ def test_route_missing_404_reports_one_line_and_exits_nonzero_without_traceback(
         "the raw httpx.HTTPStatusError must not escape as an uncaught traceback"
     )
     assert "recount_doc_count" in result.output
-    assert "nexus-c0g6e" in result.output
+    assert "cannot run: the deployed engine has no" in result.output
+    assert "Deploy an engine carrying it" in result.output
     assert db.closed is True
 
 
