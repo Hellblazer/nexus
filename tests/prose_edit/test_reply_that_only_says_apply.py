@@ -22,10 +22,10 @@ def _reply_paragraph() -> str:
 
 def test_a_bare_apply_is_a_no_on_the_query_and_leaves_the_card_open() -> None:
     para = _reply_paragraph()
-    before(para, "after you asked question 1, and the voice-card question with it", '(for example "Yes, apply.")',
+    before(para, "after you asked question 1 (with the voice-card question, when it went in the call)", '(for example "Yes, apply.")',
            "do not ask again which question it answers", "It counts as No on question 1",
-           "It does not answer the voice-card question", "step 13 asks it once more after the apply")
-    assert "never as Keep it on the voice-card question" in para and "Never read such a reply as Yes on question 1" in para
+           "When the voice-card question went in the call, the reply does not answer it", "step 13 asks it once more after the apply")
+    assert "when the voice-card question was asked, never as Keep it on it" in para and "Never read such a reply as Yes on question 1" in para
 
 
 def test_a_bare_apply_runs_the_dry_run_then_the_real_apply_in_the_same_turn() -> None:
@@ -43,7 +43,8 @@ def test_step_12_names_the_bare_apply_as_a_case_that_skips_the_apply_question() 
     s12 = step(12)
     para = s12[s12.index("    Run `REVIEW apply --work"):s12.index("    App-decided run (a path run only):")]
     assert "nor after a reply that only says to apply" in para
-    assert "ask the author to confirm unless the run is App-decided or follows a reply that only says to apply." in para
+    assert ("ask the author to confirm unless the run is App-decided or follows a reply that only says to apply "
+            "(and the dry run shows no `unplaced` or `would_skip`).") in para
     assert "in the no-edits close of step 11, do not ask: run it at once; nor in an App-decided run, below" in para
 
 
@@ -105,3 +106,12 @@ def test_a_rejections_removal_is_run_once_and_its_renumbered_list_is_not_a_faile
     before(row, "Run `MEMORY <memory_argv...>` once", "deletes entry N and prints the list that is left, renumbered from 1",
            "the removal has happened", "Never run `--remove` again to check", "never read the script's source",
            "Show the numbered rejections")
+
+
+def test_a_bare_apply_also_covers_question_1_asked_alone() -> None:
+    """A stored card, or no voice_card in the proposal, leaves question 1 alone in the call: the trigger and the
+    voice-card sentences must not presume the card question was asked."""
+    para = _reply_paragraph()
+    before(para, "picks no option of the question or questions you asked", "When the voice-card question went in the call",
+           "when the voice-card question was asked")
+    assert "of either question" not in para

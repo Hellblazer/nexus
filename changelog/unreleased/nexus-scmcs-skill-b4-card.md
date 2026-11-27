@@ -1,3 +1,5 @@
 ### Fixed
 
 - **prose-edit no longer stops on a bare "Yes, apply." after a held query.** When a path run asked the query question and the voice-card question together and the author replied only "Yes, apply.", the skill asked which question that answered and applied nothing. It now reads the reply as No on the query, leaves the voice-card question open, runs the dry run and applies in the same turn (it still asks `Apply` when the dry run leaves an edit out), and asks the voice-card question again after the apply with the card text in that reply (nexus-scmcs).
+- **A bare "Yes, apply." applies even when every edit is held.** The apply also logs the session and deletes the work directory, so "nothing would change" is no reason to skip it; the reply covers a query question asked alone as well as one asked with the voice-card question (nexus-scmcs).
+- **`/prose-edit rejections <path> --remove N` is run once.** The command prints the list that is left, renumbered from 1; the skill read that as a failed removal, ran it again and deleted a second rejection. The skill now says the removal has happened and never to repeat it to check (nexus-scmcs).
