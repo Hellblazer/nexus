@@ -22,6 +22,7 @@ from structlog.testing import capture_logs
 
 from nexus import brief
 from nexus.hooks import rdr_verb, session_context, t2_prefix_scan, usage_log
+from tests._bd_seam import bd_present
 
 
 def _seed_map(tmp_path: Path, monkeypatch, body: str = "## Knowledge Map\n\ncode: Session Topic - resume (77)\n") -> Path:
@@ -134,7 +135,7 @@ def test_beads_is_ready_beads_then_the_primer_when_the_plugin_is_off(tmp_path: P
     (proj / ".beads").mkdir(parents=True)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))  # no beads plugin enabled anywhere
-    monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+    bd_present(monkeypatch)
 
     import types
 
@@ -429,7 +430,7 @@ def _bd_that_exits(monkeypatch, *, returncode: int, stderr: str) -> list[list[st
         seen.append(list(argv))
         return types.SimpleNamespace(returncode=returncode, stdout="", stderr=stderr)
 
-    monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+    bd_present(monkeypatch)
     monkeypatch.setattr(bounded_subprocess, "run_bounded", fake)
     return seen
 
@@ -457,7 +458,7 @@ def test_beads_that_timed_out_says_so(tmp_path: Path, monkeypatch) -> None:
     def slow(argv, **_kw):  # noqa: ANN001, ANN003
         raise subprocess.TimeoutExpired(argv, 5)
 
-    monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+    bd_present(monkeypatch)
     monkeypatch.setattr(bounded_subprocess, "run_bounded", slow)
     text = brief.render("beads", cwd=str(tmp_path)).text
     assert "timed out" in text and "printed nothing" not in text
@@ -468,7 +469,7 @@ def test_beads_that_exits_zero_with_no_output_keeps_the_honest_empty_line(tmp_pa
 
     from nexus import bounded_subprocess
 
-    monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+    bd_present(monkeypatch)
     monkeypatch.setattr(
         bounded_subprocess, "run_bounded", lambda argv, **_kw: types.SimpleNamespace(returncode=0, stdout="", stderr="")
     )

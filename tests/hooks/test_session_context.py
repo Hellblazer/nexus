@@ -25,6 +25,7 @@ import pytest
 
 from nexus._hook_runtime._io import HookResult
 from nexus.hooks import board_due, identity_notes, session_context, t2_prefix_scan
+from tests._bd_seam import bd_present
 
 # -- Carried: the plugin script's hygiene tests, retargeted ------------------
 
@@ -410,7 +411,7 @@ class TestExtractedRenders:
     def test_beads_is_ready_then_prime_and_empty_without_bd(self, monkeypatch, tmp_path: Path) -> None:
         monkeypatch.setattr(session_context, "which", lambda cmd: False)
         assert session_context._render_beads(tmp_path) == []
-        monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+        bd_present(monkeypatch)
         import types
 
         from nexus import bounded_subprocess
@@ -434,11 +435,29 @@ class TestExtractedRenders:
             calls.append(list(argv))
             return types.SimpleNamespace(returncode=1, stdout="", stderr="Error: no beads database found\n")
 
-        monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+        bd_present(monkeypatch)
         monkeypatch.setattr(bounded_subprocess, "run_bounded", fake)
         lines = session_context._render_beads(tmp_path)
         assert len(lines) == 1 and "no beads database" in lines[0]
         assert len(calls) == 1 and calls[0][1] == "ready"
+
+    def test_render_beads_says_so_when_bd_cannot_be_resolved_off_the_cwd(self, monkeypatch, tmp_path: Path) -> None:
+        """On Windows ``argv_off_cwd`` refuses a bare ``bd`` that only a planted copy in the project could satisfy; the
+        render says that, in one line, and never spawns."""
+        from nexus import bounded_subprocess
+        from nexus.util import nx_argv
+
+        def refuse(argv, **_kw):
+            raise FileNotFoundError("bd: not found on PATH outside the working directory")
+
+        def never(argv, **_kw):
+            raise AssertionError("nothing may be spawned")
+
+        monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+        monkeypatch.setattr(nx_argv, "argv_off_cwd", refuse)
+        monkeypatch.setattr(bounded_subprocess, "run_bounded", never)
+        lines = session_context._render_beads(tmp_path)
+        assert len(lines) == 1 and "`bd` was not found" in lines[0]
 
     def test_knowledge_map_reads_the_cache_and_names_its_path(self, monkeypatch, tmp_path: Path) -> None:
         repo = tmp_path / "fakerepo"

@@ -23,6 +23,7 @@ import pytest
 
 from nexus import beads_prime
 from nexus.hooks import session_context
+from tests._bd_seam import bd_present
 
 KEY = "beads@beads-marketplace"
 
@@ -99,7 +100,7 @@ class TestSessionContextPrime:
         _settings(config / "settings.json", {KEY: plugin_on})
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+        bd_present(monkeypatch)
         calls: list = []
 
         def _fake(args, timeout, cwd=None):
