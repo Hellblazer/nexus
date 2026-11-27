@@ -310,8 +310,10 @@ class TestRenameCLI:
             ("foo", "code", "bar", True),
             ("foo", "docs", "bar", True),
             ("foo", "rdr", "bar", True),
-            # No readable row: nothing to compare, as before.
+            # No readable row: compared by name only, so a plain target passes...
             ("foo", None, "bar", False),
+            # ...and a prefixed target is refused.
+            ("foo", None, "docs__bar", True),
             # A plain source and a prefixed target still compare the row's type.
             ("foo", "knowledge", "docs__bar", True),
             # A minted source and a prefixed target of the row's own type.
@@ -386,8 +388,11 @@ class TestRenameCLI:
 
     def test_rename_plain_source_with_unreadable_row_is_not_checked(self, env_creds) -> None:
         """nexus-a7o92: only a minted source reads its row strictly. A plain
-        label may be a legacy unregistered name, so a failed listing leaves it
-        unchecked and the rename goes through without the flag."""
+        label may be a legacy unregistered name, so a failed read leaves it
+        compared by name only, and a plain target goes through without the
+        flag. The patch raises from get_collection_row itself; the real
+        non-strict call catches a listing failure inside it, so this pins the
+        outcome, not that path."""
         from nexus.commands.collection import rename_cmd
         from nexus.mcp_infra import ServiceNotReadyError
 

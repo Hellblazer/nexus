@@ -946,7 +946,8 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     embedding-model space and are rejected unless ``--force-prefix-change``
     is set; otherwise search hits would be garbage. A label with no type
     prefix (a minted ``c<id>``, or a plain one) names no type, so its row's
-    type is compared instead (a plain new label is a ``knowledge`` collection).
+    type is compared instead when the row can be read (a plain new label is a
+    ``knowledge`` collection).
 
     A conformant new name is also checked against the source collection's
     catalog-row ``embedding_model``: the engine keeps the
