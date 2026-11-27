@@ -45,12 +45,17 @@ AnswersReader = Callable[[], list[dict[str, Any]]]
 Clock = Callable[[], datetime]
 
 
+def _ancestors(start: Path) -> tuple[Path, ...]:
+    """*start* and every directory above it: the chain ``_has_beads_database`` looks for a ``.beads`` directory in. A seam,
+    so a test can end the chain inside its tmp dir on a host whose real ancestors hold a ``.beads`` directory."""
+    return (start, *start.parents)
+
+
 def _has_beads_database() -> bool:
     """True when the beads dir variable is set or a ``.beads`` directory sits at or above the working directory."""
     if os.environ.get("BEADS_DIR"):
         return True
-    cwd = Path.cwd()
-    return any((d / ".beads").is_dir() for d in (cwd, *cwd.parents))
+    return any((d / ".beads").is_dir() for d in _ancestors(Path.cwd()))
 
 
 def run_bd_needs_sam(timeout: float = BD_TIMEOUT_SECONDS) -> BeadsResult:

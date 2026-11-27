@@ -8,6 +8,8 @@ test in ``tests/test_console_app.py``, so this module provisions no tenant.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -193,10 +195,36 @@ def _fake_bd(tmp_path, monkeypatch, script: str) -> None:
     monkeypatch.setenv("PATH", str(tmp_path))
 
 
+#: ``_fake_bd`` is an extensionless ``#!/bin/sh`` file, which Windows neither finds on PATH nor runs. Each test that uses it
+#: has a twin below that fakes ``run_bounded`` instead and runs on every OS, so the Windows set loses no case.
+_POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="the fake bd is an extensionless #!/bin/sh file; its _runner twin covers the case on Windows")
+
+
+def _fake_runner(monkeypatch, *, returncode: int = 0, stdout: str = "", stderr: str = "", raises: Exception | None = None):
+    """Replace the route's ``run_bounded``; returns the list of argvs it was called with."""
+    seen: list[list[str]] = []
+
+    def fake(argv, **_kw):  # noqa: ANN001, ANN003
+        seen.append(list(argv))
+        if raises is not None:
+            raise raises
+        return subprocess.CompletedProcess(list(argv), returncode, stdout, stderr)
+
+    monkeypatch.setattr(threads_route, "run_bounded", fake)
+    return seen
+
+
 def test_run_bd_skips_when_bd_is_missing_and_there_is_no_beads_database(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("PATH", str(tmp_path))  # empty dir: no bd
     monkeypatch.delenv("BEADS_DIR", raising=False)
-    monkeypatch.chdir(tmp_path)  # no .beads at or above (tmp_path is outside the repo)
+    monkeypatch.chdir(tmp_path)
+    base = Path.cwd()
+    # The walk is real (`_has_beads_database` runs), but its chain ends at tmp_path: a host such as the Windows runner can
+    # hold a `.beads` directory above the pytest tmp dir, which says nothing about this test's project.
+    monkeypatch.setattr(
+        threads_route, "_ancestors", lambda start: tuple(d for d in (start, *start.parents) if d == base or base in d.parents)
+    )
+    assert not (base / ".beads").exists()
     result = threads_route.run_bd_needs_sam()
     # No bd and no beads database: a user without beads has no bead list to read
     # (user-surface inventory 2026-11-04, new row 9). Skipped, said once.
@@ -223,6 +251,7 @@ def test_run_bd_missing_with_beads_dir_env_set_is_an_error(tmp_path, monkeypatch
     assert threads_route.run_bd_needs_sam().error == "bd is not on PATH"
 
 
+@_POSIX_ONLY
 def test_run_bd_skips_on_its_no_beads_database_error(tmp_path, monkeypatch) -> None:
     _fake_bd(tmp_path, monkeypatch, 'echo "Error: no beads database found" >&2\nexit 1\n')
     result = threads_route.run_bd_needs_sam()
@@ -244,6 +273,7 @@ def test_run_bd_broken_bd_is_an_error_not_a_skip(tmp_path, monkeypatch) -> None:
     assert not result.ok and result.skipped == ""
 
 
+@_POSIX_ONLY
 def test_run_bd_parses_output_and_passes_the_label_filter(tmp_path, monkeypatch) -> None:
     argv_file = tmp_path / "argv"
     _fake_bd(tmp_path, monkeypatch,
@@ -258,21 +288,63 @@ def test_run_bd_parses_output_and_passes_the_label_filter(tmp_path, monkeypatch)
     ]
 
 
+@_POSIX_ONLY
 def test_run_bd_nonzero_exit_is_one_line(tmp_path, monkeypatch) -> None:
     _fake_bd(tmp_path, monkeypatch, 'echo "database is locked" >&2\nexit 3\n')
     result = threads_route.run_bd_needs_sam()
     assert result.error == "bd list failed (exit 3): database is locked"
 
 
+@_POSIX_ONLY
 def test_run_bd_garbage_output_is_one_line(tmp_path, monkeypatch) -> None:
     _fake_bd(tmp_path, monkeypatch, 'echo "hello"\n')
     result = threads_route.run_bd_needs_sam()
     assert not result.ok and "not JSON" in result.error
 
 
+@_POSIX_ONLY
 def test_run_bd_timeout(tmp_path, monkeypatch) -> None:
     _fake_bd(tmp_path, monkeypatch, "exec sleep 5\n")
     monkeypatch.setenv("PATH", f"{tmp_path}:/bin:/usr/bin")
+    result = threads_route.run_bd_needs_sam(timeout=0.2)
+    assert not result.ok and "timed out" in result.error
+
+
+# Runner-faked twins of the five `_fake_bd` tests above: the same cases, on every OS.
+
+
+def test_run_bd_skips_on_its_no_beads_database_error_runner(monkeypatch) -> None:
+    _fake_runner(
+        monkeypatch, returncode=1,
+        stderr="Error: no beads database found\nHint: run 'bd where' to inspect the resolved workspace, or 'bd init'\n",
+    )
+    result = threads_route.run_bd_needs_sam()
+    assert result.ok and result.beads == () and "no beads database" in result.skipped
+
+
+def test_run_bd_parses_output_and_passes_the_label_filter_runner(monkeypatch) -> None:
+    seen = _fake_runner(monkeypatch, stdout='[{"id":"nexus-1","title":"T","priority":0,"assignee":"sam"}]\n')
+    result = threads_route.run_bd_needs_sam()
+    assert result.ok and [b.id for b in result.beads] == ["nexus-1"]
+    # Live work needs Sam too: in_progress and blocked beads are not dropped.
+    assert seen == [[
+        "bd", "list", "--label", "needs-sam", "--status", "open,in_progress,blocked", "--limit", "0", "--json",
+    ]]
+
+
+def test_run_bd_nonzero_exit_is_one_line_runner(monkeypatch) -> None:
+    _fake_runner(monkeypatch, returncode=3, stderr="database is locked\n")
+    assert threads_route.run_bd_needs_sam().error == "bd list failed (exit 3): database is locked"
+
+
+def test_run_bd_garbage_output_is_one_line_runner(monkeypatch) -> None:
+    _fake_runner(monkeypatch, stdout="hello\n")
+    result = threads_route.run_bd_needs_sam()
+    assert not result.ok and "not JSON" in result.error
+
+
+def test_run_bd_timeout_runner(monkeypatch) -> None:
+    _fake_runner(monkeypatch, raises=subprocess.TimeoutExpired(["bd"], 0.2))
     result = threads_route.run_bd_needs_sam(timeout=0.2)
     assert not result.ok and "timed out" in result.error
 
