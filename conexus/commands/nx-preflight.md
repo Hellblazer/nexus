@@ -18,7 +18,7 @@ The preflight output above is the command's own gathered data when the `!` pream
 | uv | — | — |
 | CLAUDE.md | — | — |
 
-Fill in each row from the check results above. Use "PASS", "FAIL", or "WARN" for Status. Leave Action needed blank for passing checks; for failures/warnings, provide the install command or link.
+Fill in each row from the check results above. Use "PASS", "FAIL", or "WARN" for Status; a check the output prints as "SKIP" (nx doctor outlasting its bound, nx not installed) is a "WARN", and its Action needed says what the line says. Leave Action needed blank for passing checks; for failures/warnings, provide the install command or link.
 
 If all checks pass: print "conexus plugin is ready"
 If any check fails: print "Fix the above before using nx agents"

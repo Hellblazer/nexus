@@ -314,7 +314,8 @@ def _has_beads(payload: dict) -> bool:
 
 def _without_beads_section(shaped: str, payload: dict) -> str:
     """*shaped* without its ``### In-progress beads`` subsection when the project has no ``.beads/`` directory: for such a
-    project ``nx command-context continuation`` fills it with a ``bd unavailable`` placeholder (nexus-sby49.4, S2-2)."""
+    project ``nx command-context continuation`` fills it with a one-line placeholder naming why there is no list (no beads
+    database here, ``bd`` not installed, ``bd`` failed; nexus-sby49.4, S2-2, GH #1689)."""
     if _has_beads(payload):
         return shaped
     return re.sub(r"(?ms)^### In-progress beads[^\n]*\n.*?(?=^### |\Z)", "", shaped)

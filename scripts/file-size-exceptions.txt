@@ -75,7 +75,7 @@ src/nexus/commands/catalog_cmds/doctor.py 2002
 src/nexus/commands/catalog_cmds/integrity.py 1797
 src/nexus/commands/catalog_cmds/reconcile_stale.py 1613
 src/nexus/commands/collection.py 3096
-src/nexus/commands/command_context.py 1762
+src/nexus/commands/command_context.py 1737
 src/nexus/commands/daemon.py 2523
 src/nexus/commands/doctor.py 4950
 src/nexus/commands/dt.py 2596

@@ -248,13 +248,13 @@ class TestAudienceGate:
         assert not hasattr(mod, "_maintainer") and not hasattr(mod, "_audience")
 
     def test_a_project_without_beads_loses_the_in_progress_beads_placeholder(self, mod, tmp_path) -> None:
-        """``nx command-context continuation`` fills the subsection with ``(bd unavailable or no results)`` for a project that
-        has no beads; the checkpoint drops it there and keeps every other subsection, and keeps it all where beads exist."""
-        shaped = ("- **branch:** `x`\n\n### In-progress beads\n- (bd unavailable or no results)\n\n"
+        """``nx command-context continuation`` fills the subsection with a one-line placeholder (here: no beads database) for a
+        project that has no beads; the checkpoint drops it there and keeps every other subsection, and keeps it all where beads exist."""
+        shaped = ("- **branch:** `x`\n\n### In-progress beads\n- (there is no beads database here (`bd init` creates one))\n\n"
                   "### Uncommitted\n(clean)\n\n### Recent commits\nabc a commit\n")
         (tmp_path / "bare" / ".git").mkdir(parents=True)
         out = mod._without_beads_section(shaped, {"cwd": str(tmp_path / "bare")})
-        assert "In-progress beads" not in out and "bd unavailable" not in out
+        assert "In-progress beads" not in out and "no beads database" not in out
         assert "### Uncommitted\n(clean)" in out and "### Recent commits\nabc a commit" in out and "- **branch:**" in out
         (tmp_path / "bare" / ".beads").mkdir()
         assert mod._without_beads_section(shaped, {"cwd": str(tmp_path / "bare")}) == shaped

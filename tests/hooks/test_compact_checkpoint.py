@@ -588,7 +588,7 @@ class TestPre:
         ("rows", "board"),
         [
             ("◐ nexus-aaaaa ● P2 claimed after the board was written", "ref: nexus-closd"),  # nothing kept
-            ("- (bd unavailable or no results)", "ref: nexus-3lqxv"),  # a bd outage
+            ("- (bd failed (exit 2: Error: dolt server unreachable))", "ref: nexus-3lqxv"),  # a bd outage
             ("◐ nexus-aaaaa ● P2 mine", "ref: (none yet)\nwaiting_on: nexus-peerx"),  # only a peer's bead
             ("◐ nexus-aaaaa ● P2 mine", "state: no ref line"),
         ],

@@ -1247,6 +1247,10 @@ def stub_preflight_subprocess(monkeypatch) -> None:
 
     setattr_in(monkeypatch, cc, "subprocess.check_output", _fake_check_output)
     setattr_in(monkeypatch, cc, "subprocess.run", _fake_run)
+    # The doctor block probes the local engine before it runs doctor; no ambient engine state may reach these tests.
+    from nexus import health
+
+    monkeypatch.setattr(health, "_resolve_service_endpoint", lambda _config_dir: None)
 
 
 @pytest.mark.t2_tenant
@@ -2375,4 +2379,3 @@ def test_a_prune_failure_never_fails_the_command(tmp_path: Path, monkeypatch, st
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(main, ["command-context", "continuation"])
     assert result.exit_code == 0, result.output
-
