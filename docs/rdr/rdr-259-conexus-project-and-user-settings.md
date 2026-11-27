@@ -2,7 +2,8 @@
 title: "conexus project and user settings: replacing the person-keyed audience model"
 id: RDR-259
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-27
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
@@ -468,7 +469,7 @@ What is still assumed after the spikes:
   and `clear` in Desktop for that channel, other Desktop versions. If a
   surface hides it, `nx settings check` and the deny-text clause (Decision
   4) still tell the user.
-- [ ] Which commit an isolation worktree is cut from. **Status**: Unsettled,
+- [waived: no Decision depends on it; left open on purpose at close, 2026-11-27] Which commit an isolation worktree is cut from. **Status**: Unsettled,
   and left open on purpose (Research 10: origin's default branch in the
   spike, the primary's tracked branch in nexus). No later record settles it.
   The design does not depend on it (Decision 1, which copy is read), so
@@ -1764,8 +1765,7 @@ git-guard tests (`tests/test_routing_subagent_git_write.py`,
 `tests/test_routing_subagent_git_write_gaps.py`,
 `tests/test_routing_subagent_git_dash_c_worktree.py`) passing on native
 Windows on qwent. 195 of those tests had failed on qwent from a bash and WSL
-launcher fault in the test harness. The Windows run: <WINDOWS-RUN: counts
-and commit to be filled at close>.
+launcher fault in the test harness. The Windows run: on qwent's native Windows, tests/test_routing_subagent_git_write.py, _gaps.py and _dash_c_worktree.py passed 522 of 522 with 0 skipped on 2026-11-27 (195 had failed on the WSL-launcher harness fault; the fix points the tests at Git for Windows' bash; T3 debug-finding-windows-bash-wsl-launcher), and the live MVV reran green on the installed 8.5.9 (scenario 36, 42 of 42, a clean account).
 
 ### Stage 0: Measure (no release), done 2026-11-25 and 2026-11-26
 
@@ -1849,8 +1849,7 @@ every key at its cap; the Minimum Viable Validation passes on the laptop (cc-val
 36, 42 of 42), and on native Windows its clause is met by the git-guard tests
 (`tests/test_routing_subagent_git_write.py`, `_gaps.py` and
 `_dash_c_worktree.py`) passing on qwent, by Sam's ruling of 2026-11-27 (T2
-`nexus/sam-ruling-rdr259-close-2026-11-27`) <WINDOWS-RUN: counts and commit
-to be filled at close>; the file reads stay within the 5 ms design budget on
+`nexus/sam-ruling-rdr259-close-2026-11-27`) on qwent's native Windows, tests/test_routing_subagent_git_write.py, _gaps.py and _dash_c_worktree.py passed 522 of 522 with 0 skipped on 2026-11-27 (195 had failed on the WSL-launcher harness fault; the fix points the tests at Git for Windows' bash; T3 debug-finding-windows-bash-wsl-launcher), and the live MVV reran green on the installed 8.5.9 (scenario 36, 42 of 42, a clean account); the file reads stay within the 5 ms design budget on
 native Windows (record 57); the strictness keys' `HEAD` read adds under 50 ms
 at the median on the guard and advice paths, on the laptop and on native
 Windows (record 59); a plain repository with no settings file runs no git process for settings on
@@ -2055,8 +2054,7 @@ acknowledged and carry no decision.
 The Minimum Viable Validation is Stage 1's ship-when. It ran live on the
 laptop (cc-validation scenario 36, 42 of 42). On native Windows the clause is
 met by the git-guard tests passing on qwent, by Sam's ruling of 2026-11-27
-(T2 `nexus/sam-ruling-rdr259-close-2026-11-27`): <WINDOWS-RUN: counts and
-commit to be filled at close>.
+(T2 `nexus/sam-ruling-rdr259-close-2026-11-27`): on qwent's native Windows, tests/test_routing_subagent_git_write.py, _gaps.py and _dash_c_worktree.py passed 522 of 522 with 0 skipped on 2026-11-27 (195 had failed on the WSL-launcher harness fault; the fix points the tests at Git for Windows' bash; T3 debug-finding-windows-bash-wsl-launcher), and the live MVV reran green on the installed 8.5.9 (scenario 36, 42 of 42, a clean account).
 
 ### Cross-Cutting Concerns
 
