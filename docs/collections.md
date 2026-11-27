@@ -138,14 +138,13 @@ To give a collection a readable label, rename it with `nx collection rename
 OLD NEW`. A minted label has no route to a bare readable label without
 `--force-prefix-change`. Three things to know first:
 
-- **A rename sets the collection's content type and owner from the new name.**
+- **A rename sets the collection's content type and owner from the new name** (bar the exception at the end of this bullet).
   For a `knowledge` collection the owner is its subject. Renaming `c4812` to
   `distributed-systems-papers` (possible only with the flag below) makes `distributed-systems-papers` its
   subject, so a later write to `distributed-systems` no longer finds it and
   registers a second collection. Rename a subject's collection only to
-  change its subject. In the one-row rename, a `code`, `docs` or `rdr`
-  collection whose owner is already a tumbler segment (`1-15`) keeps it: a
-  slug from the new name never replaces it.
+  change its subject. The one exception is in the one-row rename:
+  a `code`, `docs` or `rdr` collection whose owner is already a tumbler segment (`1-15`) keeps it when the new name gives a slug; a tumbler-shaped owner from the new name is applied (`1-2` renamed to a name whose owner is `1-5` ends with `1-5`).
 - **The CLI guards compare the two names.** A minted `c<id>` label has no
   type prefix, so renaming it to a label without one, or to one the CLI
   reads as another embedding model (`knowledge__x` reads as
@@ -154,7 +153,7 @@ OLD NEW`. A minted label has no route to a bare readable label without
   the model-token check, so use it only when the new name's type and model
   are right. A conformant four-segment name whose model token matches the
   row's model passes without the flag, and sets the owner from its owner
-  segment.
+  segment (subject to the first bullet's exception).
 - **What a rename does depends on the engine's gate 3 latch.** Before it, a
   rename rewrites every table that names the collection, gives the
   collection a new registry row and id, and leaves the old name as a

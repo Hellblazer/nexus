@@ -275,8 +275,8 @@ The collection's name is a label, unique among a tenant's collections that are n
 A new knowledge subject gets a minted label, `c` followed by its id (`c4812`).
 `nx index repo` does not mint: the `code`, `docs` and `rdr` collections it
 creates are labelled in the four-segment shape below. A rename takes
-its content type and owner from the new name (the one-row rename leaves a
-`code`, `docs` or `rdr` owner that is already a tumbler segment alone) and has its own guards
+its content type and owner from the new name, with one exception for a
+`code`, `docs` or `rdr` collection's tumbler owner, and has its own guards
 ([Choosing and Naming Collections](collections.md), Rule 3). Existing labels
 stay as they are, typically in one of two older shapes (a `quarantine-`
 collection and a renamed one carry other labels):
