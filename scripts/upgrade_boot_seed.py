@@ -67,11 +67,11 @@ def _rows(t3) -> list[dict]:
 
 
 def _physical(t3, subject: str, before: set[str]) -> tuple[str, str]:
-    """The collection the subject's first ``nx store put`` created, and its embedding model.
+    """The collection the subject's first note created, and its embedding model.
 
     A client before 8.5.6 names it ``knowledge__<subject>__<model>__v<n>``: found by that prefix, model read from
     the name. Since 8.5.6 the engine mints a ``c<id>`` label that carries neither the subject nor a model: found
-    as the one collection not listed before the put, model read from its registry row (``embedding_model``)."""
+    as the one collection not listed before that note, model read from its registry row (``embedding_model``)."""
     rows = _rows(t3)
     names = [r["name"] for r in rows]
     hits = [r for r in rows if r["name"].startswith(f"knowledge__{subject}__")]
