@@ -47,5 +47,7 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/scripts/_endpoint_resolve.py`: the bearer TLS context sets TLS 1.2 as an explicit floor (`minimum_version`), matching the CLI's `bearer_transport`; behaviour is unchanged (Python's client default is already TLS 1.2), the floor is now stated, nexus-ec37o.
+
 
 ## Deferred to the next client release
