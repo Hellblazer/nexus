@@ -167,7 +167,11 @@ def retired_no_successor_error_from_body(status: int | None, body: Any) -> Retir
 
     Keyed on the status, ``reason == "collection_superseded"``, a non-empty ``collection``, and NO ``superseded_by`` and
     NO ``successor_collection_id`` (absent, null or empty): a body that names a successor is
-    :func:`superseded_write_error_from_body`'s, and every other 409 is left to its own handler."""
+    :func:`superseded_write_error_from_body`'s, and every other 409 is left to its own handler.
+
+    THE SEAM for the engine's RETIRED_NO_SUCCESSOR reason marker. Today the no-successor case is recognised by the absence
+    of a successor in a ``collection_superseded`` body. When the engine names it with an explicit reason, this is the one
+    place that reads it (every transport calls this function); the marker is deliberately NOT parsed yet."""
     from nexus.db.engine_reasons import COLLECTION_SUPERSEDED_REASON, error_reason  # noqa: PLC0415 — deferred: this module stays import-free for the CLI boundary
 
     if status != 409 or not isinstance(body, dict) or error_reason(body) != COLLECTION_SUPERSEDED_REASON:
