@@ -17,7 +17,6 @@ import pytest
 from tests._audience_fixtures import build_posture
 from tests.hooks.git_shim import GitShim, init_repo
 
-pytestmark = pytest.mark.skipif(os.name == "nt", reason="the recording git shim is a POSIX script")
 
 
 def _every_path(audience, payload: dict) -> list[str]:

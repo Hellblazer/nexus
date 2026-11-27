@@ -24,7 +24,6 @@ import pytest
 from tests.hooks.audience_harness import write_project_settings
 from tests.hooks.git_shim import GitShim, init_repo
 
-pytestmark = pytest.mark.skipif(os.name == "nt", reason="the recording git shim is a POSIX script")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HARNESS = REPO_ROOT / "tests" / "hooks" / "audience_harness.py"
@@ -66,7 +65,7 @@ def _run(script: Path, payload: dict, repo: Path, tmp_path: Path, shim: GitShim)
     cfg.mkdir(exist_ok=True)
     env = {
         **os.environ,
-        "PATH": str(shim.bin) + os.pathsep + os.environ.get("PATH", ""),
+        **shim.env(),
         "CLAUDE_PROJECT_DIR": str(repo),
         "NX_HOOK_PYTHON": sys.executable,
         "NX_ROUTING_LOG_PATH": str(tmp_path / "routing.jsonl"),

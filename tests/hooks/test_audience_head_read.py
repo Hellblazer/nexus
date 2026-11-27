@@ -17,7 +17,6 @@ import pytest
 from tests._module_seam import setattr_in
 from tests.hooks.git_shim import GitShim, init_repo, path_without_git, run_git
 
-pytestmark = pytest.mark.skipif(os.name == "nt", reason="the recording git shim is a POSIX script; the answers are pinned on Windows by the corpus")
 
 PROJECT = ".nexus/project.json"
 HEAD = ".nexus/project.json at HEAD"
@@ -294,6 +293,7 @@ def test_a_committed_file_over_the_cap_is_strict_with_one_process(audience, tmp_
     assert shim.verbs() == ["cat-file"]
 
 
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="a POSIX owner check: Windows has no uid and the reader makes no ownership test there")
 def test_a_repository_owned_by_another_user_is_not_read_and_the_working_tree_decides(audience, tmp_path, shim, monkeypatch):
     repo = init_repo(tmp_path / "r", {PROJECT: _j(subagent_git="strict")})
     _set_wt(repo, _j())
