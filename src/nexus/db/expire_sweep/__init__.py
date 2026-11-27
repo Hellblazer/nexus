@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from nexus.db.retired_rows import skip_retired_rows
+from nexus.collection_errors import RetiredNoSuccessorError
+from nexus.db.retired_rows import RetiredSkips
 
 if TYPE_CHECKING:
     from nexus.db.http_vector_client import HttpVectorClient
@@ -273,6 +274,7 @@ def sweep_expired(client: HttpVectorClient, *, dry_run: bool = False) -> ExpireR
     orphans = 0
     notes = 0
     unattributed = 0
+    retired_skipped = RetiredSkips("store_expire")
     retired: list[RetiredNote] = []
     failures: list[tuple[str, str]] = []
     ttl_stale: list[tuple[str, str]] = []
@@ -285,11 +287,7 @@ def sweep_expired(client: HttpVectorClient, *, dry_run: bool = False) -> ExpireR
         return reader_box[0]
 
     try:
-        inventory, retired_skipped = skip_retired_rows(
-            client.list_collections(routing=True),  # reads name and content_type only (nexus-mjmjl)
-            site="store_expire",
-        )
-        for entry in inventory:
+        for entry in client.list_collections(routing=True):  # reads name and content_type only (nexus-mjmjl)
             name = entry.get("name", "")
             # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): `entry`
             # already carries `content_type` when a catalog row backs this
@@ -305,18 +303,25 @@ def sweep_expired(client: HttpVectorClient, *, dry_run: bool = False) -> ExpireR
             expired_row_meta: dict[str, dict] = {}  # the lapsed rows' metadata, for row_written_by
             offset = 0
             while True:
-                result = hvc._post(
-                    "/v1/vectors/get",
-                    {
-                        "collection": name,
-                        "where": ttl_where,
-                        "include": ["metadatas"],
-                        "limit": page_limit,
-                        "offset": offset,
-                        "include_non_live": True,
-                    },
-                    tenant=client._tenant,
-                )
+                try:
+                    result = hvc._post(
+                        "/v1/vectors/get",
+                        {
+                            "collection": name,
+                            "where": ttl_where,
+                            "include": ["metadatas"],
+                            "limit": page_limit,
+                            "offset": offset,
+                            "include_non_live": True,
+                        },
+                        tenant=client._tenant,
+                    )
+                except RetiredNoSuccessorError:
+                    # RDR-229 R7: the engine refuses a by-label read of a retired collection with no live successor.
+                    # The listing cannot say which rows those are, so the read decides; the rest are swept as before.
+                    retired_skipped.add(name)
+                    expired_row_ids.clear()
+                    break
                 page_ids = result.get("ids", []) or []
                 metas = result.get("metadatas", []) or []
                 for doc_id, meta in zip(page_ids, metas):
@@ -326,6 +331,8 @@ def sweep_expired(client: HttpVectorClient, *, dry_run: bool = False) -> ExpireR
                 offset += len(page_ids)
                 if len(page_ids) < page_limit:
                     break  # last page (short or empty)
+            if name in retired_skipped.names:
+                continue
 
             reader = catalog_reader()
             # Which of the row-lapsed chunks the row may judge (see this method's docstring).
@@ -397,5 +404,5 @@ def sweep_expired(client: HttpVectorClient, *, dry_run: bool = False) -> ExpireR
     return ExpireReport(
         total, 0 if dry_run else notes, tuple(failures), unattributed, tuple(ttl_stale),
         retired=tuple(retired), orphan_chunks=orphans, candidate_chunks=candidates, dry_run=dry_run,
-        retired_collections_skipped=retired_skipped,
+        retired_collections_skipped=tuple(retired_skipped.names),
     )

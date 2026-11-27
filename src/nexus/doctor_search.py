@@ -52,7 +52,8 @@ from typing import Any, Callable
 
 import click
 
-from nexus.db.retired_rows import skip_retired_rows
+from nexus.collection_errors import RetiredNoSuccessorError
+from nexus.db.retired_rows import RetiredSkips
 
 _CHASH_SHAPE = re.compile(r"chash:[0-9a-f]{64}(:\d+-\d+)?")
 
@@ -82,6 +83,16 @@ class ProbeResult:
     nearest_distance: float | None = None
     threshold: float | None = None
     probe_chunks: int | None = None
+
+
+def _retired_result(col: str, expected: str = "", actual: str = "") -> "ProbeResult":
+    """The result for a collection the engine refuses to read: it is retired and has no live successor (RDR-229 R7).
+    Skipped and shown, never an error and never a failure."""
+    return ProbeResult(
+        name=col, surface="retrieval_quality", outcome="retired_skipped",
+        error="retired with no live successor; not probed",
+        expected_model=expected or None, actual_model=actual or None,
+    )
 
 
 # ── Surface runners (probe 3a, production-wired) ────────────────────────────
@@ -365,6 +376,8 @@ def _neighbour_probe(
                 kept += sum(1 for d in real if d <= threshold)
             if real:
                 nearest.append(min(real))
+    except RetiredNoSuccessorError:
+        return _retired_result(col, expected, actual)
     except Exception as exc:  # noqa: BLE001 — probe captures any failure as ProbeResult outcome=error (diagnostic)
         return ProbeResult(name=col, surface="retrieval_quality", outcome="error",
                            error=f"{type(exc).__name__}: {exc}",
@@ -432,6 +445,9 @@ def run_retrieval_quality_probe(
             expected = model_for(col)
             meta = metadata_fn(col) or {}
             actual = str(meta.get("embedding_model") or "")
+        except RetiredNoSuccessorError:
+            out.append(_retired_result(col, expected, actual))
+            continue
         except Exception as exc:  # noqa: BLE001 — probe captures any failure as ProbeResult outcome=error (diagnostic)
             out.append(
                 ProbeResult(
@@ -457,7 +473,11 @@ def run_retrieval_quality_probe(
             )
             continue
 
-        samples = probe_for(col) if probe_for is not None else None
+        try:
+            samples = probe_for(col) if probe_for is not None else None
+        except RetiredNoSuccessorError:
+            out.append(_retired_result(col, expected, actual))
+            continue
         if samples:
             out.append(_neighbour_probe(
                 col, samples, t3=t3, search_fn=search_fn, n_results=n_results,
@@ -471,6 +491,9 @@ def run_retrieval_quality_probe(
                 query, [col], n_results, t3,
                 diagnostics_out=diag_list, sensitivity="include",
             )
+        except RetiredNoSuccessorError:
+            out.append(_retired_result(col, expected, actual))
+            continue
         except Exception as exc:  # noqa: BLE001 — probe captures any failure as ProbeResult outcome=error (diagnostic)
             out.append(
                 ProbeResult(
@@ -658,14 +681,6 @@ def run_check_search(*, json_out: bool) -> None:
             )
         )
     else:
-        # RDR-229 R7: the engine refuses a by-label read of a retired collection that has no live successor, so
-        # such a row is reported as skipped (never a probe, never a FAIL).
-        rows, retired_skipped = skip_retired_rows(rows, site="doctor_check_search")
-        retrieval_results.extend(
-            ProbeResult(name=name, surface="retrieval_quality", outcome="retired_skipped",
-                        error="retired with no live successor; not probed")
-            for name in retired_skipped
-        )
         collections = [str(r["name"]) for r in rows if r.get("name")]
         if collections:
             try:
@@ -680,14 +695,17 @@ def run_check_search(*, json_out: bool) -> None:
                     )
                 )
             else:
-                retrieval_results.extend(
-                    run_retrieval_quality_probe(
-                        t3=t3,
-                        collections=collections,
-                        model_for=_model_for_rows(rows),
-                        probe_for=lambda col: _default_probe_for(t3, col),
-                    )
+                probed = run_retrieval_quality_probe(
+                    t3=t3,
+                    collections=collections,
+                    model_for=_model_for_rows(rows),
+                    probe_for=lambda col: _default_probe_for(t3, col),
                 )
+                retrieval_results.extend(probed)
+                skips = RetiredSkips("doctor_check_search")
+                for r in probed:
+                    if r.outcome == "retired_skipped":
+                        skips.add(r.name)  # logged: a skip is never silent
 
     if json_out:
         click.echo(format_combined_json(name_results, retrieval_results))

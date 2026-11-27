@@ -12350,12 +12350,10 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
     try:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
         from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred, matches make_t3
-        from nexus.db.retired_rows import skip_retired_rows  # noqa: PLC0415 — deferred, matches make_t3
-
+        from nexus.db.retired_rows import RetiredSkips  # noqa: PLC0415 — deferred, matches make_t3
         t3 = make_t3()
-        # RDR-229 P2.9: the row's own content_type picks the collections, never the name; a quarantine sibling is left
-        # out by its state. R7: a retired row (no live successor) is refused by label, so it is skipped and logged.
-        listing, _ = skip_retired_rows(t3.list_collections(), site="doctor_pdf_stub_metadata")
+        # RDR-229 P2.9: the row's own content_type picks the collections, never the name; a quarantine sibling is left out by its state.
+        listing = list(t3.list_collections())
         names = sorted(
             str(c.get("name", "")) for c in listing
             if c.get("content_type") in _PDF_STUB_SCAN_CONTENT_TYPES and c.get("lifecycle_state") != "quarantine"
@@ -12399,11 +12397,13 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
 
     from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — only this check fans out
 
+    retired = RetiredSkips("doctor_pdf_stub_metadata")
     def _scan(name: str) -> tuple[str, dict[str, int] | None, _StubScanCoverage]:
         try:
             found, cover = _pdf_stubs_in_collection(t3, name, MAX_QUERY_RESULTS)
             return name, found, cover
         except Exception as exc:  # noqa: BLE001 — one unreadable collection must not hide the rest
+            if retired.refused(name, exc): return name, {}, _StubScanCoverage()  # R7: retired, no live successor: skipped and logged
             _log.debug("doctor_pdf_stub_metadata_collection_failed", collection=name, error=str(exc))
             return name, None, _StubScanCoverage()
 

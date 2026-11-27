@@ -1,54 +1,55 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Full-inventory loops skip retired collections, and say so (RDR-229 R7, nexus-p2m1x.25).
+"""Full-inventory loops skip a retired collection the engine refuses, and say so (RDR-229 R7, nexus-p2m1x.25).
 
-The engine answers 409 ``collection_superseded`` to a read that names a retired collection by label when no live
-successor exists (``nexus.collection_errors.RetiredNoSuccessorError``). A retired row can still hold chunks (a
-``re-embed --keep-source`` source whose target was deleted), so ``list_collections()`` still lists it, and a loop that
-reads each listed collection by name would meet that 409 on it. Such a loop skips the retired row up front, through
-:func:`skip_retired_rows`, which logs what it left out so a skip is never silent.
+The engine answers 409 ``collection_superseded`` (reason ``retired_no_successor``) to a read that names a retired
+collection by label when no live successor exists (``nexus.collection_errors.RetiredNoSuccessorError``). Such a row can
+still hold chunks, so ``list_collections()`` still lists it and a loop that reads each listed collection would meet the
+refusal on it.
 
-A leaf module: no imports from the vector client, so any inventory loop can use it without a cycle.
+The listing cannot tell the loop in advance. Its ``superseded_by`` is label TEXT: for a tombstone whose successor was
+deleted it keeps the deleted successor's label, which another live collection may since have taken, and the engine decides
+whether a successor is live by walking ``superseded_by_id``, which the listing does not carry. A tombstone WITH a live
+successor is still served. So a loop never pre-filters on the row; it reads, and a collection whose read raises
+:class:`RetiredNoSuccessorError` is recorded here (:meth:`RetiredSkips.add`), logged, left out of its results, and named
+in its output.
+
+A leaf module: it imports nothing from the vector client, so any inventory loop can use it without a cycle.
 """
 from __future__ import annotations
-
-from collections.abc import Iterable
-from typing import Any
 
 import structlog
 
 _log = structlog.get_logger(__name__)
 
-#: How many skipped names one log line carries; the count is always complete.
-_LOGGED_NAMES = 20
 
-#: A ``lifecycle_state`` that marks a retired collection (the engine's vocabulary has grown past the closed set
-#: :data:`nexus.db.http_vector_client.LIFECYCLE_STATES` once before; the superseded marker below is the one RDR-229 sets).
-RETIRED_LIFECYCLE_STATE = "retired"
+class RetiredSkips:
+    """The collections one loop left out because the engine refused to read them as retired with no live successor.
 
+    ``add`` logs each (structlog warning ``retired_collection_skipped`` with the *site*) so a skip is never silent;
+    ``names`` is what the loop reports to the person."""
 
-def is_retired_collection_row(row: Any) -> bool:
-    """Whether a ``list_collections()`` row names a retired collection: ``superseded_by`` is set (a rename's old name,
-    or a source whose successor was deleted) or ``lifecycle_state`` says retired. A non-dict entry (a bare name) carries
-    no state and is not retired; an engine that predates the keys omits them and the row reads as not retired."""
-    if not isinstance(row, dict):
+    def __init__(self, site: str) -> None:
+        self.site = site
+        self._names: list[str] = []
+
+    def add(self, name: str) -> None:
+        if name not in self._names:
+            self._names.append(name)
+            _log.warning("retired_collection_skipped", site=self.site, skipped=1, collections=[name])
+
+    def refused(self, name: str, exc: BaseException) -> bool:
+        """Whether *exc* is the engine's refusal of a retired collection with no live successor; if so, *name* is
+        recorded (and logged) as skipped."""
+        from nexus.collection_errors import RetiredNoSuccessorError  # noqa: PLC0415 — deferred: collection_errors imports db.vector_errors
+
+        if isinstance(exc, RetiredNoSuccessorError):
+            self.add(name)
+            return True
         return False
-    return bool(row.get("superseded_by")) or row.get("lifecycle_state") == RETIRED_LIFECYCLE_STATE
 
+    @property
+    def names(self) -> list[str]:
+        return list(self._names)
 
-def skip_retired_rows(rows: Iterable[Any], *, site: str) -> tuple[list[Any], tuple[str, ...]]:
-    """*rows* without the retired ones, and the names left out.
-
-    Logs ``retired_collection_skipped`` (structlog, warning) with the *site* and the count whenever it left any out, so a
-    caller that also reports to the person can use the returned names for its own line."""
-    kept: list[Any] = []
-    skipped: list[str] = []
-    for row in rows:
-        if is_retired_collection_row(row):
-            skipped.append(str(row.get("name", "")))
-        else:
-            kept.append(row)
-    if skipped:
-        _log.warning(
-            "retired_collection_skipped", site=site, skipped=len(skipped), collections=skipped[:_LOGGED_NAMES],
-        )
-    return kept, tuple(skipped)
+    def __bool__(self) -> bool:
+        return bool(self._names)

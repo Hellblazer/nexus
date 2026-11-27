@@ -38,23 +38,26 @@ from typing import Any
 import click
 import structlog
 
-from nexus.db.retired_rows import skip_retired_rows
+from nexus.collection_errors import RetiredNoSuccessorError
+from nexus.db.retired_rows import RetiredSkips
 
 _log = structlog.get_logger(__name__)
 
 
-def _listing_without_retired(t3: Any, *, site: str) -> tuple[list[dict], list[str]]:
-    """The T3 listing a per-collection check reads: bypass-schema (``taxonomy__*``) rows and retired ones left out.
+def _bypass_free_listing(t3: Any) -> list[dict]:
+    """The T3 listing a per-collection check reads, bypass-schema (``taxonomy__*``) rows left out.
 
-    The engine refuses a by-label read of a retired collection that has no live successor (RDR-229 R7), and such a row
-    can still hold chunks, so a check that opened it would report a read error or a FAIL for a collection nobody can
-    read. The names left out come back as a list and are logged; each check carries them as ``retired_skipped``."""
+    A collection the engine refuses to read as retired with no live successor (RDR-229 R7) is NOT filtered here: the
+    listing cannot tell (its ``superseded_by`` is label text, and a tombstone with a live successor is still served), so
+    each check reads and skips what the read refuses, through :class:`~nexus.db.retired_rows.RetiredSkips`, and carries
+    the names as ``retired_skipped``."""
     from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415 — command-local import (nexus.db.rows.lifecycle)
 
-    rows, skipped = skip_retired_rows(
-        (c for c in t3.list_collections() if not bypasses_canonical_schema(c["name"], c)), site=site,
-    )
-    return rows, list(skipped)
+    return [c for c in t3.list_collections() if not bypasses_canonical_schema(c["name"], c)]
+
+
+#: ``_run_name_vs_embed_dim``'s probe error for a collection the engine refuses as retired with no live successor.
+_RETIRED_PROBE = "retired-no-successor"
 
 
 def _echo_retired_skipped(report: dict) -> None:
@@ -698,8 +701,8 @@ def _run_chunk_size_distribution() -> dict:
 
     try:
         t3 = make_t3()
-        rows, retired_skipped = _listing_without_retired(t3, site="catalog_doctor_chunk_size_distribution")
-        collections = [c["name"] for c in rows]
+        collections = [c["name"] for c in _bypass_free_listing(t3)]
+        retired_skipped = RetiredSkips("catalog_doctor_chunk_size_distribution")
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
             "pass": False,
@@ -716,6 +719,9 @@ def _run_chunk_size_distribution() -> dict:
             # nexus-5z0us sibling: a handle for a name just listed, not
             # get_collection (which re-lists the whole tenant per call).
             col = t3.get_or_create_collection(name)
+        except RetiredNoSuccessorError:
+            retired_skipped.add(name)
+            continue
         except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             tables[name] = {"error": f"open: {exc}"}
             overall_pass = False
@@ -727,6 +733,9 @@ def _run_chunk_size_distribution() -> dict:
                 got = col.get(
                     limit=page, offset=offset, include=["documents"], sensitivity="include",
                 )
+            except RetiredNoSuccessorError:
+                retired_skipped.add(name)
+                break
             except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
                 tables[name] = {"error": f"get: {exc}"}
                 overall_pass = False
@@ -739,6 +748,8 @@ def _run_chunk_size_distribution() -> dict:
                 break
             offset += page
         else:
+            continue
+        if name in retired_skipped.names:
             continue
         sizes.sort()
         n = len(sizes)
@@ -765,7 +776,7 @@ def _run_chunk_size_distribution() -> dict:
         "max_document_bytes": max_doc_bytes,
         "micro_chunk_bytes": _MICRO_CHUNK_BYTES,
         "tables": tables,
-        "retired_skipped": retired_skipped,
+        "retired_skipped": retired_skipped.names,
     }
 
 
@@ -815,8 +826,8 @@ def _run_chunk_text_dedup() -> dict:
 
     try:
         t3 = make_t3()
-        rows, retired_skipped = _listing_without_retired(t3, site="catalog_doctor_chunk_text_dedup")
-        collections = [c["name"] for c in rows]
+        collections = [c["name"] for c in _bypass_free_listing(t3)]
+        retired_skipped = RetiredSkips("catalog_doctor_chunk_text_dedup")
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
             "pass": False,
@@ -834,6 +845,9 @@ def _run_chunk_text_dedup() -> dict:
             # nexus-5z0us sibling: a handle for a name just listed, not
             # get_collection (which re-lists the whole tenant per call).
             col = t3.get_or_create_collection(name)
+        except RetiredNoSuccessorError:
+            retired_skipped.add(name)
+            continue
         except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             within_summary[name] = {"error": f"open: {exc}"}
             overall_pass = False
@@ -845,6 +859,9 @@ def _run_chunk_text_dedup() -> dict:
                 got = col.get(
                     limit=page, offset=offset, include=["metadatas"], sensitivity="include",
                 )
+            except RetiredNoSuccessorError:
+                retired_skipped.add(name)
+                break
             except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
                 within_summary[name] = {"error": f"get: {exc}"}
                 overall_pass = False
@@ -864,6 +881,8 @@ def _run_chunk_text_dedup() -> dict:
                 break
             offset += page
         else:
+            continue
+        if name in retired_skipped.names:
             continue
         total = sum(chash_count.values())
         # within-coll dupes: chashes seen >= 2 times in the same collection.
@@ -893,7 +912,7 @@ def _run_chunk_text_dedup() -> dict:
         "cross_dupe_warn_threshold": _CROSS_COLL_DUPE_WARN_COUNT,
         "cross_dupe_warn": cross_warn,
         "cross_sample": cross[:20],
-        "retired_skipped": retired_skipped,
+        "retired_skipped": retired_skipped.names,
     }
 
 
@@ -1143,8 +1162,8 @@ def _run_name_vs_embed_dim() -> dict:
 
     try:
         t3_db = make_t3()
-        rows, retired_skipped = _listing_without_retired(t3_db, site="catalog_doctor_name_vs_embed_dim")
-        cols = [c["name"] for c in rows]
+        cols = [c["name"] for c in _bypass_free_listing(t3_db)]
+        retired_skipped = RetiredSkips("catalog_doctor_name_vs_embed_dim")
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
             "pass": False,
@@ -1181,6 +1200,8 @@ def _run_name_vs_embed_dim() -> dict:
                 embs = t3_db.get_embeddings(name, ids[:1]) if ids else None
                 probe_err = None
                 break
+            except RetiredNoSuccessorError:
+                return [], None, _RETIRED_PROBE  # refused by the engine, not unreadable: no retry, no read error
             except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
                 probe_err = str(exc)
         return ids, embs, probe_err
@@ -1206,6 +1227,9 @@ def _run_name_vs_embed_dim() -> dict:
         probes = list(pool.map(lambda t: _probe(t[0]), targets))
 
     for (name, token, expected), (ids, embs, probe_err) in zip(targets, probes):
+        if probe_err == _RETIRED_PROBE:
+            retired_skipped.add(name)  # RDR-229 R7: reported as skipped, never a read error
+            continue
         if probe_err is not None:
             # nexus-ou4tb walk (MEDIUM): a read failure is NOT an
             # "unrecognized model token" — burying it there let a fully
@@ -1240,7 +1264,7 @@ def _run_name_vs_embed_dim() -> dict:
         "skipped_non_conformant": skipped_non_conformant,
         "unknown_token": unknown_token,
         "read_errors": read_errors,
-        "retired_skipped": retired_skipped,
+        "retired_skipped": retired_skipped.names,
     }
 
 
@@ -1608,7 +1632,7 @@ def _run_visible_outside_manifest(
         "reason": "", "checked": 0, "total": 0, "findings": [], "collections": [],
         "collections_total": 0, "collections_unreached": 0, "unrowed_collections": 0,
         "truncated": False, "truncated_reason": "",
-        "check_errors": [], "elapsed_s": 0.0, "retired_skipped": [],
+        "check_errors": [], "elapsed_s": 0.0,
         "row_budget": row_budget, "time_budget_s": time_budget_s,
     }
 
@@ -1617,8 +1641,8 @@ def _run_visible_outside_manifest(
             from nexus.db import make_t3  # noqa: PLC0415 — command-local import (nexus.db)
 
             t3 = make_t3()
-        listing, retired_skipped = skip_retired_rows(t3.list_collections(), site="catalog_doctor_visible_outside_manifest")
-        report["retired_skipped"] = list(retired_skipped)
+        listing = list(t3.list_collections())
+        retired_skipped = RetiredSkips("catalog_doctor_visible_outside_manifest")
         names = sorted(
             c["name"] for c in listing
             if c.get("content_type") == _VISIBLE_CHECK_CONTENT_TYPE and c.get("lifecycle_state") != "quarantine"
@@ -1673,6 +1697,9 @@ def _run_visible_outside_manifest(
             # every page, so a collection with no superseded chunk costs one call.
             try:
                 page = t3.manifest_less_census(name, limit=page_limit, offset=offset)
+            except RetiredNoSuccessorError:
+                retired_skipped.add(name)  # RDR-229 R7: refused by the engine; reported as skipped, not an error
+                break
             except Exception as exc:  # noqa: BLE001 — classified here, never a silent skip
                 # A 404 means the engine has no census route. Safe to treat as
                 # not-applicable only because REQUIRED_ENGINE_VERSION makes the
@@ -1753,6 +1780,8 @@ def _run_visible_outside_manifest(
                 break
             offset += page_limit
 
+        if name in retired_skipped.names:
+            continue
         if not errored and coll_row["checked"] < superseded_total:
             # Some superseded chunk went unprobed. Name the budget that
             # stopped it if no stop was recorded yet.
@@ -1776,6 +1805,7 @@ def _run_visible_outside_manifest(
         elif not report["truncated"] and report["total"] == 0 and report["checked"] == 0:
             report["vacuous"] = True
     report["elapsed_s"] = round(clock() - started, 3)
+    report["retired_skipped"] = retired_skipped.names
     return report
 
 

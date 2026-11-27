@@ -38,7 +38,8 @@ from typing import Any
 import click
 import structlog
 
-from nexus.db.retired_rows import skip_retired_rows
+from nexus.collection_errors import RetiredNoSuccessorError
+from nexus.db.retired_rows import RetiredSkips
 
 _log = structlog.get_logger(__name__)
 
@@ -71,6 +72,8 @@ class CollectionDrift:
     #: a re-embed in progress, or a row deleted between the two reads.
     no_vector: int = 0
     error: str | None = None
+    #: The engine refused to read the collection: retired with no live successor (RDR-229 R7). Skipped, not a failure.
+    retired: bool = False
 
     @property
     def below_floor(self) -> list[tuple[str, float]]:
@@ -166,6 +169,8 @@ def probe_collection(t3: Any, name: str, size: int, sample: int, rng: random.Ran
         if len(fresh) != len(ids):
             raise RuntimeError(f"embed returned {len(fresh)} vectors for {len(ids)} texts")
         result.cosines = {i: _cosine(stored[i], f) for i, f in zip(ids, fresh)}
+    except RetiredNoSuccessorError:
+        result.retired = True
     except Exception as exc:  # noqa: BLE001 — one collection's failure is reported, never hides the rest
         _log.debug("doctor_embeddings_probe_failed", collection=name, error=str(exc))
         result.error = f"{type(exc).__name__}: {exc}"
@@ -196,6 +201,8 @@ def probe_collections(
 def format_report(results: list[CollectionDrift], *, sample: int, seed: int) -> tuple[list[str], bool]:
     """Human lines and whether the run is clean."""
     lines: list[str] = []
+    retired = [r for r in results if r.retired]
+    results = [r for r in results if not r.retired]
     drifted = [r for r in results if r.error is None and r.below_floor]
     failed = [r for r in results if r.error is not None]
     probed = [r for r in results if r.error is None and r.cosines]
@@ -219,6 +226,11 @@ def format_report(results: list[CollectionDrift], *, sample: int, seed: int) -> 
         )
     for r in failed:
         lines.append(f"      ✗ {r.collection}: NOT PROBED ({r.error})")
+    if retired:
+        lines.append(
+            f"      skipped {len(retired)} retired collection(s) with no live successor (the engine refuses a read of "
+            f"one by label): {', '.join(r.collection for r in retired)}"
+        )
     if empty:
         lines.append(
             f"      NOT CHECKED: {len(empty)} collection(s) gave no comparable chunk "
@@ -251,20 +263,12 @@ def run_check_embeddings(*, sample: int, collections: tuple[str, ...], seed: int
     run_seed = default_seed() if seed is None else seed
     try:
         t3 = make_t3()
-        # RDR-229 R7: a retired collection with no live successor is refused by label, so it is not sampled.
-        rows, retired_skipped = skip_retired_rows(t3.list_collections(), site="doctor_check_embeddings")
-        listed = {str(c.get("name", "")): int(c.get("count", 0) or 0) for c in rows}
+        listed = {str(c.get("name", "")): int(c.get("count", 0) or 0) for c in t3.list_collections()}
     except Exception as exc:  # noqa: BLE001 — boundary: an unreadable tenant is a hard failure here
         click.echo(f"[✗] Embedding drift: T3 UNREADABLE ({type(exc).__name__}: {exc})")
         raise SystemExit(1) from exc
 
-    if retired_skipped:
-        click.echo(f"[-] Embedding drift: skipped {len(retired_skipped)} retired collection(s) with no live successor: {', '.join(retired_skipped)}")
     if collections:
-        retired_named = [c for c in collections if c in retired_skipped]
-        if retired_named:
-            click.echo(f"[✗] Embedding drift: retired with no live successor, so it cannot be read by label: {', '.join(retired_named)}")
-            raise SystemExit(1)
         unknown = [c for c in collections if c not in listed]
         if unknown:
             click.echo(f"[✗] Embedding drift: no such collection(s): {', '.join(unknown)}")
@@ -277,6 +281,10 @@ def run_check_embeddings(*, sample: int, collections: tuple[str, ...], seed: int
         return
 
     results = probe_collections(t3, sizes, sample=sample, seed=run_seed)
+    skips = RetiredSkips("doctor_check_embeddings")
+    for r in results:
+        if r.retired:
+            skips.add(r.collection)  # logged: a skip is never silent
     lines, ok = format_report(results, sample=sample, seed=run_seed)
     for line in lines:
         click.echo(line)

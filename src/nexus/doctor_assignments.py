@@ -128,7 +128,8 @@ from typing import Any
 import click
 import structlog
 
-from nexus.db.retired_rows import skip_retired_rows
+from nexus.collection_errors import RetiredNoSuccessorError
+from nexus.db.retired_rows import RetiredSkips
 from nexus.doctor_embeddings import default_seed, window_offsets
 
 _log = structlog.get_logger(__name__)
@@ -279,6 +280,8 @@ class CollectionAssignmentDrift:
     #: Sampled chunks actually compared (had a live vector at this dim
     #: AND a foreign centroid both the engine and this probe could see).
     compared: int = 0
+    #: The engine refused to read the collection: retired with no live successor (RDR-229 R7). Skipped, not a failure.
+    retired: bool = False
     disagreements: list[Disagreement] = field(default_factory=list)
     #: Sampled candidate ids the engine's cross-preview answered for, but
     #: whose vector this probe could not itself re-fetch (a re-embed in
@@ -449,6 +452,9 @@ def probe_collection(
                     exact_topic_id=exact_topic_id, exact_similarity=exact_sim, gap=gap,
                     stored_topic_id=stored_context.get(doc_id),
                 ))
+    except RetiredNoSuccessorError:
+        result.retired = True  # refused by the engine (retired, no live successor): skipped, never inconclusive
+        return result
     except Exception as exc:  # noqa: BLE001 — one collection's failure is reported, never hides the rest
         _log.debug("doctor_assignments_probe_failed", collection=name, error=str(exc))
         result.error = f"{type(exc).__name__}: {exc}"
@@ -477,6 +483,8 @@ def format_report(
 ) -> tuple[list[str], bool]:
     """Human lines and whether the run is clean."""
     lines: list[str] = []
+    retired = [r for r in results if r.retired]
+    results = [r for r in results if not r.retired]
     disagreed = [r for r in results if r.error is None and r.disagreements]
     failed = [r for r in results if r.error is not None]
     probed = [r for r in results if r.error is None and r.compared > 0]
@@ -515,6 +523,11 @@ def format_report(
         )
     for r in failed:
         lines.append(f"      ✗ {r.collection}: NOT PROBED ({r.error})")
+    if retired:
+        lines.append(
+            f"      skipped {len(retired)} retired collection(s) with no live successor (the engine refuses a read of "
+            f"one by label): {', '.join(r.collection for r in retired)}"
+        )
     if inconclusive:
         lines.append(
             f"      INCONCLUSIVE: {len(inconclusive)} collection(s) sampled candidate "
@@ -568,20 +581,12 @@ def run_check_assignments(*, sample: int, collections: tuple[str, ...], seed: in
     run_seed = default_seed() if seed is None else seed
     try:
         t3 = make_t3()
-        # RDR-229 R7: a retired collection with no live successor is refused by label, so it is not sampled.
-        rows, retired_skipped = skip_retired_rows(t3.list_collections(), site="doctor_check_assignments")
-        listed = {str(c.get("name", "")): int(c.get("count", 0) or 0) for c in rows}
+        listed = {str(c.get("name", "")): int(c.get("count", 0) or 0) for c in t3.list_collections()}
     except Exception as exc:  # noqa: BLE001 — boundary: an unreadable tenant is a hard failure here
         click.echo(f"[✗] Assignment drift: T3 UNREADABLE ({type(exc).__name__}: {exc})")
         raise SystemExit(1) from exc
 
-    if retired_skipped:
-        click.echo(f"[-] Assignment drift: skipped {len(retired_skipped)} retired collection(s) with no live successor: {', '.join(retired_skipped)}")
     if collections:
-        retired_named = [c for c in collections if c in retired_skipped]
-        if retired_named:
-            click.echo(f"[✗] Assignment drift: retired with no live successor, so it cannot be read by label: {', '.join(retired_named)}")
-            raise SystemExit(1)
         unknown = [c for c in collections if c not in listed]
         if unknown:
             click.echo(f"[✗] Assignment drift: no such collection(s): {', '.join(unknown)}")
@@ -597,6 +602,10 @@ def run_check_assignments(*, sample: int, collections: tuple[str, ...], seed: in
     taxo = HttpTaxonomyStore()
     try:
         results = probe_collections(taxo, t3, {n: listed[n] for n in names}, sample=sample, seed=run_seed)
+        skips = RetiredSkips("doctor_check_assignments")
+        for r in results:
+            if r.retired:
+                skips.add(r.collection)  # logged: a skip is never silent
 
         # An engine below the version that shipped POST .../cross-preview
         # 404s on every collection identically -- fold that into ONE line

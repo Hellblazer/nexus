@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-229 R7 client half (nexus-p2m1x.25): full-inventory loops skip retired collections, visibly.
+"""RDR-229 R7 client half (nexus-p2m1x.25): full-inventory loops skip a retired collection the engine refuses, visibly.
 
-The engine answers 409 ``collection_superseded`` to a read by label of a retired collection with no live successor, and
-such a row can still hold chunks, so ``list_collections()`` still lists it. A loop over the listing that reads each
-collection by name would die on it (or report a false FAIL). Each loop here skips the retired row (``superseded_by`` set
-or ``lifecycle_state`` retired), counts it, and logs it (structlog ``retired_collection_skipped``); the live collections
-are still read.
+The engine answers 409 ``collection_superseded`` (reason ``retired_no_successor``) to a read by label of a retired
+collection with no live successor, and such a row can still hold chunks, so ``list_collections()`` still lists it. The
+listing cannot tell a loop which rows the engine will refuse: its ``superseded_by`` is label text (a tombstone whose
+successor was deleted keeps that label, which another collection may have taken), and a tombstone WITH a live successor is
+still served. So no loop pre-filters on the row; each reads, and a collection whose read raises
+:class:`RetiredNoSuccessorError` is skipped, counted, logged (structlog ``retired_collection_skipped``) and named in the
+output, while every other collection, a successor-bearing tombstone included, is read as before.
 """
 from __future__ import annotations
 
@@ -20,77 +22,70 @@ import pytest
 from click.testing import CliRunner
 from structlog.testing import capture_logs
 
-from nexus import health, search_engine
-from nexus.catalog.engine_writes.collection_delete import SupersededCollectionDeleteError, refusal_of
-from nexus.commands.collection import _reembed_job_error
-from nexus.db.t2._refreshable_client import _RetiredNoSuccessorHttpError
-from nexus.db.t2.http_document_aspects_store import _raise_fenced_refusal
-from nexus.search_engine import search_cross_corpus
-from tests.test_retired_no_successor_client import _BatchingT3
-from nexus.cli import main
-from nexus.collection_errors import RetiredNoSuccessorError
-from nexus.commands.catalog_cmds.integrity import note_chunks_present
-from nexus.db.http_vector_client import VectorServiceError
-from nexus.catalog.recovery_bundle import _collection_rows
-from nexus.commands import enrich
-from nexus.commands.enrich import aspects_backfill_uri_cmd
-from nexus.upgrade_ladder.rungs.manifest_section_labels import _chunk_metadatas
 import nexus.doctor_assignments as da
 import nexus.doctor_embeddings as de
 import nexus.doctor_search as ds
+from nexus import health, search_engine
+from nexus.catalog.engine_writes.collection_delete import SupersededCollectionDeleteError, refusal_of
+from nexus.catalog.recovery_bundle import _collection_rows
+from nexus.cli import main
+from nexus.collection_errors import RetiredNoSuccessorError, retired_no_successor_error_from_body
+from nexus.commands import enrich
 from nexus.commands.catalog_cmds import doctor
+from nexus.commands.catalog_cmds.integrity import note_chunks_present
+from nexus.commands.collection import _reembed_job_error
+from nexus.commands.enrich import aspects_backfill_uri_cmd
 from nexus.commands.store import expire_cmd, export_cmd
-
-from nexus.collection_errors import retired_no_successor_error_from_body
-from nexus.db.http_vector_client import HttpVectorClient
-from nexus.db.retired_rows import is_retired_collection_row, skip_retired_rows
+from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
+from nexus.db.retired_rows import RetiredSkips
+from nexus.db.t2._refreshable_client import _RetiredNoSuccessorHttpError
+from nexus.db.t2.http_document_aspects_store import _raise_fenced_refusal
+from nexus.search_engine import SearchDiagnostics, search_cross_corpus
+from nexus.upgrade_ladder.rungs.manifest_section_labels import _chunk_metadatas
 from tests.test_6pfgb15_note_ttl import _COLLECTION, _entry, _FakeCatalog, _lapsed_row, _World
+from tests.test_retired_no_successor_client import _BatchingT3
 
 RETIRED_NAME = "knowledge__gone__bge-base-en-v15-768__v1"
+LIVE_NAME = "knowledge__live__bge-base-en-v15-768__v1"
+#: A tombstone WITH a live successor: the listing marks it superseded exactly as it marks a no-successor one, and the
+#: engine still serves it. It must be read, expired and exported as before.
+TOMBSTONE_NAME = "knowledge__moved__bge-base-en-v15-768__v1"
+#: What a no-successor row's ``superseded_by`` holds: the label TEXT of its deleted successor, which a live collection may
+#: since have taken. It is not the row's own name and nothing in the listing separates it from TOMBSTONE_NAME's.
+DELETED_SUCCESSOR_LABEL = "knowledge__deleted-successor__bge-base-en-v15-768__v1"
 
 
 def _retired_409(name: str):
     err = retired_no_successor_error_from_body(
-        409, {"error": "collection_superseded", "reason": "collection_superseded", "collection": name, "collection_id": 41})
+        409, {"error": "collection_superseded", "reason": "retired_no_successor", "collection": name, "collection_id": 41})
     assert err is not None
     return err
 
 
-# ── the row predicate and the one skip helper ───────────────────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize(("row", "retired"), [
-    ({"name": "a", "lifecycle_state": "live"}, False),
-    ({"name": "a"}, False),
-    ({"name": "a", "superseded_by": None}, False),
-    ({"name": "a", "superseded_by": ""}, False),
-    ({"name": "a", "superseded_by": "b"}, True),
-    ({"name": "a", "lifecycle_state": "retired"}, True),
-    ({"name": "a", "lifecycle_state": "quarantine"}, False),
-    ("bare-name", False),
-])
-def test_a_row_is_retired_by_superseded_by_or_lifecycle_state(row, retired):
-    assert is_retired_collection_row(row) is retired
+#: The listing rows both kinds of tombstone share.
+RETIRED_ROW = {"name": RETIRED_NAME, "count": 3, "content_type": "knowledge", "superseded_by": DELETED_SUCCESSOR_LABEL}
+TOMBSTONE_ROW = {"name": TOMBSTONE_NAME, "count": 2, "content_type": "knowledge", "superseded_by": LIVE_NAME}
 
 
-def test_skip_retired_rows_returns_the_rest_and_names_what_it_left_out_and_logs_it():
-    rows = [{"name": "live"}, {"name": "old", "superseded_by": "x"}, {"name": "gone", "lifecycle_state": "retired"}]
+# ── the one skip record ─────────────────────────────────────────────────────────────────────────────────────────────
+
+def test_retired_skips_name_what_they_were_given_once_and_log_each_skip():
+    skips = RetiredSkips("unit")
+    assert not skips
     with capture_logs() as logs:
-        kept, skipped = skip_retired_rows(rows, site="unit")
-    assert [r["name"] for r in kept] == ["live"] and skipped == ("old", "gone")
-    [event] = [e for e in logs if e["event"] == "retired_collection_skipped"]
-    assert event["site"] == "unit" and event["skipped"] == 2 and event["collections"] == ["old", "gone"]
-
-
-def test_skip_retired_rows_is_silent_when_nothing_is_retired():
-    with capture_logs() as logs:
-        kept, skipped = skip_retired_rows([{"name": "live"}], site="unit")
-    assert kept == [{"name": "live"}] and skipped == () and logs == []
+        skips.add("a")
+        skips.add("a")
+        skips.add("b")
+    assert skips.names == ["a", "b"] and skips
+    events = [e for e in logs if e["event"] == "retired_collection_skipped"]
+    assert [(e["site"], e["collections"]) for e in events] == [("unit", ["a"]), ("unit", ["b"])]
 
 
 # ── nx store expire ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-def _expire_world(monkeypatch, *, retired_row):
-    """One live knowledge collection with a lapsed chunk, and a retired one whose label read the engine refuses."""
+def _expire_world(monkeypatch):
+    """A live knowledge collection with a lapsed chunk, a successor-bearing tombstone holding another, and a retired
+    one whose label read the engine refuses. The listing marks the two tombstones the same way."""
     cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": "2026-01-01T00:00:00+00:00", "doc_id": "c1"})],
                        {"1.1.1": ["c1"]})
     w = _World(monkeypatch, cat, {"c1": _lapsed_row(1)})
@@ -104,36 +99,31 @@ def _expire_world(monkeypatch, *, retired_row):
         return live_post(path, body, **kw)
 
     monkeypatch.setattr(HttpVectorClient, "list_collections", lambda self, *a, **k: [
-        {"name": RETIRED_NAME, "count": 3, "content_type": "knowledge", **retired_row},
-        {"name": _COLLECTION, "count": 1, "content_type": "knowledge"}])
+        RETIRED_ROW, {**TOMBSTONE_ROW, "name": _COLLECTION}, {"name": LIVE_NAME, "count": 0, "content_type": "knowledge"}])
     monkeypatch.setattr("nexus.db.http_vector_client._post", post)
     return w, reads
 
 
-@pytest.mark.parametrize("retired_row", [{"superseded_by": RETIRED_NAME}, {"lifecycle_state": "retired"}])
-def test_store_expire_skips_a_retired_collection_and_sweeps_the_rest(monkeypatch, retired_row):
-    w, reads = _expire_world(monkeypatch, retired_row=retired_row)
+def test_store_expire_skips_the_collection_the_engine_refuses_and_still_sweeps_a_successor_bearing_tombstone(monkeypatch):
+    w, reads = _expire_world(monkeypatch)
 
     with capture_logs() as logs:
         report = HttpVectorClient().expire_report()
 
-    assert RETIRED_NAME not in reads, "a retired collection is never read by label"
     assert report.retired_collections_skipped == (RETIRED_NAME,)
-    assert w.deleted, "the live collection was still swept"
+    assert _COLLECTION in reads and w.deleted, "the successor-bearing tombstone is still swept"
     [event] = [e for e in logs if e["event"] == "retired_collection_skipped"]
     assert event["site"] == "store_expire" and event["collections"] == [RETIRED_NAME]
 
 
 def test_store_expire_dry_run_reports_the_skipped_retired_collection_too(monkeypatch):
-    _, _ = _expire_world(monkeypatch, retired_row={"superseded_by": RETIRED_NAME})
+    _expire_world(monkeypatch)
     report = HttpVectorClient().expire_report(dry_run=True)
     assert report.retired_collections_skipped == (RETIRED_NAME,)
 
 
 def test_nx_store_expire_names_the_retired_collections_it_did_not_read(monkeypatch):
-
-
-    _expire_world(monkeypatch, retired_row={"superseded_by": RETIRED_NAME})
+    _expire_world(monkeypatch)
     monkeypatch.setattr("nexus.commands.store._t3", lambda: HttpVectorClient())
 
     result = CliRunner().invoke(expire_cmd, [])
@@ -144,15 +134,9 @@ def test_nx_store_expire_names_the_retired_collections_it_did_not_read(monkeypat
 
 # ── nx store export --all ───────────────────────────────────────────────────────────────────────────────────────────
 
-def test_store_export_all_skips_a_retired_collection_and_exports_the_rest(monkeypatch, tmp_path):
-
-
-    live = "knowledge__live__bge-base-en-v15-768__v1"
+def test_store_export_all_skips_the_collection_the_engine_refuses_and_exports_a_successor_bearing_tombstone(monkeypatch, tmp_path):
     db = MagicMock()
-    db.list_collections.return_value = [
-        {"name": RETIRED_NAME, "superseded_by": RETIRED_NAME, "count": 3},
-        {"name": live, "count": 5},
-    ]
+    db.list_collections.return_value = [RETIRED_ROW, TOMBSTONE_ROW, {"name": LIVE_NAME, "count": 5}]
     exported: list[str] = []
 
     def export(*, db, collection_name, output_path, includes, excludes):
@@ -168,59 +152,91 @@ def test_store_export_all_skips_a_retired_collection_and_exports_the_rest(monkey
         result = CliRunner().invoke(export_cmd, ["--all", "-o", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    assert exported == [live], "the retired collection is never exported by label"
+    assert exported == [TOMBSTONE_NAME, LIVE_NAME], "the successor-bearing tombstone is exported"
     assert "ERROR exporting" not in result.output, "a skipped retired collection is not a failure"
     assert "1 retired collection was not exported" in result.output and RETIRED_NAME in result.output
-    assert "across 1 collections" in result.output
+    assert "across 2 collections" in result.output
     assert any(e["event"] == "retired_collection_skipped" and e["site"] == "store_export_all" for e in logs)
 
 
 # ── nx doctor --check-search ────────────────────────────────────────────────────────────────────────────────────────
 
-def _check_search_world(monkeypatch):
-
-    probed: list[list[str]] = []
+def _search_probe_world(monkeypatch):
+    """Retrieval probe over three listed collections, the retired one refused wherever it is read."""
     monkeypatch.setattr(ds, "_load_canaries", lambda: [])
     monkeypatch.setattr(ds, "run_name_resolution_probe", lambda *a, **k: [])
-    monkeypatch.setattr(ds, "_list_collections", lambda: [
-        {"name": RETIRED_NAME, "superseded_by": RETIRED_NAME},
-        {"name": "docs__live__bge-base-en-v15-768__v1", "content_type": "docs"}])
+    monkeypatch.setattr(ds, "_list_collections", lambda: [RETIRED_ROW, TOMBSTONE_ROW, {"name": LIVE_NAME}])
     monkeypatch.setattr(ds, "_make_t3", lambda: object())
+    probed: list[str] = []
 
-    def probe(*, collections, **kw):
-        probed.append(list(collections))
+    def probe_for(t3, col):
+        probed.append(col)
+        if col == RETIRED_NAME:
+            raise _retired_409(col)
         return []
 
-    monkeypatch.setattr(ds, "run_retrieval_quality_probe", probe)
-    return ds, probed
+    monkeypatch.setattr(ds, "_default_probe_for", probe_for)
+    monkeypatch.setattr(ds, "_collection_metadata", lambda t3, col: {"embedding_model": "bge-base-en-v15-768"})
+    monkeypatch.setattr(ds, "_model_for_rows", lambda rows: lambda col: "bge-base-en-v15-768")
+
+    def search_fn(query, cols, n, t3, *, diagnostics_out=None, **kw):
+        diagnostics_out.append(SearchDiagnostics(per_collection={cols[0]: (1, 0, 0.45, None)}, total_dropped=0, total_raw=1))
+        return []
+
+    real = ds.run_retrieval_quality_probe
+    monkeypatch.setattr(ds, "run_retrieval_quality_probe", lambda **kw: real(**{**kw, "search_fn": search_fn}))
+    return probed
 
 
-def test_check_search_does_not_probe_a_retired_collection_and_reports_the_skip_without_failing(monkeypatch, capsys):
-    ds, probed = _check_search_world(monkeypatch)
+def test_check_search_reports_the_collection_the_engine_refuses_as_skipped_and_still_probes_the_rest(monkeypatch, capsys):
+    probed = _search_probe_world(monkeypatch)
 
     with capture_logs() as logs:
         ds.run_check_search(json_out=False)  # no SystemExit(2): a skip is not a regression
 
-    assert probed == [["docs__live__bge-base-en-v15-768__v1"]]
+    assert sorted(probed) == sorted([RETIRED_NAME, TOMBSTONE_NAME, LIVE_NAME])
     out = capsys.readouterr().out
-    assert "retired_skipped" in out and RETIRED_NAME in out and "1 retired_skipped" in out
+    assert "1 retired_skipped" in out and RETIRED_NAME in out
+    assert f"[-] retired_skipped" in out
     assert any(e["event"] == "retired_collection_skipped" and e["site"] == "doctor_check_search" for e in logs)
 
 
 def test_check_search_json_carries_the_retired_skip(monkeypatch, capsys):
-
-    ds, _ = _check_search_world(monkeypatch)
+    _search_probe_world(monkeypatch)
     with capture_logs():  # the skip's log line would otherwise share stdout with the JSON
         ds.run_check_search(json_out=True)
     retrieval = json.loads(capsys.readouterr().out)["probes"][1]
-    assert retrieval["summary"] == {"retired_skipped": 1}
-    assert [(r["name"], r["outcome"]) for r in retrieval["results"]] == [(RETIRED_NAME, "retired_skipped")]
+    outcomes = {r["name"]: r["outcome"] for r in retrieval["results"]}
+    assert outcomes[RETIRED_NAME] == "retired_skipped" and outcomes[TOMBSTONE_NAME] != "retired_skipped"
+    assert retrieval["summary"]["retired_skipped"] == 1
+
+
+def test_check_search_reads_a_refusal_at_the_metadata_and_the_canned_search_too(monkeypatch):
+    def refuse(*a, **k):
+        raise _retired_409(RETIRED_NAME)
+
+    for site in ("metadata", "search"):
+        results = ds.run_retrieval_quality_probe(
+            t3=object(), collections=[RETIRED_NAME],
+            model_for=lambda c: "m",
+            metadata_fn=refuse if site == "metadata" else (lambda c: {"embedding_model": "m"}),
+            search_fn=refuse if site == "search" else (lambda *a, **k: []),
+            probe_for=None,
+        )
+        assert [(r.name, r.outcome) for r in results] == [(RETIRED_NAME, "retired_skipped")], site
+
+
+def test_check_search_reads_a_refusal_inside_the_neighbour_probe(monkeypatch):
+    def refuse(*a, **k):
+        raise _retired_409(RETIRED_NAME)
+
+    results = ds.run_retrieval_quality_probe(
+        t3=object(), collections=[RETIRED_NAME], model_for=lambda c: "m", metadata_fn=lambda c: {"embedding_model": "m"},
+        search_fn=refuse, probe_for=lambda c: [("some text", "id1")], threshold_for=lambda c: 0.5)
+    assert [(r.name, r.outcome) for r in results] == [(RETIRED_NAME, "retired_skipped")]
 
 
 # ── nx catalog doctor ───────────────────────────────────────────────────────────────────────────────────────────────
-
-LIVE_NAME = "knowledge__live__bge-base-en-v15-768__v1"
-
 
 class _FakeCollection:
     def __init__(self, name):
@@ -233,15 +249,14 @@ class _FakeCollection:
 
 
 class _FakeT3:
-    """A tenant listing one retired collection (it still holds chunks) and one live one; a by-label read of the
-    retired one raises what the engine's 409 becomes."""
+    """A tenant listing a retired collection (it still holds chunks; a by-label read raises what the engine's 409
+    becomes), a successor-bearing tombstone and a live one, the tombstones marked alike."""
 
     def __init__(self):
         self.opened: list[str] = []
 
     def list_collections(self, *a, **k):
-        return [{"name": RETIRED_NAME, "superseded_by": RETIRED_NAME, "count": 3, "content_type": "knowledge"},
-                {"name": LIVE_NAME, "count": 1, "content_type": "knowledge", "lifecycle_state": "live"}]
+        return [RETIRED_ROW, TOMBSTONE_ROW, {"name": LIVE_NAME, "count": 1, "content_type": "knowledge", "lifecycle_state": "live"}]
 
     def get_or_create_collection(self, name):
         self.opened.append(name)
@@ -262,8 +277,7 @@ class _FakeT3:
     ("_run_chunk_size_distribution", "tables"),
     ("_run_chunk_text_dedup", "within"),
 ])
-def test_catalog_doctor_per_collection_checks_skip_a_retired_collection_not_fail_on_it(monkeypatch, runner, table_key):
-
+def test_catalog_doctor_per_collection_checks_skip_the_collection_the_engine_refuses(monkeypatch, runner, table_key):
     t3 = _FakeT3()
     monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
 
@@ -271,29 +285,27 @@ def test_catalog_doctor_per_collection_checks_skip_a_retired_collection_not_fail
         report = getattr(doctor, runner)()
 
     assert report["pass"] is True, report
-    assert RETIRED_NAME not in t3.opened and RETIRED_NAME not in report[table_key]
-    assert LIVE_NAME in report[table_key], "the live collection is still read"
+    assert RETIRED_NAME not in report[table_key] and "error" not in str(report[table_key])
+    assert LIVE_NAME in report[table_key] and TOMBSTONE_NAME in report[table_key], "the others are still read"
     assert report["retired_skipped"] == [RETIRED_NAME]
     assert any(e["event"] == "retired_collection_skipped" for e in logs)
 
 
-def test_catalog_doctor_name_vs_embed_dim_skips_a_retired_collection_not_a_read_error(monkeypatch):
-
+def test_catalog_doctor_name_vs_embed_dim_skips_the_collection_the_engine_refuses_not_a_read_error(monkeypatch):
     t3 = _FakeT3()
     monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
 
     report = doctor._run_name_vs_embed_dim()
 
     assert report["read_errors"] == [] and report["pass"] is True, report
-    assert report["checked"] == 1 and report["retired_skipped"] == [RETIRED_NAME]
+    assert report["checked"] == 2 and report["retired_skipped"] == [RETIRED_NAME]
 
 
-def test_catalog_doctor_visible_outside_manifest_skips_a_retired_collection(monkeypatch):
-
+def test_catalog_doctor_visible_outside_manifest_skips_the_collection_the_engine_refuses(monkeypatch):
     report = doctor._run_visible_outside_manifest(t3=_FakeT3())
 
     assert report["check_errors"] == [] and report["pass"] is True, report
-    assert report["collections_total"] == 1 and report["retired_skipped"] == [RETIRED_NAME]
+    assert report["collections_total"] == 3 and report["retired_skipped"] == [RETIRED_NAME]
 
 
 @pytest.mark.parametrize(("printer", "report"), [
@@ -307,7 +319,6 @@ def test_catalog_doctor_visible_outside_manifest_skips_a_retired_collection(monk
       "read_errors": [], "retired_skipped": ["r1"]}),
 ])
 def test_catalog_doctor_text_names_the_retired_collections_it_skipped(capsys, printer, report):
-
     getattr(doctor, printer)(report)
 
     assert "skipped 1 retired collection" in capsys.readouterr().out
@@ -317,60 +328,117 @@ def test_catalog_doctor_text_names_the_retired_collections_it_skipped(capsys, pr
 
 class _ListingT3:
     def list_collections(self, *a, **k):
-        return [{"name": RETIRED_NAME, "superseded_by": RETIRED_NAME, "count": 3},
-                {"name": LIVE_NAME, "count": 4}]
+        return [{**RETIRED_ROW, "count": 3}, {**TOMBSTONE_ROW, "count": 2}, {"name": LIVE_NAME, "count": 4}]
 
 
-def test_check_embeddings_probes_only_live_collections_and_names_the_retired_skip(monkeypatch, capsys):
-    probed: list[dict] = []
+def _drift_probe_world(monkeypatch, module, record_type, extra=()):
+    probed: list[str] = []
+
+    def probe_collection(*args, **kw):
+        name = [a for a in args if isinstance(a, str)][0]
+        probed.append(name)
+        if name == RETIRED_NAME:
+            raise _retired_409(name)
+        return record_type(collection=name, size=1, *extra)
+
     monkeypatch.setattr("nexus.db.make_t3", lambda: _ListingT3())
-    monkeypatch.setattr(de, "probe_collections", lambda t3, sizes, **kw: probed.append(dict(sizes)) or [])
-    monkeypatch.setattr(de, "format_report", lambda results, **kw: ([], True))
-
-    de.run_check_embeddings(sample=5, collections=(), seed=1)
-
-    assert probed == [{LIVE_NAME: 4}]
-    assert "skipped 1 retired collection" in capsys.readouterr().out
+    return probed
 
 
-def test_check_embeddings_says_a_named_retired_collection_is_retired_not_that_it_does_not_exist(monkeypatch, capsys):
-    monkeypatch.setattr("nexus.db.make_t3", lambda: _ListingT3())
+def test_check_embeddings_skips_the_collection_the_engine_refuses_and_probes_the_rest(monkeypatch, capsys):
+    probed: list[str] = []
+
+    def fake_get_or_create(name):
+        probed.append(name)
+        if name == RETIRED_NAME:
+            raise _retired_409(name)
+        raise RuntimeError("stop after the open")  # a live one is not probed further here
+
+    t3 = _ListingT3()
+    t3.get_or_create_collection = fake_get_or_create
+    monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
+
+    with capture_logs() as logs, pytest.raises(SystemExit):
+        de.run_check_embeddings(sample=5, collections=(), seed=1)
+
+    out = capsys.readouterr().out
+    assert sorted(probed) == sorted([RETIRED_NAME, TOMBSTONE_NAME, LIVE_NAME])
+    assert "skipped 1 retired collection" in out and RETIRED_NAME in out
+    assert f"✗ {RETIRED_NAME}: NOT PROBED" not in out, "a retired collection is not a failed probe"
+    assert f"✗ {LIVE_NAME}: NOT PROBED" in out, "the others still report their own failures"
+    assert any(e["event"] == "retired_collection_skipped" and e["site"] == "doctor_check_embeddings" for e in logs)
+
+
+def test_check_embeddings_naming_only_a_retired_collection_exits_non_zero_because_nothing_was_compared(monkeypatch, capsys):
+    t3 = _ListingT3()
+
+    def refuse(name):
+        raise _retired_409(name)
+
+    t3.get_or_create_collection = refuse
+    monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
     with pytest.raises(SystemExit) as exc:
         de.run_check_embeddings(sample=5, collections=(RETIRED_NAME,), seed=1)
     out = capsys.readouterr().out
-    assert exc.value.code == 1 and "retired" in out and "no such collection" not in out
+    assert exc.value.code == 1 and "skipped 1 retired collection" in out and "no such collection" not in out
 
 
-def test_check_assignments_probes_only_live_collections_and_names_the_retired_skip(monkeypatch, capsys):
-    probed: list[dict] = []
-    monkeypatch.setattr("nexus.db.make_t3", lambda: _ListingT3())
-    monkeypatch.setattr(da, "probe_collections", lambda taxo, t3, sizes, **kw: probed.append(dict(sizes)) or [])
-    monkeypatch.setattr(da, "format_report", lambda results, **kw: ([], True))
-
+def _assignments_world(monkeypatch, opened):
     class _Taxo:
         def close(self):
             pass
 
+    t3 = _ListingT3()
+
+    def open_collection(name):
+        opened.append(name)
+        if name == RETIRED_NAME:
+            raise _retired_409(name)
+        raise RuntimeError("stop after the open")  # a live one is not probed further here
+
+    t3.get_or_create_collection = open_collection
+    monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
     monkeypatch.setattr("nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore", _Taxo)
 
-    da.run_check_assignments(sample=5, collections=(), seed=1)
 
-    assert probed == [{LIVE_NAME: 4}]
-    assert "skipped 1 retired collection" in capsys.readouterr().out
+def test_check_assignments_skips_the_collection_the_engine_refuses_and_probes_the_rest(monkeypatch, capsys):
+    opened: list[str] = []
+    _assignments_world(monkeypatch, opened)
+
+    with capture_logs() as logs, pytest.raises(SystemExit):
+        da.run_check_assignments(sample=5, collections=(), seed=1)
+
+    out = capsys.readouterr().out
+    assert sorted(opened) == sorted([RETIRED_NAME, TOMBSTONE_NAME, LIVE_NAME])
+    assert "skipped 1 retired collection" in out and RETIRED_NAME in out
+    assert f"✗ {RETIRED_NAME}: NOT PROBED" not in out and f"✗ {LIVE_NAME}: NOT PROBED" in out
+    assert any(e["event"] == "retired_collection_skipped" and e["site"] == "doctor_check_assignments" for e in logs)
+
+
+def test_check_assignments_naming_only_a_retired_collection_exits_non_zero_and_says_retired(monkeypatch, capsys):
+    """doctor_assignments.py's old retired_named branch is gone; a named retired collection is skipped like any other and
+    the run, which compared nothing, is not clean."""
+    _assignments_world(monkeypatch, [])
+    with pytest.raises(SystemExit) as exc:
+        da.run_check_assignments(sample=5, collections=(RETIRED_NAME,), seed=1)
+    out = capsys.readouterr().out
+    assert exc.value.code == 1 and "skipped 1 retired collection" in out and "no such collection" not in out
+    assert "nothing was compared" in out
 
 
 # ── nx doctor: the PDF chunk metadata scan ──────────────────────────────────────────────────────────────────────────
 
-def test_doctor_pdf_stub_scan_does_not_read_a_retired_collection(monkeypatch):
+def test_doctor_pdf_stub_scan_names_the_collection_the_engine_refuses_not_as_unreadable(monkeypatch):
     scanned: list[str] = []
 
     class _Listing:
         def list_collections(self, *a, **k):
-            return [{"name": RETIRED_NAME, "content_type": "knowledge", "superseded_by": RETIRED_NAME},
-                    {"name": LIVE_NAME, "content_type": "knowledge"}]
+            return [RETIRED_ROW, TOMBSTONE_ROW, {"name": LIVE_NAME, "content_type": "knowledge"}]
 
     def scan(t3, name, limit):
         scanned.append(name)
+        if name == RETIRED_NAME:
+            raise _retired_409(name)
         return {}, health._StubScanCoverage()
 
     monkeypatch.setattr("nexus.db.make_t3", lambda: _Listing())
@@ -380,7 +448,7 @@ def test_doctor_pdf_stub_scan_does_not_read_a_retired_collection(monkeypatch):
     with capture_logs() as logs:
         [result] = health._check_pdf_stub_metadata()
 
-    assert scanned == [LIVE_NAME], "the retired collection is not read by label"
+    assert sorted(scanned) == sorted([RETIRED_NAME, TOMBSTONE_NAME, LIVE_NAME]), "a successor-bearing tombstone is scanned"
     assert "could not be read" not in result.detail
     assert any(e["event"] == "retired_collection_skipped" and e["site"] == "doctor_pdf_stub_metadata" for e in logs)
 
