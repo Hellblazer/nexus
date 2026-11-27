@@ -140,3 +140,20 @@ def test_a_probe_that_cannot_be_made_never_costs_the_doctor_run(monkeypatch) -> 
     monkeypatch.setattr(health, "_resolve_service_endpoint", boom)
     calls = _fake_bounded(monkeypatch, stdout="doctor: ok\n")
     assert "Status: PASS" in pd.nx_doctor_block() and len(calls) == 1
+
+
+def test_a_connect_timeout_is_a_wedge_warn_and_doctor_is_not_run(monkeypatch) -> None:
+    """A full backlog or a dropped SYN times the connect out: an engine address that does not answer, not a refusal."""
+    from nexus import health
+    from tests._module_seam import setattr_in
+
+    def slow_connect(address, timeout=None, **_kw):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(health, "_resolve_service_endpoint", lambda _config_dir: ("127.0.0.1", 9))
+    setattr_in(monkeypatch, pd, "socket.create_connection", slow_connect)
+    calls = _fake_bounded(monkeypatch, stdout="doctor: ok\n")
+    text = "\n".join(pd.nx_doctor_block())
+    assert calls == [], "doctor must not run behind an engine address that times out"
+    assert "Status: WARN" in text and "127.0.0.1:9" in text and "engine" in text
+    assert "run 'nx doctor' directly" in text and "SKIP" not in text

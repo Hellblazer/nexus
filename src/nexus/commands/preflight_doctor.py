@@ -45,6 +45,9 @@ def _engine_wedged() -> str | None:
     host, port = endpoint
     try:
         conn = socket.create_connection((host, port), timeout=_ENGINE_PROBE_TIMEOUT)
+    except TimeoutError:
+        # A full backlog or a dropped SYN: the address does not answer, which is a wedge and not a refusal.
+        return f"the engine at {host}:{port} did not accept a connection within {_ENGINE_PROBE_TIMEOUT:g}s"
     except OSError:
         return None
     with conn:
