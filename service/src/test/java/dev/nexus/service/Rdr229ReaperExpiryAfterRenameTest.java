@@ -220,7 +220,7 @@ class Rdr229ReaperExpiryAfterRenameTest {
         World w = renamed("e2", false, false, true);
         movedAfterTheRetag(w, false, true);
         assertThat(reapEngineMoved(w)).as("the reaper lists the label tag A").containsExactly(w.a());
-        assertThat(held(w, w.referenced())).as("a row with no id key names no origin by id; its re-reference under B must still protect it").isTrue();
+        assertThat(held(w, w.referenced())).as("a row with no id key is outside the call from the latch (it leaks, vectors-086); it is kept by the latch term, not by B's re-reference").isTrue();
     }
 
     @Test
@@ -228,6 +228,6 @@ class Rdr229ReaperExpiryAfterRenameTest {
         World w = renamed("k2", true, false, false);
         movedAfterTheRetag(w, false, false);
         assertThat(reapClientMoved(w)).as("A is live knowledge again, so the client lister names it").containsExactly(w.a());
-        assertThat(held(w, w.referenced())).as("a row with no id key names no origin by id; its re-reference under B must still protect it").isTrue();
+        assertThat(held(w, w.referenced())).as("a row with no id key is outside the call from the latch (it leaks, vectors-086); it is kept by the latch term, not by B's re-reference").isTrue();
     }
 }

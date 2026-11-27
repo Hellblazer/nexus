@@ -84,8 +84,10 @@ public final class QuarantineOrigin {
      * ({@code origin_collection_id}) alone, before it by the label tag. A row with no origin id after the latch (the key absent, or present
      * and JSON null, which a dangling tag is backfilled to) is no sibling of the label's current holder: the arm
      * {@code origin_collection_id IS NULL AND origin_collection = label} is refused (linda 2026-11-23), because a label names whichever row
-     * holds it now. Gate 3 does not hold while a quarantine chunk lacks the key ({@code CompletionCheck}), so after the latch every row has
-     * it. {@link #taggedWithoutId} finds the refused rows, to count and WARN. One definition for {@code rowsOf} and the restore's sibling lookup.
+     * holds it now. Gate 3 does not hold while a quarantine chunk lacks the key ({@code CompletionCheck}), so every row has it AT the latch.
+     * It does not stay so: a mover racing a rename resolves the origin by name a second time and can write a row without the key (vectors-077),
+     * and the reaper's two expiries (vectors-086) leave such a row alone from the latch: never expired, never counted as protected.
+     * {@link #taggedWithoutId} finds the refused rows, to count and WARN. One definition for {@code rowsOf} and the restore's sibling lookup.
      */
     public static Condition taggedWith(boolean byId, String tenant, String origin) {
         return byId
