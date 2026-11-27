@@ -240,6 +240,14 @@ for label in (a, b):
     if search_rows or hook_rows:
         raise SystemExit(f"refusing: {search_rows} search and {hook_rows} hook rows are recorded under {label!r}")
 print("no rows under the probe labels")
+# The latch state is read before anything is sent, and printed first, so a long reason after it cannot push it past the
+# 200 characters the step's record keeps. One retry: an unreadable status is not yet a verdict.
+status = fetch_engine_status(timeout=20.0) or fetch_engine_status(timeout=20.0) or {}
+completion = status.get("rdr229_completion")
+latched = completion.get("gate3_latched") if isinstance(completion, dict) else None
+if latched is None:
+    raise SystemExit("the gate 3 latch state is unreadable (GET /v1/status carries no rdr229_completion.gate3_latched): the probe cannot say which regime it covered")
+print(f"result: gate3_latched={latched}")
 try:
     store.rename_collection(old=a, new="c42")
 except httpx.HTTPStatusError as exc:
@@ -248,11 +256,6 @@ except httpx.HTTPStatusError as exc:
     print("minted target refused 400")
 else:
     raise SystemExit("a minted-form target was accepted: the engine does not judge the telemetry rename target")
-status = fetch_engine_status(timeout=20.0) or {}
-completion = status.get("rdr229_completion")
-latched = completion.get("gate3_latched") if isinstance(completion, dict) else None
-if latched is None:
-    raise SystemExit("the gate 3 latch state is unreadable (GET /v1/status carries no rdr229_completion.gate3_latched): the probe cannot say which regime it covered")
 def live(name):
     found = cat.get_collection(name)
     return found is not None and not found.get("superseded_by")
@@ -269,10 +272,10 @@ try:
     try:
         moved = store.rename_collection(old=a, new=b)
     except httpx.HTTPStatusError as exc:
-        print("result: legal rename answered", exc.response.status_code, _shown(exc), f"gate3_latched={latched}")
+        print("result: legal rename answered", exc.response.status_code, _shown(exc))
         raise SystemExit(f"the legal rename answered {exc.response.status_code} after the registry rename, not 200")
     assert all(v == 0 for v in moved.values()), f"the probe's legal rename moved rows: {moved}"
-    print("result: legal rename answered 200", moved, f"gate3_latched={latched}")
+    print("result: legal rename answered 200", moved)
 finally:
     if live(b):
         rename_in_registry(b, a)
