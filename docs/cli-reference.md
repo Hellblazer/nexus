@@ -3684,7 +3684,7 @@ Resolution is env first, then `config.yml`, for both. See
 
 ## nx settings
 
-Inspect the conexus plugin's project and user settings files. The project file is `.nexus/project.json` in the repository; the user file is `conexus.json` under `.config/nexus` in your account home. Neither holds a credential, and there is no command that writes them: edit them by hand. The user file is read from the operating system's account home even when `NEXUS_CONFIG_DIR` is set, because that is the file the hooks read. Credentials stay in [`nx config`](#nx-config).
+Inspect the conexus plugin's project and user settings files. The project file is `.nexus/project.json` in the repository; the user file is `conexus.json` under `.config/nexus` in your account home. Neither holds a credential, and there is no command that writes them: edit them by hand. The user file is read from the operating system's account home even when `NEXUS_CONFIG_DIR` is set, because that is the file the hooks read. Credentials stay in [`nx config`](#nx-config). The keys, how two values combine and what a bad value does are in [settings.md](settings.md).
 
 ```
 nx settings show [--cwd PATH] [--json]
