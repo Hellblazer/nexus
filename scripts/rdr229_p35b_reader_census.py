@@ -262,8 +262,11 @@ includes = re.findall(r'<include\s+file="([^"]+)"', master)
 # it is a live reader the dispositions must name, and it has no earlier text to be disposed instead of.
 # vectors-083 (RDR-229 P3.7, nexus-p2m1x.27) redefines four of those objects again (the restore functions and the reattach plan find a quarantined chunk's
 # origin by id from gate 3); it is a later definer of objects P3.5b already redefined, so the baseline stays at the definer before P3.5b.
+# vectors-086 (nexus-p2m1x.28) is the same kind: it redefines nexus.reaper_expire_quarantine and reaper_expire_client_quarantine once more
+# (the row's own origin id guards it), so the baseline stays at the definer before P3.5b.
 P35B_OWN = {"db/changelog/vectors-077-rdr229-p35b-readers-both.xml", "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml",
-            "db/changelog/vectors-083-restore-by-origin-id.xml", "db/changelog/vectors-084-rdr229-ann-query-by-id.xml"}
+            "db/changelog/vectors-083-restore-by-origin-id.xml", "db/changelog/vectors-084-rdr229-ann-query-by-id.xml",
+            "db/changelog/vectors-086-reaper-expiry-by-origin-id.xml"}
 # Files whose CREATE FUNCTIONs are ADDED OVERLOADS of functions an earlier file defines (vectors-084: taxonomy_ann_query_<dim> with a
 # trailing p_collection_id), not redefinitions: each is the object nexus.<name>/by-id, and the text-signature function keeps its own.
 OVERLOAD_FILES = {"db/changelog/vectors-084-rdr229-ann-query-by-id.xml"}

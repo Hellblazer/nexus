@@ -187,8 +187,8 @@ ops	gc_audit	nexus.gc_restore_rereferenced [vectors-085-quarantine-tuple-guards.
 ops	gc_audit	nexus.gc_restore_rereferenced_bounded [vectors-085-quarantine-tuple-guards.xml:2379]	2153	insert	sql_function	collection	collection_id	no		sql	
 ops	gc_audit	nexus.purge_trash [vectors-077-rdr229-p35b-readers-both.xml:8871]	8776	insert	sql_function	collection	collection_id	no		sql	
 ops	gc_audit	nexus.quarantine_restore_chunks [vectors-083-restore-by-origin-id.xml:1241]	879	insert	sql_function	collection	collection_id	no		sql	
-ops	gc_audit	nexus.reaper_expire_client_quarantine [vectors-083-restore-by-origin-id.xml:2879]	2728	insert	sql_function	collection	collection_id	no		sql	
-ops	gc_audit	nexus.reaper_expire_quarantine [vectors-077-rdr229-p35b-readers-both.xml:6351]	6261	insert	sql_function	collection	collection_id	no		sql	
+ops	gc_audit	nexus.reaper_expire_client_quarantine [vectors-086-reaper-expiry-by-origin-id.xml:428]	268	insert	sql_function	collection	collection_id	no		sql	
+ops	gc_audit	nexus.reaper_expire_quarantine [vectors-086-reaper-expiry-by-origin-id.xml:132]	33	insert	sql_function	collection	collection_id	no		sql	
 ops	gc_audit	nexus.reaper_quarantine_chunks [vectors-085-quarantine-tuple-guards.xml:1453]	1207	insert	sql_function	collection	collection_id	no		sql	
 ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11769	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history	
 ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12244	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history	

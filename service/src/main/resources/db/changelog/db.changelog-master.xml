@@ -2544,6 +2544,16 @@
     <include file="db/changelog/vectors-085-quarantine-tuple-guards.xml"/>
 
     <!--
+        Bead nexus-p2m1x.28 (RDR-229 P3.7): vectors-086-1 and -2 redefine nexus.reaper_expire_quarantine (last definer vectors-077-55) and
+        nexus.reaper_expire_client_quarantine (last definer vectors-083-7) so a quarantine row's own origin_collection_id protects it from
+        deletion whatever origin label the caller passed, and from the gate 3 latch a row with no origin_collection_id key is never deleted
+        (a move that commits after a one-row rename's retag leaves a row tagged with the old label). Two CREATE OR REPLACE FUNCTION, each
+        with a rollback to the current body. DATA EFFECT: none. After vectors-085 (which redefines the neighbouring quarantine functions;
+        neither redefines the other's), before vectors-081 and the grants. See the included file's header.
+    -->
+    <include file="db/changelog/vectors-086-reaper-expiry-by-origin-id.xml"/>
+
+    <!--
         Bead nexus-p2m1x.21 (RDR-229 P3.3c; Sam's ruling, T2 nexus/sam-ruling-validate-bounds-lock-wait-only-2026-11-23): vectors-081-1 sets
         statement_timeout_ms 2147483647 (no statement bound, a 5 s lock wait) on the registered stamp moves and P3.3a id-twin validation moves
         that are not complete, whose on_completes are VALIDATE CONSTRAINT and block no writer. DATA EFFECT: at most 23 rows of nexus.data_moves;
