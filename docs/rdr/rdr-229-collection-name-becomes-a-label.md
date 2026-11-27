@@ -1952,7 +1952,7 @@ while the engine serves:
     case), so a fresh or half-stamped install normally sees
     `name_key_drop_move` and then `none` (`Rdr229P37RestartValueTest`,
     `Rdr229FreshInstallRenameRestartTest`; the corrected versions of these are
-    on the P3.7 lane, and develop holds older versions). The same
+    on develop). The same
     values, with `none`, go out as `rdr229_completion.rename_missing`, and
     `nx doctor` shows a row for each one that is not `none`
     (`CompletionStatusJson.java:26-36`; `rdr229_completion_health.py:155-171`).
@@ -3442,8 +3442,7 @@ its acceptance is that test green plus the census pin it lowers.
   repository); the repository-level pins are `Rdr229P35cSearchByIdIntegrationTest`,
   `Rdr229P35cLatchedIdPathTest`, `Rdr229P35bSqlReadersIntegrationTest` and
   `Rdr229P35bBranchPartitionIntegrationTest`. The corrected versions of the
-  fresh-install and refusal-window tests are on the P3.7 lane, and develop
-  holds older versions; the half-stamped test exists only on the lane. T2
+  fresh-install, refusal-window and half-stamped tests are on develop. T2
   `229-research-322` inferred this chain from code; the named tests now test it
   (nexus-p2m1x.48).
   - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
@@ -4279,9 +4278,7 @@ None.
   fails to apply on its own. Tests of the rename behaviour (search is pinned
   at the repository, see P3.5): `Rdr229P35HalfStampedStoreTest`,
   `Rdr229FreshInstallRenameRestartTest`, `Rdr229P37RenameStagesTest` and
-  `Rdr229P37RestartValueTest`. The corrected versions are on the P3.7 lane;
-  develop holds older versions of the second and third, and the other two
-  exist only on the lane.
+  `Rdr229P37RestartValueTest`. The corrected versions are on develop.
 - **Scenario**: an engine with P4.0 boots on a store with only half its
   chunks stamped — **Verify**: it serves migration-only, refusing
   collection-scoped routes with an error that names the floor, the stamp
@@ -4871,3 +4868,4 @@ large, and moved under a ratchet.
 - 2026-11-27: item 6's list says `topic_assignments_chunk_fk` is not dropped in Phase 3 and why (linda; Rdr229P37OneRowRenameTest, nexus-p2m1x.27): after the drop move the one-row rename rewrites no assignment row, so the key stays satisfied; `topic_assignments_collection_fk` still refuses the rename by its cascade and is dropped by the move. P4.1's child-key drop step removes the key with the other two name child keys.
 - 2026-11-27: R7 is deferred to Phase 4 (Sam, ask `rdr229-r7-defer`, option 1, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`; grant 3, nexus-p2m1x.25 and .34): the label-addressed read refusal, `RETIRED_NO_SUCCESSOR`, its typed client error and not-retried read, go to P4.0 (nexus-p2m1x.34), not nexus-p2m1x.25, and so does the open acceptance that a no-successor tombstone's chunks are readable by no route (undecided, back to Sam with R7; reads by id are refused already in Phase 3, a read by label is not); the per-reader tests over today's 409 are named as shipped (`CollectionRetiredNoSuccessorReadersTest`, 3904bdc8a7 and its two predecessors), not as owed. The 2026-11-24 lines above that say they stay on .25 are the record of that date.
 - 2026-11-27: correction batch 2 (grant 3, nexus-p2m1x.48, .34, .28; fix check `229-fix-check-4a034623990a`): P4.0's bullet and the Versioning paragraph carry R7's remainder, its client-first pairing and the open acceptance (readable by no route; reads by id are refused already, a read by label is not), which goes to P4.0 undecided; the restart signal and the order sentence say `restart` is reached only when a listed changeset fails on its own, `vectors-078-4` under lock contention included; the `rdr229-restart` notice needs gate 1; the P3.7 lane tests are cited as corrected versions on the lane with develop's older versions named, and search is cited to its repository-level pins; `topic_assignments_collection_fk` is named where `that key` stood; the mint class's retirement is marked as inferred from P4.3; item 12's census arithmetic reaches 212, the current pin. No decision changed.
+- 2026-11-27: the test-location wording: the corrected fresh-install, refusal-window, restart-value and half-stamped tests are on develop, no longer on a separate lane (both lanes are stacked on one branch before the push; no decision changed).
