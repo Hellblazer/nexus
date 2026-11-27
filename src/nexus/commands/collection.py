@@ -937,7 +937,7 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     The engine refuses a new name it reserves (409 ``label_reserved``: a
     collection renamed away from that label while a name-keyed table still
     holds a row under it; the label frees when the engine drops the name
-    columns, RDR-229 P4.1), and refuses every rename (409
+    columns), and refuses every rename (409
     ``rename_refused``, ``missing: restart``) until it restarts after an
     upgrade whose completion step has not run; the restart is the
     operator's to order.
@@ -976,8 +976,16 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
         try:
             from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-            old_prefix = (get_collection_row(old) or {}).get("content_type") or ""
-        except Exception:  # noqa: BLE001 — an unreadable row keeps the name-only comparison, as before
+            # A minted label names nothing, so a listing that failed must not read as "no row" (nexus-a7o92): strict
+            # raises it. None still means no stored chunk yet (a freshly minted empty collection), which has no type to compare.
+            old_prefix = (get_collection_row(old, strict=minted and not force_prefix_change) or {}).get("content_type") or ""
+        except Exception as exc:  # noqa: BLE001 — an unreadable row keeps the name-only comparison, as before
+            if minted and not force_prefix_change:
+                raise click.ClickException(
+                    f"cannot rename {old!r}: its row's content type could not be read ({exc}). A minted label names "
+                    f"no type, so the type check has nothing to compare. Retry when the engine answers, or pass "
+                    f"--force-prefix-change to rename without the check."
+                ) from exc
             old_prefix = ""
     if minted and old_prefix and not new_prefix:
         new_prefix = "knowledge"

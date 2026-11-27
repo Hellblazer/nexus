@@ -102,7 +102,9 @@ two-segment name's type prefix), and a minted `c<id>` label carries
 neither. A few checks still compare a model token read from a name: the
 `nx collection rename` guards compare the new name's type prefix, and its
 model (the token it carries, or the one its prefix implies), with the
-source's (for a minted `c<id>` source, its row's type and no model); the engine
+source's (a minted `c<id>` source is compared on its row's type; a conformant
+new name's token is compared with the row's model, and a non-conformant one is
+not compared on model); the engine
 refuses a conformant new name whose token disagrees with the source row's
 model; and the re-embed job's foreign-origin check reads a source's name
 when that source's row is gone.
@@ -135,8 +137,9 @@ bytes, and not the minted form `c<digits>`, which only the engine assigns. It
 may not contain `/` or `,`, and it may not begin or end with whitespace.
 
 To give a collection a readable label, rename it with `nx collection rename
-OLD NEW`. A minted `c<id>` label renames to a bare readable label without
-`--force-prefix-change`. Three things to know first:
+OLD NEW`. A minted `c<id>` knowledge collection renames to a bare readable label
+without `--force-prefix-change`; a minted code, docs or rdr collection needs it,
+because a plain label is a knowledge collection. Three things to know first:
 
 - **A rename sets the collection's content type and owner from the new name.**
   The client sends them only for a name it can parse, and the engine keeps a
@@ -151,7 +154,9 @@ OLD NEW`. A minted `c<id>` label renames to a bare readable label without
   no type and no model, so the guards read neither from it: it compares its
   row's type with the new name's (a label with no type prefix is a
   `knowledge` collection), and a `knowledge` row renames to a plain label
-  without the flag. A named label such as `code__foo` still stops
+  without the flag. A minted collection with no rows yet has no type to
+  compare and is not checked; if its row cannot be read at all, the rename
+  stops and asks for the flag. A named label such as `code__foo` still stops
   with a prefix or model mismatch when the new name reads as another type
   or embedding model (`code__foo` to `docs__foo`, or to a bare label).
   `--force-prefix-change` lets it through and switches off the model-token
