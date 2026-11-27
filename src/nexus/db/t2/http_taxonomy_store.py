@@ -68,6 +68,7 @@ else:
     # module on every process's first T2 handle, taxonomy or not.
     np = lazy_module("numpy")
 
+from nexus.collection_errors import RetiredNoSuccessorError
 from nexus.errors import SplitConservationViolatedError
 
 # nexus-i711w Stage 2 Phase 0: these all live in taxonomy_compute (the
@@ -1190,6 +1191,8 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                     {"collection": collection_name, "specs": specs},
                 )
             except httpx.HTTPStatusError as exc:
+                if isinstance(exc, RetiredNoSuccessorError):
+                    raise  # RDR-229 R7: retired with no live successor; not the concurrent-discovery 409 below
                 if exc.response is not None and exc.response.status_code == 409:
                     try:
                         body = exc.response.json()

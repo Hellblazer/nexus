@@ -1447,8 +1447,8 @@ class RefreshableHttpStoreMixin:
         # nexus-mp8ys, nexus-i15oc: the engine refused a write to a retired collection
         # name: a chunk write (the combined write_many / append / append_many), or a
         # taxonomy, aspect, highlight or aspect-queue write. Typed, naming the
-        # successor. It is not an HTTPStatusError, so neither retry ladder in
-        # this mixin (both key on that type) can resend it.
+        # successor. The superseded and label_reserved types are not HTTPStatusErrors, and the retired
+        # no-successor one is a 409 that no ladder retries (both key on 502/503/504 and request_in_flight), so none is resent.
         if resp.status_code == 409:
             try:
                 superseded = superseded_write_error_from_body(409, resp.json())

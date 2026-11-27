@@ -14,11 +14,22 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import click
+import httpx
 import pytest
 from click.testing import CliRunner
 from structlog.testing import capture_logs
 
-from nexus import health
+from nexus import health, search_engine
+from nexus.commands.collection import _reembed_job_error
+from nexus.db.t2._refreshable_client import _RetiredNoSuccessorHttpError
+from nexus.db.t2.http_document_aspects_store import _raise_fenced_refusal
+from nexus.search_engine import search_cross_corpus
+from tests.test_retired_no_successor_client import _BatchingT3
+from nexus.cli import main
+from nexus.collection_errors import RetiredNoSuccessorError
+from nexus.commands.catalog_cmds.integrity import note_chunks_present
+from nexus.db.http_vector_client import VectorServiceError
 from nexus.catalog.recovery_bundle import _collection_rows
 from nexus.commands import enrich
 from nexus.commands.enrich import aspects_backfill_uri_cmd
@@ -426,3 +437,79 @@ def test_enrich_aspects_backfill_uri_skips_a_retired_collection_and_reports_it(m
     assert report["retired_skipped"] == [RETIRED_NAME]
     assert [c["collection"] for c in report["collections"]] == [LIVE_NAME]
     assert any(e["event"] == "retired_collection_skipped" and e["site"] == "enrich_aspects_backfill_uri" for e in logs)
+
+
+# ── get_by_id and its callers ───────────────────────────────────────────────────────────────────────────────────────
+
+def _get_by_id_world(monkeypatch):
+    def post(path, body, **kw):
+        raise _retired_409(body["collection"])
+
+    monkeypatch.setattr("nexus.db.http_vector_client._post", post)
+
+
+def test_get_by_id_surfaces_the_retired_error_and_still_reads_other_service_errors_as_a_miss(monkeypatch):
+    _get_by_id_world(monkeypatch)
+    with pytest.raises(RetiredNoSuccessorError):
+        HttpVectorClient().get_by_id(RETIRED_NAME, "a" * 64, sensitivity="include")
+
+    def other(path, body, **kw):
+        raise VectorServiceError("collection gone", code=404)
+
+    monkeypatch.setattr("nexus.db.http_vector_client._post", other)
+    assert HttpVectorClient().get_by_id(RETIRED_NAME, "a" * 64, sensitivity="include") is None
+
+
+def test_nx_store_get_of_a_retired_collection_is_the_one_message_not_not_found(monkeypatch):
+    _get_by_id_world(monkeypatch)
+    monkeypatch.setattr("nexus.commands.store._t3", lambda: HttpVectorClient())
+    monkeypatch.setattr("nexus.commands.store._store_scope", lambda collection, db, **k: ([RETIRED_NAME], []))
+
+    result = CliRunner().invoke(main, ["store", "get", "a" * 64, "-c", RETIRED_NAME])
+
+    assert result.exit_code != 0
+    assert "was retired and has no successor" in result.output and "not found" not in result.output
+
+
+def test_a_retired_collection_is_unverifiable_never_a_ghost_to_the_note_presence_lookup(monkeypatch):
+    _get_by_id_world(monkeypatch)
+    with pytest.raises(RetiredNoSuccessorError):  # its callers read a raise as unverifiable, never "content is gone"
+        note_chunks_present(HttpVectorClient(), RETIRED_NAME, "a" * 64, "a title")
+
+
+# ── guards the 0e696a2211 confirmation review found no test could fail (T2 nexus/confirm-0e696a2211-nexus-p2m1x-2026-11-24) ──
+
+def test_a_search_naming_a_retired_collection_memoizes_nothing_as_poisoned():
+    live, dead = "code__nexus", "knowledge__gone__bge-base-en-v15-768__v1"
+    before = set(search_engine._poisoned_collections)
+    t3 = _BatchingT3({live: [{"id": "a", "content": "hit", "distance": 0.3}]}, retired={dead})
+    search_cross_corpus("q", [live, dead], 10, t3, sensitivity="include")
+    assert set(search_engine._poisoned_collections) == before, "a retired collection is not a permanent poisoning"
+
+
+def test_the_cli_boundary_does_not_prefix_the_retired_message_as_a_generic_service_error():
+    @click.command("zz-read-r7")
+    def zz_read() -> None:
+        raise _retired_409(RETIRED_NAME)
+
+    main.add_command(zz_read)
+    try:
+        result = CliRunner().invoke(main, ["zz-read-r7"])
+    finally:
+        main.commands.pop("zz-read-r7", None)
+    assert result.exit_code == 1
+    assert "the nexus service returned an error" not in result.output and "was retired and has no successor" in result.output
+
+
+def test_reembed_job_error_gives_the_typed_retired_error_its_own_message():
+    err = _reembed_job_error(_retired_409(RETIRED_NAME))
+    assert "was retired and has no successor" in err.message and "collection_superseded" not in err.message
+
+
+def test_the_aspect_upsert_and_taxonomy_persist_do_not_flatten_the_retired_error_to_a_generic_conflict():
+    request = httpx.Request("POST", "http://x/upsert")
+    response = httpx.Response(409, request=request, json={"error": "collection_superseded", "reason": "collection_superseded", "collection": RETIRED_NAME})
+    typed = _RetiredNoSuccessorHttpError(_retired_409(RETIRED_NAME), httpx.HTTPStatusError("409", request=request, response=response))
+
+    with pytest.raises(RetiredNoSuccessorError):
+        _raise_fenced_refusal(typed)

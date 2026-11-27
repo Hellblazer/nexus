@@ -58,7 +58,7 @@ from nexus.db.gateway_backoff import (
 )
 from nexus.db.client_identity import client_identity_headers
 from nexus.db.expire_sweep import ExpireIncompleteError, ExpireReport, RetiredNote, sweep_expired  # noqa: F401 — the report types are re-exported: callers import them from here
-from nexus.collection_errors import retired_no_successor_error_from_body, superseded_write_error_from_body
+from nexus.collection_errors import RetiredNoSuccessorError, retired_no_successor_error_from_body, superseded_write_error_from_body
 from nexus.db.vector_errors import VectorServiceError  # noqa: F401 — defined in a leaf module so collection_errors can subclass it; re-exported here
 from nexus.db.engine_reasons import (
     QUARANTINE_RESTORE_BUSY_REASON,
@@ -5163,6 +5163,9 @@ class HttpVectorClient:
     def get_by_id(self, collection: str, doc_id: str, *, sensitivity: Sensitivity) -> dict | None:
         """Fetch a single chunk by ID.
 
+        A collection retired with no live successor raises :class:`~nexus.collection_errors.RetiredNoSuccessorError`
+        (RDR-229 R7): that is not a missing chunk, so it is not read as one.
+
         ``sensitivity`` (RDR-243 Phase 2, nexus-rfvyy.7.8; see :meth:`search`): under ``exclude`` a chunk with a
         live sensitive owner is absent from the engine's answer and this returns ``None``. A refusal
         (:class:`SensitivityExcludeUnavailable`) is raised BEFORE the request, outside the ``try`` below that reads
@@ -5181,6 +5184,8 @@ class HttpVectorClient:
         self._stamp_sensitivity(request, sensitivity)
         try:
             result = _post("/v1/vectors/store-get", request, tenant=self._tenant)
+        except RetiredNoSuccessorError:
+            raise  # RDR-229 R7: a read of a retired collection with no live successor is refused, never "no such chunk"
         except VectorServiceError:
             return None
 

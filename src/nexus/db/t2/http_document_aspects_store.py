@@ -81,6 +81,10 @@ def _raise_fenced_refusal(exc: httpx.HTTPStatusError) -> NoReturn:
     re-raises the bare ``HTTPStatusError`` unchanged. 400 and the integrity
     409 get the two classes above. Anything else is re-raised as it came.
     """
+    from nexus.collection_errors import RetiredNoSuccessorError  # noqa: PLC0415 — deferred: keep this store's import surface light
+
+    if isinstance(exc, RetiredNoSuccessorError):
+        raise exc  # RDR-229 R7: a write to a retired collection with no live successor keeps its own message
     status = exc.response.status_code
     if status in (403, 404):
         _raise_typed(exc)
