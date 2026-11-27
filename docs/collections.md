@@ -102,7 +102,8 @@ two-segment name's type prefix), and a minted `c<id>` label carries
 neither. A few checks still compare a model token read from a name: the
 `nx collection rename` guards compare the new name's type prefix, and its
 model (the token it carries, or the one its prefix implies), with the
-source's (a minted `c<id>` source is compared on its row's type; a conformant
+source's (a source with no type prefix, a minted `c<id>` or a plain label, is
+compared on its row's type; a conformant
 new name's token is compared with the row's model, and a non-conformant one is
 not compared on model); the engine
 refuses a conformant new name whose token disagrees with the source row's
@@ -156,7 +157,8 @@ because a plain label is a knowledge collection. Three things to know first:
   `knowledge` collection), and a `knowledge` row renames to a plain label
   without the flag. So does any label with no type prefix: `foo` to `bar`
   passes for a `knowledge` row, and a `code`, `docs` or `rdr` row still
-  stops. A minted collection with no rows yet has no type to
+  stops when its row can be read (a plain label whose row cannot be read is
+  not checked). A minted collection with no rows yet has no type to
   compare and is not checked; if its row cannot be read at all, the rename
   stops and asks for the flag. A named label such as `code__foo` still stops
   with a prefix or model mismatch when the new name reads as another type

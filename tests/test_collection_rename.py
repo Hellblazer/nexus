@@ -384,6 +384,28 @@ class TestRenameCLI:
             assert result.exit_code == 0, result.output
             mock_cascade.assert_called_once_with("c4812", "my-repo", check_model_token=False)
 
+    def test_rename_plain_source_with_unreadable_row_is_not_checked(self, env_creds) -> None:
+        """nexus-a7o92: only a minted source reads its row strictly. A plain
+        label may be a legacy unregistered name, so a failed listing leaves it
+        unchecked and the rename goes through without the flag."""
+        from nexus.commands.collection import rename_cmd
+        from nexus.mcp_infra import ServiceNotReadyError
+
+        fake_counts = {
+            "tax_topics": 0, "tax_assignments": 0, "tax_meta": 0,
+            "chash": 0, "catalog_docs": 0,
+        }
+        with patch(
+            "nexus.commands.collection.rename_collection_data_plane",
+            return_value=fake_counts,
+        ) as mock_cascade, patch(
+            "nexus.mcp_infra.get_collection_row",
+            side_effect=ServiceNotReadyError("listing down"),
+        ):
+            result = CliRunner().invoke(rename_cmd, ["foo", "bar"])
+        assert result.exit_code == 0, result.output
+        mock_cascade.assert_called_once_with("foo", "bar")
+
     # test_force_prefix_change_bypasses_gate retired (nexus-i711w terminal
     # deletion): same retired client-side fan-out pins as
     # test_rename_happy_path above. The prefix/model gates themselves stay
