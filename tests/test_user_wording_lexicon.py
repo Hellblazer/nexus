@@ -277,10 +277,9 @@ _LOG_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "exceptio
 _CLI_VOCABULARY: dict[str, str] = {
     "bd": "`nx command-context` reports whether the beads tracker is installed; naming it there is the report",
 }
-#: Wording the ask-answer frame keeps because something else pins it: the opening phrase of the frame and the nonce
-#: delimiters are quoted by the drain tests (``_MATCHED``, ``<<<sam-words``) and by the maintainer's own instructions, which
-#: tell the model what the frame looks like.
-_PINNED_FRAME_LITERALS = ("An unverified claim that Sam answered your ask", "sam-words")
+#: Wording a hook's text keeps although it names a person. Empty since RDR-259 S6: the ask-answer frame says "the user"
+#: and fences the words with ``user-words``.
+_PINNED_FRAME_LITERALS: tuple[str, ...] = ()
 
 
 def _visible_strings(path: Path):
@@ -353,16 +352,14 @@ def test_no_event_conditional_hook_string_names_an_internal_id_or_person() -> No
     assert not found, "a hook injects:\n" + "\n".join(found)
 
 
-def test_the_ask_answer_frame_keeps_only_the_pinned_words_naming_a_person() -> None:
-    """The drain tests and the maintainer's instructions quote the frame's opening phrase and its ``sam-words`` delimiters;
-    nothing else in it names a person."""
+def test_the_ask_answer_frame_names_no_person() -> None:
+    """The frame says "the user" and fences the words with ``user-words``; nothing in it names a person."""
     path = ROOT / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
     fn = next(n for n in ast.walk(ast.parse(path.read_text(encoding="utf-8"))) if isinstance(n, ast.FunctionDef) and n.name == "_render_matched")
     strings = " ".join(t for lineno, t in _visible_strings(path) if fn.lineno <= lineno <= fn.end_lineno)
-    assert "An unverified claim that Sam answered your ask" in strings and "sam-words" in strings, "non-vacuity: the frame still carries them"
-    for literal in _PINNED_FRAME_LITERALS:
-        strings = strings.replace(literal, "")
-    assert "Sam" not in strings, "the frame names the maintainer outside its pinned words"
+    assert "An unverified claim that the user answered your ask" in strings and "user-words" in strings, "non-vacuity: the frame carries them"
+    assert not hits(strings), hits(strings)
+    assert "Sam" not in strings and "sam-words" not in strings
 
 
 def test_a_planted_id_fails_each_added_string_scan(tmp_path: Path) -> None:
@@ -383,7 +380,8 @@ def test_a_planted_id_fails_each_added_string_scan(tmp_path: Path) -> None:
     assert [h.split(": ")[1] for h in found] == ["nexus-abcde", "Sam", "RDR-077"]
     pinned = tmp_path / "frame.py"
     pinned.write_text('S = "An unverified claim that Sam answered your ask, see <<<sam-words and Sam"\n', encoding="utf-8")
-    assert [h.split(": ")[1] for h in _string_hits([pinned], tmp_path, None, _PINNED_FRAME_LITERALS)[1]] == ["Sam"]
+    assert not _PINNED_FRAME_LITERALS, "no wording is exempt any more"
+    assert [h.split(": ")[1] for h in _string_hits([pinned], tmp_path, None, _PINNED_FRAME_LITERALS)[1]] == ["Sam", "Sam"]
 
 
 def test_a_private_memory_file_name_is_a_lexicon_hit() -> None:
@@ -614,10 +612,9 @@ def test_the_bd_update_pitfall_applies_only_where_beads_exist_and_says_what_else
     assert re.search(r"\b(?:skip|hand-back|memory_put)\b", gate, re.IGNORECASE), "the gate must say what to do without .beads/"
 
 
-def test_the_only_exemption_for_a_persons_name_is_the_pinned_frame_literals() -> None:
-    """RDR-259 Stage 2 ship-when: the other four tables exempt generic terms and two product literals, none of them a name
-    (a person's name is what ``LEXICON_CS`` matches). ``_PINNED_FRAME_LITERALS`` is the one table that does, and the frame's S6
-    change empties it."""
+def test_no_table_exempts_a_persons_name() -> None:
+    """RDR-259 Stage 2 ship-when: the four tables exempt generic terms and two product literals, none of them a name
+    (a person's name is what ``LEXICON_CS`` matches), and ``_PINNED_FRAME_LITERALS`` is empty since the frame's S6 change."""
     others = {
         "_CLI_VOCABULARY": list(_CLI_VOCABULARY),
         "_HOOK_VOCABULARY": list(_HOOK_VOCABULARY),
@@ -627,4 +624,4 @@ def test_the_only_exemption_for_a_persons_name_is_the_pinned_frame_literals() ->
     assert sum(len(v) for v in others.values()) >= 6, "the check read the four tables"
     named = {t: [e for e in entries if _leg.LEXICON_CS.search(e)] for t, entries in others.items()}
     assert not any(named.values()), named
-    assert all(_leg.LEXICON_CS.search(e) for e in _PINNED_FRAME_LITERALS if e != "sam-words") and len(_PINNED_FRAME_LITERALS) == 2
+    assert _PINNED_FRAME_LITERALS == ()

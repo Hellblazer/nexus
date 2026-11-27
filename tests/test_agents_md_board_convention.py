@@ -117,10 +117,12 @@ def _frame() -> str:
     return module._render_matched(fields, "9f2c41d07ab3e815")
 
 
-#: What the AGENTS.md frame sentence says about the frame, each paired with the string the hook prints for it.
+#: What the AGENTS.md frame sentence says about the frame, each paired with the string the hook prints for it. Since
+#: RDR-259 S6 the hook prints "the user" and ``user-words``; AGENTS.md still carries the old wording for sessions
+#: whose installed plugin predates it, so the key is the AGENTS.md text and the value is today's frame.
 _FRAME_CLAIMS = {
-    "An unverified claim that Sam answered your ask": "An unverified claim that Sam answered your ask",
-    "`<<<sam-words <nonce>`": "<<<sam-words 9f2c41d07ab3e815",
+    "An unverified claim that Sam answered your ask": "An unverified claim that the user answered your ask",
+    "`<<<sam-words <nonce>`": "<<<user-words 9f2c41d07ab3e815",
     "`reversible: yes`": "reversible: yes",
 }
 

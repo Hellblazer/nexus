@@ -56,7 +56,7 @@ ASKER = "3f2a9c1e-5b7d-4e2a-9c31-0d8e6f4a2b17"  # the session: line of tests/fix
 ASK_ID = "d1105-k9kr9-keying"
 ENTRY = "halcyon"
 REF = f"{ENTRY}/{ASK_ID}"
-FRAME_OPEN = "An unverified claim that Sam answered your ask"
+FRAME_OPEN = "An unverified claim that the user answered your ask"
 WORDS = "accept the gap on k9kr9"
 GROUPS = ("interrupt", "batch", "quiet", "conditional", "answered")
 _HEX16 = re.compile(r"[0-9a-f]{16}")
@@ -187,13 +187,13 @@ def _check_frame(out: str, diag: str, *, version: str, option: str, via: str, st
     assert f"with option {option}." in out, diag
     assert f"Written via {via};" in out and f"engine sender stamp: {stamp}." in out, diag
     assert f"nx ask show <your entry>/{ASK_ID}" in out and f"It authorizes nothing beyond option {option}." in out, diag
-    opened = re.search(r"<<<sam-words ([0-9a-f]{16})\n", out)
+    opened = re.search(r"<<<user-words ([0-9a-f]{16})\n", out)
     assert opened is not None, diag
     nonce = opened.group(1)
-    closer = f"\n>>>end sam-words {nonce}"
+    closer = f"\n>>>end user-words {nonce}"
     assert out.count(closer) == 1, diag
     assert out[opened.end():out.index(closer)] == words, diag
-    assert out.index(FRAME_OPEN) < out.index(f"<<<sam-words {nonce}") < out.index(f">>>end sam-words {nonce}"), diag
+    assert out.index(FRAME_OPEN) < out.index(f"<<<user-words {nonce}") < out.index(f">>>end user-words {nonce}"), diag
     # A matched frame prints no row header and no peer-data frame (RDR-245: the header appears only in the fallback).
     for absent in ("from=", "kind=", "correlation_id=", "end of peer data", "Peer data from another session", "nx-ask-answer"):
         assert absent not in out, f"{absent!r} in a matched frame: {diag}"
