@@ -33,6 +33,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests._fake_credentials import SAVED_FAKE_CREDENTIALS, fake_credential
+
 _DEFAULT_CONFIG = {
     "server": {"ignorePatterns": []},
     "indexing": {
@@ -69,7 +71,8 @@ def _service_mode_patches(db, *, extra=None):
     patches = {
         "nexus.frecency.batch_frecency": {"return_value": {}},
         "nexus.config.load_config": {"return_value": _DEFAULT_CONFIG},
-        "nexus.config.get_credential": {"return_value": "fake-key"},
+        "nexus.config.get_credential": {"side_effect": fake_credential},
+        "nexus.config.persisted_credentials": {"return_value": SAVED_FAKE_CREDENTIALS},
         "nexus.mcp_infra.get_t3": {"return_value": db},
         "nexus.db.make_t3": {"return_value": db},
         "nexus.indexer._index_code_file": {"return_value": 1},

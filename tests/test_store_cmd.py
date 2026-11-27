@@ -619,6 +619,75 @@ def test_store_expire_summary_counts_every_held_note_and_says_nothing_when_none_
     assert "held" not in result.output
 
 
+def _retired(*specs):
+    from nexus.db.http_vector_client import RetiredNote  # noqa: PLC0415 — only these expire pins use it
+
+    return tuple(RetiredNote(*spec) for spec in specs)
+
+
+def test_store_expire_names_each_retired_note_before_the_totals(runner, mock_store):
+    """nexus-6pfgb.15 shakeout (8.5.8, 2026-11-26): "Expired 4 entries. 4 notes retired" named none of the four, so a run
+    could not be audited. Each retired note is printed (collection, title, its expiry) ahead of the totals."""
+    from nexus.db.http_vector_client import ExpireReport  # noqa: PLC0415
+
+    mock_store.expire_report.return_value = ExpireReport(
+        chunks_deleted=2, notes_tombstoned=2,
+        retired=_retired(
+            ("knowledge__nexus-testing", "1.2.3", "cc-reverse-probe-2026-10-21", "2026-10-22T09:00:00+00:00"),
+            ("knowledge__nexus-testing", "1.2.4", "cowork-784-probe-2026-10-22", "2026-10-23T09:00:00+00:00"),
+        ),
+    )
+    result = runner.invoke(main, ["store", "expire"])
+    assert result.exit_code == 0
+    out = result.stdout
+    for line in (
+        "knowledge__nexus-testing", "'cc-reverse-probe-2026-10-21'", "1.2.3", "2026-10-22T09:00:00+00:00",
+        "'cowork-784-probe-2026-10-22'", "1.2.4", "2026-10-23T09:00:00+00:00",
+    ):
+        assert line in out, out
+    assert out.index("cc-reverse-probe-2026-10-21") < out.index("Expired 2 entries."), "the notes come before the totals"
+    assert out.index("cowork-784-probe-2026-10-22") < out.index("2 notes retired; 2 chunks deleted.")
+    mock_store.expire_report.assert_called_once_with(dry_run=False)
+
+
+def test_store_expire_dry_run_lists_what_it_would_retire_and_writes_nothing(runner, mock_store):
+    from nexus.db.http_vector_client import ExpireReport  # noqa: PLC0415
+
+    mock_store.expire_report.return_value = ExpireReport(
+        chunks_deleted=0, notes_tombstoned=0, dry_run=True, candidate_chunks=3, orphan_chunks=1,
+        retired=_retired(("knowledge__nexus-testing", "1.2.3", "cowork-shakeout-probe-2026-10-21", "2026-10-22T09:00:00+00:00")),
+    )
+    result = runner.invoke(main, ["store", "expire", "--dry-run"])
+    assert result.exit_code == 0
+    mock_store.expire_report.assert_called_once_with(dry_run=True)
+    mock_store.batch_delete.assert_not_called()
+    out = result.stdout
+    assert "Would retire 1 note" in out
+    assert "cowork-shakeout-probe-2026-10-21" in out and "2026-10-22T09:00:00+00:00" in out
+    assert "Dry run: nothing was written." in out
+    assert "Expired" not in out and "retired;" not in out, "a dry run never reports work done"
+    assert "3 chunks" in out and "1 with no live note" in out
+
+
+def test_store_expire_dry_run_with_nothing_lapsed_says_so(runner, mock_store):
+    from nexus.db.http_vector_client import ExpireReport  # noqa: PLC0415
+
+    mock_store.expire_report.return_value = ExpireReport(chunks_deleted=0, notes_tombstoned=0, dry_run=True)
+    result = runner.invoke(main, ["store", "expire", "--dry-run"])
+    assert result.exit_code == 0
+    assert "Would retire 0 notes" in result.stdout and "Dry run: nothing was written." in result.stdout
+
+
+def test_store_expire_dry_run_still_names_a_note_it_could_not_judge(runner, mock_store):
+    from nexus.db.http_vector_client import ExpireReport  # noqa: PLC0415
+
+    mock_store.expire_report.return_value = ExpireReport(
+        chunks_deleted=0, notes_tombstoned=0, dry_run=True, failures=(("1.1.7", "its chunk rows could not be read"),))
+    result = runner.invoke(main, ["store", "expire", "--dry-run"])
+    assert result.exit_code != 0
+    assert "1.1.7" in result.output and "would NOT be retired" in result.output
+
+
 # ── nx collection ────────────────────────────────────────────────────────────
 
 @pytest.mark.t2_tenant
@@ -649,7 +718,11 @@ def test_collection_not_found(runner, mock_collection, subcmd, args):
 
 
 def test_collection_delete_without_yes_prompts(runner, mock_collection):
-    runner.invoke(main, ["collection", "delete", "knowledge__test"], input="n\n")
+    # ``delete LABEL`` reads the registry listing before it asks (RDR-229 P3.12); give it an empty one, not a service.
+    cat = MagicMock()
+    cat.list_collections.return_value = []
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=cat):
+        runner.invoke(main, ["collection", "delete", "knowledge__test"], input="n\n")
     mock_collection.delete_collection.assert_not_called()
 
 

@@ -23,6 +23,7 @@ inside a wait loop, once when the work is first seen and again every
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections.abc import Callable, Iterable
 from datetime import datetime
@@ -76,6 +77,56 @@ def _progress(obj: dict[str, Any], *, top: bool) -> str:
     return f"{done:,} of {total:,}" + (f" {unit}" if unit else "")
 
 
+#: The engine's entry id for "the engine needs one restart" (the engine's RESTART_ENTRY_ID). Nothing runs: ``what``
+#: is an instruction ("restart the engine once: it applies ..."), not a gerund.
+RESTART_ID: str = "rdr229-restart"
+#: The engine's entry id for a standing condition (the engine's HELD_BOOT_WORK_ID, also
+#: ``pg_bundle_refresh.STANDING_CONDITION_ID``): ``what`` is the operator's reasons, joined with "; ", and nothing runs.
+HELD_ID: str = "id-unique-index-held"
+_RESTART_LEAD = "restart the engine once"
+
+#: A data move's ``what`` opens with its class (the engine's MoveBootWork); the worker and reporter entries open with
+#: ``blocked:``. Each maps to the head's lead-in and a kind: ``running`` (the engine is working on it, so "running for"
+#: and the interrupt advice are true), ``pending`` (the engine will work on it, nothing runs yet: "listed for", the interrupt
+#: advice is still true of the engine's coming work) or ``idle`` (nothing runs for it until something outside changes: no
+#: interrupt advice, only what stopping the service costs).
+_CLASS_LEAD: dict[str, tuple[str, str]] = {
+    "working": ("The engine is working: ", "running"),
+    "stalled": ("The engine is stalled: ", "running"),
+    "blocked": ("The engine is blocked: ", "idle"),
+    "paused": ("The engine is paused: ", "idle"),
+    "queued": ("The engine has a data move queued: ", "pending"),
+    "failed": ("The engine has a failed data move: ", "idle"),
+    "runs complete": ("The engine has a data move whose runs are complete: ", "pending"),
+}
+_CLASS_RE = re.compile(r"^(" + "|".join(_CLASS_LEAD) + r"): ?(.*)$", re.S)
+
+
+def _head(entry: dict[str, Any], what: str, elapsed: float | None) -> tuple[str, str]:
+    """The first line's text without its closing progress, and the entry's kind (see ``_CLASS_LEAD``; a restart request
+    or a held condition is ``standing``: nothing is running, there is no ``done of total``, and the engine's own sentence
+    says what it costs). Every ``what`` the engine publishes reads as a sentence here, whatever its grammar: a gerund
+    ("building search indexes") follows "The engine is", an instruction ("restart the engine once: ...") and a reasons
+    list (the held entry) get their own lead-in, a data move's class ("failed: label") its own."""
+    eid = entry.get("id")
+    if what.startswith("The engine"):
+        lead, kind, verb = "", "running", "running"
+    elif eid == RESTART_ID or what.startswith(_RESTART_LEAD):
+        what = what.split(": ", 1)[1] if ": " in what else ""
+        lead, kind, verb = "The engine needs one restart" + (": " if what else ""), "standing", "waiting"
+    elif eid == HELD_ID:
+        lead, kind, verb = "The engine has a standing condition: ", "standing", "listed"
+    elif m := _CLASS_RE.match(what):
+        (lead, kind), what = _CLASS_LEAD[m.group(1)], m.group(2)
+        verb = "running" if kind == "running" else "listed"
+    else:
+        lead, kind, verb = "The engine is ", "running", "running"
+    head = lead + what
+    if elapsed is not None:
+        head += f", {verb} for {duration(elapsed)}"
+    return head, kind
+
+
 def render(entries: Iterable[dict[str, Any]], *, now: float, waiting: bool = True) -> list[str]:
     """Lines for the entries, never raising on a malformed one. *waiting* False is for a command that waits on
     nothing (``nx daemon service status``): it says what stopping the service costs, not what interrupting
@@ -86,10 +137,8 @@ def render(entries: Iterable[dict[str, Any]], *, now: float, waiting: bool = Tru
             what = str(entry.get("what") or entry.get("id") or "heavy work")
             started = _started(entry)
             elapsed = now - started if started is not None else None
-            head = f"The engine is {what}" if not what.startswith("The engine") else what
-            if elapsed is not None:
-                head += f", running for {duration(elapsed)}"
-            progress = _progress(entry, top=True)
+            head, kind = _head(entry, what, elapsed)
+            progress = "" if kind == "standing" else _progress(entry, top=True)
             if progress:
                 head += f": {progress}"
             lines.append(head + ".")
@@ -100,7 +149,14 @@ def render(entries: Iterable[dict[str, Any]], *, now: float, waiting: bool = Tru
             on_stop = entry.get("on_stop")
             if isinstance(entry.get("notice"), str) and entry["notice"]:
                 lines.append(f"  {entry['notice']}")
-            elif not waiting:
+            elif kind == "standing":
+                # Nothing is running, so neither "interrupting this command" nor "stopping the service" applies: the
+                # engine's own sentence says what it costs (a restart request: nothing is lost).
+                if on_stop:
+                    lines.append(f"  {str(on_stop)[:1].upper()}{str(on_stop)[1:]}.")
+            elif kind == "idle" or not waiting:
+                # An idle entry (a blocked, paused or failed data move) is not work this command waits on and not work
+                # interrupting it could stop: only what stopping the service costs is true of it.
                 if on_stop:
                     lines.append(f"  Stopping the service now: {on_stop}.")
             elif entry.get("safe_to_stop") is True:

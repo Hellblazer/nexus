@@ -63,11 +63,11 @@ def test_the_tool_records_its_source_as_mcp(tmp_path, monkeypatch) -> None:
     assert json.loads(line)["source"] == "mcp"
 
 
-def test_the_tool_is_auto_approved_on_both_events() -> None:
+def test_the_tool_is_auto_approved_on_pretooluse_only() -> None:
     name = "mcp__plugin_conexus_nexus__brief"
     assert name in auto_approve._ALLOWED_TOOLS
     assert _parse_decision(_run_nx_hook(name)) == "allow"
-    assert _parse_decision(_run_nx_hook(name, hook_event_name="PermissionRequest")) == "allow"
+    assert _run_nx_hook(name, hook_event_name="PermissionRequest") == ""
 
 
 def test_the_topic_is_case_insensitive_over_the_wire_too() -> None:

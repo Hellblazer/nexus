@@ -677,7 +677,7 @@ def test_check_search_exits_zero_when_the_only_finding_is_a_threshold_drop(monke
                           threshold=0.65, probe_chunks=1)
     monkeypatch.setattr(ds, "_load_canaries", lambda: [])
     monkeypatch.setattr(ds, "run_name_resolution_probe", lambda *a, **k: [])
-    monkeypatch.setattr(ds, "_list_collections", lambda: ["c"])
+    monkeypatch.setattr(ds, "_list_collections", lambda: [{"name": "c"}])
     monkeypatch.setattr(ds, "_make_t3", lambda: object())
     monkeypatch.setattr(ds, "run_retrieval_quality_probe", lambda **k: [drop])
     ds.run_check_search(json_out=False)  # returns: no SystemExit(2)

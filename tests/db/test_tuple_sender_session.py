@@ -75,7 +75,7 @@ def debug_logs():
 
 
 def _store(handler) -> HttpTupleStore:
-    store = HttpTupleStore(base_url="http://mock.test")
+    store = HttpTupleStore(base_url="https://mock.test")
     store._client = httpx.Client(transport=httpx.MockTransport(handler))
     reresolves: list[int] = []
     # The mixin's data-token path: counted, and made a no-op so a test sees it fire.
@@ -165,8 +165,8 @@ class TestHeader:
 
         assert HEADER not in build_shared_t2_client().headers
         shared = httpx.Client(transport=httpx.MockTransport(handler))
-        tuples = HttpTupleStore(base_url="http://mock.test", client=shared)
-        memory = HttpMemoryStore(base_url="http://mock.test", client=shared)
+        tuples = HttpTupleStore(base_url="https://mock.test", client=shared)
+        memory = HttpMemoryStore(base_url="https://mock.test", client=shared)
         memory._get("/v1/memory/ping")
         tuples.rd("mailbox/x", {"to": "x"})
         memory._get("/v1/memory/ping")

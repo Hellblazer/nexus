@@ -10567,10 +10567,10 @@ public final class CatalogRepository {
         // `counts` is built inside the lambda, so each attempt starts from an empty map.
         return manifestWriteTxn(tenant, "catalog.deleteCollection " + name, ctx -> {
             CollectionRegistry.exemptFromWriterCensus(ctx, "the collection delete takes the registry rows it needs itself: by label, the children first and the registry row last"
-                + " (linda Q2); by id, the re-embed start guard shared, then the origin row FOR UPDATE with its quarantine siblings' rows FOR KEY SHARE in collection_id order,"
+                + " (linda Q2); by id, the re-embed start guard shared, then the origin row FOR UPDATE with its quarantine siblings' rows FOR UPDATE in collection_id order,"
                 + " then the children (CollectionDeleteFence.lockByIdFirst)");
             // RDR-229 P3.5a, row 16 and row 14: a delete by id locks the registry rows first, in the canonical order (CollectionDeleteFence.lockByIdFirst:
-            // the re-embed start guard shared, the origin's row FOR UPDATE with its siblings' rows FOR KEY SHARE in one id order, the 404 / 409 checks of
+            // the re-embed start guard shared, the origin's row FOR UPDATE with its siblings' rows FOR UPDATE in one id order, the 404 / 409 checks of
             // the row of that id, the collection_busy check), in this transaction, so a row that is gone, retired, or no longer bears `name` since the
             // verdict read is refused (404 / 409) before anything is purged. From gate 3 the purge below is of THAT row's id; before it the
             // purge is by name (CollectionPurgeScope), so the lock above is what keeps a label's new holder out of it.

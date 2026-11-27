@@ -32,7 +32,8 @@ import pytest
 
 from nexus.db.http_scratch_store import DEFAULT_TENANT, HttpScratchStore
 from nexus.db.t1 import publish_t1_session_lease
-from nexus.db.t2 import shared_ssl
+from nexus.db.t2 import bearer_transport, shared_ssl
+from nexus.db.t2.bearer_transport import NetworkSettings
 from tests.db._fake_t2_server import fake_http_server
 from tests.db.test_http_scratch_store import (
     _REQUIRED_T1_TOKEN,
@@ -63,6 +64,10 @@ def ca_file(tmp_path, monkeypatch):
     monkeypatch.setenv("SSL_CERT_FILE", str(path))
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
     monkeypatch.setattr(shared_ssl, "_slot", None)
+    # The scratch store carries a bearer, so its trust store is the bearer context, which reads no
+    # SSL_CERT_FILE (nexus-ec37o): its CA bundle is network.ca_bundle of config.yml, pointed here.
+    monkeypatch.setattr(bearer_transport, "network_settings", lambda: NetworkSettings("", str(path)))
+    monkeypatch.setattr(bearer_transport, "_slot", None)
     return path
 
 
@@ -109,6 +114,7 @@ def test_failed_rebuild_leaves_the_old_client_open(store, ca_file, monkeypatch):
     old = store._client
     ca_file.unlink()
     monkeypatch.setattr(shared_ssl, "_slot", None)  # force a fresh read of the missing file
+    monkeypatch.setattr(bearer_transport, "_slot", None)
 
     with pytest.raises(OSError) as excinfo:
         store._adopt_session_token("another-token", SESSION)
@@ -224,6 +230,7 @@ def test_a_failed_token_adoption_leaves_the_old_token_in_place(store, ca_file, m
     monkeypatch.setenv("NX_T1_SESSION", "the-env-token")
     ca_file.unlink()
     monkeypatch.setattr(shared_ssl, "_slot", None)
+    monkeypatch.setattr(bearer_transport, "_slot", None)
 
     with pytest.raises(OSError):
         store._adopt_session_token("fresh-token", SESSION)
@@ -241,6 +248,7 @@ def test_a_failed_rebind_leaves_the_old_endpoint_in_place(store, ca_file, monkey
     )
     ca_file.unlink()
     monkeypatch.setattr(shared_ssl, "_slot", None)
+    monkeypatch.setattr(bearer_transport, "_slot", None)
 
     with pytest.raises(OSError):
         store._rebind_from_lease()

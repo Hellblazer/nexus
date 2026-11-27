@@ -287,6 +287,10 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         // quarantine_reattach_plan is a LANGUAGE sql function, whose body Postgres checks when it is created: left in, the old walk fails at
         // vectors-083-4 with 'column cc.collection_id does not exist' (the plpgsql bodies of -1 to -3 and -5 to -7 are not checked until they run). It
         // is as unborn as vectors-077, whose definers it replaces; the new boot applies it after them.
+        //
+        // RDR-229 P3.7 (nexus-p2m1x.28): vectors-086 redefines the two reaper expiries (077-55 and 083-7 are their last definers). Their bodies name
+        // collection_id (the manifest guard by id), so THE RULE below puts it here: the old walk strips 077 and 083, and left in, 086 would be the
+        // only definer of both functions in the old state. They are plpgsql, so Postgres does not check the bodies when they are created.
         // THE RULE for a future changeset (linda 2026-11-24): any changeset whose bodies name collection_id (the column vectors-068 adds)
         // joins this list, because the old walk runs without it; a real upgrade is unaffected (master order applies 068 first). A miss
         // fails the old walk at that changeset, and the non-vacuity assertion below names every entry, so the list cannot shrink unnoticed.
@@ -298,7 +302,8 @@ class GrantsNexusSvcUpgradeIntegrationTest {
                 "db/changelog/vectors-077-rdr229-p35b-readers-both.xml",
                 "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml",
                 "db/changelog/vectors-083-restore-by-origin-id.xml",
-                "db/changelog/vectors-084-rdr229-ann-query-by-id.xml")) {
+                "db/changelog/vectors-084-rdr229-ann-query-by-id.xml",
+                "db/changelog/vectors-086-reaper-expiry-by-origin-id.xml")) {
             if (!stripped.contains(unborn)) {
                 stripped.add(unborn);
             }
@@ -313,6 +318,7 @@ class GrantsNexusSvcUpgradeIntegrationTest {
                 "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml",
                 "db/changelog/vectors-081-rdr229-validation-bounds.xml",
                 "db/changelog/vectors-083-restore-by-origin-id.xml",
+                "db/changelog/vectors-086-reaper-expiry-by-origin-id.xml",
                 "db/changelog/catalog-052-residue-moves-supersede.xml");
         for (String registering : stripped) {
             String include = "<include file=\"" + registering + "\"/>";

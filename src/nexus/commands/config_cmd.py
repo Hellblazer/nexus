@@ -81,7 +81,12 @@ def _get_config_value(dotted_key: str) -> str | None:
     Returns the string value or ``None`` when the key is absent.
     """
     parts = dotted_key.split(".")
-    node: object = load_config()
+    if parts[0] == "network":
+        # nexus-ec37o: what a bearer-carrying request uses is the global config.yml alone, so that is what this shows
+        from nexus.config import get_global_config_section  # noqa: PLC0415 — deferred: heavy at import
+        node: object = {"network": get_global_config_section("network")}
+    else:
+        node = load_config()
     for part in parts:
         if not isinstance(node, dict):
             return None
@@ -168,6 +173,8 @@ def config_set(key_value: str, value: str | None, from_stdin: bool, from_file: P
       printf %s "$VOYAGE_KEY" | nx config set voyage_api_key --stdin
       nx config set voyage_api_key --from-file ~/.secrets/voyage.key
       nx config set pdf.extractor=mineru
+      nx config set network.https_proxy=http://proxy.corp:3128
+      nx config set network.ca_bundle=/etc/corp/root-ca.pem
     """
     inline = value is not None or "=" in key_value
     sources = [inline, from_stdin, from_file is not None]
@@ -225,6 +232,13 @@ def config_unset(key: str) -> None:
       nx config unset service_token
     """
     key = key.strip().lower().replace("-", "_")
+    if key.startswith("network."):
+        # nexus-ec37o: the proxy and CA a bearer-carrying request uses; no environment variable stands behind them
+        from nexus.config import unset_config_value  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        removed = unset_config_value(key)
+        path = _global_config_path()
+        click.echo(f"Removed {key}  →  {path}" if removed else f"{key} was not saved in {path}; nothing to remove.")
+        return
     profile_before = _embed_profile_if_restart_key(key)
     try:
         removed = unset_credential(key)

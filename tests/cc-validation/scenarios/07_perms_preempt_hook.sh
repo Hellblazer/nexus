@@ -8,8 +8,10 @@
 # in docs/tables/cc-version-answers.toml (cc_preempt_verdict, runner.sh): the same answer
 # passes, a different one FAILS "answer changed since <version>", a version with no row prints
 # INFO "record this version's answer". Nothing may be deleted or relied on from either answer;
-# re-measure on every Claude Code pin bump. In particular the nx_hook_shim auto-approve verb
-# (registered on PreToolUse and PermissionRequest) stays as a hedge whichever way this lands.
+# re-measure on every Claude Code pin bump. The conexus nx_hook_shim auto-approve verb is
+# registered on PreToolUse only: its PermissionRequest registration was removed on purpose,
+# because a PermissionRequest allow overrides a user's own ask rule (measured, T2
+# nexus_rdr/259-research-26, -51 and -52), so nobody restores it as insurance.
 #
 # nexus-qsmc5: this scenario pins defaultMode "default" and used to launch through
 # claude_start, which passes --dangerously-skip-permissions: under that flag the permission

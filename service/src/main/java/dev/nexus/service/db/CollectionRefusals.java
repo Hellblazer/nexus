@@ -26,7 +26,7 @@ public final class CollectionRefusals {
      * bounded lock ({@link CollectionTombstones#lockRows(DSLContext, String, long, String...)}) took the row first, and the second
      * {@code FOR UPDATE} of a row one holds does not wait. A supersede names its successor by id the same way (the ordered statement
      * took the successor's row too). The delete by id calls it THIRD, as they do: {@link CollectionDeleteFence#lockByIdFirst} took the
-     * re-embed start guard shared, then the origin's row {@code FOR UPDATE} with its quarantine siblings' rows {@code FOR KEY SHARE} in one
+     * re-embed start guard shared, then the origin's row {@code FOR UPDATE} with its quarantine siblings' rows {@code FOR UPDATE} in one
      * id order, with no lock bound (linda), before any child row, so the delete's lock here is a no-wait re-lock that checks and consumes
      * the id. A re-lock that was the delete's FIRST lock of the row would wait behind a key share of its own and deadlock a second delete
      * of the same id. The delete takes no sweep gate before it, and supersede takes none at all.

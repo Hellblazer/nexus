@@ -1525,8 +1525,11 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(functionDef).as("the id-twin retry's index test, exactly once").containsOnlyOnce(twinTest);
         int notExistsCount = functionDef.replace(twinTest, "<twin-index-test>").split("NOT EXISTS \\(", -1).length - 1;
         assertThat(notExistsCount)
-            .as("no inline NOT EXISTS over the manifest survives: only the emptiness check on the victim set")
-            .isEqualTo(1);
+            .as("no inline NOT EXISTS over the manifest survives: the emptiness check on the victim set, and (vectors-085,"
+                + " RDR-229 P3.8, nexus-p2m1x.28) the tuple guard inside the sibling refresh's DO UPDATE ... WHERE, a NOT EXISTS over"
+                + " nexus.catalog_collections for another live holder of the tuple; neither is a manifest anti-join or a standalone"
+                + " guard SELECT")
+            .isEqualTo(2);
         assertThat(functionDef).as("the manifest anti-join is not re-derived inline any more")
             .doesNotContain("FROM nexus.catalog_document_chunks m");
     }

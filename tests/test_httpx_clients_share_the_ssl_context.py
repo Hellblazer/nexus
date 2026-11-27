@@ -12,8 +12,9 @@ directory``: on 2026-11-21/22 that broke the T1 scratch tool for the rest of
 four sessions, and review of the fix found the same build in
 ``IdentityClient``, ``groups.py``, the engine-version probes and more.
 
-The rule: pass ``verify=get_shared_ssl_context()`` (``nexus.db.t2.shared_ssl``),
-or, for a client, a ``transport=`` that builds no SSL context (an
+The rule: pass ``verify=get_shared_ssl_context()`` (``nexus.db.t2.shared_ssl``), or, for a request
+that carries a bearer, ``**bearer_httpx_kwargs(...)`` (``nexus.db.t2.bearer_transport``: the same one-per-process
+context, built with no environment in it, nexus-ec37o), or, for a client, a ``transport=`` that builds no SSL context (an
 ``httpx.MockTransport``, or a transport the caller passes in: a test seam),
 or be listed in ``ALLOWED`` with the reason the process is short-lived. An
 ``httpx.HTTPTransport(...)`` builds its own context, so it takes ``verify=``
@@ -38,13 +39,13 @@ BUILDERS = frozenset({
     "get", "post", "put", "patch", "delete", "head", "options", "request", "stream",
 })
 CLIENTS = frozenset({"Client", "AsyncClient"})
-SHARED_CONTEXT_FUNCS = frozenset({"get_shared_ssl_context", "_get_shared_ssl_context"})
+SHARED_CONTEXT_FUNCS = frozenset({"get_shared_ssl_context", "_get_shared_ssl_context", "bearer_ssl_context"})
+#: ``**bearer_httpx_kwargs(...)`` carries ``verify=bearer_ssl_context()`` (and ``trust_env=False``, the proxy).
+BEARER_KWARGS_FUNCS = frozenset({"bearer_httpx_kwargs", "_bearer_httpx_kwargs"})
 NO_CONTEXT_TRANSPORTS = frozenset({"MockTransport"})
 
 #: (path under src/nexus, enclosing function) -> why a per-client SSL context is acceptable there.
 ALLOWED: dict[tuple[str, str], str] = {
-    ("backup/cloud_export.py", "ExportClient.__init__"): "nx backup export: a CLI command, one process per run",
-    ("backup/cloud_import.py", "ImportClient.__init__"): "nx backup import: a CLI command, one process per run",
     ("commands/catalog_cmds/backfill.py", "backfill_etags_cmd"): "nx catalog backfill-etags: a CLI command",
     ("commands/doctor.py", "_run_check_mineru"): "nx doctor: a CLI command, one process per run",
     ("doctor_references.py", "run_check_references"): "nx doctor --check-references: reached only from the CLI",
@@ -101,6 +102,8 @@ def _builder(func: ast.expr, module_aliases: set[str], name_aliases: dict[str, s
 
 def _verdict(call: ast.Call, builder: str) -> str:
     kws = {k.arg: k.value for k in call.keywords if k.arg}
+    if any(k.arg is None and isinstance(k.value, ast.Call) and _call_name(k.value.func) in BEARER_KWARGS_FUNCS for k in call.keywords):
+        return "shared"
     verify = kws.get("verify")
     if isinstance(verify, ast.Call) and _call_name(verify.func) in SHARED_CONTEXT_FUNCS:
         return "shared"
@@ -152,8 +155,12 @@ def test_no_allowlist_entry_is_stale() -> None:
     ("import httpx\nhttpx.get(u, timeout=2)\n", "per-client"),
     ("import httpx as h\nh.stream('GET', u, verify=get_shared_ssl_context())\n", "shared"),
     ("from httpx import post\npost(u)\n", "per-client"),
+    ("import httpx\nhttpx.Client(timeout=3, **bearer_httpx_kwargs())\n", "shared"),
+    ("import httpx\nhttpx.get(u, **_bearer_httpx_kwargs(u))\n", "shared"),
+    ("import httpx\nhttpx.get(u, **other_kwargs())\n", "per-client"),
 ], ids=["mock-transport", "seam-transport", "unknown-transport", "http-transport", "http-transport-shared",
-        "module-get", "aliased-stream-shared", "from-import-post"])
+        "module-get", "aliased-stream-shared", "from-import-post", "bearer-kwargs-client", "bearer-kwargs-get",
+        "other-kwargs"])
 def test_the_verdicts(source: str, verdict: str) -> None:
     tree = ast.parse(source)
     module_aliases = {"httpx"} | {a.asname or a.name for n in ast.walk(tree) if isinstance(n, ast.Import)

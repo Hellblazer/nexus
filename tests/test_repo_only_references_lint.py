@@ -66,6 +66,7 @@ import ast
 import functools
 import importlib
 import re
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -188,6 +189,21 @@ def _prefix_kind(text: str, start: int) -> str | None:
     return None
 
 
+@functools.cache
+def _gitignored(rel: str, repo_root: Path) -> bool:
+    """Whether git ignores *rel* under *repo_root*. A path that is ignored here is local debris (``.claude/worktrees/``
+    from harness agent worktrees) that a fresh checkout, CI's included, does not have, so it never makes text
+    repo-only. A tracked file is never reported ignored; outside a git repository nothing is ignored."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_root), "check-ignore", "-q", "--", rel],
+            capture_output=True, check=False, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
 def _is_repo_only(token: str, repo_root: Path = REPO_ROOT, *, exists_only: bool = False) -> bool:
     t = token.rstrip(".,;:)'\"`")
     t = _LINE_SUFFIX.sub("", t)
@@ -201,16 +217,20 @@ def _is_repo_only(token: str, repo_root: Path = REPO_ROOT, *, exists_only: bool 
     if "/" not in t:
         return False
     path = repo_root / t
+    # What a gitignored path holds is not in the checkout a user or CI gets: it counts as absent.
+    present = path.exists() and not _gitignored(t, repo_root)
+    is_file = present and path.is_file()
+    is_dir = present and path.is_dir()
     if t == "docs/rdr" or t.startswith("docs/rdr/"):
         # Every project has its own docs/rdr/. A concrete nexus RDR file that exists here is still ours.
-        return bool(re.match(r"docs/rdr/(?:rdr-)?\d{3}[-\w]*\.md$", t)) and path.is_file()
+        return bool(re.match(r"docs/rdr/(?:rdr-)?\d{3}[-\w]*\.md$", t)) and is_file
     if t.split("/", 1)[0] in _FILE_ONLY_ROOTS:
         # A directory counts too when it is a nexus one (``docs/agents/``); the prose-edit genre map names
         # ``docs/exploration/`` and ``docs/runbooks/`` for the USER'S own repository, so those names are theirs.
-        return path.is_file() or (path.is_dir() and t not in _USERS_OWN_DIRS and not exists_only)
+        return is_file or (is_dir and t not in _USERS_OWN_DIRS and not exists_only)
     if exists_only:
-        return path.exists()
-    return path.exists() or Path(t).suffix in _FILE_EXTENSIONS
+        return present
+    return present or Path(t).suffix in _FILE_EXTENSIONS
 
 
 def repo_only_paths(text: str, repo_root: Path = REPO_ROOT) -> list[str]:
@@ -693,6 +713,27 @@ def test_a_root_level_file_and_a_data_directory_are_judged_by_what_exists_here(t
     assert repo_only_paths("the nexus AGENTS.md", tmp_path)
     assert not repo_only_paths("the project's AGENTS.md", tmp_path)
     assert not repo_only_paths("the nexus CHANGELOG.md", tmp_path), "absent here: nothing to point at"
+
+
+def test_a_gitignored_path_that_exists_here_is_not_repo_only(tmp_path: Path) -> None:
+    """Local debris such as ``.claude/worktrees/`` (harness agent worktrees, gitignored) exists on a laptop and not
+    in CI's checkout: the verdict must be the same in both."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".gitignore").write_text(".claude/worktrees/\nscripts/scratch/\n")
+    (repo / ".claude" / "worktrees" / "x").mkdir(parents=True)
+    (repo / ".claude" / "rules").mkdir()
+    (repo / "scripts" / "scratch").mkdir(parents=True)
+    for ignored in (".claude/worktrees/", ".claude/worktrees/x", "scripts/scratch/"):
+        assert not repo_only_paths(f"keep {ignored} out", repo), ignored
+    # An ignored directory does not hide an unignored sibling, or a file named by its extension.
+    assert repo_only_paths("see .claude/rules/", repo)
+    assert repo_only_paths("see .claude/worktrees/notes.md", repo), "a file extension still names a file"
+    # Outside a git repository nothing is ignored: an existing directory still counts.
+    plain = tmp_path / "plain"
+    (plain / ".claude" / "worktrees").mkdir(parents=True)
+    assert repo_only_paths("keep .claude/worktrees/ out", plain)
 
 
 def test_a_url_with_punctuation_glued_on_is_flagged() -> None:

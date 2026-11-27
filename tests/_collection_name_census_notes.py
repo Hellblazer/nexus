@@ -70,7 +70,7 @@ MINT_T3DB: str = (
     'T3Database is the test-only Chroma-era facade (it dies with the chromadb dependency, RDR-155 P3) and holds no catalog, so the NoRow outcome is the only one it can have: the model comes from the name (RDR-229 item 1).'
 )
 DIAG_DRIFT: str = (
-    "doctor_search's model_drift probe compares what the NAME says (this site) with the model the collection reports, which is the row's since P2.2 (HttpVectorClient.collection_metadata); a row read here would make the probe vacuous (RDR-204 (d))."
+    "doctor_search's model_drift probe is a row-consistency check: the model the collection's own row content_type calls for (corpus.canonical_embedding_model) against the embedding_model the row registers. It no longer compares the label's model token, because once the one-row rename is live (8.5.6 and later, after the engine's restart) a rename changes only the label (RDR-229), so a label's model token is not authority. This site is the fallback for a collection whose row has no content_type, where the NAME's rule decides."
 )
 MIG_BLANK: str = (
     "RDR-229 P2.2: a registry row with a blank model_version takes the version from its conformant label (legacy_names.version_of_blank_row_label) until D2 (nexus-f3yqd.2.23) completes; the label is from an older era. Removed once D2's cloud run completes (no bead owns it, RDR-229 Phase 1.4)."

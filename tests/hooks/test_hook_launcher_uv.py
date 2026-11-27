@@ -100,15 +100,16 @@ def _require_uv() -> None:
 
 
 def test_the_walk_finds_the_launcher_entries() -> None:
-    """Non-vacuity: twenty-three entries launch through uv: six scripts, four through
-    the shim (the fourth is the SubagentStop T1 nudge, nexus-mtheb.3) and seven
+    """Non-vacuity: twenty-two entries launch through uv: six scripts, three through
+    the shim (the third is the SubagentStop T1 nudge, nexus-mtheb.3; the PermissionRequest
+    auto-approve entry is gone, nexus-sby49.5) and seven
     through the launcher (RDR-228, nexus-sv2wx.8), and four through
     ``compact_checkpoint.py`` (nexus-3lqxv; the fourth is the SessionEnd ``end`` mode, RDR-253 Step 6); the sixth script is the Stop wake guard
     (nexus-4cgop). The twenty-first is ``destructive_action_advice.py`` (nexus-qo7ie.36), the
-    advise-mode PreToolUse guard on ``Bash|Edit|Write|MultiEdit``. The twenty-third is the SessionStart
+    advise-mode PreToolUse guard on ``Bash|Edit|Write|MultiEdit``. The twenty-second is the
     ``settings_notice.py`` (nexus-sby49.12, RDR-259), a UserPromptSubmit entry."""
     entries = _launcher_entries()
-    assert len(entries) == 23, [(e, _script(h)) for e, h in entries]
+    assert len(entries) == 22, [(e, _script(h)) for e, h in entries]
     assert sum(1 for _, h in entries if _script(h) == "nx_launch.py") == 7
     assert {_script(h) for _, h in entries} == {
         "nx_launch.py",
@@ -158,18 +159,21 @@ def test_the_mailbox_drain_runs_under_the_floor_and_fails_open(tmp_path: Path) -
     assert "requires Python 3.12" not in proc.stderr
 
 
-@pytest.mark.skipif(shutil.which("nx-hook") is None, reason="needs the installed nx-hook the shim wraps")
-@pytest.mark.parametrize("event", ["PreToolUse", "PermissionRequest"])
-def test_auto_approve_allows_through_uv_and_the_shim(event: str, tmp_path: Path) -> None:
+def _run_auto_approve_entry(event: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
     (hook,) = [
         h for e, h in _launcher_entries()
         if e == event and launcher_script_args(h)[-1] == "auto-approve"
     ]
-    proc = _run(
+    return _run(
         hook,
         {"hook_event_name": event, "tool_name": "mcp__plugin_conexus_nexus__search", "session_id": "launcher-test"},
         tmp_path,
     )
+
+
+@pytest.mark.skipif(shutil.which("nx-hook") is None, reason="needs the installed nx-hook the shim wraps")
+def test_auto_approve_pretooluse_allows_through_uv_and_the_shim(tmp_path: Path) -> None:
+    proc = _run_auto_approve_entry("PreToolUse", tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert "allow" in proc.stdout, proc.stdout
 
@@ -263,7 +267,7 @@ def test_the_uv_alias_needs_no_symlink_privilege(tmp_path) -> None:
     assert proc.returncode == 0 and proc.stdout.startswith("uv "), (proc.returncode, proc.stderr)
 
 
-def test_uv_with_no_interpreter_exits_2_which_blocks_seven_entries(tmp_path) -> None:
+def test_uv_with_no_interpreter_exits_2_which_blocks_six_entries(tmp_path) -> None:
     """MEASURED, not fixed: hooks.json launches in exec form (``args`` set, so no
     shell), and an exec-form entry cannot map a launcher failure to a non-blocking
     code. With no Python 3.12+ findable and none fetchable (offline, proxied,
@@ -275,7 +279,7 @@ def test_uv_with_no_interpreter_exits_2_which_blocks_seven_entries(tmp_path) -> 
     env = _no_interpreter_env(tmp_path)
     entries = _launcher_entries()
     blocking = [(e, h) for e, h in entries if e in _BLOCKING_EVENTS]
-    assert len(blocking) == 7, [(e, _script(h)) for e, h in blocking]
+    assert len(blocking) == 6, [(e, _script(h)) for e, h in blocking]
     # The plugin root is a copy outside the repo: `--directory <plugin root>` makes uv
     # discover interpreters from there, and the repo's own .venv above conexus/ would
     # supply one.

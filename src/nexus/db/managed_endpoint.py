@@ -32,15 +32,16 @@ import structlog
 
 from nexus._log_safe_url import log_endpoint, require_no_userinfo, scrub_transport_error
 from nexus.db.request_gate import before_request
+from nexus.db.service_endpoint import DEFAULT_MANAGED_SERVICE_URL, ServiceTokenUnresolvableError, select_service_token  # noqa: F401 — single source of the default (nexus-ec37o); re-exported
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 _log = structlog.get_logger(__name__)
 
-#: Where the managed multitenant nexus service lives by default. Overridable per
-#: half via ``NX_SERVICE_URL`` (base) / ``NX_SERVICE_TOKEN`` (bearer) — the same
-#: env vars the local HTTP vector client honours, so a single override re-points
-#: every client at a staging or self-hosted managed deployment.
-DEFAULT_MANAGED_SERVICE_URL = "https://api.conexus-nexus.com"
+# DEFAULT_MANAGED_SERVICE_URL (imported above, defined in service_endpoint): where the
+# managed multitenant nexus service lives by default. Overridable per half via
+# ``NX_SERVICE_URL`` (base) / ``NX_SERVICE_TOKEN`` (bearer) — the same env vars the
+# local HTTP vector client honours. A saved token is bound to the saved service_url,
+# else to this default (nexus-ec37o).
 
 #: CROSS-REPO CONTRACT (conexus RDR-001): the managed multitenant service MUST
 #: expose ``GET /version`` UNAUTHENTICATED with ``release_version`` (and
@@ -146,16 +147,31 @@ def resolve_managed_endpoint(*, require_token: bool = True) -> tuple[str, str | 
     (RDR-166 nexus-v3p0x). Without this the probe would ignore a config.yml-only
     user's endpoint and silently target the default.
 
+    The token is bound to its origin (:func:`~nexus.db.service_endpoint.select_service_token`):
+    when ``require_token`` and the ``service_token`` was issued for another host
+    than *base_url* (an ``NX_SERVICE_URL`` naming one), the named
+    :class:`~nexus.db.service_endpoint.CredentialOriginMismatchError` is raised.
+
     Fails loud (:class:`ManagedServiceIncompatible`) when ``require_token`` and no
     token is configured — a cloud-mode client with no bearer cannot call any
     ``/v1/*`` route, so a silent ``None`` would only defer the failure to an
     opaque 401 later. The unauthenticated ``/version`` probe itself does not need
     the token; ``require_token=False`` supports probe-only callers.
     """
-    from nexus.config import get_credential, get_service_url  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.config import get_service_url  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
     base = get_service_url() or DEFAULT_MANAGED_SERVICE_URL
-    token = (get_credential("service_token") or "").strip() or None
+    token: str | None = None
+    try:
+        # nexus-ec37o: the saved service_token goes only to the service_url
+        # saved beside it (else the default managed endpoint); an env URL naming
+        # another host gets no token. A probe-only caller (require_token=False)
+        # never sends it, so a refusal there is just "no token".
+        picked = select_service_token(base, lease=lambda: (None, None), allow_mint=False)
+        token = picked[0] if picked is not None else None
+    except ServiceTokenUnresolvableError:
+        if require_token:
+            raise
     if require_token and not token:
         raise ManagedServiceIncompatible(
             "cloud mode is configured but NX_SERVICE_TOKEN is not set — the "
