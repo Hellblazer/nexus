@@ -679,7 +679,9 @@ rule?** Closed 2026-11-27: Sam chose "Guard catch" (T2
 `nexus/sam-ruling-rdr258-gate-answers-2026-11-27`). A catch is a red fixed by
 changing what the check's `guards:` header names; a check whose reds were all
 fixed by ledger or ceiling edits retires after 60 days. Each retirement is
-still Sam's decision per check.
+still Sam's decision per check. The options he did not choose were a literal
+product catch, which would have retired every class-A check, and red hours
+against a bound he would set.
 
 ### Minimum Viable Validation
 
@@ -1102,3 +1104,4 @@ split into its own RDR at accept if Sam prefers.
 - 2026-11-27: Gate round 1 — PASSED (0 Critical, 11 Significant, 0 ship-blocker(s)); blob `e2ccd807694a`; critique `nexus_rdr/258-gate-critique-2026-11-27-r1`.
 - 2026-11-27: round 1 fixes and Sam's gate answers (258-research-18). Folded in N = 60 days, the 2-week review, the 14-day quarantine and the Day-2 targets. Fixed S1 (Q1 opened), S3, S4, S5, S6, S7, S8, S9, S10; S2 resolved in Technical Design; S11 carried to implementation. Phases renumbered: old Phase 1 steps 1-4 are Phase 1, old step 5 is Phase 2, old Phases 2 to 7 are Phases 3, 5, 6, 7, 8 and 9, and Phase 4 (ledgers) is new.
 - 2026-11-27: Gate round 2 — PASSED (0 Critical, 11 Significant, 0 ship-blocker(s)); blob `37f653b4c9e1`; critique `nexus_rdr/258-gate-critique-2026-11-27-r2`.
+- 2026-11-27: round 2 fixes (258-research-19). Q1 closed: Sam chose the guard catch. N1: one class test, by what a check guards; a catch can move a check from A to U only. N7: the 2-week review applies retirement from Phase 1 step 5, each check's 60-day clock starts at its demotion, rule (h) moves to Phase 1 step 6, and Phase 8 keeps only the plugin guidance. One-line fixes from N2 (class U blocks at least at the release boundaries; pass/fail checks never fail on develop; (h)'s alarm line only for numeric checks), N3 (docs_reference_rot leaves the docs-readers selector) and N6 (a target for each phase metric). N4, N5, N8 to N11 carried to implementation.
