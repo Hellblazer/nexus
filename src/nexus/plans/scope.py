@@ -15,7 +15,8 @@ between the save path (``plan_library.save_plan``), the inference helper
 from __future__ import annotations
 
 import json
-import re
+
+from nexus.label_quote import HASH_SUFFIX_RE, label_needs_quote, unquote_label
 
 __all__ = [
     "_HASH_SUFFIX_RE",
@@ -26,7 +27,7 @@ __all__ = [
     "normalize_scope_tags",
 ]
 
-_HASH_SUFFIX_RE = re.compile(r"-[0-9a-fA-F]{8}$")
+_HASH_SUFFIX_RE = HASH_SUFFIX_RE
 
 # Comma-separated ``scope_tags`` entries; also the keys ``_infer_scope_tags``
 # looks for in retrieval-step args.
@@ -55,10 +56,19 @@ def _normalize_scope_string(scope: str) -> str:
       * Stored case is preserved; only the hex-suffix and glob tails
         are removed. Case folding for comparison happens at match time
         in :func:`nexus.plans.matcher._scope_fit`.
+      * A quoted part (``"all"``, ``"foo*"``, ``"$x"``) names the label inside
+        exactly (nexus-o5vbo, :mod:`nexus.label_quote`): its glob, hash suffix,
+        ``all`` and ``$`` are the label's own, so none is stripped. The quotes stay
+        when a reader would misread the bare label (the canonical form, so the
+        stored tag still names the label and never the sentinel) and go when none
+        would (``"code__foo"`` is ``code__foo``).
       * Empty input is returned unchanged.
     """
     if not scope:
         return scope
+    label, quoted = unquote_label(scope)
+    if quoted:
+        return scope if label_needs_quote(label) else label
     if scope.endswith("-*"):
         return scope[:-2]
     if scope.endswith("*"):

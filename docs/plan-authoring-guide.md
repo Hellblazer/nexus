@@ -413,6 +413,7 @@ Both save-time and match-time normalization applies the same rules:
 - Trailing 8-char lowercase hex suffixes are stripped: `rdr__arcaneum-2ad2825c` → `rdr__arcaneum`. Shorter, longer, or non-hex tails are preserved verbatim (the collection hash convention is strict).
 - Trailing `*` or `-*` globs are stripped at match time only: caller scope `rdr__arcaneum-*` normalizes to `rdr__arcaneum`.
 - Bare family prefixes (`rdr__`) and tumbler addresses (`1.16`) pass through unchanged.
+- A part in double quotes names a label exactly (nexus-o5vbo): `"all"`, `"notes*"`, `"notes-deadbeef"` and `"$topic"` are the collections of those labels, so nothing is stripped and `"all"` is not the wildcard. The quotes stay in the stored tag when the bare label would be misread, and go when it would not (`"code__repo"` is stored as `code__repo`). A quoted tag matches only a caller scope that names the same label the same way. The same quoted form works in a retrieval step's `corpus` arg (`"corpus": "\"all\""`); it does not start with `$`, so the runner does not read it as a binding.
 
 ### Matching semantics
 

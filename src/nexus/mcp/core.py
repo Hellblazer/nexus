@@ -46,6 +46,7 @@ from nexus.db.t2.records import ReplySpec
 from nexus.db.t3 import verify_collection_deep
 from nexus.migration.banner import degrade_loud_when_migrating
 from nexus import sensitivity as _sensitivity  # reads go through the module so one test patch reaches every entry point
+from nexus.label_quote import unquote_label  # nexus-o5vbo: a quoted corpus part names a label exactly
 from nexus.sensitivity import ReadSensitivity, bound_to
 from nexus.sensitive_output import (
     BADGE as _SENSITIVE_BADGE,
@@ -3467,7 +3468,7 @@ def _search_render(
 
     Args:
         query: Search query string
-        corpus: Corpus prefixes or collection names, comma-separated. "all" for everything.
+        corpus: Corpus prefixes or collection names, comma-separated. "all" for everything. Double-quote a label to name it exactly: "all" is a collection labelled all.
         limit: Page size (default 10)
         offset: Skip N results for pagination (default 0)
         where: Metadata filter (KEY=VALUE, comma-separated). Ops: = >= <= > < !=
@@ -4265,6 +4266,13 @@ def _resolve_corpus_target(
     prefix; a ``__``-qualified part is a collection name; a bare part is a
     corpus prefix resolved against the live collection list.
 
+    A part in double quotes names the label inside exactly (nexus-o5vbo,
+    :mod:`nexus.label_quote`): ``"all"`` is the label ``all``, not the
+    wildcard, and ``"code"`` is the label ``code``, not the content-type
+    fan-out. A quoted label with no ``__`` is looked up by exact name only;
+    one with ``__`` resolves as the same name would unquoted. An unquoted
+    part reads exactly as before.
+
     Within one bare-prefix part's fan-out, a collection is dropped per
     :func:`_fanout_exclusions_for_group` (nexus-rbhci) -- see that
     function's docstring for the full rule. An explicitly named collection
@@ -4303,7 +4311,8 @@ def _resolve_corpus_target(
     # get_fanout_counts); names come from the cheap routing listing.
     counts_up_front: dict[str, int] | None = None
     if corpus == "all" or any(
-        part.strip() and not _names_a_collection(part.strip()) for part in corpus.split(",")
+        bare and not quoted and not _names_a_collection(bare)
+        for bare, quoted in (unquote_label(part.strip()) for part in corpus.split(","))
     ):
         counts_up_front = _get_fanout_counts()
     all_names = _get_collection_names()
@@ -4316,8 +4325,13 @@ def _resolve_corpus_target(
         corpus = ",".join(seen) if seen else "knowledge,code,docs,rdr"
     target: list[str] = []
     for part in corpus.split(","):
-        part = part.strip()
+        part, quoted = unquote_label(part.strip())
         if not part:
+            continue
+        if quoted and not _names_a_collection(part):
+            # nexus-o5vbo: a quoted dunder-free label is that exact label: never "all", a content-type
+            # fan-out or a label-pattern prefix.
+            target.extend(n for n in all_names if n == part)
             continue
         # *part* is a user-typed --corpus TOKEN: see _names_a_collection above.
         if _names_a_collection(part):
@@ -5294,7 +5308,8 @@ def query(
     question: Annotated[str, Field(description="Natural-language research question.")],
     corpus: Annotated[str, Field(
         description=(
-            "Corpus prefix or full collection name; \"all\" for every corpus. "
+            "Corpus prefix or full collection name; \"all\" for every corpus; "
+            "double-quote a label to name it exactly (\"all\" is a collection labelled all). "
             "Empty (default) means every knowledge__* collection when no catalog "
             "param is set; with one (author, content_type, follow_links, "
             "subtree), the content_type's own corpus when it names one "
