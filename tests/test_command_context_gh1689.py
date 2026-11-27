@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``nx command-context`` preamble blocks: ``nx doctor``'s own bound and liveness probe, and a ``bd`` with no database (GH #1689).
+"""``nx command-context`` preamble blocks for a ``bd`` with no database (GH #1689).
 
-Split out of ``tests/test_command_context_command.py``, which is at its file-size ceiling. Fakes replace only the runner
-(``run_bounded``) or the engine address; the engine probe and the child-process ``bd`` tests use real I/O.
+Split out of ``tests/test_command_context_command.py``, which is at its file-size ceiling. The runner-faked tests replace
+only ``run_bounded``; the child-process ``bd`` tests use real I/O. ``nx doctor``'s tests are ``tests/test_preflight_doctor.py``.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# GH #1689: nx doctor's own bound, and a bd with no database
+# GH #1689: a bd with no database
 # ---------------------------------------------------------------------------
 
 
@@ -31,91 +31,6 @@ def _fake_bounded(monkeypatch, cc, *, returncode: int = 0, stdout: str = "", std
 
     monkeypatch.setattr(cc, "run_bounded", fake)
     return calls
-
-
-@pytest.fixture
-def no_local_engine(monkeypatch) -> None:
-    """No local engine is discoverable: the doctor block skips its liveness probe and runs doctor."""
-    from nexus import health
-
-    monkeypatch.setattr(health, "_resolve_service_endpoint", lambda _config_dir: None)
-
-
-def test_nx_doctor_gets_its_own_bound_longer_than_a_healthy_run(monkeypatch, no_local_engine) -> None:
-    """A healthy ``nx doctor`` took 44.9 s (105 steps) on Windows; the 15 s tool bound made check 2 impossible to pass."""
-    from nexus.commands import command_context as cc
-
-    calls = _fake_bounded(monkeypatch, cc, stdout="doctor: ok\n")
-    lines = cc.nx_doctor_block()
-    (_, kw), = calls
-    assert kw["timeout"] == cc._DOCTOR_TIMEOUT
-    assert cc._DOCTOR_TIMEOUT >= 90 > cc._PREAMBLE_TIMEOUT
-    assert "Status: PASS" in lines
-
-
-def test_nx_doctor_timeout_says_it_timed_out_and_is_not_a_failure(monkeypatch, no_local_engine) -> None:
-    import subprocess
-
-    from nexus.commands import command_context as cc
-
-    _fake_bounded(monkeypatch, cc, raises=subprocess.TimeoutExpired(["nx", "doctor"], cc._DOCTOR_TIMEOUT))
-    text = "\n".join(cc.nx_doctor_block())
-    assert f"exceeded {cc._DOCTOR_TIMEOUT}s" in text
-    assert "not a failure" in text and "run 'nx doctor' directly" in text
-    assert "unavailable" not in text
-
-
-def _answering_engine(status: int):
-    """A real HTTP server on port 0 whose /health answers *status*; returns ``(server, port)`` (caller shuts it down)."""
-    import http.server
-    import threading
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
-            self.send_response(status)
-            self.end_headers()
-
-        def log_message(self, *_a):  # noqa: ANN002
-            return
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, server.server_address[1]
-
-
-def test_a_local_engine_that_does_not_answer_is_reported_at_once_and_doctor_is_not_run(monkeypatch) -> None:
-    """A wedged engine must not stall the synchronous preamble for the whole doctor bound: probe /health first."""
-    import socket
-
-    from nexus import health
-    from nexus.commands import command_context as cc
-
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        closed_port = s.getsockname()[1]  # bound then released: nothing listens, connection is refused
-    monkeypatch.setattr(health, "_resolve_service_endpoint", lambda _config_dir: ("127.0.0.1", closed_port))
-    calls = _fake_bounded(monkeypatch, cc, stdout="doctor: ok\n")
-    text = "\n".join(cc.nx_doctor_block())
-    assert calls == [], "doctor must not run when the engine does not answer"
-    assert "Status: SKIP - engine not answering" in text and f"127.0.0.1:{closed_port}" in text
-    assert "run 'nx doctor' directly" in text and "unavailable" not in text
-
-
-@pytest.mark.parametrize("status", [200, 503], ids=["healthy", "db-down-still-answers"])
-def test_a_local_engine_that_answers_gets_doctor_under_the_long_bound(monkeypatch, status: int) -> None:
-    from nexus import health
-    from nexus.commands import command_context as cc
-
-    server, port = _answering_engine(status)
-    try:
-        monkeypatch.setattr(health, "_resolve_service_endpoint", lambda _config_dir: ("127.0.0.1", port))
-        calls = _fake_bounded(monkeypatch, cc, stdout="doctor: ok\n")
-        lines = cc.nx_doctor_block()
-    finally:
-        server.shutdown()
-        server.server_close()
-    (_, kw), = calls
-    assert kw["timeout"] == cc._DOCTOR_TIMEOUT and "Status: PASS" in lines
 
 
 def test_the_other_preamble_calls_keep_the_short_bound(monkeypatch, tmp_path: Path) -> None:
@@ -209,7 +124,7 @@ def bd_without_database(tmp_path: Path, monkeypatch) -> Path:
     bd = bindir / "bd"
     bd.write_text("#!/bin/sh\nprintf '%s' \"$BD_FAKE_STDERR\" >&2\nexit 1\n")
     bd.chmod(0o755)
-    monkeypatch.setenv("BD_FAKE_STDERR", _BD_NO_DB_STDERR.replace("\n", "\n"))
+    monkeypatch.setenv("BD_FAKE_STDERR", _BD_NO_DB_STDERR)
     monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.delenv("BEADS_DIR", raising=False)
     work = tmp_path / "repo"

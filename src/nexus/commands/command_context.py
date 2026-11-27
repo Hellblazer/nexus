@@ -26,6 +26,8 @@ import click
 
 from nexus.beads_state import NO_BEADS_DATABASE_NOTE, failure_summary, is_no_beads_database
 from nexus.bounded_subprocess import run_bounded
+from nexus.commands.claude_md_language import detect_language
+from nexus.commands.preflight_doctor import nx_doctor_block
 from nexus.util.nx_argv import nx_argv
 
 
@@ -74,17 +76,6 @@ _SOURCE_SCAN_EXCLUDE: frozenset[str] = frozenset({"node_modules", "target", ".gi
 # per-helper ``try/except Exception`` already routes a timeout to the graceful
 # fallback path.
 _PREAMBLE_TIMEOUT: int = 15
-
-# ``nx doctor`` is the one preamble call that is slow when healthy: 44.9 s for 105 steps on a Windows box (GH #1689),
-# so the short bound above made check 2 report "unavailable" on every healthy install.  It still has a bound, for the
-# wedged-daemon case the comment above describes; raise this when doctor grows.
-_DOCTOR_TIMEOUT: int = 120
-
-# The preamble runs synchronously when the slash command starts, so a wedged engine must not stall it for the whole
-# doctor bound: a liveness probe of the engine's /health runs first, under this short bound, and a local engine that
-# does not answer is reported at once.
-_ENGINE_PROBE_TIMEOUT: float = 5.0
-
 
 def _check_output(cmd: list[str], **kwargs: object) -> str:
     """``subprocess.check_output`` with a default ``timeout`` and text decoding.
@@ -492,101 +483,6 @@ def tool_check_block(tool: str, section_heading: str, fail_message: str) -> list
     return lines
 
 
-def _engine_not_answering() -> str | None:
-    """Why the local engine is not answering ``/health`` within ``_ENGINE_PROBE_TIMEOUT``, or ``None``.
-
-    ``None`` also when no local engine is discoverable (a managed endpoint, or no service configured: ``nx doctor`` is the
-    judge of those) and when the probe itself cannot be made: only a confirmed address that gives no answer returns a
-    reason.  Any HTTP answer, a 503 included, counts as answering; the engine is up and doctor says what is wrong.  The
-    endpoint and the probe are the ones ``nx doctor`` and ``nx daemon service status`` use, not copies.
-    """
-    try:
-        from nexus import config as _config  # noqa: PLC0415 — deferred: only the doctor block pays for them
-        from nexus.commands.daemon import _probe_health  # noqa: PLC0415, PLC2701 — the status verb's own probe
-        from nexus.health import _resolve_service_endpoint  # noqa: PLC0415, PLC2701 — one rule for "where is the engine"
-
-        endpoint = _resolve_service_endpoint(_config.nexus_config_dir())
-        if endpoint is None:
-            return None
-        host, port = endpoint
-        answer = _probe_health(host, port, timeout=_ENGINE_PROBE_TIMEOUT)
-    except Exception:  # noqa: BLE001 — a probe that cannot be made never costs the preamble
-        return None
-    if answer == "unreachable":
-        return f"the engine at {host}:{port} did not answer /health within {_ENGINE_PROBE_TIMEOUT:g}s"
-    return None
-
-
-def nx_doctor_block() -> list[str]:
-    """Return the nx-doctor status block.
-
-    First asks the local engine's ``/health`` under a short bound (a wedged engine is reported at once, not after the
-    doctor bound).  Then runs ``nx doctor`` (bounded by ``_DOCTOR_TIMEOUT``, not the short tool bound) and reports PASS/FAIL/SKIP based on
-    exit code.  SKIP when nx is not installed or doctor outlasts its bound (said so, not called unavailable).
-
-    Returns:
-        List of lines for the ### 2. nx configuration section.
-    """
-    heading = "### 2. nx configuration (nx doctor)"
-    lines: list[str] = [heading, ""]
-    not_answering = _engine_not_answering()
-    if not_answering is not None:
-        lines.append(f"Status: SKIP - engine not answering: {not_answering}; run 'nx doctor' directly for details")
-        lines.append("")
-        return lines
-    try:
-        proc = run_bounded(
-            nx_argv("doctor"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=_DOCTOR_TIMEOUT,
-        )
-        lines += proc.stdout.splitlines()
-        lines.append("")
-        if proc.returncode == 0:
-            lines.append("Status: PASS")
-        else:
-            lines.append("Status: FAIL - run 'nx doctor' for details")
-    except FileNotFoundError:
-        lines.append("Status: SKIP - nx not installed")
-    except subprocess.TimeoutExpired:
-        # A wedged daemon or a slow box: not a statement about the install's health (GH #1689).
-        lines.append(f"Status: SKIP - nx doctor exceeded {_DOCTOR_TIMEOUT}s; not a failure; run 'nx doctor' directly")
-    except Exception as exc:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
-        lines.append(f"Status: SKIP - nx doctor could not run ({type(exc).__name__})")
-    lines.append("")
-    return lines
-
-
-# Languages a CLAUDE.md names, each as a case-sensitive proper name with word boundaries (GH #1689: the old
-# case-insensitive alternation reported the verb "go" as Go, Java inside JavaScript, Rust inside "rusty").  Go is also an
-# English word, so it needs a stronger cue than its name: a version, "Golang", ``go.mod`` or a go tool command.
-_LANGUAGE_CUES: list[tuple[str, re.Pattern[str]]] = [
-    (label, re.compile(pattern))
-    for label, pattern in [
-        ("Python", r"\bPython\b"),
-        ("Java", r"\bJava\b"),
-        ("Go", r"\bGolang\b|\bGo\s+\d+(?:\.\d+)*\b|\bgo\.mod\b|\bgo (?:build|test|mod|vet|run)\b"),
-        ("Rust", r"\bRust\b|\bCargo\.toml\b"),
-        ("TypeScript", r"\bTypeScript\b"),
-        ("Node.js", r"\bNode\.js\b"),
-        ("C++", r"C\+\+"),
-        ("C#", r"\bC#"),
-        ("Ruby", r"\bRuby\b"),
-        ("Kotlin", r"\bKotlin\b"),
-        ("Swift", r"\bSwift\b"),
-        ("Scala", r"\bScala\b"),
-        ("Lua", r"\bLua\b"),
-    ]
-]
-
-
-def _detect_language(content: str) -> str | None:
-    """The label of the language cue that appears first in *content*, or ``None``."""
-    found = [(m.start(), label) for label, rx in _LANGUAGE_CUES if (m := rx.search(content))]
-    return min(found)[1] if found else None
-
-
 def claude_md_block(root: Path) -> list[str]:
     """Return CLAUDE.md agent-readiness check lines.
 
@@ -616,7 +512,7 @@ def claude_md_block(root: Path) -> list[str]:
     lines.append("[x] CLAUDE.md exists")
     try:
         content = claude_md.read_text(encoding="utf-8")
-        language = _detect_language(content)
+        language = detect_language(content)
         if language:
             lines.append(f"[x] Language detected: {language}")
         else:
