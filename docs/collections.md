@@ -148,9 +148,10 @@ OLD NEW`. A minted `c<id>` label renames to a bare readable label without
   registers a second collection. Rename a subject's collection only to
   change its subject.
 - **The CLI guards compare the two names.** A minted `c<id>` label carries
-  no type and no model, so the guards read neither from it: it renames to
-  a label with no type prefix, or to a prefixed one whose type is its
-  row's, without the flag. A named label such as `code__foo` still stops
+  no type and no model, so the guards read neither from it: it compares its
+  row's type with the new name's (a label with no type prefix is a
+  `knowledge` collection), and a `knowledge` row renames to a plain label
+  without the flag. A named label such as `code__foo` still stops
   with a prefix or model mismatch when the new name reads as another type
   or embedding model (`code__foo` to `docs__foo`, or to a bare label).
   `--force-prefix-change` lets it through and switches off the model-token
