@@ -71,9 +71,9 @@ an inline "Amended 2026-11-01" note pointing here. The contract itself is
     parent document the step named (a tumbler-id hydration, or a reserved
     primary-stream item's named source) can supply a tumbler. Edited in
     place under § Witness Schema v1, Evidence records and Host binding
-    rule 3. A step confined to one document could bind a shared chunk to
+    rule 3. A run confined to one document could bind a shared chunk to
     that document when it is one of the chunk's owners; that recall gain
-    is nexus-z1d0l.1.12.
+    landed as amendment (vii).
   - **(vi)** 2026-11-01, approved by Sam (nexus-z1d0l.1.10): two rules
     the text above left unstated. First, `requires_review` is true when
     the host holds no records for the step; `bind` has done so since
@@ -85,6 +85,20 @@ an inline "Amended 2026-11-01" note pointing here. The contract itself is
     `nx_answer` reads it, so its answer text and the answer-runs class of
     such a run are unchanged. Edited in place under § Witness Schema v1,
     the `requires_review` rule and Compatibility.
+  - **(vii)** 2026-11-27, landed (nexus-z1d0l.1.12), citing (v): a run
+    confined to one document knows its parent document the way a
+    tumbler-id hydration does, so the runner now binds a shared chunk to
+    that document. When the confined document is one of the live owners
+    in the chash's owner rows, in the chunk's collection (or, where the
+    chunk's collection is unknown, in the confinement's own collection),
+    the record's `tumbler` is that document. When it is not an owner, or no
+    collection is known to match an owner row against, the record stays
+    `ambiguous` as before. A row in another collection, or one naming no
+    collection, never counts for the confined document. The rule applies to
+    the records built from a check or verify step's hydrated chunk ids
+    and to its repaired items. A run not confined to one document is
+    unchanged. Edited in place under § Witness Schema v1, Host binding
+    rules 3 and 4.
 
 ### Witness Schema v1
 
@@ -233,14 +247,21 @@ verify: {schema_version: 1, verified, reason, evidence: [item], rejected: [str],
    `chash` and `collection`.
 3. A contained quote binds (`bound`) only when the record has source
    identity: a `tumbler` that names the one owning document (the parent
-   the step named, or the owner set's single owner; never a retrieval
-   step's tumbler, *amended 2026-11-01 (v)*), or a `chash` with a
+   the step named, the owner set's single owner, or, in a run confined to
+   one document, that document when it is one of several owners (rule 4);
+   never a retrieval step's tumbler, *amended 2026-11-01 (v)*, *2026-11-27
+   (vii)*), or a `chash` with a
    `collection` whose single parent document is known. A contained quote on a record without identity is
    `unattributed`: the text is real, the source is not known. Every
    direct-MCP plain-text call lands here.
 4. A record with a `chash` and no `tumbler` is `ambiguous` unless the
    owner set shows exactly one owning document, in which case that
-   document's tumbler fills the record and rule 3 applies. The owner rows
+   document's tumbler fills the record and rule 3 applies. A second route,
+   in a run confined to one document (*Amendment Log (vii)*): a chunk
+   several live documents own binds to the confined document when it is
+   one of those owners in the chunk's collection, or in the confinement's
+   collection when the chunk's is unknown; otherwise the record stays
+   `ambiguous`. The owner rows
    the runner already captures (`capturing_owner_lookups`) are one source;
    nexus-z1d0l.1.3 makes the lookup complete (it needs nexus-tko2w). With
    no owner set, a chash-only record is `ambiguous`, never `bound`. A
