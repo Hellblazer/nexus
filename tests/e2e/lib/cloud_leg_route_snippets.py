@@ -182,7 +182,9 @@ else:
     raise SystemExit("gc expire-quarantine accepted an origin nothing registers")
 """
 
-#: Prepended to the probes that print a refusal's reason: the `reason` key of an engine error body, or None when the body has none.
+#: Prepended to the probes that print a refusal's answer. `_reason_of` is the strict `reason` key of an engine error body (None when
+#: it has none): every assertion reads it. `_shown` is what a probe PRINTS: the reason, else the body's `error` text cut short (a
+#: label-rule or topic-check 400 carries `error` and no `reason`), else the bare status.
 _REASON_OF = r"""
 def _reason_of(exc):
     try:
@@ -190,55 +192,90 @@ def _reason_of(exc):
     except ValueError:
         return None
     return body.get("reason") if isinstance(body, dict) else None
+
+def _shown(exc):
+    reason = _reason_of(exc)
+    if reason:
+        return "reason " + str(reason)
+    try:
+        error = exc.response.json().get("error")
+    except (ValueError, AttributeError):
+        error = None
+    return "error " + repr(str(error)[:80]) if error else "no reason or error in the body"
 """
 
 TELEMETRY_RENAME = _REASON_OF + r"""
 import httpx
+from nexus.commands.catalog import _get_catalog
+from nexus.corpus import t3_collection_name
+from nexus.db import make_t3
 from nexus.db.http_engine_status import fetch_engine_status
 from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 # nexus-n3hhc: the telemetry rename judges its target with the label rule. This runs against the production engine at
 # release time, where a data write is Sam's alone, so the probe proves before it renames that nothing is recorded under
-# its source label (unique per run), and refuses to run otherwise (linda's condition). The minted-form target goes first:
-# the label rule runs before the rename guard, so it is a 400 in every gate state, with either table untouched.
+# its labels, and refuses to run otherwise (linda's condition). The minted-form target goes first: the label rule runs before
+# the rename guard, so it is a 400 in every gate state, with either table untouched.
+# The legal pair must answer the SAME in every gate state, because the leg fails a status the cloud returns and the local engine
+# does not. Before gate 3 latches the rename is the name path (200, every count 0 here). Once it has latched the engine
+# answers a per-store rename 409 rename_not_in_registry unless the registry already moved the label (RenameGuard.requireRegistryRenamed,
+# wire ledger 0434c01e91). So the probe moves the label in the registry first, on a collection of its own, and renames the same pair in
+# the history tables: 200 with zero counts either way. The collection is registered by NAME on a dedicated tuple (owner 1.9997, beside
+# 1.9998 and 1.9999) so it is registered once, every run reuses it, and it is renamed back in a finally: a latched engine refuses a
+# minted-form rename target, so a nameless row could not be undone. The registry rename posts the route with no content type or owner,
+# so the row keeps its tuple (the client's rename derives an owner from the new label and would move it).
+cat = _get_catalog()
 store = HttpTelemetryStore()
-source = "@label@-tel-probe"
-search_rows = int(store.query_collection_stats(source, days=36500).get("row_count") or 0)
-hooks = store.list_hook_failures(days=0, limit=1)
-if hooks["total"] > 10000:
-    raise SystemExit(f"refusing: {hooks['total']} hook_failures rows is too many to prove none is under {source!r}")
-hook_rows = sum(1 for r in store.list_hook_failures(days=0, limit=max(hooks["total"], 1))["rows"]
-                if r.get("collection") == source)
-if search_rows or hook_rows:
-    raise SystemExit(f"refusing: {search_rows} search and {hook_rows} hook rows are recorded under {source!r}")
-print("no rows under the probe source")
+home = t3_collection_name("cloud-leg-probe", t3=make_t3(), for_write=True)
+row = cat.get_collection(home)
+if row is None:
+    raise SystemExit(f"{home} is not registered: the store-put step has not run")
+a, b = "cloudleg-tel-probe-a", "cloudleg-tel-probe-b"
+for label in (a, b):
+    search_rows = int(store.query_collection_stats(label, days=36500).get("row_count") or 0)
+    hooks = store.list_hook_failures(days=0, limit=1)
+    if hooks["total"] > 10000:
+        raise SystemExit(f"refusing: {hooks['total']} hook_failures rows is too many to prove none is under {label!r}")
+    hook_rows = sum(1 for r in store.list_hook_failures(days=0, limit=max(hooks["total"], 1))["rows"]
+                    if r.get("collection") == label)
+    if search_rows or hook_rows:
+        raise SystemExit(f"refusing: {search_rows} search and {hook_rows} hook rows are recorded under {label!r}")
+print("no rows under the probe labels")
 try:
-    store.rename_collection(old=source, new="c42")
+    store.rename_collection(old=a, new="c42")
 except httpx.HTTPStatusError as exc:
-    print("result: minted target answered", exc.response.status_code, "reason", _reason_of(exc))
+    print("result: minted target answered", exc.response.status_code, _shown(exc))
     assert exc.response.status_code == 400, f"a minted-form target answered {exc.response.status_code}, not 400"
     print("minted target refused 400")
 else:
     raise SystemExit("a minted-form target was accepted: the engine does not judge the telemetry rename target")
-# The legal pair (source -> source-renamed) names no registry row. Before gate 3 latches the rename moves no row and every
-# count is 0 (the probe's source holds none). Once it has latched, the one-row regime checks the registry moved the label
-# first and refuses 409 rename_not_in_registry (RenameGuard.requireRegistryRenamed; wire ledger 0434c01e91): an intended
-# answer, so the probe takes either, each only with its exact reason. The latch is one-way, so a 200 with the latch
-# already reported is a failure; a 409 against a latch not yet reported is a stale status and passes.
 status = fetch_engine_status(timeout=20.0) or {}
 completion = status.get("rdr229_completion")
 latched = completion.get("gate3_latched") if isinstance(completion, dict) else None
-gate = "gate3_latched=" + ("unknown" if latched is None else str(latched))
+if latched is None:
+    raise SystemExit("the gate 3 latch state is unreadable (GET /v1/status carries no rdr229_completion.gate3_latched): the probe cannot say which regime it covered")
+def live(name):
+    found = cat.get_collection(name)
+    return found is not None and not found.get("superseded_by")
+def rename_in_registry(old, new):
+    cat._post("/collections/rename", {"old_name": old, "new_name": new}, idempotent=False)
+if not live(a):
+    if live(b):   # an earlier run stopped between its rename and its undo
+        rename_in_registry(b, a)
+    else:
+        cat.register_collection(a, content_type=row["content_type"], owner_id="1.9997",
+                                embedding_model=row["embedding_model"], model_version=row["model_version"])
+rename_in_registry(a, b)
 try:
-    moved = store.rename_collection(old=source, new=source + "-renamed")
-except httpx.HTTPStatusError as exc:
-    reason = _reason_of(exc)
-    print("result: legal rename answered", exc.response.status_code, "reason", reason, gate)
-    assert exc.response.status_code == 409 and reason == "rename_not_in_registry", (
-        f"the legal rename answered {exc.response.status_code} reason {reason!r}, not 200 or 409 rename_not_in_registry")
-else:
-    assert latched is not True, f"gate 3 has latched and the legal rename was accepted ({moved}), not refused 409 rename_not_in_registry"
+    try:
+        moved = store.rename_collection(old=a, new=b)
+    except httpx.HTTPStatusError as exc:
+        print("result: legal rename answered", exc.response.status_code, _shown(exc), f"gate3_latched={latched}")
+        raise SystemExit(f"the legal rename answered {exc.response.status_code} after the registry rename, not 200")
     assert all(v == 0 for v in moved.values()), f"the probe's legal rename moved rows: {moved}"
-    print("result: legal rename answered 200", moved, gate)
+    print("result: legal rename answered 200", moved, f"gate3_latched={latched}")
+finally:
+    if live(b):
+        rename_in_registry(b, a)
 """
 
 CHASH_RENAME_REFUSAL = r"""
@@ -315,7 +352,7 @@ if not ids:
 try:
     store.persist_split({"topic_id": ids[0], "collection_name": home, "child_specs": []})
 except httpx.HTTPStatusError as exc:
-    print("result: persist_split answered", exc.response.status_code, "reason", _reason_of(exc))
+    print("result: persist_split answered", exc.response.status_code, _shown(exc))
     assert exc.response.status_code == 400, f"persist_split of another collection's topic answered {exc.response.status_code}, not 400"
     print("persist_split refused 400")
 else:
