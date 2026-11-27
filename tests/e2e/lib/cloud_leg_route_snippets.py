@@ -183,7 +183,7 @@ else:
 """
 
 #: Prepended to the probes that print a refusal's answer. `_reason_of` is the strict `reason` key of an engine error body (None when
-#: it has none): every assertion reads it. `_shown` is what a probe PRINTS: the reason, else the body's `error` text cut short (a
+#: it has none): every assertion reads it. `_shown` is what a probe PRINTS: the reason, else the body's `error` text cut to 48 characters (a
 #: label-rule or topic-check 400 carries `error` and no `reason`), else the bare status.
 _REASON_OF = r"""
 def _reason_of(exc):
@@ -201,7 +201,7 @@ def _shown(exc):
         error = exc.response.json().get("error")
     except (ValueError, AttributeError):
         error = None
-    return "error " + repr(str(error)[:80]) if error else "no reason or error in the body"
+    return "error " + repr(str(error)[:48]) if error else "no reason or error in the body"
 """
 
 TELEMETRY_RENAME = _REASON_OF + r"""
