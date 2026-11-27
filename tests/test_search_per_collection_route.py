@@ -889,6 +889,26 @@ class TestMixedModelFallsBackToSingletons:
         assert {r.collection for r in results} == set(cols)
         assert _SEARCH not in engine.paths()
 
+    def test_a_group_naming_a_retired_no_successor_collection_isolates_it_instead_of_failing_the_group(self, monkeypatch):
+        """RDR-229 R7: the engine refuses a request that names a retired collection with no live successor as a whole (409
+        retired_no_successor). The group is retried as one request per collection, so the retired one fails alone (named
+        in failed_collections) and the others are served, as the batched path does."""
+        cols = _cols("code", _BGE, 3)
+        dead = cols[1]
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[:7], 3, 0.2) for c in cols})
+        engine.fail_when = lambda body: (
+            (409, {"error": "collection_superseded", "reason": "retired_no_successor", "collection": dead,
+                   "collection_id": 41})
+            if dead in body["collections"] else None
+        )
+        diags: list[SearchDiagnostics] = []
+        results = _search(engine, cols, diagnostics_out=diags)
+
+        assert {r.collection for r in results} == {cols[0], cols[2]}, "the live collections are still served"
+        assert list(diags[0].failed_collections) == [dead]
+        assert "was retired and has no successor" in diags[0].failed_collections[dead]
+        assert _SEARCH not in engine.paths()
+
     @staticmethod
     def _mixed(engine):
         engine.fail_when = lambda body: (

@@ -2228,6 +2228,13 @@ def search_cross_corpus(
             return None
         except SensitivityExcludeUnavailable:
             raise  # RDR-243 review r1 F5: a refused read is not this group's failure
+        except RetiredNoSuccessorError as exc:
+            # RDR-229 R7: the engine refuses the whole request when it names a collection retired with no live
+            # successor. One request per collection isolates it (it fails alone, named), as the batched path does;
+            # a single collection, or a group already split, is that one failed collection. Never memoized as poisoned.
+            if allow_split and len(group) > 1:
+                return _split_per_collection()
+            return [_failed_part(c, exc) for c in group]
         except VectorServiceError as exc:
             if allow_split and len(group) > 1 and _is_mixed_model_error(exc):
                 _log.warning(
