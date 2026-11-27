@@ -640,6 +640,17 @@ nexus-2hx2u
 nexus-2iig
 nexus-2ivn
 nexus-2jfoj
+nexus-2jomg
+nexus-2jomg.1
+nexus-2jomg.10
+nexus-2jomg.2
+nexus-2jomg.3
+nexus-2jomg.4
+nexus-2jomg.5
+nexus-2jomg.6
+nexus-2jomg.7
+nexus-2jomg.8
+nexus-2jomg.9
 nexus-2jp5
 nexus-2k1y
 nexus-2k66t
@@ -2768,6 +2779,7 @@ nexus-aym
 nexus-aym.1
 nexus-ays2l
 nexus-ayvrv
+nexus-azcro
 nexus-azgb
 nexus-azsqe
 nexus-azss4
@@ -5578,6 +5590,7 @@ nexus-ll31n
 nexus-ll7zm
 nexus-ll7zm.1
 nexus-llba1
+nexus-llbgu
 nexus-llcq
 nexus-llo7w
 nexus-lme1s
