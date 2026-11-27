@@ -359,13 +359,17 @@ Eight elements, each grounded below.
 
 **(a) Two classes of check.** Every check that is not a product test is either
 *user-reachable* (class U: it guards a failure a user can receive, and keeps
-failing the build) or *accounting* (class A: it reports as a fitness function in
-warning mode and is reviewed every 2 weeks; a class-A check with a numeric value
-also fails past an explicit alarm line, which Sam sets per check from Phase 0's
-report). Grounds: the warn mode of fitness functions (258-research-9); CA-1;
-the red census (258-research-1). A check's class is decided from what it
-caught, in Phase 0's report, not from the census's name-based label: three
-checks that label calls accounting caught product defects (258-research-15).
+blocking at least at the release boundaries, the release PR into main and, for
+wire pairing from Phase 2, the engine release) or *accounting* (class A: it
+reports as a fitness function in warning mode and is reviewed every 2 weeks; a
+class-A check with a numeric value also fails past an explicit alarm line,
+which Sam sets per check from Phase 0's report). Grounds: the warn mode of
+fitness functions (258-research-9); CA-1; the red census (258-research-1). One
+test decides a check's class: what it guards. A check that guards a failure a
+user can receive is class U; every other check is class A. Phase 0's report can
+move a check from A to U when it shows the check caught a product defect, as
+three checks the census's name-based label calls accounting did
+(258-research-15); it never moves a check from U to A for lack of a catch.
 The class of each named check, from strand C's inventory (258-research-5):
 
 | Check | Class | Why |
@@ -394,12 +398,14 @@ reads CI history the way strand B did (failing item per red run, plus the fix
 signal) and prints, per check, reds, catches and red hours in a window. A check
 with no catch in 60 days is put to retirement at the next 2-week review, one
 check at a time with Sam's decision (N and the cadence: Sam, 2026-11-27). For a class-U check, a catch is a
-product catch. A class-A check does not test the product, so for it a product
-catch is the wrong measure: a check that stays class A after Phase 0 has none
-by its definition, and a rule keyed on product catches would retire every
-class-A check. Which catch counts for a class-A check is Open question Q1
-(Implementation Plan); it must be answered before Phase 8 writes the rule into
-the review. Grounds: the 67-to-4 ceiling record and the absence of any merit
+product catch. For a class-A check it is a guard catch (Sam, 2026-11-27, Q1;
+T2 `nexus/sam-ruling-rdr258-gate-answers-2026-11-27`): a red fixed by changing
+what the check's `guards:` header names. A check whose reds were all fixed by
+ledger or ceiling edits retires after 60 days. A demoted check reports instead
+of failing, so a reported failing item fixed by changing what `guards:` names
+also counts as a catch. Each check's 60-day clock starts on the day its
+demotion lands, so the first clocks start with Phase 1's demotions. The 2-week
+review applies the rule from Phase 1 step 5 on. Grounds: the 67-to-4 ceiling record and the absence of any merit
 retirement since 2026-10-04 (258-research-4); the 3.1x regrowth after a burst
 cleanup (258-research-7). No verified source gives a retirement rule; this
 element rests on the measured figures.
@@ -460,8 +466,10 @@ figure.
 
 **(h) Stop adding a gate per incident.** The review gate's habit of answering a
 finding with a new check becomes: fix the behaviour and add a behaviour test of
-the product. A new accounting check needs an owner, an incident and an alarm
-line, and it lands in report mode. Grounds: about half of the lint modules were
+the product. A new accounting check needs an owner, an incident and, if it has
+a numeric value, an alarm line, and it lands in report mode. Phase 1 step 6
+writes this into nexus's rules; Phase 8 carries it into the plugin guidance.
+Grounds: about half of the lint modules were
 born from incidents (258-research-4); Google's "a test for each behavior"
 (258-research-8).
 
@@ -489,7 +497,8 @@ The new code is small and reuses existing patterns.
   - a pass/fail check (a pytest lint test such as the census,
     `docs_reference_rot` or `module_seam`) has no value and no alarm line. It
     lists each failing item in the job summary and in the report, and never
-    fails the gate. An item still failing at the next 2-week review is fixed,
+    fails the gate on develop; a class-A ledger check still blocks the release
+    PR into main (Phase 4). An item still failing at the next 2-week review is fixed,
     or its check is put to the retirement question at that review.
 
   The pytest-gate reads whole jobs (its `needs:` list in `ci.yml`), not single
@@ -568,8 +577,9 @@ check failing, so the guard against the wire-pairing class of damage stays.
 - The lint bucket regrew to 3.1 times its post-cleanup size in seven weeks
   (258-research-7), because the habits that add gates did not change.
 
-**Reason for rejection**: It treats the stock and not the flow. Its deletion
-lists are reused in Phase 1, but only with (b) and (h) in place.
+**Reason for rejection**: It treats the stock and not the flow. This RDR
+removes checks only through (b), and (h) lands in Phase 1, with the first
+demotions.
 
 ### Alternative 3: Delete all meta tests
 
@@ -658,31 +668,18 @@ does without him.
 
 - [x] CA-2 checked by source search (258-research-16): half false; Phase 2 adds the engine-release pairing check before pairing leaves develop.
 - [x] Sam's answers to the Finalization Gate questions (T2 `nexus/sam-ruling-rdr258-gate-answers-2026-11-27`): N = 60 days; review every 2 weeks; quarantine deadline 14 days; targets as in the Day-2 metrics table; per-check alarm lines set from Phase 0's report, each one to Sam.
-- [ ] Open question Q1 answered. It blocks only Phase 8.
+- [x] Q1 answered (same record): a guard catch counts for a class-A check.
 
 Phase 0 step 1 waits on no answer from Sam.
 
-### Open questions for Sam
+### Questions answered by Sam
 
 **Q1: Which catch counts for a class-A check under the 60-day retirement
-rule?** Sam's answer reads "60 days without a product catch retires a class-A
-check". Read literally, that retires every check that is still class A after
-Phase 0, because a class-A check does not test the product (finding S1 of gate
-round 1). Options:
-
-1. A guard catch: a red fixed by changing what the check's `guards:` line names
-   (removing a tenant a test did not need, fixing a dangling citation, removing
-   leaked mode state) rather than the check's ceiling, ledger or allowlist. A
-   class-A check with no guard catch in 60 days is put to retirement. This is
-   the option under which a class-A check can earn its place.
-2. A product catch, as the answer reads: class A becomes a 60-day stage before
-   deletion, and each class-A check is put to retirement at the first review
-   after 60 days in report mode.
-3. Cost against value: a class-A check is put to retirement when its red hours
-   in 60 days pass a bound Sam sets, whatever its catches.
-
-Every option is reversible (a retired check is restored from git), and each
-retirement is still Sam's decision per check.
+rule?** Closed 2026-11-27: Sam chose "Guard catch" (T2
+`nexus/sam-ruling-rdr258-gate-answers-2026-11-27`). A catch is a red fixed by
+changing what the check's `guards:` header names; a check whose reds were all
+fixed by ledger or ceiling edits retires after 60 days. Each retirement is
+still Sam's decision per check.
 
 ### Minimum Viable Validation
 
@@ -734,7 +731,7 @@ committed beside it as a compressed file. Run the MVV on it.
 For each red the report attributes to a fix in `src/` or `service/src/main`
 (18 in 258-research-15), read the fix commit and record whether the red caught a
 product defect or was a gate red on an in-flight feature commit. A check with a
-real catch is class U, or stays next to product code, whatever its label.
+real product catch moves to class U, whatever its label.
 
 #### Step 4: Check headers and classes
 
@@ -749,11 +746,12 @@ automatic counts); for each numeric class-A check, its value, trend and a
 proposed alarm line, sent to Sam one check at a time; and the target for the
 ledger-and-ceiling commit share, which Sam left for Phase 0 to set.
 
-### Phase 1: Report mode for four class-A checks, and the 2-week review. Sam decides each demotion and alarm line; the implementer builds the reporting and runs the reviews without him.
+### Phase 1: Report mode for four class-A checks, the 2-week review and rule (h). Sam decides each demotion and alarm line, each retirement and the AGENTS.md rule; the implementer builds the reporting and runs the reviews without him.
 
-**Sam decides**: each step's demotion, with the alarm line of a numeric check.
+**Sam decides**: each step's demotion, with the alarm line of a numeric check;
+each retirement the review proposes; the AGENTS.md rule in step 6.
 **Without Sam**: the report-mode code, the advisory job layout, the review
-records, and the cause test in step 3.
+records, the cause test in step 3, and the step 6 draft.
 
 Ordered by measured red runs (258-research-2). `cli_runner_output_invariant`
 (27) and `tmp_root` (20) are larger than step 4 but were not examined
@@ -768,7 +766,10 @@ line; stop editing `tests/storage_touch_ceiling.toml` per change.
 
 Choose the advisory job layout for pass/fail pytest checks (Technical Design).
 Report on develop and in the nightly job; fix dangling citations in batches at
-review.
+review. The test also runs in the `test-docs-readers` job, which pytest-gate
+needs, and in the push gate's docs-readers proof, both of which take their
+files from `scripts/select_docs_reader_tests.py`. Exclude it from that
+selector's output in the same step, so neither path keeps it blocking.
 
 #### Step 3: Mode-declarations census (47) [Sam]
 
@@ -786,7 +787,16 @@ which is an inference, not a measured fact; Phase 0's report checks it.
 
 The first review runs two weeks after this phase's first demotion lands, and
 every two weeks after. Each writes a review record (Technical Design); Sam
-reads it. The first three records are the CA-3 measurement.
+reads it. The first three records are the CA-3 measurement. From this step on,
+the review applies the retirement rule (b): a check with no guard catch in the
+60 days since its demotion is put to retirement, with Sam's decision per check.
+
+#### Step 6: No new gate per incident [Sam]
+
+Write rule (h) into the AGENTS.md hot rule on review gates: a finding is
+answered by fixing the behaviour and adding a behaviour test; a new accounting
+check lands in report mode with an owner, an incident and, if numeric, an
+alarm line.
 
 ### Phase 2: Wire pairing blocks at the release boundaries. Sam decides the engine-release change and the develop demotion; the implementer prepares both without him.
 
@@ -896,17 +906,15 @@ counted (CA-4).
 Selection gates develop pushes, with the full suite nightly and on the release
 PR into main.
 
-### Phase 8: Standing retirement and the review-gate habit. Sam decides Q1, each retirement, the guidance change and the plugin release; the implementer drafts the rule and the guidance without him.
+### Phase 8: The review-gate habit in the plugin guidance. Sam decides the guidance change and the plugin release; the implementer drafts the guidance without him.
 
-**Sam decides**: Q1; each retirement; the guidance change; the plugin release
-that ships it.
-**Without Sam**: the review procedure text and the guidance draft.
+**Sam decides**: the guidance change; the plugin release that ships it.
+**Without Sam**: the guidance draft.
 
-The 2-week review (running since Phase 1) applies the retirement rule: a check
-with no catch, under Q1's answer, in 60 days is put to retirement at the next
-review. The orchestration review gate's "new check per finding" becomes "fix
-the behaviour; add a behaviour test" (conexus plugin guidance and the AGENTS.md
-hot rule on review gates). The plugin guidance ships to every plugin user, so
+Retirement is not in this phase: the 2-week review applies it from Phase 1
+step 5, and Phase 1 step 6 writes rule (h) into AGENTS.md. This phase carries
+rule (h) into the conexus plugin's orchestration review gate: "new check per
+finding" becomes "fix the behaviour; add a behaviour test". The plugin guidance ships to every plugin user, so
 the AGENTS.md rule "The plugin's process is product; nexus's specifics are
 leaks" applies: the new terms (class A, alarm line, the `owner`, `guards` and
 `class` headers) are written generically, nexus's names and ids stay in
@@ -969,11 +977,15 @@ None.
    **Expected**: the metric the phase names, measured by the report over the
    sixty days after the phase, moves toward its target; a phase that does not
    move its metric is reverted. Phases 1 to 4 are measured by the accounting
-   red share and the red hours, and Phase 4 also by the ledger-and-ceiling
-   commit share; Phase 5 by the flake red share; Phase 6 by the stale and
-   ambient-coupled red share; Phase 7 by the shadow window's miss count and the
-   runner-hours per develop push; Phase 8 by the lint module count. Phase 0
-   measures and changes nothing; Phase 9 is optional and has no metric.
+   red share and the red hours, Phase 1 also by the lint module count, and
+   Phase 4 also by the ledger-and-ceiling commit share; Phase 5 by the flake red
+   share; Phase 6 by the stale and ambient-coupled red share; Phase 7 by the
+   shadow window's miss count and the runner-hours per develop push; Phase 8 by
+   the lint module count. A metric Sam set no target for has the target "better
+   than its Phase 0 baseline"; for Phase 7's miss count the target is no
+   diff-caused miss that the full run caught, as on the replay
+   (258-research-17). Phase 0 measures and changes nothing; Phase 9 is optional
+   and has no metric.
 
 ### Performance Expectations
 
@@ -1007,7 +1019,7 @@ Three tensions are stated in the text. (f) cites Machalica et al. for a
 different selector than the one proposed, and says so. CA-2 is half false, so
 Phase 2 adds the engine-release pairing check before pairing leaves develop. A
 retirement rule keyed on product catches would contradict the class-A
-definition; Q1 carries that choice to Sam.
+definition; Sam's Q1 answer keys it on guard catches.
 
 ### Assumption Verification
 
@@ -1044,7 +1056,7 @@ scope; the snapshot it runs on is Phase 0 step 1.
 - **IDE compatibility**: N/A
 - **Incremental adoption**: each phase is reversible by restoring a check's
   failing role. Phases 1 to 4 need Phase 0's alarm lines; Phase 2 step 2 waits
-  on step 1; Phase 7 waits on Phase 5; Phase 8 waits on Q1.
+  on step 1; Phase 7 waits on Phase 5; Phase 8 waits on Phase 1 step 6.
 - **Secret/credential lifecycle**: the report uses the existing `gh` token
   read-only.
 - **Memory management**: N/A
