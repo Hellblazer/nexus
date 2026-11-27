@@ -334,15 +334,16 @@ class TestProbeImplementations:
         from nexus.commands.daemon import _probe_health
 
         err = HTTPError("http://x/health", 503, "Service Unavailable", {}, None)
-        with patch("urllib.request.urlopen", side_effect=err):
+        # the probe opens through nexus-ec37o's probe_opener (no environment proxy), not urllib.request.urlopen
+        with patch("nexus.db.t2.bearer_transport.probe_opener") as opener:
+            opener.return_value.open.side_effect = err
             assert _probe_health("127.0.0.1", 5999) == "db-down"
 
     def test_probe_health_connection_refused_is_unreachable(self) -> None:
         from nexus.commands.daemon import _probe_health
 
-        with patch(
-            "urllib.request.urlopen", side_effect=ConnectionRefusedError(),
-        ):
+        with patch("nexus.db.t2.bearer_transport.probe_opener") as opener:
+            opener.return_value.open.side_effect = ConnectionRefusedError()
             assert _probe_health("127.0.0.1", 5999) == "unreachable"
 
     def test_pgvector_version_prefers_admin_creds(self) -> None:
