@@ -62,28 +62,47 @@ def sentinel_text(subject: str) -> str:
             f"at the quiet ferry before dawn.")
 
 
-def _physical(t3, subject: str) -> str:
-    names = [c["name"] if isinstance(c, dict) else str(getattr(c, "name", c)) for c in t3.list_collections()]
-    hits = [n for n in names if n.startswith(f"knowledge__{subject}__")]
+def _rows(t3) -> list[dict]:
+    return [c if isinstance(c, dict) else {"name": str(getattr(c, "name", c))} for c in t3.list_collections()]
+
+
+def _physical(t3, subject: str, before: set[str]) -> tuple[str, str]:
+    """The collection the subject's first ``nx store put`` created, and its embedding model.
+
+    A client before 8.5.6 names it ``knowledge__<subject>__<model>__v<n>``: found by that prefix, model read from
+    the name. Since 8.5.6 the engine mints a ``c<id>`` label that carries neither the subject nor a model: found
+    as the one collection not listed before the put, model read from its registry row (``embedding_model``)."""
+    rows = _rows(t3)
+    names = [r["name"] for r in rows]
+    hits = [r for r in rows if r["name"].startswith(f"knowledge__{subject}__")]
+    if not hits:
+        hits = [r for r in rows if r["name"] not in before]
     if len(hits) != 1:
-        sys.exit(f"upgrade_boot_seed: expected one collection for {subject}, found {hits} in {names}")
-    return hits[0]
+        sys.exit(f"upgrade_boot_seed: expected one collection for {subject}, found {[r['name'] for r in hits]} "
+                 f"in {names} (before the put: {sorted(before)})")
+    row = hits[0]
+    parts = row["name"].split("__")
+    model = parts[2] if len(parts) == 4 and parts[0] == "knowledge" else row.get("embedding_model")
+    if not model:
+        sys.exit(f"upgrade_boot_seed: no embedding model for {row['name']}: its row carries {sorted(row)}")
+    return row["name"], model
 
 
 def seed(subject: str, rows: int, dim: int, rng: random.Random) -> tuple[str, int]:
+    from nexus.db import make_t3  # noqa: PLC0415
+
+    t3 = make_t3()
+    before = {r["name"] for r in _rows(t3)}
     subprocess.run(["nx", "store", "put", "-", "--collection", subject, "--title", f"{subject}-first-note"],
                    input=sentinel_text(subject),
                    text=True, check=True, capture_output=True)
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415
-    from nexus.db import make_t3  # noqa: PLC0415
 
-    t3 = make_t3()
-    name = _physical(t3, subject)
+    name, model = _physical(t3, subject, before)
     reader, writer = make_catalog_reader(), make_catalog_writer()
     if reader is None or writer is None:
         sys.exit("upgrade_boot_seed: no catalog (is the install's service running?)")
     owner = reader.curator_owner_tumbler_by_name("knowledge") or writer.register_owner("knowledge", "curator")
-    model = name.split("__")[2]
     written = 0
     doc = 0
     while written < rows:
