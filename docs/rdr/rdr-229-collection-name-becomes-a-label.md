@@ -702,7 +702,10 @@ legacy_names.candidate_attributes(name: str) -> CandidateAttributes | None
 Every census site is one of five classes, recorded in the census beside the
 site. Three are callers of `legacy_names`: **mint** (the name is the user's
 own input or one `nx` is about to register, so no row exists yet; this class
-empties at Phase 3, when minting stops rendering names), **migration
+keeps the parsers of the names a user types and the names `nx` is about to
+register, so it does not empty at Phase 3. The census pins it at 129
+(`tests/test_collection_name_parse_census.py:418`), so the count cannot grow,
+and it retires with the Phase 4 parsers, P4.3), **migration
 source** (the name comes from another install or an older era: recovery
 bundle import, migrate-fallback, legacy-collection migration), or
 **diagnostic** (doctor, reconcile and shape checks whose purpose is to
@@ -2476,8 +2479,9 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
   a Row answers with its `content_type`; NoRow (after one cache re-read,
   bounded to one extra listing per interval) and Unreadable answer with the
   candidate name's content type (`corpus.candidate_content_type`, the one
-  parse, which P2.2 points at `legacy_names`), one mint entry per caller, all
-  empty at P3.8. A prefix-free label with no row derives nothing and stays
+  parse, which P2.2 points at `legacy_names`), one mint entry per caller; those
+  entries stay in the mint class, which the census pins at 129 and which retires
+  with the Phase 4 parsers (item 12). A prefix-free label with no row derives nothing and stays
   unrouted until P3.8's writer uses the registering call's row. The
   `note_tags_array` rung reads strictly, so a failed listing is not "no
   strings". A read-only router that sees only a search hit's collection
@@ -4782,3 +4786,4 @@ large, and moved under a ratchet.
 - 2026-11-26: the delete's lock modes follow the quarantine lane's fix round (grant 3, nexus-p2m1x.23 and .27; the commits of feature/rdr229-nextcut-quarantine, unpublished until the stack lands; T2 `nexus/nextcut-quarantine-lane-2026-11-26`): a delete by id takes the origin's row and its quarantine siblings' rows FOR UPDATE in one `collection_id`-ordered statement, a delete by label the siblings FOR UPDATE and the origin FOR KEY SHARE in the same order, and a rename's retag key-shares each sibling's row before it reads the rows; the `CollectionDeleteFence.java` cites are re-read from that tree.
 - 2026-11-26: the reaper's two expiry functions guard a quarantine row by its own origin id (grant 3, nexus-p2m1x.28; Sam's ruling, T2 `nexus/sam-ruling-rdr229-nextcut-ddl-cap-2961-2026-11-26`): `vectors-086` redefines `reaper_expire_quarantine` and `reaper_expire_client_quarantine`; after a one-row rename a move that commits after the retag leaves a row tagged with the old label, which the label-resolved guard missed; the I8 census's basis for the two reaper rows no longer says the call was ruled safe.
 - 2026-11-27: the Test Plan's two rename scenarios state the restart precondition (grant 3, nexus-p2m1x.48 step 2): once gate 3 holds, until the restart that applies P3.5b's changesets a rename is refused (409 `rename_refused`, `missing` = `restart`), and a rename test on a fresh or half-stamped fixture boots, waits for the restart signal, restarts, waits for readiness `NONE`, then renames; before gate 3 holds a rename is the name path and is not refused. Two Test Plan Verify clauses gain a sentence each (the amendment bead nexus-p2m1x.48 asked for); no decision changed.
+- 2026-11-27: the mint class does not empty at Phase 3 (Sam's ruling, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`, ask `rdr229-mint-pin`, option 1; grant 3, nexus-p2m1x.28): item 12's census paragraph and the routing paragraph's "all empty at P3.8" now say the class keeps the parsers of the names a user types and the names `nx` is about to register, is pinned at 129 (`tests/test_collection_name_parse_census.py:418`) so it cannot grow, and retires with the Phase 4 parsers (P4.3).
