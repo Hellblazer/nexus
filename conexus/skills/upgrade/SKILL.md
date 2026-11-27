@@ -68,8 +68,10 @@ operator` row if one keeps failing). The chunks move is the long one: about 38 h
 production-size store. Leave `NX_DATA_MOVE_SLEEP_MS` unset.
 
 When every stamp move is complete the engine lists one more `boot_work` entry, `rdr229-restart`
-("restart the engine once"); until it runs, a collection rename is refused (409). That restart is
-the one manual step and nothing is lost by waiting: the user restarts the engine, never you. A rollback starts with the down-step
+("restart the engine once"). Until it runs, a collection rename still works the old way and is not
+refused. After it, the engine refuses a rename (409) for as long as one background move runs, seconds
+on a small store, and then renames work. That restart is the one manual step and nothing is lost by
+waiting: the user restarts the engine, never you. A rollback starts with the down-step
 ([runbook](https://github.com/Hellblazer/nexus/blob/main/docs/runbooks/rdr-229-p31-rollback.md)).
 
 ## The manifest backfill rung and its failure mode

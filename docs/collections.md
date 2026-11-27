@@ -159,7 +159,8 @@ OLD NEW`. A minted label has no route to a bare readable label without
   collection a new registry row and id, and leaves the old name as a
   superseded row that keeps its label taken. From the latch it is refused
   (409 `rename_refused`, nothing changes) until the name-key drop move has
-  finished and the engine has restarted once; then it changes one row: the
+  finished (about 10 s on an empty store, longer while it waits behind an
+  index build); then it changes one row: the
   collection keeps its id, no chunk or child row is rewritten (the `nx-note://` source URIs of its
   notes and its queued aspect tasks follow the label), and the old label has
   no row. `nx doctor`'s "RDR-229 completion" row counts the gates that
@@ -275,8 +276,8 @@ successor or an import of that label is refused (409 `label_reserved`, nothing w
 drops the name columns (P4.1); renaming the collection back is allowed. Before
 the latch a rename runs as before and is not refused. From the latch it is
 refused (409 `rename_refused`, nothing changes) until the name-key drop move has
-finished and the engine has restarted once; the doctor row "RDR-229 collection
-rename" names which. A delete, prune or reindex of a collection a
+finished; the doctor row "RDR-229 collection rename" names the wait. A restart
+is needed only if a listed changeset fails to apply on its own. A delete, prune or reindex of a collection a
 re-embed job holds is refused (409 `collection_busy`). The
 [CLI reference](cli-reference.md#nx-collection) has each message and its way out.
 
