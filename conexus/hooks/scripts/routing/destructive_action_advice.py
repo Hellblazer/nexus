@@ -942,16 +942,18 @@ def row_mode(row: Row, blocked: "frozenset[str] | set[str]" = frozenset()) -> st
     return "deny" if row.id in blocked else "advise"
 
 
-def _blocked_rows(payload: dict) -> "frozenset[str]":
-    """The advice row ids the project or the user listed to block; empty when the helper is missing or fails (a row advises)."""
+def _blocked_rows(payload: dict, head: bool = False) -> "frozenset[str]":
+    """The advice row ids the project or the user listed to block; empty when the helper is missing or fails (a row advises).
+
+    *head* adds the committed project settings file (RDR-259 Decision 1): ask it only where a matched row would otherwise warn."""
     try:
         sys.path.insert(0, _SCRIPTS)
         try:
             from _audience import advice_blocked as _advice_blocked  # noqa: PLC0415 -- only a matched call pays for it
         except BaseException:  # noqa: BLE001
-            def _advice_blocked(payload: object) -> frozenset[str]:
+            def _advice_blocked(payload: object, head: bool = False) -> frozenset[str]:
                 return frozenset()
-        return _advice_blocked(payload)
+        return _advice_blocked(payload, head=head)
     except BaseException:  # noqa: BLE001
         return frozenset()
 
@@ -965,6 +967,8 @@ def emit(_lib, payload: dict, hits: list[Hit], blocked: "frozenset[str] | None" 
     ctx = Ctx(payload)
     escaped = bool(ctx.command) and _lib.should_skip_for_reason(ctx.command)
     rows = _blocked_rows(payload) if blocked is None else blocked
+    if blocked is None and any(row_mode(h.row, rows) != "deny" for h in hits):
+        rows = _blocked_rows(payload, head=True)  # a row that would only warn: the committed copy may list it
     denying = [h for h in hits if row_mode(h.row, rows) == "deny"]
     for h in hits:
         if h in denying:

@@ -1417,7 +1417,8 @@ def run_inject(payload: dict) -> str:
     compact = payload.get("source") == "compact"
 
     def notice() -> str:
-        # no checkpoint to read: the board is named for the maintainer only, and `bd list` only where `.beads/` exists
+        # no checkpoint to read: inject makes no `nx` call and no setting says a project keeps a board, so the board is not
+        # named (`_board_known` answers False without a checkpoint); `bd list` is named only where `.beads/` exists
         return _no_restore_notice(session_id, board=_board_known(None, payload), beads=_has_beads(payload))
 
     try:

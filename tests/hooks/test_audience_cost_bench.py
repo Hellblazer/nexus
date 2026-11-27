@@ -2,7 +2,10 @@
 """The settings reader's two pre-declared cost bounds, measured (nexus-sby49.15 items 3 and 4, RDR-259 Stage 1 ship-when).
 
 * Item 3: the reader's file reads (the project file and the user file) stay within the 5 ms design budget.
-* Item 4: the strictness keys' ``HEAD`` read (``head=True``) adds under 50 ms at the median on the guard and advice paths.
+* Item 4: the strictness keys' ``HEAD`` read (``head=True``) adds under 50 ms at the median on the guard and advice paths. It is
+  measured twice: at the reader (``head=True`` against ``head=False``) and on the real hook path, where the subagent git guard and
+  the destructive-action advice now ask ``HEAD`` (nexus-sby49.18): the same hook and command, a repository whose ``HEAD`` read
+  runs against one with no settings file (no git process), each a fresh interpreter through ``audience_harness.py``.
 
 Slow-marked (``-m slow``; the default suite does not run it). Run it by hand where the number matters:
 
@@ -132,6 +135,53 @@ def _cold(repo: Path, home: Path, real_home: bool) -> "dict[str, dict[str, float
     return {k: _stats(v) for k, v in rows.items()}
 
 
+_SCRIPTS = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "routing"
+GUARD_HOOK = _SCRIPTS / "subagent_git_write_requires_orchestrator.py"
+ADVICE_HOOK = _SCRIPTS / "destructive_action_advice.py"
+HARNESS = Path(__file__).resolve().parent / "audience_harness.py"
+HOOK_RUNS = 25  # interleaved pairs per hook
+GIT_WRITE_CMD = "git " + "com" + "mit -m x"  # parts: no literal write verb in this source
+
+
+def _hook_once(script: Path, payload: dict, repo: Path, home: Path, cfg: Path) -> int:
+    env = {**os.environ, "CLAUDE_PROJECT_DIR": str(repo), "NX_HOOK_PYTHON": sys.executable, "NEXUS_CONFIG_DIR": str(cfg),
+           "NX_ROUTING_LOG_PATH": str(cfg / "routing.jsonl"), "NX_DROPPED_WRITES_LOG_PATH": str(cfg / "dropped.jsonl")}
+    t0 = time.perf_counter_ns()
+    proc = subprocess.run([sys.executable, str(HARNESS), str(home), str(script)], input=json.dumps(payload), capture_output=True,
+                          text=True, env=env, check=False, timeout=60)
+    dt = time.perf_counter_ns() - t0
+    assert proc.returncode == 0, proc.stderr
+    return dt
+
+
+def _hook_path(postures: "dict[str, tuple[Path, Path, bool]]", tmp: Path) -> "dict[str, dict[str, dict]]":
+    """The hooks' real path: each hook as a child process on a repository whose ``HEAD`` read runs (``project-committed``,
+    non-strict) and on one where it does not (``plain``). The difference is what the read adds to a call that needs it."""
+    cfg = tmp / "hook-cfg"
+    cfg.mkdir()
+    cases = {
+        "guard (subagent write verb)": (GUARD_HOOK, lambda r: {
+            "agent_id": "a1", "agent_type": "developer", "session_id": "s", "cwd": str(r),
+            "tool_name": "Bash", "tool_input": {"command": GIT_WRITE_CMD}}),
+        "advice (pattern_kill row)": (ADVICE_HOOK, lambda r: {
+            "tool_name": "Bash", "tool_input": {"command": "pkill -f x"}, "cwd": str(r), "session_id": "s"}),
+    }
+    out: "dict[str, dict[str, dict]]" = {}
+    for label, (script, mk) in cases.items():
+        base, with_read = postures["plain"], postures["project-committed"]
+        off: "list[int]" = []
+        on: "list[int]" = []
+        for i in range(HOOK_RUNS + 3):
+            a = _hook_once(script, mk(base[0]), base[0], base[1], cfg)
+            b = _hook_once(script, mk(with_read[0]), with_read[0], with_read[1], cfg)
+            if i >= 3:
+                off.append(a)
+                on.append(b)
+        so, sn = _stats(off), _stats(on)
+        out[label] = {"off": so, "on": sn, "added_median": sn["median"] - so["median"], "added_p90": sn["p90"] - so["p90"]}
+    return out
+
+
 def _fmt(s: "dict[str, float]") -> str:
     return f"{s['median']:8.3f} {s['p90']:8.3f}"
 
@@ -200,6 +250,8 @@ def test_the_reader_stays_within_the_file_read_and_head_read_budgets(tmp_path: P
             so, sn = _stats(off), _stats(on)
             head_rows[name][fname] = {"off": so, "on": sn, "added_median": sn["median"] - so["median"], "added_p90": sn["p90"] - so["p90"]}
 
+    hook_rows = _hook_path(postures, tmp_path)
+
     # ---- report -----------------------------------------------------------------------------------------------------------
     print("\nCOSTBENCH item 3: file reads, ms (median p90); budget %.1f ms" % FILE_READ_BUDGET_MS)
     for k, v in warm_stats.items():
@@ -213,7 +265,11 @@ def test_the_reader_stays_within_the_file_read_and_head_read_budgets(tmp_path: P
     for name, fns in head_rows.items():
         for fname, r in fns.items():
             print(f"  {name:18s} {fname:15s} {r['off']['median']:8.3f} {r['on']['median']:8.3f} {r['added_median']:10.3f} {r['added_p90']:10.3f}  {git_counts[name]}")
-    print("COSTBENCH_JSON " + json.dumps({"machine": header, "warm": warm_stats, "cold_override": cold_stats, "cold_real_home": cold_real,
+    print("COSTBENCH item 4, hook path: a child-process hook on a repository that reads HEAD minus one that does not, ms; budget %.1f ms" % HEAD_ADDED_BUDGET_MS)
+    print(f"  {'hook':30s} {'no-read med':>12s} {'read med':>10s} {'added med':>10s} {'added p90':>10s}")
+    for label, r in hook_rows.items():
+        print(f"  {label:30s} {r['off']['median']:12.3f} {r['on']['median']:10.3f} {r['added_median']:10.3f} {r['added_p90']:10.3f}")
+    print("COSTBENCH_JSON " + json.dumps({"machine": header, "hook_path": hook_rows, "warm": warm_stats, "cold_override": cold_stats, "cold_real_home": cold_real,
                                           "head": head_rows, "git_counts": git_counts, "runs": {"warm": WARM_RUNS, "head": HEAD_RUNS, "cold": COLD_RUNS}}))
 
     # ---- the bounds ---------------------------------------------------------------------------------------------------------
@@ -229,3 +285,5 @@ def test_the_reader_stays_within_the_file_read_and_head_read_budgets(tmp_path: P
     for name, fns in head_rows.items():
         for fname, r in fns.items():
             assert r["added_median"] < HEAD_ADDED_BUDGET_MS, f"{name}/{fname}: HEAD read adds {r['added_median']:.1f} ms at the median (budget {HEAD_ADDED_BUDGET_MS})"
+    for label, r in hook_rows.items():
+        assert r["added_median"] < HEAD_ADDED_BUDGET_MS, f"hook path {label}: the HEAD read adds {r['added_median']:.1f} ms at the median (budget {HEAD_ADDED_BUDGET_MS})"

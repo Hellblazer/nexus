@@ -653,7 +653,7 @@ try:
         note_hook_error as _note_hook_error,
     )
 except BaseException:  # noqa: BLE001
-    def _guard_mode(payload: object) -> str:
+    def _guard_mode(payload: object, head: bool = False) -> str:
         return "strict"
 
     def _forced_strict_clause(payload: object, head: bool = False) -> "str | None":
@@ -4654,7 +4654,7 @@ def _admission_unguarded(command: str, cwd: str) -> Any:
 
 
 def _user_mode(payload: dict[str, Any], command: str) -> None:
-    """The seatbelt, the guard's default mode; always exits.
+    """The seatbelt, the guard's default mode: it denies, or returns when it has nothing to deny.
 
     Text-only forms deny in any cwd; git-state forms deny only when the checkout
     has something to lose. No telemetry is recorded for a user's repository.
@@ -4666,7 +4666,7 @@ def _user_mode(payload: dict[str, Any], command: str) -> None:
         _note_hook_error(payload, f"user-mode seatbelt raised {type(exc).__name__}")
         hit = None
     if hit is None:
-        _lib.pass_through()
+        return
     _lib.deny(
         _user_git_seatbelt.deny_text(hit),
         summary=f"subagent git {hit.label} stopped (cannot be undone).",
@@ -4687,7 +4687,17 @@ def body(payload: dict[str, Any]) -> None:
     # strict. Otherwise the short seatbelt answers: it denies or passes and never falls through, unless
     # the seatbelt module could not be imported.
     if _guard_mode(payload) != "strict" and _user_git_seatbelt is not None:
-        _user_mode(payload, command)
+        _user_mode(payload, command)  # a deny exits; a return means the seatbelt passes the command
+        # RDR-259 Decision 1: the committed project settings file can say strict where the working tree does not. Ask
+        # HEAD only when the answer can change: the strict scan would deny this command. Any other call (nearly all of
+        # them) never starts the read, and a repository with no settings file starts no process at all.
+        if _remote_test_host_command(command) is not None:
+            _lib.pass_through()
+        _spliced, _primary, _relaxed, _view = _scan_command(command, _normalize_for_primary_scan(command))
+        if not _spliced and _primary is None:
+            _lib.pass_through()
+        if _guard_mode(payload, head=True) != "strict":
+            _lib.pass_through()
 
     # The chas carve-out (nexus-yc7fs): one ssh command whose git runs on the
     # test host. Checked before both gates because neither can tell a remote
@@ -4828,7 +4838,7 @@ def body(payload: dict[str, Any]) -> None:
         _deny_message(
             agent_type, verb_names, undeterminable=worktree is None,
             in_worktree=wt_config, sidefx=sidefx,
-            forced_clause=_forced_strict_clause(payload),
+            forced_clause=_forced_strict_clause(payload, head=True),
         ),
         summary=(
             f"subagent git write verb ({verb_names}) blocked in the shared "
