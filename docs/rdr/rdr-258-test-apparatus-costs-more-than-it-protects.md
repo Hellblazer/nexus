@@ -2,12 +2,12 @@
 title: "The test apparatus costs more than it protects: repo-accounting checks report instead of fail, gates retire on evidence, tests check behaviour"
 id: RDR-258
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-11-23
-accepted_date:
+accepted_date: 2026-11-27
 related_issues: []
 related_rdrs: [RDR-109, RDR-214]
 ---
@@ -1134,3 +1134,4 @@ split into its own RDR at accept if Sam prefers.
 - 2026-11-27: Gate round 3 — PASSED (0 Critical, 14 Significant, 0 ship-blocker(s)); blob `0c28c8be1f16`; critique `nexus_rdr/258-gate-critique-2026-11-27-r3`.
 - 2026-11-27: Sam's accept condition (T2 `nexus/sam-ruling-rdr258-accept-2026-11-27`; 258-research-20). Phase 1 step 7: the 2-week review demotes the class-A remainder in batches from Phase 0's report, each batch to Sam. The ruling sets no stop condition; the step 7 batches are what give the under-30% accounting target a path. This disposes of round 3's planning blocker "no phase demotes the class-A remainder". Fix-check one-liners: `guards:` carries the guarded paths, so the report can derive a guard catch; each 60-day clock starts at the demotion commit on develop, and every class-A check now has a demoting step or batch.
 - 2026-11-27: Gate round 4 — PASSED (0 Critical, 7 Significant, 0 ship-blocker(s)); blob `f4923e254b8b`; critique `nexus_rdr/258-gate-critique-2026-11-27-r4`.
+- 2026-11-27: Accepted by Sam (T2 `nexus/sam-ruling-rdr258-accept-2026-11-27`), on round 4's PASS (`nexus_rdr/258-gate-latest`). Round 3's planning blocker is disposed by Phase 1 step 7 (4cd68e5d09); round 4's 7 Significant residuals are discover-at-implementation and are carried to their phase beads under epic nexus-2jomg.
