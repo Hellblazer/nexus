@@ -124,8 +124,9 @@ COLLECTION_BUSY_REASON: str = "collection_busy"
 #: half-stamped install, is ``name_key_drop_move``: it starts at the latch of gate 3 (which the restart brings; before the latch a
 #: rename is the name path and is not refused) and lasts as long as the drop move, about 10 s on an empty store and longer while the
 #: move waits behind an index build; a rename run again after it succeeds, and a stalled move gives the same refusal. ``restart`` is
-#: not that window: the restart's walk applies every listed
-#: P3.5b changeset, so ``restart`` appears only when one fails to apply on its own and the engine must restart to apply it. The
+#: not that window: the restart's walk normally applies every listed
+#: P3.5b changeset, so ``restart`` appears only when one fails or is skipped on its own (``vectors-078-4`` under lock contention)
+#: and the engine must restart to apply it. The
 #: others are ``p35b_list_missing``, ``readiness_unreadable``, ``p35c_readers_absent`` and ``latch_row_missing``. Nothing was renamed.
 RENAME_REFUSED_REASON: str = "rename_refused"
 

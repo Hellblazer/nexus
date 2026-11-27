@@ -83,7 +83,7 @@ def _engine_restart_refusal(exc: Exception) -> str | None:
     """What to say when *exc* is the engine's 409 ``rename_refused`` with ``missing: restart``, else ``None``.
 
     The engine has a listed changeset that failed to apply on its own (on a fresh or half-stamped install the restart's
-    walk applies them all, so this is not the normal window) and refuses every rename until it restarts and applies it.
+    walk normally applies them; one skipped under lock contention, vectors-078-4, is this case) and refuses every rename until it restarts and applies it.
     Retrying does not help and nothing on the client is wrong, so the usual "fix the error and retry" would send the
     person looking for a fault. The restart is the operator's to order. The normal wait after an upgrade is
     :func:`_engine_drop_move_refusal`'s; any other ``missing`` value keeps the generic refusal text with the engine's

@@ -155,7 +155,7 @@ def _latch_posture_row(field: dict[str, Any]) -> HealthResult | None:
 RENAME_WAITS: dict[str, str] = {
     "name_key_drop_move": "the name-key drop move (rdr229-name-key-drop), which the engine registers once gate 3 has latched and runs as a data move",
     "p35b_list_missing": "the list of P3.5b changesets this build must carry, which is missing from the build",
-    "restart": "an engine restart: a listed P3.5b changeset failed to apply on its own, and the restart applies it (the restart after an upgrade applies them all, so this is not the normal wait)",
+    "restart": "an engine restart: a listed P3.5b changeset failed to apply on its own, and the restart applies it (the restart after an upgrade normally applies them; one skipped under lock contention, vectors-078-4, is this case)",
     "readiness_unreadable": "a readable rename readiness: the engine could not read it on its last check",
     "p35c_readers_absent": "an engine whose readers select by id (P3.5c); this build's do not",
 }
