@@ -12,22 +12,11 @@ The conexus plugin ships one development process to every Claude Code user: work
 
 ## The settings
 
-**Project settings**, `.nexus/project.json`, tracked in the repository, found by walking up from the payload's cwd to the first `.git`. TIGHTEN-ONLY: a project may make the plugin stricter or add its own text, and never loosen a rule or turn telemetry on, because whoever controls a repository writes the file. A file that exists but cannot be read gives the strict reading.
-
-| Key | Meaning |
-|---|---|
-| `subagent_git` | `"strict"` runs the full subagent git guard in this project (`"seatbelt"`, the default, is the short deny list) |
-| `preflight` | the command a worktree agent runs first (the SubagentStart Preflight row) |
-| `ci_wait` | the command the Stop guard names for waiting on a push's CI; without it the wording is neutral |
-| `credential_helper` | text the credential guard's deny adds, naming the project's safe helper; without it the deny says ask your operator |
-| `brief_questions` | a list of strings added to the implementer brief check after the four generic questions |
-| `advice_block` | advice row ids that block in this project instead of warning |
+Two files, read by the plugin's hooks: a project's tracked `.nexus/project.json` (tighten-only: a project may make the plugin stricter or add its own text, and never loosen a rule or turn telemetry on, because whoever controls a repository writes the file) and the user's `<account home>/.config/nexus/conexus.json`. The user-facing reference is [`docs/settings.md`](../settings.md): every key, how two values combine, the failure table and the advice row ids. Its key table is generated from `SETTINGS` in `_audience.py` (`uv run python -m tests._settings_doc` prints it) and `tests/test_settings_docs_lint.py` fails when the two disagree, when the page is absent, or when its advice row ids differ from `ADVICE_ROW_IDS`. The design of record is RDR-259.
 
 The two older markers, `.nexus/dev-process.json` (the Phase 2 file) and `scripts/agent-worktree-preflight.sh` (the Phase 1 file), are gone: a checkout with no `.nexus/project.json` reads plain (the seatbelt) whatever those files say. A project that relied on `.nexus/dev-process.json` for the strict guard writes `.nexus/project.json` with `"subagent_git": "strict"`.
 
-**User settings**, `<account home>/.config/nexus/conexus.json`: `subagent_git` (as above; a project's strict is not loosened by a user's seatbelt), `telemetry` (bool, default false: routing events and the dispatch record are sent only when true), `t1_nudge` (bool, default true: the SubagentStop reminder to write findings to T1) and `advice_block`. An error reading it leaves the defaults.
-
-The default for every key is the same for everyone: the seatbelt, neutral text, no blocked advice row, no telemetry, the T1 nudge on. The seven destructive and other-party tools (`memory_delete`, `answer_plan_delete` and its old name, `memory_consolidate`, `nx_tidy`, `tuple_in`, `mailbox_send`) are auto-approved for every user; a user who wants a prompt adds an `ask` rule in their own Claude Code settings, which beats a hook's allow.
+The default for every key is the same for everyone: the seatbelt, neutral text, no blocked advice row, no telemetry, the T1 nudge on. The seven destructive and other-party tools (`memory_delete`, `answer_plan_delete` and its old name, `memory_consolidate`, `nx_tidy`, `tuple_in`, `mailbox_send`) are auto-approved for every user; a user who wants a prompt adds an `ask` rule in their own Claude Code settings, and the plugin's approver answers on PreToolUse only, so Claude Code's own rule decides. (Depends on the PermissionRequest registration's removal, nexus-sby49.14.)
 
 ## The helper
 
@@ -36,9 +25,9 @@ The default for every key is the same for everyone: the seatbelt, neutral text, 
 Invariants, each of which is a test:
 
 1. **Tighten-only for a project.** A project's file adds rules or text; it never loosens anything and never turns telemetry on. Every default is the EVERY-USER baseline.
-2. **No environment variable moves the settings.** The account home comes from the OS account database (`pwd`, or the profile API on Windows), never `HOME`, `USERPROFILE` or `NEXUS_CONFIG_DIR`. The one test seam is the in-process attribute `_audience._ACCOUNT_HOME_OVERRIDE`.
+2. **No environment variable moves the settings.** The account home comes from the OS account database (`pwd`, or the profile API on Windows), never `HOME`, `USERPROFILE` or `NEXUS_CONFIG_DIR`. The one test seam is the in-process attribute `_audience._ACCOUNT_HOME_OVERRIDE`; it is never read from the environment. The two telemetry senders are pinned the same way: they resolve the engine from the account's config directory only and start their child with an environment built by `_audience.telemetry_child_env()`.
 3. **The cwd is the payload's `cwd`, then `CLAUDE_PROJECT_DIR`,** never the process cwd (uv starts the hook scripts in the plugin root).
-4. **Failure goes in the safe direction.** `guard_mode()` answers strict on any error, so a broken helper restores the full guard; a project file that cannot be read gives the strict reading. The readers that loosen or add nothing answer their default: `telemetry_enabled()` False, `advice_blocked()` and `remote_test_hosts()` the empty set, `project_text()` None, `project_brief_questions()` the empty list; `t1_nudge_enabled()` answers True (it adds a reminder). A missing passwd entry is "no user settings", not an error.
+4. **Failure goes in the safe direction.** `guard_mode()` answers strict on any error, so a broken helper restores the full guard; a project file that cannot be read gives the strict reading, and so does a user file that cannot be read (a user writes `conexus.json` to change something, and the likeliest change is `strict`). The readers that loosen or add nothing answer their default: `telemetry_enabled()` False, `advice_blocked()` and `remote_test_hosts()` the empty set, `project_text()` None, `project_brief_questions()` the empty list; `t1_nudge_enabled()` answers True (it adds a reminder). A missing passwd entry is "no user settings", not an error.
 5. **Nothing asks who the user is.** There is no maintainer flag, no repo-is-nexus test and no person's name in the plugin's behaviour; a test asserts the helper has none.
 
 ## Declaring a rule: `conexus/hooks/audience.yaml`
@@ -52,6 +41,7 @@ Every `hooks.json` registration, every module that carries text or reads a setti
 - a declared constant that does not exist, and a module-level text value of 40 characters or more (below) that nobody classified as injected or not injected;
 - a `SETTING:<key>` entry (`live: true`) in a module that never calls the reader of that key;
 - an audience import that is not inside a `try`, or whose fallback widens a permission (T9);
+- a table in `docs/settings.md` that disagrees with `SETTINGS`: that rule is its own file, `tests/test_settings_docs_lint.py` (see [The settings](#the-settings));
 - a reader called at import time, or outside a wrapped body. The accepted wrappers are `_lib.run_hook`, `_io.never_fail` (directly, through a verb the dispatcher wraps, or through an `mcp` hook tool), a standalone `main()` with a `try`/`except`, and a local `try`/`except` around the call.
 
 The census reads module-level values: a string, a `+` or f-string concatenation, a list, tuple, set or dict that holds a long string, the arguments and the receiver of a call (a `Row(...)` table, `"...".format(x)`), a conditional expression, and a tuple-unpack assignment, leaving out `re.compile` and `frozenset`. **What it cannot see:** text written or joined inside a function (function-local text of any length), text read from a file, and injected text shorter than 40 characters that nobody declared. Those are held by review and by the behaviour leg, which runs the hooks and reads what they print.
@@ -65,7 +55,8 @@ A row whose end state is not wired yet is `live: false` and names the phase that
 ## Adding a rule or a line of text
 
 1. Decide what it is. Process every user should have is EVERY-USER, with nothing nexus-specific in its text. A behaviour that needs a choice (a stricter mode, a project's command, extra text, data leaving the machine) is a setting: pick the key it belongs to, give it a default that suits a stranger, and keep nexus's own value in nexus's `.nexus/project.json`. Never key a hook, a rule or a line of text on who the user is. `conexus/skills/writing-nx-skills/promotion.md` has the same step for a memory promotion.
-2. Read the setting through `_audience`'s reader for its key, inside the hook's existing wrapper, with the guarded import and its fallback (copy one of the existing modules).
+2. A new key is one entry in `SETTINGS` (in both byte copies of `_audience.py`), a limit and a failure value, and a row in `docs/settings.md`: print the table with `uv run python -m tests._settings_doc` and paste it, and describe the key under the table. A key never changes meaning in place, and an advice row id is never renamed once a file can name it.
+   Read the setting through `_audience`'s reader for its key, inside the hook's existing wrapper, with the guarded import and its fallback (copy one of the existing modules).
 3. Add its entry to `audience.yaml` and, if it is text, a case the behaviour leg reaches.
 4. Write the test in the fixture convention: **plain** by default (a bare `git init` and an account with no settings file), asserting a setting's behaviour only in a **project-strict** or **user-strict** fixture (`tests/AGENTS.md`).
 5. If it changes a file under the plugin's behavioural surface, declare it in `conexus/PENDING_RELEASE.md`.
