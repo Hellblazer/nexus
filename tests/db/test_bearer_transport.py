@@ -75,6 +75,7 @@ def _proxies(opener) -> dict[str, str]:
 
 
 def _handshake(ctx: ssl.SSLContext, origin: TlsOrigin) -> None:
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # the client floor these handshakes assert under, whatever the context's default
     with socket.create_connection(("127.0.0.1", origin.port), timeout=5) as raw, ctx.wrap_socket(raw, server_hostname="127.0.0.1"):
         pass
 

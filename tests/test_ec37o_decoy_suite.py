@@ -55,6 +55,11 @@ EXPORTED = "Bearer exported-by-the-user"
 _ENGINE_VERSION = ".".join(str(part) for part in REQUIRED_ENGINE_VERSION)
 
 
+def _no_line_breaks(value: str) -> str:
+    """A header value built from request text carries no CR or LF, so it cannot split the response."""
+    return value.replace("\r", "").replace("\n", "")
+
+
 # ── the two servers ──────────────────────────────────────────────────────────
 
 
@@ -85,7 +90,7 @@ class _Server:
                 outer.requests.append((self.path, self.headers.get("Authorization")))
                 if outer.redirect_to is not None and self.path != "/version":
                     self.send_response(outer.redirect_code)
-                    self.send_header("Location", outer.redirect_to + self.path)
+                    self.send_header("Location", outer.redirect_to + _no_line_breaks(self.path))
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return

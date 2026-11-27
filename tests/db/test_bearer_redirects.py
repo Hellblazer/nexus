@@ -29,6 +29,11 @@ _SCRIPTS = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
 _CODES = (301, 302, 303, 307, 308)
 
 
+def _no_line_breaks(value: str) -> str:
+    """A header value built from request text carries no CR or LF, so it cannot split the response."""
+    return value.replace("\r", "").replace("\n", "")
+
+
 class _Recorder:
     """A port-0 server recording ``(method, path, Authorization)``; with *redirect_to* it answers 3xx there."""
 
@@ -46,7 +51,7 @@ class _Recorder:
                 outer.requests.append((self.command, self.path, self.headers.get("Authorization")))
                 if outer.redirect_to is not None:
                     self.send_response(outer.code)
-                    self.send_header("Location", outer.redirect_to + self.path)
+                    self.send_header("Location", outer.redirect_to + _no_line_breaks(self.path))
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
