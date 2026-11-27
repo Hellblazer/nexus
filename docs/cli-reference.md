@@ -1912,7 +1912,7 @@ Default is report-only; both `--no-dry-run` AND `--yes` are required to actually
 
 Before gate 3 the old name survives the rename as a **superseded tombstone**: its projection row
 stays, carrying `superseded_by` = the new name and a `superseded_at` timestamp, so a
-rename remains auditable after the fact. From gate 3 the rename changes one registry row (its label, and its content type and owner from the new name) and leaves
+rename remains auditable after the fact. From gate 3 the rename changes one registry row (its label, and its content type and owner from the new name, bar one exception for a tumbler owner; [collections.md](collections.md) Rule 3) and leaves
 no tombstone, and everything below about a tombstoned name applies only to renames made before it. It holds no chunks or documents (everything
 re-homes onto the new name) and `superseded_by` keeps it out of collection-for-tuple
 resolution, so it can never be picked as a write target. Renaming *back* onto a
