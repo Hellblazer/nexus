@@ -915,8 +915,9 @@ def _ask_matches(record: object, parsed: dict[str, str]) -> bool:
 def _ask_record_words(record: dict[str, Any]) -> object:
     """The words in an answer record: ``user_words``, else ``sam_words`` for a record an older client wrote.
 
-    The fallback is read for one release after the release that first ships ``user_words``, then dropped
-    (the client writes both keys until then, so a copy of this hook from 8.5.9 still finds the words)."""
+    The fallback (with the client's dual-write and the ``--sam-words`` alias) is removed in the second client
+    release after the one that first ships ``user_words``; the client writes both keys until then, so a copy of
+    this hook from 8.5.9 still finds the words."""
     return record["user_words"] if "user_words" in record else record.get("sam_words")
 
 

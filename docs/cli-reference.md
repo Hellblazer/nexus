@@ -7686,14 +7686,14 @@ Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The
 
 ## nx ask
 
-Structured asks on the threads board (RDR-245, nexus-wc4jj.7): the mediator's tool and Sam's fallback. An ask is an `ask:` block in a session's T2 `threads` entry. It is named `<entry>/<id>`; a bare `<id>` is accepted only when exactly one entry holds it. Answers are recorded in T2 project `asks` (title `<asker session id>/<ask id>/<version>`) and mailed to `mailbox/<asker session id>` as a raw `tuple_out`. The record, batch record and mail body shapes are pinned by `tests/fixtures/asks/`.
+Structured asks on the threads board (RDR-245, nexus-wc4jj.7): the mediator's tool and the user's fallback. An ask is an `ask:` block in a session's T2 `threads` entry. It is named `<entry>/<id>`; a bare `<id>` is accepted only when exactly one entry holds it. Answers are recorded in T2 project `asks` (title `<asker session id>/<ask id>/<version>`) and mailed to `mailbox/<asker session id>` as a raw `tuple_out`. The record, batch record and mail body shapes are pinned by `tests/fixtures/asks/`.
 
 | Subcommand | Description |
 |------------|-------------|
 | `list [--json] [--all]` | Interrupt asks, then the batch, then one-line counts of quiet, conditional and answered asks (`--all` lists them), then legacy asks and needs-sam beads (a bead that a structured ask folds into carries `-> <entry>/<ask id>`; the ask stays in its own group), then lint findings, then the last 48 hours of answers and, when the digest could not read some `asks` rows, a line naming them. An ask whose answer record is `sending` or `failed` shows `[answer sending]` or `[answer failed]` (`[answer sending: outcome unknown]` when the mail may have been delivered). `--json` carries every parsed field of every ask with its version and `answer_status`, the bead objects with `ask_pointers`, the lint findings, the digest and `digest_skipped` |
 | `show <ref> [--json]` | Every field of one ask: numbered options with the recommendation marked, the version, the asker session, the entry age, the raw ask lines, the repeated and bad-valued fields, and the answer record for this version, if any |
 | `answer <ref> <n\|text> --expect VERSION [--note TEXT] [--via cli\|mediator] [--user-words TEXT] [--batch-words TEXT] [--replace]` | Answer one ask. A number picks that option; any other text is a note-only answer that authorizes no option |
-| `digest` | Every answer of the last seven days, newest first: time, `via`, Sam's words, the batch reply they came from, and the tuple id (or the `sending` / `failed` status) |
+| `digest` | Every answer of the last seven days, newest first: time, `via`, the user's words, the batch reply they came from, and the tuple id (or the `sending` / `failed` status) |
 
 ### nx ask answer
 
@@ -7705,11 +7705,11 @@ Refused, with nothing recorded or sent: `--expect` differs from the ask's curren
 
 | Flag | Description |
 |------|-------------|
-| `--expect VERSION` | Required. The 16-hex version of the ask Sam saw |
+| `--expect VERSION` | Required. The 16-hex version of the ask the user saw |
 | `--note TEXT` | A note on a chosen option. Not allowed with a free-text reply (the reply is the note) |
-| `--via cli\|mediator` | `cli` (default): stdin must be a TTY; the note, or the text of a note-only answer, is recorded as Sam's words. `mediator`: a session relaying Sam's words; needs `--user-words` and this session's own id (tuple-watch marker, then `NX_T1_SESSION_ID`) |
-| `--user-words TEXT` | `--via mediator` only. The contiguous span the user typed for this ask, 1 to 500 characters. The old name `--sam-words` still works for one more client release, hidden, and prints a deprecation line on stderr; giving both is a usage error |
-| `--batch-words TEXT` | `--via mediator` only. Sam's whole reply when it covered several asks, at most 2000 characters; shown only by `digest`. Answers sent with the same words by the same mediator within 10 minutes share one `batch/<mediator session>/<YYYYMMDDTHHMMSSZ>` record |
+| `--via cli\|mediator` | `cli` (default): stdin must be a TTY; the note, or the text of a note-only answer, is recorded as the user's words. `mediator`: a session relaying the user's words; needs `--user-words` and this session's own id (tuple-watch marker, then `NX_T1_SESSION_ID`) |
+| `--user-words TEXT` | `--via mediator` only. The contiguous span the user typed for this ask, 1 to 500 characters. The old name `--sam-words` still works as a hidden alias that prints a deprecation line on stderr, and is removed in the second client release after the one that first ships `--user-words`; giving both is a usage error |
+| `--batch-words TEXT` | `--via mediator` only. The user's whole reply when it covered several asks, at most 2000 characters; shown only by `digest`. Answers sent with the same words by the same mediator within 10 minutes share one `batch/<mediator session>/<YYYYMMDDTHHMMSSZ>` record |
 | `--replace` | Supersede a `sent` answer to the same version |
 
 `--via cli` mails with a sender id minted once and kept in the nexus config dir (`ask-cli-sender`); `--via mediator` mails with the mediator's own session id. A batch record is written after the mail and the `sent` update, under an exclusive lock on `ask-answer.lock` in the same directory (waits at most 5 seconds; if the lock cannot be taken or opened, the answer still stands and a warning is printed); a `failed` answer never joins a batch.

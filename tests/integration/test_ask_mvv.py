@@ -254,6 +254,7 @@ def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_ser
     record = json.loads(records[0]["content"])
     assert record["status"] == "sent" and record["choice"] == 1 and record["via"] == "cli"
     assert record["note"] == "accept the gap" and record["user_words"] == "accept the gap"
+    assert record["sam_words"] == record["user_words"], "the 8.5.9 drain hook reads the old key"
     assert record["tty"], "the record names the terminal it was typed at"
     assert record["error"] is None and record["batch_title"] is None
     tuples = _mailbox(ASKER)
@@ -337,6 +338,7 @@ def _mediator_roundtrip(tmp_path: Path, session: dict[str, str]) -> tuple[TupleR
     mediator = session["NX_T1_SESSION_ID"]
     assert record["status"] == "sent" and record["choice"] == 1 and record["via"] == f"mediator:{mediator}"
     assert record["user_words"] == WORDS and record["note"] == "" and record["tty"] is None
+    assert record["sam_words"] == record["user_words"], "the 8.5.9 drain hook reads the old key"
     tuples = _mailbox(ASKER)
     assert len(tuples) == 1 and record["tuple_id"] == tuples[0].id
     mail = tuples[0]

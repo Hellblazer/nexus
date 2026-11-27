@@ -442,7 +442,8 @@ def _answer_entries(
 def record_words(rec: dict[str, Any]) -> Any:
     """The words an answer record carries: ``user_words``, else ``sam_words`` for a record stored before the rename.
 
-    ``sam_words`` is read for one release after the release that first ships ``user_words``, then dropped.
+    The ``sam_words`` fallback, the ``--sam-words`` alias, the dual-write and the ``list --json`` copy are removed
+    in the second client release after the one that first ships ``user_words``.
     """
     return rec["user_words"] if "user_words" in rec else rec.get("sam_words", "")
 
@@ -607,7 +608,9 @@ def _list_json(classes: Any, merged: Any, beads: BeadsResult, findings: Any, dig
     data["beads_error"] = beads.error
     data["lint"] = [{"entry": f.entry, "ask": f.ask, "rule": f.rule, "message": f.message} for f in findings]
     data["unreadable"] = sorted({*classes.unreadable, *unreadable})
-    data["digest"] = digest
+    # ``sam_words`` is a copy of ``user_words`` until the alias, the dual-write and the read fallbacks are
+    # removed in the second client release after the one that first ships user_words (nexus-sby49).
+    data["digest"] = [{**e, "sam_words": e["user_words"]} for e in digest]
     data["digest_skipped"] = skipped
     return data
 
@@ -875,11 +878,11 @@ def answer_cmd(
 ) -> None:
     """Answer one ask. REPLY is an option number, or free text for a note-only answer that authorizes no option."""
     if sam_words is not None:
-        # The old name of --user-words, kept for one release after the release that first ships --user-words
-        # (nexus-sby49). The notice goes to stderr, so stdout stays what it was.
+        # The old name of --user-words. The alias is removed in the second client release after the one that
+        # first ships --user-words (nexus-sby49). The notice goes to stderr, so stdout stays what it was.
         if user_words is not None:
             raise click.UsageError("give --user-words, not both it and its deprecated alias --sam-words")
-        click.echo("Deprecated: --sam-words is now --user-words. The old name works for one more client release and is then removed.", err=True)
+        click.echo("Deprecated: --sam-words is now --user-words. The old name is removed in the second client release after the one that first ships --user-words.", err=True)
         user_words = sam_words
     stripped = reply.strip()
     if not stripped:
@@ -963,8 +966,9 @@ def answer_cmd(
         "note": recorded_note,
         "user_words": words,
         # The key before the rename. The plugin's drain hook of 8.5.9 reads only this one, so the same words
-        # are written under both keys. This is the first release that carries user_words; the release after it
-        # drops sam_words here, with the fallback in record_words and in the plugin's drain hook.
+        # are written under both keys. This dual-write, the --sam-words alias and the read fallbacks
+        # (record_words here, _ask_record_words in the drain hook) are removed in the second client release
+        # after the one that first ships user_words.
         "sam_words": words,
         "batch_title": batch_title,
         "via": via_value,

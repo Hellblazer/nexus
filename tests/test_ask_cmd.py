@@ -921,7 +921,7 @@ def test_control_characters_in_a_record_are_stripped_from_digest_text() -> None:
 # --- the --sam-words / sam_words -> --user-words / user_words rename (nexus-sby49) ----------------
 
 
-def test_the_sam_words_flag_still_works_for_one_release_and_says_it_is_deprecated(world: World) -> None:
+def test_the_sam_words_flag_still_works_for_now_and_says_it_is_deprecated(world: World) -> None:
     r = world.run("answer", REF, "1", "--expect", VERSION, "--via", "mediator", "--sam-words", "accept the gap on k9kr9")
     assert r.exit_code == 0, r.output
     assert "Deprecated: --sam-words is now --user-words" in r.stderr
@@ -956,8 +956,8 @@ def test_both_flags_at_once_are_a_usage_error(world: World) -> None:
 
 
 def test_a_new_record_carries_both_keys_with_one_value(world: World) -> None:
-    # sam_words is the key the 8.5.9 plugin's drain hook reads; it is written until one release after
-    # user_words first ships, so an older plugin copy still finds the words in a new client's record.
+    # sam_words is the key the 8.5.9 plugin's drain hook reads; it is written until the second client
+    # release after the one that first ships user_words, so an older plugin copy still finds the words in a new client's record.
     r = world.run(*mediator_args())
     assert r.exit_code == 0, r.output
     rec = world.t2.record()
@@ -973,6 +973,14 @@ def test_the_digest_reads_a_record_stored_before_the_rename() -> None:
     assert "an answer stored before the rename" in out and "skipped" not in out, out
     entry = json.loads(w.run("list", "--json").stdout)["digest"][0]
     assert entry["user_words"] == "an answer stored before the rename"
+
+
+def test_list_json_digest_keeps_sam_words_as_a_copy_of_user_words_for_one_release() -> None:
+    w = World()
+    w.t2.add("asks", TITLE, forged(user_words="the new key", sam_words="the old key"))
+    entry = json.loads(w.run("list", "--json").stdout)["digest"][0]
+    assert entry["user_words"] == "the new key"
+    assert entry["sam_words"] == entry["user_words"]
 
 
 def test_the_digest_prefers_user_words_when_both_keys_differ() -> None:

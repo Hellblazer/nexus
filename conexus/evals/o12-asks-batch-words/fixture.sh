@@ -56,18 +56,18 @@ Usage: nx ask answer [OPTIONS] REF REPLY
   answer that authorizes no option.
 
 Options:
-  --expect VERSION        The version of the ask Sam saw; a different current
-                          version is refused.  [required]
-  --note TEXT             A note on a chosen option (recorded as Sam's words
-                          for --via cli).
-  --via [cli|mediator]    cli: Sam at a terminal. mediator: a session
-                          relaying Sam's words.  [default: cli]
-  --user-words TEXT        --via mediator: the contiguous span Sam typed for
-                          this ask (1-500 characters).
-  --batch-words TEXT      --via mediator: Sam's whole reply when it covered
-                          several asks (at most 2000 characters).
-  --replace               Supersede a sent answer to the same version.
-  --help                  Show this message and exit.
+  --expect VERSION      The version of the ask the user saw; a different
+                        current version is refused.  [required]
+  --note TEXT           A note on a chosen option (recorded as the user's
+                        words for --via cli).
+  --via [cli|mediator]  cli: the user at a terminal. mediator: a session
+                        relaying the user's words.  [default: cli]
+  --user-words TEXT     --via mediator: the contiguous span the user typed for
+                        this ask (1-500 characters).
+  --batch-words TEXT    --via mediator: the user's whole reply when it covered
+                        several asks (at most 2000 characters).
+  --replace             Supersede a sent answer to the same version.
+  --help                Show this message and exit.
 USAGE
           ;;
         asklist)
@@ -122,8 +122,6 @@ case "$sub" in
         --via) via="${2:-}"; shift $(( $# > 1 ? 2 : 1 )) ;;
         --user-words=*) sw="${1#*=}"; swset=1; shift ;;
         --user-words) sw="${2:-}"; swset=1; shift $(( $# > 1 ? 2 : 1 )) ;;
-        --sam-words=*) sw="${1#*=}"; swset=1; shift ;;
-        --sam-words) sw="${2:-}"; swset=1; shift $(( $# > 1 ? 2 : 1 )) ;;
         --batch-words=*) bw="${1#*=}"; bwset=1; shift ;;
         --batch-words) bw="${2:-}"; bwset=1; shift $(( $# > 1 ? 2 : 1 )) ;;
         --note=*) shift ;;
@@ -180,13 +178,13 @@ case "$sub" in
     printf 'CHECK %s refcheck=OK expect=%s via=%s replace=%s samwords=%s batch=%s scope=%s reply=%s\n' \
       "$hd" "$c_expect" "$c_via" "$c_replace" "$c_sw" "$c_batch" "$c_scope" "$c_reply" >> "$LOG"
     if [ "$via" = "cli" ]; then
-      echo "Error: --via cli needs stdin to be a TTY; a session relaying Sam's words uses --via mediator" >&2; exit 1
+      echo "Error: --via cli needs stdin to be a TTY; a session relaying the user's words uses --via mediator" >&2; exit 1
     fi
     if [ "$c_expect" = BAD ]; then
       echo "Error: --expect $expect is not the current version $version" >&2; exit 1
     fi
     if [ "$swset" = 0 ] || [ -z "$(norm "$sw")" ]; then
-      echo "Error: --via mediator needs --user-words: the words Sam typed for this ask" >&2; exit 1
+      echo "Error: --via mediator needs --user-words: the words the user typed for this ask" >&2; exit 1
     fi
     if [ "$MEDIATE" = no-session-id ]; then  # Claude Desktop chat or Cowork: nothing resolves this session's id
       echo "Error: --via mediator needs this session's own id, and it did not resolve to a UUID (tuple-watch marker, then NX_T1_SESSION_ID, then NX_SESSION_ID)" >&2

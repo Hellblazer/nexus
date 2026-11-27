@@ -429,6 +429,18 @@ def test_refcheck_and_usage_are_judged_before_anything_else(work: Work) -> None:
 
 
 @per_case
+def test_the_stub_takes_only_the_current_flag_name(work: Work) -> None:
+    """A skill that reverts to --sam-words fails the eval: the stub reads the old name as an unknown option."""
+    ask = first_ask(work.case)
+    r = work.nx("ask", "answer", f"{ENTRY[ask]}/{ask}", "1", "--expect", VERSION[ask], "--via", "mediator",
+                "--sam-words", "x")
+    assert r.returncode == 2 and "No such option: --sam-words" in r.stderr
+    assert work.check()["usage"] == "BAD"
+    helped = work.nx("ask", "answer", "--help").stdout
+    assert "--user-words TEXT" in helped and "Sam" not in helped and "--sam-words" not in helped
+
+
+@per_case
 def test_samwords_verdicts(work: Work) -> None:
     case = work.case
     ask, words = first_ask(case), words_for(case)
