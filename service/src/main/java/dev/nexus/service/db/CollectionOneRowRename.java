@@ -17,8 +17,8 @@ import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 
 /**
  * RDR-229 P3.7 (nexus-p2m1x.27, item 6 "Switch" and item 7): the one-row rename. From gate 3, once the name-key drop move has completed
- * and every P3.5b changeset has applied ({@link RenameGuard}), a rename updates the registry row's label and nothing else of the
- * collection: the row keeps its {@code collection_id}, so no chunk, manifest, taxonomy, aspect, highlight or telemetry row is rewritten and the
+ * and every P3.5b changeset has applied ({@link RenameGuard}), a rename updates the registry row's label, and its content type and owner when the client names them
+ * ({@link #ownerTheRenameMayChange} keeps a settled owner), and nothing else of the collection: the row keeps its {@code collection_id}, so no chunk, manifest, taxonomy, aspect, highlight or telemetry row is rewritten and the
  * per-collection indexes (whose predicate is the id) stay. The referencing tables' name columns keep the old label: they are dead, read by
  * no id reader, and dropped by P4.0/P4.1. {@link CatalogRepository#renameCollection} delegates here (over its size ceiling) from inside its rename
  * transaction, after the checks every rename shares (the sweep gates, the re-embed job, the model token, the live-target refusal).

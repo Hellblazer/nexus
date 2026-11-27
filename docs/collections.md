@@ -139,7 +139,10 @@ OLD NEW`. A minted `c<id>` label renames to a bare readable label without
 `--force-prefix-change`. Three things to know first:
 
 - **A rename sets the collection's content type and owner from the new name.**
-  For a `knowledge` collection the owner is its subject. Renaming `c4812` to
+  The client sends them only for a name it can parse, and the engine keeps a
+  `code`, `docs` or `rdr` collection's owner when that owner is already a
+  tumbler segment and the new one is a slug. For a `knowledge` collection the
+  owner is its subject. Renaming `c4812` to
   `distributed-systems-papers` makes `distributed-systems-papers` its
   subject, so a later write to `distributed-systems` no longer finds it and
   registers a second collection. Rename a subject's collection only to
@@ -267,7 +270,7 @@ GC owns those and restores from them.
 
 From RDR-229's gate 3 latch (`nx doctor`'s "RDR-229 completion" row counts the
 gates that hold) a rename changes the row's label, and its content type and
-owner from the new name (Rule 3): it keeps its `collection_id`, and no chunk
+owner from the new name where Rule 3 lets it: it keeps its `collection_id`, and no chunk
 or child row is rewritten. The label it left can
 stay reserved: while a name-keyed table still holds a row under it for another
 collection, a registration, a rename target, a re-embed target, a supersede
