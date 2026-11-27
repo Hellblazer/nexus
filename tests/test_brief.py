@@ -136,10 +136,15 @@ def test_beads_is_ready_beads_then_the_primer_when_the_plugin_is_off(tmp_path: P
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))  # no beads plugin enabled anywhere
     monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
 
-    def fake(args, timeout, cwd=None):
-        return "# primer line" if args == ["bd", "prime"] else "○ nexus-abc123 ● P1 [bug] a ready bead"
+    import types
 
-    monkeypatch.setattr(session_context, "run_command", fake)
+    from nexus import bounded_subprocess
+
+    def fake(argv, **_kw):
+        out = "# primer line" if list(argv[1:]) == ["prime"] else "○ nexus-abc123 ● P1 [bug] a ready bead"
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+    monkeypatch.setattr(bounded_subprocess, "run_bounded", fake)
     result = brief.render("beads", cwd=str(proj))
     assert result.ok
     assert result.text.startswith("## Ready Beads") and "a ready bead" in result.text
@@ -407,3 +412,64 @@ def test_the_project_dir_is_claude_project_dir_like_the_hook(tmp_path: Path, mon
     assert seen["beads"] == (tmp_path / "proj").resolve()
     assert seen["memory"] == str((tmp_path / "proj").resolve())
     assert seen["map"] == str(tmp_path)
+
+
+# -- beads, bd installed but no database (GH #1689) ----------------------------
+
+
+def _bd_that_exits(monkeypatch, *, returncode: int, stderr: str) -> list[list[str]]:
+    """``bd`` is on PATH and exits *returncode* with *stderr* for every call; returns the argvs it was handed."""
+    import types
+
+    from nexus import bounded_subprocess
+
+    seen: list[list[str]] = []
+
+    def fake(argv, **_kw):  # noqa: ANN001, ANN003
+        seen.append(list(argv))
+        return types.SimpleNamespace(returncode=returncode, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+    monkeypatch.setattr(bounded_subprocess, "run_bounded", fake)
+    return seen
+
+
+def test_beads_with_no_database_says_so_and_does_not_claim_bd_printed_nothing(tmp_path: Path, monkeypatch) -> None:
+    seen = _bd_that_exits(monkeypatch, returncode=1, stderr="Error: no beads database found\nHint: run 'bd init'\n")
+    result = brief.render("beads", cwd=str(tmp_path))
+    assert result.ok
+    assert "no beads database" in result.text
+    assert "printed nothing" not in result.text
+    bd_calls = [a[1:] for a in seen if os.path.basename(a[0]).lower().startswith("bd")]
+    assert bd_calls == [["ready"]], "a failed bd ready is not followed by bd prime"
+
+
+def test_beads_with_a_failing_bd_names_the_failure_not_silence(tmp_path: Path, monkeypatch) -> None:
+    _bd_that_exits(monkeypatch, returncode=3, stderr="Error: dolt server unreachable\n")
+    text = brief.render("beads", cwd=str(tmp_path)).text
+    assert "exit 3" in text and "dolt server unreachable" in text
+    assert "printed nothing" not in text and "no beads database" not in text
+
+
+def test_beads_that_timed_out_says_so(tmp_path: Path, monkeypatch) -> None:
+    from nexus import bounded_subprocess
+
+    def slow(argv, **_kw):  # noqa: ANN001, ANN003
+        raise subprocess.TimeoutExpired(argv, 5)
+
+    monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+    monkeypatch.setattr(bounded_subprocess, "run_bounded", slow)
+    text = brief.render("beads", cwd=str(tmp_path)).text
+    assert "timed out" in text and "printed nothing" not in text
+
+
+def test_beads_that_exits_zero_with_no_output_keeps_the_honest_empty_line(tmp_path: Path, monkeypatch) -> None:
+    import types
+
+    from nexus import bounded_subprocess
+
+    monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+    monkeypatch.setattr(
+        bounded_subprocess, "run_bounded", lambda argv, **_kw: types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    )
+    assert "printed nothing" in brief.render("beads", cwd=str(tmp_path)).text

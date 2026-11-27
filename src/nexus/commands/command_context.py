@@ -24,6 +24,7 @@ from pathlib import Path
 
 import click
 
+from nexus.beads_state import NO_BEADS_DATABASE_NOTE, failure_summary, is_no_beads_database
 from nexus.bounded_subprocess import run_bounded
 from nexus.util.nx_argv import nx_argv
 
@@ -74,6 +75,16 @@ _SOURCE_SCAN_EXCLUDE: frozenset[str] = frozenset({"node_modules", "target", ".gi
 # fallback path.
 _PREAMBLE_TIMEOUT: int = 15
 
+# ``nx doctor`` is the one preamble call that is slow when healthy: 44.9 s for 105 steps on a Windows box (GH #1689),
+# so the short bound above made check 2 report "unavailable" on every healthy install.  It still has a bound, for the
+# wedged-daemon case the comment above describes; raise this when doctor grows.
+_DOCTOR_TIMEOUT: int = 120
+
+# The preamble runs synchronously when the slash command starts, so a wedged engine must not stall it for the whole
+# doctor bound: a liveness probe of the engine's /health runs first, under this short bound, and a local engine that
+# does not answer is reported at once.
+_ENGINE_PROBE_TIMEOUT: float = 5.0
+
 
 def _check_output(cmd: list[str], **kwargs: object) -> str:
     """``subprocess.check_output`` with a default ``timeout`` and text decoding.
@@ -95,6 +106,29 @@ def _check_output(cmd: list[str], **kwargs: object) -> str:
     kwargs.setdefault("stderr", subprocess.DEVNULL)
     kwargs.setdefault("text", True)
     return run_bounded(cmd, check=True, **kwargs).stdout  # type: ignore[arg-type,no-any-return]
+
+
+def _run_bd(args: list[str], root: Path) -> tuple[str, str]:
+    """Run ``bd <args>`` in *root* and return ``(stdout, note)``.
+
+    *note* is empty when ``bd`` ran and exited 0 (*stdout* may still be empty: a database with no rows).  Otherwise it
+    says why there is no list: ``bd`` is not installed, it timed out, it has no database here (the one detector,
+    :mod:`nexus.beads_state`, that the console and ``nx brief`` share), or it failed with its own first line.  A false
+    "unavailable or no results" is what GH #1689 removed: the preamble used to drop the exit code and stderr.
+    """
+    try:
+        proc = run_bounded(["bd", *args], cwd=str(root), timeout=_PREAMBLE_TIMEOUT)
+    except FileNotFoundError:
+        return "", "bd is not installed"
+    except subprocess.TimeoutExpired:
+        return "", f"bd timed out after {_PREAMBLE_TIMEOUT}s"
+    except OSError as exc:
+        return "", f"bd could not run: {exc}"
+    if proc.returncode != 0:
+        if is_no_beads_database(proc.stderr, proc.stdout):
+            return "", NO_BEADS_DATABASE_NOTE
+        return "", f"bd failed ({failure_summary(proc.returncode, proc.stderr, proc.stdout)})"
+    return (proc.stdout or "").strip(), ""
 
 
 def detect_project_types(root: Path) -> list[str]:
@@ -176,7 +210,8 @@ def git_branch_block(root: Path) -> list[str]:
 def beads_block(root: Path, args: list[str], heading: str | None) -> list[str]:
     """Return bead-list lines under *heading* by shelling to ``bd list <args>``.
 
-    Degrades gracefully when ``bd`` is absent or exits non-zero.
+    Degrades gracefully when ``bd`` is absent or exits non-zero, and says which: not installed, timed out, no beads
+    database here, or failed (with its first line).
 
     Args:
         root: Working directory for the ``bd`` subprocess.
@@ -191,18 +226,12 @@ def beads_block(root: Path, args: list[str], heading: str | None) -> list[str]:
         fallback.
     """
     prefix = [heading] if heading is not None else []
-    try:
-        output = _check_output(
-            ["bd", "list"] + args,
-            cwd=str(root),
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        if output:
-            return prefix + output.splitlines()
-        return prefix + ["- (no beads found)"]
-    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
-        return prefix + ["- (bd unavailable or no results)"]
+    output, note = _run_bd(["list"] + args, root)
+    if note:
+        return prefix + [f"- ({note})"]
+    if output:
+        return prefix + output.splitlines()
+    return prefix + ["- (no beads found)"]
 
 
 def top_level_structure_block(root: Path) -> list[str]:
@@ -463,23 +492,58 @@ def tool_check_block(tool: str, section_heading: str, fail_message: str) -> list
     return lines
 
 
+def _engine_not_answering() -> str | None:
+    """Why the local engine is not answering ``/health`` within ``_ENGINE_PROBE_TIMEOUT``, or ``None``.
+
+    ``None`` also when no local engine is discoverable (a managed endpoint, or no service configured: ``nx doctor`` is the
+    judge of those) and when the probe itself cannot be made: only a confirmed address that gives no answer returns a
+    reason.  Any HTTP answer, a 503 included, counts as answering; the engine is up and doctor says what is wrong.
+    """
+    try:
+        import httpx  # noqa: PLC0415 — deferred: only the doctor block pays for the client
+
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, same reason
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred, same reason
+        from nexus.health import _resolve_service_endpoint  # noqa: PLC0415, PLC2701 — one rule for "where is the engine", not a copy
+
+        endpoint = _resolve_service_endpoint(nexus_config_dir())
+    except Exception:  # noqa: BLE001 — a probe that cannot be made never costs the preamble
+        return None
+    if endpoint is None:
+        return None
+    host, port = endpoint
+    try:
+        httpx.get(f"http://{host}:{port}/health", timeout=_ENGINE_PROBE_TIMEOUT, verify=get_shared_ssl_context())
+    except (httpx.TransportError, OSError) as exc:
+        return f"the engine at {host}:{port} did not answer /health within {_ENGINE_PROBE_TIMEOUT:g}s ({type(exc).__name__})"
+    except Exception:  # noqa: BLE001 — see above
+        return None
+    return None
+
+
 def nx_doctor_block() -> list[str]:
     """Return the nx-doctor status block.
 
-    Runs ``nx doctor`` and reports PASS/FAIL/SKIP based on exit code.
-    Falls back to SKIP when nx is not installed.
+    First asks the local engine's ``/health`` under a short bound (a wedged engine is reported at once, not after the
+    doctor bound).  Then runs ``nx doctor`` (bounded by ``_DOCTOR_TIMEOUT``, not the short tool bound) and reports PASS/FAIL/SKIP based on
+    exit code.  SKIP when nx is not installed or doctor outlasts its bound (said so, not called unavailable).
 
     Returns:
         List of lines for the ### 2. nx configuration section.
     """
     heading = "### 2. nx configuration (nx doctor)"
     lines: list[str] = [heading, ""]
+    not_answering = _engine_not_answering()
+    if not_answering is not None:
+        lines.append(f"Status: SKIP - engine not answering: {not_answering}; run 'nx doctor' directly for details")
+        lines.append("")
+        return lines
     try:
         proc = run_bounded(
             nx_argv("doctor"),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=_PREAMBLE_TIMEOUT,
+            timeout=_DOCTOR_TIMEOUT,
         )
         lines += proc.stdout.splitlines()
         lines.append("")
@@ -489,12 +553,42 @@ def nx_doctor_block() -> list[str]:
             lines.append("Status: FAIL - run 'nx doctor' for details")
     except FileNotFoundError:
         lines.append("Status: SKIP - nx not installed")
-    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
-        # TimeoutExpired (wedged daemon) or any other failure: degrade rather
-        # than hang or crash the preflight preamble.
-        lines.append("Status: SKIP - nx doctor unavailable")
+    except subprocess.TimeoutExpired:
+        # A wedged daemon or a slow box: not a statement about the install's health (GH #1689).
+        lines.append(f"Status: SKIP - nx doctor exceeded {_DOCTOR_TIMEOUT}s; not a failure; run 'nx doctor' directly")
+    except Exception as exc:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
+        lines.append(f"Status: SKIP - nx doctor could not run ({type(exc).__name__})")
     lines.append("")
     return lines
+
+
+# Languages a CLAUDE.md names, each as a case-sensitive proper name with word boundaries (GH #1689: the old
+# case-insensitive alternation reported the verb "go" as Go, Java inside JavaScript, Rust inside "rusty").  Go is also an
+# English word, so it needs a stronger cue than its name: a version, "Golang", ``go.mod`` or a go tool command.
+_LANGUAGE_CUES: list[tuple[str, re.Pattern[str]]] = [
+    (label, re.compile(pattern))
+    for label, pattern in [
+        ("Python", r"\bPython\b"),
+        ("Java", r"\bJava\b"),
+        ("Go", r"\bGolang\b|\bGo\s+\d+(?:\.\d+)*\b|\bgo\.mod\b|\bgo (?:build|test|mod|vet|run)\b"),
+        ("Rust", r"\bRust\b|\bCargo\.toml\b"),
+        ("TypeScript", r"\bTypeScript\b"),
+        ("Node.js", r"\bNode\.js\b"),
+        ("C++", r"C\+\+"),
+        ("C#", r"\bC#"),
+        ("Ruby", r"\bRuby\b"),
+        ("Kotlin", r"\bKotlin\b"),
+        ("Swift", r"\bSwift\b"),
+        ("Scala", r"\bScala\b"),
+        ("Lua", r"\bLua\b"),
+    ]
+]
+
+
+def _detect_language(content: str) -> str | None:
+    """The label of the language cue that appears first in *content*, or ``None``."""
+    found = [(m.start(), label) for label, rx in _LANGUAGE_CUES if (m := rx.search(content))]
+    return min(found)[1] if found else None
 
 
 def claude_md_block(root: Path) -> list[str]:
@@ -526,13 +620,9 @@ def claude_md_block(root: Path) -> list[str]:
     lines.append("[x] CLAUDE.md exists")
     try:
         content = claude_md.read_text(encoding="utf-8")
-        lang_match = re.search(
-            r"Python|Java|Go|Rust|TypeScript|Node\.js|C\+\+|C#|Ruby|Kotlin|Swift|Scala",
-            content,
-            re.IGNORECASE,
-        )
-        if lang_match:
-            lines.append(f"[x] Language detected: {lang_match.group(0)}")
+        language = _detect_language(content)
+        if language:
+            lines.append(f"[x] Language detected: {language}")
         else:
             lines.append("[?] Language: not found (optional - agents can detect from build files)")
 
@@ -915,17 +1005,11 @@ def _ready_beads_block(cwd: Path) -> list[str]:
         List starting with ``"### Ready beads (top 10)"``.
     """
     header = "### Ready beads (top 10)"
-    try:
-        output = _check_output(
-            ["bd", "ready", "--limit=10"],
-            cwd=str(cwd),
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        lines = output.splitlines()[:25] if output else []
-        return [header] + lines if lines else [header, "- (none)"]
-    except Exception:  # noqa: BLE001 — preamble block builder: degrade to placeholder text rather than crash CLI
-        return [header, "- (bd unavailable or no results)"]
+    output, note = _run_bd(["ready", "--limit=10"], cwd)
+    if note:
+        return [header, f"- ({note})"]
+    lines = output.splitlines()[:25] if output else []
+    return [header] + lines if lines else [header, "- (none)"]
 
 
 def _nx_memory_titles_block(repo: str) -> list[str]:

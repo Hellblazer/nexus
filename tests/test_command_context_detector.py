@@ -318,3 +318,46 @@ def test_accepts_explicit_root_not_cwd(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.chdir(Path("/tmp"))
     result = detect_project_types(tmp_path)
     assert "- Rust" in result
+
+
+# ---------------------------------------------------------------------------
+# claude_md_block language detection (GH #1689, defect 1b)
+# ---------------------------------------------------------------------------
+
+
+def _language_line(tmp_path: Path, text: str) -> str:
+    """The ``Language`` line ``claude_md_block`` prints for a CLAUDE.md holding *text*."""
+    from nexus.commands.command_context import claude_md_block
+
+    (tmp_path / "CLAUDE.md").write_text(text, encoding="utf-8")
+    (line,) = [ln for ln in claude_md_block(tmp_path) if ln.startswith(("[x] Language", "[?] Language"))]
+    return line
+
+
+_NOT_FOUND = "[?] Language: not found (optional - agents can detect from build files)"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Always go ahead and run the suite before you go home.", _NOT_FOUND),  # the verb, GH #1689
+        ("The frontend is JavaScript only.", _NOT_FOUND),  # Java is not a prefix match of JavaScript
+        ("Keep the rusty old scripts out of src/.", _NOT_FOUND),  # Rust is not a substring match
+        ("Golden files live under tests/.", _NOT_FOUND),  # nor Go inside a longer word
+        ("Service code is Java 21 on Maven.", "[x] Language detected: Java"),
+        ("Tooling is written in Lua.", "[x] Language detected: Lua"),
+        ("The CLI is Python 3.12+.", "[x] Language detected: Python"),
+        ("Built with Go 1.22.", "[x] Language detected: Go"),
+        ("A Golang service.", "[x] Language detected: Go"),
+        ("Run `go test ./...` before pushing.", "[x] Language detected: Go"),
+        ("See go.mod for the module path.", "[x] Language detected: Go"),
+        ("Core is Rust, shipped through Cargo.toml.", "[x] Language detected: Rust"),
+        ("Node.js scripts and C++ extensions.", "[x] Language detected: Node.js"),
+    ],
+    ids=[
+        "go-the-verb", "javascript-is-not-java", "rusty-is-not-rust", "golden-is-not-go", "java", "lua", "python",
+        "go-version", "golang", "go-test", "go-mod", "rust", "node-first",
+    ],
+)
+def test_claude_md_language_detection(tmp_path: Path, text: str, expected: str) -> None:
+    assert _language_line(tmp_path, text) == expected

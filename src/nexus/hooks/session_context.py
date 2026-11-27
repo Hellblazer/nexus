@@ -177,11 +177,9 @@ def which(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
-def run_command(args: list[str], timeout: int, cwd: str | None = None) -> str | None:
-    """
-    Run a command and return its stdout, or None on failure.
-    Stderr is captured; printed to stderr only when DEBUG is set.
-    """
+def _spawn(args: list[str], timeout: int, cwd: str | None = None) -> tuple["subprocess.CompletedProcess[str] | None", str]:
+    """Run *args* bounded, off the cwd. Returns ``(process, problem)``: *process* is ``None`` when it never ran to an
+    exit (*problem* says why: not found, timed out, an OS error), and ``problem`` is empty when it did."""
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 - stdlib-only, function-level so the hook module itself stays import-light
@@ -198,14 +196,26 @@ def run_command(args: list[str], timeout: int, cwd: str | None = None) -> str | 
             print(  # noqa: T201 — carried: stderr, not the stdout decision channel
                 f"[session-hook] stderr from {args[0]}: {result.stderr[:500]}", file=sys.stderr
             )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+        return result, ""
     except subprocess.TimeoutExpired:
         debug(f"{args} timed out after {timeout}s")
+        return None, f"timed out after {timeout}s"
     except FileNotFoundError:
         debug(f"{args[0]} command not found")
+        return None, f"`{args[0]}` was not found"
     except OSError as e:
         debug(f"{args} failed: {e}")
+        return None, f"could not run: {e}"
+
+
+def run_command(args: list[str], timeout: int, cwd: str | None = None) -> str | None:
+    """
+    Run a command and return its stdout, or None on failure.
+    Stderr is captured; printed to stderr only when DEBUG is set.
+    """
+    result, _problem = _spawn(args, timeout, cwd)
+    if result is not None and result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
     return None
 
 
@@ -346,11 +356,25 @@ def _render_bd_prime(project_dir: Path) -> list[str]:
 
 
 def _render_beads(project_dir: Path) -> list[str]:
-    """The ``## Ready Beads`` block, then ``bd prime`` when it applies. ``[]`` when ``bd`` is not on PATH."""
+    """The ``## Ready Beads`` block, then ``bd prime`` when it applies. ``[]`` when ``bd`` is not on PATH, or when ``bd
+    ready`` ran clean and listed nothing.
+
+    A ``bd`` that ran and did NOT list answers one line saying why, never ``[]`` (GH #1689: "printed nothing" reached an
+    agent for a bd that had exited 1 for want of a database). No database is told apart from a failure by the one detector
+    (:mod:`nexus.beads_state`) the console's needs-sam read also uses."""
     if not which('bd'):
         debug("bd command not found")
         return []
-    ready_output = run_command(['bd', 'ready'], timeout=BD_TIMEOUT, cwd=str(project_dir))
+    proc, problem = _spawn(['bd', 'ready'], BD_TIMEOUT, str(project_dir))
+    if proc is None:
+        return [f"beads: `bd ready` {problem}"]
+    if proc.returncode != 0:
+        from nexus.beads_state import NO_BEADS_DATABASE_NOTE, failure_summary, is_no_beads_database  # noqa: PLC0415 — deferred: only a failed bd pays
+
+        if is_no_beads_database(proc.stderr, proc.stdout):
+            return [f"beads: {NO_BEADS_DATABASE_NOTE}; nothing to show"]
+        return [f"beads: `bd ready` failed ({failure_summary(proc.returncode, proc.stderr, proc.stdout)})"]
+    ready_output = proc.stdout.strip() or None
     lines = _render_ready_beads(ready_output)
     # A bd that just failed or timed out on `bd ready` is not asked again.
     if ready_output is not None:

@@ -18,6 +18,7 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Request
 
+from nexus.beads_state import is_no_beads_database
 from nexus.bounded_subprocess import run_bounded
 from nexus.console.threads import (
     BeadsResult,
@@ -38,9 +39,6 @@ ASKS_PROJECT = "asks"
 BD_TIMEOUT_SECONDS = 10.0
 _BD_ARGV = ["bd", "list", "--label", "needs-sam", "--status", "open,in_progress,blocked", "--limit", "0", "--json"]
 
-#: bd's own error text (compared lower case) when the working directory has no beads database.
-_NO_BEADS_DATABASE = "no beads database found"
-
 BdRunner = Callable[[], BeadsResult]
 ThreadsReader = Callable[[], list[dict[str, Any]]]
 AnswersReader = Callable[[], list[dict[str, Any]]]
@@ -60,7 +58,7 @@ def run_bd_needs_sam(timeout: float = BD_TIMEOUT_SECONDS) -> BeadsResult:
 
     Never raises. The source is ``skipped`` (a user without beads has none to read) only when there is no beads
     database for the working directory: ``bd`` is missing from PATH and no ``.beads`` directory sits at or above
-    it, or ``bd`` exits with its "no beads database found" error. A missing ``bd`` where a ``.beads`` directory
+    it, or ``bd`` exits with its no-database error (``nexus.beads_state``). A missing ``bd`` where a ``.beads`` directory
     exists, a broken ``bd``, a timeout, any other non-zero exit or unparseable output comes back as a one-line
     ``error``, so a real failure never reads as "nothing needs you".
     """
@@ -75,7 +73,7 @@ def run_bd_needs_sam(timeout: float = BD_TIMEOUT_SECONDS) -> BeadsResult:
     except OSError as exc:
         return BeadsResult((), f"bd could not run: {exc}")
     if proc.returncode != 0:
-        if _NO_BEADS_DATABASE in f"{proc.stderr}\n{proc.stdout}".lower():
+        if is_no_beads_database(proc.stderr, proc.stdout):
             return BeadsResult((), skipped="there is no beads database here")
         detail = (proc.stderr or proc.stdout).strip().splitlines()
         return BeadsResult((), f"bd list failed (exit {proc.returncode})" + (f": {detail[0][:120]}" if detail else ""))

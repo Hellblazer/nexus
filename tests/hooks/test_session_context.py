@@ -411,9 +411,34 @@ class TestExtractedRenders:
         monkeypatch.setattr(session_context, "which", lambda cmd: False)
         assert session_context._render_beads(tmp_path) == []
         monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
-        monkeypatch.setattr(session_context, "run_command", lambda args, timeout, cwd=None: "○ nexus-abc123 ● P1 [bug] a ready bead")
+        import types
+
+        from nexus import bounded_subprocess
+
+        monkeypatch.setattr(
+            bounded_subprocess, "run_bounded",
+            lambda argv, **_kw: types.SimpleNamespace(returncode=0, stdout="○ nexus-abc123 ● P1 [bug] a ready bead", stderr=""),
+        )
         text = "\n".join(session_context._render_beads(tmp_path))
         assert text.startswith("## Ready Beads") and "a ready bead" in text
+
+    def test_render_beads_tells_a_missing_database_from_an_empty_ready_list(self, monkeypatch, tmp_path: Path) -> None:
+        """GH #1689: bd installed with no database exits 1; that is a statement, not an empty list (and never a primer)."""
+        import types
+
+        from nexus import bounded_subprocess
+
+        calls: list[list[str]] = []
+
+        def fake(argv, **_kw):
+            calls.append(list(argv))
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="Error: no beads database found\n")
+
+        monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+        monkeypatch.setattr(bounded_subprocess, "run_bounded", fake)
+        lines = session_context._render_beads(tmp_path)
+        assert len(lines) == 1 and "no beads database" in lines[0]
+        assert len(calls) == 1 and calls[0][1] == "ready"
 
     def test_knowledge_map_reads_the_cache_and_names_its_path(self, monkeypatch, tmp_path: Path) -> None:
         repo = tmp_path / "fakerepo"
