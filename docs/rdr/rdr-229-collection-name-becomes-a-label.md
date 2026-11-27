@@ -706,7 +706,7 @@ keeps the parsers of the names a user types and the names `nx` is about to
 register, so it does not empty at Phase 3. The census pins it at 129
 (`tests/test_collection_name_parse_census.py:418`; an equality, so the count
 can neither grow nor fall without a re-pin),
-and it retires with the Phase 4 parsers, P4.3), **migration
+and it retires with the Phase 4 parsers, an inference from P4.3, which deletes every parser outside `legacy_names`), **migration
 source** (the name comes from another install or an older era: recovery
 bundle import, migrate-fallback, legacy-collection migration), or
 **diagnostic** (doctor, reconcile and shape checks whose purpose is to
@@ -1105,13 +1105,13 @@ The key moves table by table in strangler order:
     `source_collection` then fails `topic_assignments_chunk_fk`, which
     references the chunks' name key (vectors-030:1032-1036), because the
     chunks keep the old name; so it refuses the rename too. The move drops
-    that key, so the cascade never runs. The key `topic_assignments_chunk_fk`
+    `topic_assignments_collection_fk`, so the cascade never runs. The key `topic_assignments_chunk_fk`
     is not dropped in Phase 3: after the drop move the one-row rename rewrites
     no assignment row, so the key, which references the chunks' name key and
     the chunks' old name, stays satisfied (`Rdr229P37OneRowRenameTest` renames
     after the latch with the key in place and finds the assignments' rows
     unchanged and the key still there). It is one of the three name child
-    keys that P4.1's first child-key drop step removes;
+    keys that P4.1's child-key drop step removes (P4.1);
   - `aspect_extraction_queue_collection_fk` is `ON DELETE CASCADE ON
     UPDATE CASCADE` (aspects-005:103-107), and the queue's only other key
     references `catalog_documents`, so it refuses nothing.
@@ -1946,10 +1946,13 @@ while the engine serves:
     `RenameRefusedException.java:55-65`, `HttpUtil.java:651-659`; T2
     `229-research-301`, `229-research-303`, `229-research-329`). On the real
     chain `restart` is reached only when a listed changeset fails to apply on
-    its own: the boot that latches gate 3 applies them all, so a fresh or
-    half-stamped install sees `name_key_drop_move` and then `none`
-    (`Rdr229P37RestartValueTest`, `Rdr229FreshInstallRenameRestartTest`,
-    on the P3.7 lane, not yet on develop). The same
+    its own: the boot that latches gate 3 applies every listed changeset
+    that does not fail (`vectors-078-4` has `failOnError="false"` and a 5 s
+    `lock_timeout`, so lock contention can skip it, which is a restart
+    case), so a fresh or half-stamped install normally sees
+    `name_key_drop_move` and then `none` (`Rdr229P37RestartValueTest`,
+    `Rdr229FreshInstallRenameRestartTest`; the corrected versions of these are
+    on the P3.7 lane, and develop holds older versions). The same
     values, with `none`, go out as `rdr229_completion.rename_missing`, and
     `nx doctor` shows a row for each one that is not `none`
     (`CompletionStatusJson.java:26-36`; `rdr229_completion_health.py:155-171`).
@@ -2007,8 +2010,7 @@ while the engine serves:
     not-retried read move to Phase 4, to P4.0 (bead nexus-p2m1x.34; Sam, ask
     `rdr229-r7-defer`, option 1, 2026-11-27, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`; the split itself is Sam's
     "Split" and linda's, 2026-11-24; T2 `229-research-328`, `229-research-336`).
-    The acceptance that the chunks of a no-successor tombstone are unreadable
-    travels with them to P4.0 and was not granted for Phase 3. The per-reader
+    The acceptance that the chunks of a no-successor tombstone are readable by no route travels with them to P4.0, undecided (it goes back to Sam with R7). In Phase 3 a read by id is refused already (409, `CollectionRetiredNoSuccessorReadersTest`); a read by label is not (it answers 200). The per-reader
     tests over today's 409 shipped after the P3.5c landing line:
     `CollectionRetiredNoSuccessorReadersTest` sends the id of such a tombstone
     to every read route of the census (51 readers, in both gate states;
@@ -2055,12 +2057,14 @@ while the engine serves:
     (`CompletionBootWork.java:199-203`), and then `restart` only once the
     drop move has `completed_at` and a listed changeset is still unapplied
     (`CompletionCheck.java:424-437`). On a fresh or half-stamped store the
-    restart is asked for by the notice alone, and `rename_missing` never reads
-    `restart`: gate 3 latches only at the boot that applies `vectors-078` and
-    `vectors-084` (P3.5), and that boot's walk applies every listed P3.5b
-    changeset with them, so after the latch the wait is `name_key_drop_move`.
-    `restart` shows only when a listed changeset fails to apply on its own
-    (`Rdr229P37RestartValueTest`). The notice is the one exception among the
+    restart is asked for by the notice alone: `rename_missing` reads `none`
+    until gate 3 latches, which happens only at the boot that applies
+    `vectors-078` and `vectors-084` (P3.5). That boot's walk applies every
+    listed P3.5b changeset that does not fail, so after the latch the wait is
+    normally `name_key_drop_move`; `rename_missing` reads `restart` only when
+    a listed changeset fails to apply on its own (`vectors-078-4` skipped
+    under lock contention, for one; `Rdr229P37RestartValueTest`). The notice
+    is the one exception among the
     check's reports to the rule above (`id-unique-index-held`, above, is
     another entry the same skips pass over): a notice that does no work and
     is safe to stop, which `nx upgrade`'s
@@ -2502,7 +2506,7 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
   candidate name's content type (`corpus.candidate_content_type`, the one
   parse, which P2.2 points at `legacy_names`), one mint entry per caller; those
   entries stay in the mint class, which the census pins at 129 (an equality, so a re-pin lowers it too) and which retires
-  with the Phase 4 parsers. A prefix-free label with no row derives nothing and stays
+  with the Phase 4 parsers (inferred from P4.3). A prefix-free label with no row derives nothing and stays
   unrouted until P3.8's writer uses the registering call's row. The
   `note_tags_array` rung reads strictly, so a failed listing is not "no
   strings". A read-only router that sees only a search hit's collection
@@ -2545,7 +2549,10 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
   `validate_collection_name` no longer
   reads any part of a name, so it left the derived helper set, and its two
   `T3Database` callers left the ledger (mint 131 -> 129, primitive_call
-  179 -> 177).
+  179 -> 177). One P3.8 fallout site follows: `entity_keys` matches a minted
+  label's configured glob against the name its row renders, a second
+  label-pattern `fnmatch` (label-pattern 10 -> 11, fnmatch 14 -> 15), so the
+  total is 212, the current `PARSE_SITE_PIN`.
 - *The shipped default exclude pattern.* `config.py:1391`
   (`"local_exclude_collections": ["code__*"]`) excludes code collections
   from local-mode taxonomy by name. P2.9 replaces that default with a
@@ -3418,19 +3425,27 @@ its acceptance is that test green plus the census pin it lowers.
   boot (`vectors-078:573-601`, the changeset and its one `sqlCheck`). So in the first process a
   rename is still the name path and succeeds (200, a new collection id,
   `ids_stable` false); the engine only asks for the restart, with the
-  `rdr229-restart` `boot_work` notice, and `rename_missing` reads `none`. The
+  `rdr229-restart` `boot_work` notice once every stamp move is complete (gate 1),
+  and `rename_missing` reads `none`. The
   restart's walk applies `vectors-078-8`, `vectors-084-1` to `-3` and every other P3.5b
-  changeset together, gate 3 latches once the id-index pass has built what it
+  changeset that does not fail on its own together, gate 3 latches once the id-index pass has built what it
   waits for, an engine pass registers the name-key drop move, and from the
   latch until that move completes a rename is refused (409 `rename_refused`,
   `missing` = `name_key_drop_move`); after it the rename is the one-row path
   and the id survives. A fresh install follows the same chain, its stamp moves
-  completing on empty tables in boot 1. Tested over HTTP on a booted engine
-  running the production id-index pass, which simulates only gate 3's
-  PCI-coverage input: `Rdr229P35HalfStampedStoreTest` (half-stamped),
-  `Rdr229FreshInstallRenameRestartTest` (fresh install) and
-  `Rdr229P37RenameStagesTest` (the refusal window), on the P3.7
-  lane, not yet on develop (T2 `229-research-322`; nexus-p2m1x.48).
+  completing on empty tables in boot 1. The rename behaviour of this chain is
+  tested over HTTP on a booted engine running the production id-index pass,
+  which simulates only gate 3's PCI-coverage input: `Rdr229P35HalfStampedStoreTest`
+  (half-stamped), `Rdr229FreshInstallRenameRestartTest` (fresh install) and
+  `Rdr229P37RenameStagesTest` (the refusal window). Search and the readers'
+  switch to the id are not covered there (the harness has no vector
+  repository); the repository-level pins are `Rdr229P35cSearchByIdIntegrationTest`,
+  `Rdr229P35cLatchedIdPathTest`, `Rdr229P35bSqlReadersIntegrationTest` and
+  `Rdr229P35bBranchPartitionIntegrationTest`. The corrected versions of the
+  fresh-install and refusal-window tests are on the P3.7 lane, and develop
+  holds older versions; the half-stamped test exists only on the lane. T2
+  `229-research-322` inferred this chain from code; the named tests now test it
+  (nexus-p2m1x.48).
   - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
     label index; every collection-taking route in the census accepts
     `collection_id` or a label, and a request carrying both for one
@@ -3719,15 +3734,13 @@ its acceptance is that test green plus the census pin it lowers.
     `src/` and `tests/` hold no such marker. Only the partial R7 ships in
     this cut, on the stack: a re-embed refusal names the successor's label
     or says the collection is retired with no successor, the by-id 409, and
-    `TargetSelection` refusing a target with no successor. Deferred to the
+    `TargetSelection` refusing a target with no successor. Deferred to
     Phase 4, P4.0 (bead nexus-p2m1x.34; linda's ruling of 2026-11-24, bead
     nexus-p2m1x.25, corrected at 10:53 UTC, first put it in the next paired
     cut, after 0.1.202 / 8.5.6, and Sam's ruling on ask `rdr229-r7-defer`,
     2026-11-27, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`, moved it to Phase 4): the
     label-addressed read refusal, the marker on the wire, the typed client
-    error and the client's not-retried read of it. The acceptance that the
-    chunks of a no-successor tombstone are unreadable travels with them and
-    was not granted for Phase 3. The per-reader tests Sam's wording put in
+    error and the client's not-retried read of it. The acceptance that the chunks of a no-successor tombstone are readable by no route travels with them to P4.0, undecided (it goes back to Sam with R7). In Phase 3 a read by id is refused already (409, `CollectionRetiredNoSuccessorReadersTest`); a read by label is not (it answers 200). The per-reader tests Sam's wording put in
     this cut shipped after the landing line, over today's 409:
     `CollectionRetiredNoSuccessorReadersTest` (commits 21c4b06b57, 28fd6a73fe
     and 3904bdc8a7; its 51 readers in both gate states), beside the
@@ -3763,7 +3776,8 @@ its acceptance is that test green plus the census pin it lowers.
     `:2758-2760`; `CatalogHandler.java:2931`, `:2993`;
     `ReembedRunner.java:567`; `CollectionSupersededException.java:28-29`), which linda
     moved to the paired cut with a `CollectionSuccessor` lookup and a test
-    each (bead nexus-p2m1x.25, comment of 2026-11-24 10:42 UTC). P3.1 builds
+    each (bead nexus-p2m1x.25, comment of 2026-11-24 10:42 UTC), and which
+    now go to P4.0 (bead nexus-p2m1x.34) with R7's remainder. P3.1 builds
     only R7's pre-flight counts and the doctor's listing queries (item 6).
 - P3.6 Label rule, after P2.9 and P2.10: partial UNIQUE on live `(tenant_id, name)`;
   `validate_collection_name` becomes the label rule (item 7). Test: a
@@ -3849,7 +3863,7 @@ its acceptance is that test green plus the census pin it lowers.
   before the name-key drop move completes is refused with the move named;
   and a rename after that move completes and before every P3.5b changeset
   has applied is refused with the restart named
-  (`Rdr229P37OneRowRenameTest`, `Rdr229P37RenameStagesTest`; also
+  (`Rdr229P37OneRowRenameTest`, `Rdr229P37RenameStagesTest` for the drop-move window and `Rdr229P37RestartValueTest` for the restart refusal; also
   `Rdr229P37LabelReservedTest`, `Rdr229P37RestoreOriginUnregisteredTest`,
   `Rdr229P37ChildNameTriggerTest` and `Rdr229P37IdsStableTest`). Added
   coverage beyond the criteria above: the drop move's wait is pinned by
@@ -3994,7 +4008,22 @@ its acceptance is that test green plus the census pin it lowers.
   completes `boot_work` carries the `rdr229-restart` notice and
   `rename_missing` stays `none`; after that one restart, gates 1 to 3,
   the name-key drop move and the floor follow in one process with no
-  further restart, and it then serves by the id.
+  further restart, and it then serves by the id. P4.0's cut also carries
+  R7's remainder, deferred from P3.5c (Sam, ask `rdr229-r7-defer`,
+  2026-11-27, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`; bead nexus-p2m1x.34; the engine and
+  client halves are held on branches): the `RETIRED_NO_SUCCESSOR` marker on
+  the wire; the typed client error for a chunk write to a no-successor
+  tombstone (a released client gets a generic 409 today,
+  `aspect_worker_tuples.py:513`, `corpus.py:2500`); the label-addressed read
+  refusal; and the `CollectionSuccessor` message sites
+  (`CatalogHandler.java:2708-2993`, `ReembedRunner.java:567`,
+  `CollectionSupersededException.java:28-29`). The client half ships first
+  (the reverse of the usual order, Versioning): the label-read refusal breaks
+  a released client that meets a no-successor tombstone that still holds
+  chunks, in an inventory loop or `get_by_id`, so the release that skips such
+  a row and surfaces the typed error comes before the engine half. Open: The acceptance that the chunks of a no-successor tombstone are readable by no route travels with R7 to P4.0, undecided (it goes back to Sam with R7). In Phase 3 a read by id is refused already (409, `CollectionRetiredNoSuccessorReadersTest`); a read by label is not (it answers 200). R7's remainder carries
+  its own tests, written with its beads; the open acceptance has none until
+  it is decided.
 - P4.1 After P3.11 and P4.0; its acceptance includes RDR-248's committed fixture
   and a stated effect on backups taken before P3.1 (item 10). Before any
   drop, every name-holding primary key and UNIQUE has an id-keyed twin
@@ -4240,16 +4269,19 @@ None.
   id, `ids_stable` false), and the engine reads by the id once gate 3 has
   latched (`Gate3.java:6-11`). The latch comes only at the restart, the boot
   after the stamp moves complete, because the first walk skips `vectors-078-8`
-  and `vectors-084-1` to `-3`, which gate 3 waits for (P3.5); until then
-  `boot_work` carries the `rdr229-restart` notice and `rename_missing` reads
-  `none`. From the latch until the name-key drop move completes, a rename is
+  and `vectors-084-1` to `-3`, which gate 3 waits for (P3.5). Once every stamp
+  move is complete (gate 1), `boot_work` carries the `rdr229-restart` notice
+  until the restart, and `rename_missing` reads `none` until the latch. From the latch until the name-key drop move completes, a rename is
   refused (409 `rename_refused`, `missing` = `name_key_drop_move`); after it
   the rename is the one-row path (the same id, `ids_stable` true). A fresh
   install follows the same chain, its stamp moves completing on empty tables
   in boot 1. `missing` = `restart` appears only when a listed P3.5b changeset
-  fails to apply on its own. Tests: `Rdr229P35HalfStampedStoreTest`,
+  fails to apply on its own. Tests of the rename behaviour (search is pinned
+  at the repository, see P3.5): `Rdr229P35HalfStampedStoreTest`,
   `Rdr229FreshInstallRenameRestartTest`, `Rdr229P37RenameStagesTest` and
-  `Rdr229P37RestartValueTest`, on the P3.7 lane, not yet on develop.
+  `Rdr229P37RestartValueTest`. The corrected versions are on the P3.7 lane;
+  develop holds older versions of the second and third, and the other two
+  exist only on the lane.
 - **Scenario**: an engine with P4.0 boots on a store with only half its
   chunks stamped — **Verify**: it serves migration-only, refusing
   collection-scoped routes with an error that names the floor, the stamp
@@ -4601,7 +4633,12 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
   install that skips from before P3.1 to a release with P4.0 meets P4.0's
   boot floor, which serves it migration-only until gate 3, P3.7's
   name-key drop move and P3.5b's changesets hold there (P4.0; T2
-  `229-research-59`, `229-research-64`).
+  `229-research-59`, `229-research-64`). R7's remainder (P4.0) pairs with a
+  client release in the reverse order: the engine's label-read refusal and
+  `RETIRED_NO_SUCCESSOR` marker break a released client that meets a
+  no-successor tombstone that still holds chunks, so the client half, which
+  skips such a row and surfaces the typed error, is released first and the
+  engine half after it (bead nexus-p2m1x.34; T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`).
 - **Build tool compatibility**: N/A.
 - **Licensing**: N/A.
 - **Deployment model**: every changeset is walked on a PITR fork rehearsal
@@ -4829,7 +4866,8 @@ large, and moved under a ratchet.
 - 2026-11-26: citations to landed, reviewed code (grant 3), nexus-p2m1x.48, the two boot_work warm-up commits of the next engine cut: the `MoveBootWork.java` and `MoveBootWorkTest.java` line cites (the announce and retainAnnounced block, the validation-in-flight block, the entry publisher, the restarted-engine builds line and its test) follow the sampler's new warm-up code, which shifted them; no wording changes.
 - 2026-11-26: the delete's lock modes follow the quarantine lane's fix round (grant 3, nexus-p2m1x.23 and .27; the commits of feature/rdr229-nextcut-quarantine, unpublished until the stack lands; T2 `nexus/nextcut-quarantine-lane-2026-11-26`): a delete by id takes the origin's row and its quarantine siblings' rows FOR UPDATE in one `collection_id`-ordered statement, a delete by label the siblings FOR UPDATE and the origin FOR KEY SHARE in the same order, and a rename's retag key-shares each sibling's row before it reads the rows; the `CollectionDeleteFence.java` cites are re-read from that tree.
 - 2026-11-26: the reaper's two expiry functions guard a quarantine row by its own origin id (grant 3, nexus-p2m1x.28; Sam's ruling, T2 `nexus/sam-ruling-rdr229-nextcut-ddl-cap-2961-2026-11-26`): `vectors-086` redefines `reaper_expire_quarantine` and `reaper_expire_client_quarantine`; after a one-row rename a move that commits after the retag leaves a row tagged with the old label, which the label-resolved guard missed; the I8 census's basis for the two reaper rows no longer says the call was ruled safe.
-- 2026-11-27: the fresh-install and half-stamped chain, matching the engine as measured (grant 3, nexus-p2m1x.48 step 2; tests Rdr229P35HalfStampedStoreTest, Rdr229FreshInstallRenameRestartTest, Rdr229P37RenameStagesTest and Rdr229P37RestartValueTest, on the P3.7 lane and not yet on develop): gate 3 does not latch in boot 1, so a boot-1 rename is the name path; the restart's walk applies every P3.5b changeset and latches gate 3; renames are refused naming `name_key_drop_move` until that move completes, then the one-row rename runs; `missing` = `restart` appears only when a listed changeset fails on its own. P3.5's Test loses "inferred from code, not tested"; item 6's order and restart-signal text, the half-stamped Test Plan scenario's Verify clause and the rename scenario's setup (which now waits for the stamp moves, the restart, the latch and readiness `none`) say so. No decision changed.
-- 2026-11-27: the mint class does not empty at Phase 3 (Sam's ruling, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`, ask `rdr229-mint-pin`, option 1; grant 3, nexus-p2m1x.28): item 12's census paragraph and the routing paragraph's "all empty at P3.8" now say the class keeps the parsers of the names a user types and the names `nx` is about to register, is pinned at 129 (`tests/test_collection_name_parse_census.py:418`) so it cannot grow, and retires with the Phase 4 parsers (P4.3).
-- 2026-11-27: item 6's list says `topic_assignments_chunk_fk` is not dropped in Phase 3 and why (linda; Rdr229P37OneRowRenameTest, nexus-p2m1x.27): after the drop move the one-row rename rewrites no assignment row, so the key stays satisfied; `topic_assignments_collection_fk` still refuses the rename by its cascade and is dropped by the move. P4.1's first child-key drop step removes the key with the other two name child keys.
-- 2026-11-27: R7 is deferred to Phase 4 (Sam, ask `rdr229-r7-defer`, option 1, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`; grant 3, nexus-p2m1x.25 and .34): the label-addressed read refusal, `RETIRED_NO_SUCCESSOR`, its typed client error and not-retried read, and the acceptance that a no-successor tombstone's chunks are unreadable (not granted for Phase 3) go to P4.0 (nexus-p2m1x.34), not nexus-p2m1x.25; the per-reader tests over today's 409 are named as shipped (`CollectionRetiredNoSuccessorReadersTest`, 3904bdc8a7 and its two predecessors), not as owed. The 2026-11-24 lines above that say they stay on .25 are the record of that date.
+- 2026-11-27: the fresh-install and half-stamped chain, matching the engine as measured (grant 3, nexus-p2m1x.48 step 2; tests Rdr229P35HalfStampedStoreTest, Rdr229FreshInstallRenameRestartTest, Rdr229P37RenameStagesTest and Rdr229P37RestartValueTest, the corrected versions are on the P3.7 lane and develop holds older versions of the first and third): gate 3 does not latch in boot 1, so a boot-1 rename is the name path; the restart's walk applies every P3.5b changeset and latches gate 3; renames are refused naming `name_key_drop_move` until that move completes, then the one-row rename runs; `missing` = `restart` appears only when a listed changeset fails on its own. P3.5's Test loses "inferred from code, not tested"; item 6's order and restart-signal text, the half-stamped Test Plan scenario's Verify clause and the rename scenario's setup (which now waits for the stamp moves, the restart, the latch and readiness `none`) say so. No decision changed.
+- 2026-11-27: the mint class does not empty at Phase 3 (Sam's ruling, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`, ask `rdr229-mint-pin`, option 1; grant 3, nexus-p2m1x.28): item 12's census paragraph and the routing paragraph's "all empty at P3.8" now say the class keeps the parsers of the names a user types and the names `nx` is about to register, is pinned at 129 (`tests/test_collection_name_parse_census.py:418`) so it cannot grow, and retires with the Phase 4 parsers (inferred from P4.3).
+- 2026-11-27: item 6's list says `topic_assignments_chunk_fk` is not dropped in Phase 3 and why (linda; Rdr229P37OneRowRenameTest, nexus-p2m1x.27): after the drop move the one-row rename rewrites no assignment row, so the key stays satisfied; `topic_assignments_collection_fk` still refuses the rename by its cascade and is dropped by the move. P4.1's child-key drop step removes the key with the other two name child keys.
+- 2026-11-27: R7 is deferred to Phase 4 (Sam, ask `rdr229-r7-defer`, option 1, T2 `nexus/sam-ruling-rdr229-p3-mint-pin-and-fresh-rename-2026-11-27`; grant 3, nexus-p2m1x.25 and .34): the label-addressed read refusal, `RETIRED_NO_SUCCESSOR`, its typed client error and not-retried read, go to P4.0 (nexus-p2m1x.34), not nexus-p2m1x.25, and so does the open acceptance that a no-successor tombstone's chunks are readable by no route (undecided, back to Sam with R7; reads by id are refused already in Phase 3, a read by label is not); the per-reader tests over today's 409 are named as shipped (`CollectionRetiredNoSuccessorReadersTest`, 3904bdc8a7 and its two predecessors), not as owed. The 2026-11-24 lines above that say they stay on .25 are the record of that date.
+- 2026-11-27: correction batch 2 (grant 3, nexus-p2m1x.48, .34, .28; fix check `229-fix-check-4a034623990a`): P4.0's bullet and the Versioning paragraph carry R7's remainder, its client-first pairing and the open acceptance (readable by no route; reads by id are refused already, a read by label is not), which goes to P4.0 undecided; the restart signal and the order sentence say `restart` is reached only when a listed changeset fails on its own, `vectors-078-4` under lock contention included; the `rdr229-restart` notice needs gate 1; the P3.7 lane tests are cited as corrected versions on the lane with develop's older versions named, and search is cited to its repository-level pins; `topic_assignments_collection_fk` is named where `that key` stood; the mint class's retirement is marked as inferred from P4.3; item 12's census arithmetic reaches 212, the current pin. No decision changed.
