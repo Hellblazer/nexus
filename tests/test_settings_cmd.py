@@ -301,6 +301,26 @@ def test_telemetry_off_reports_nothing_about_an_endpoint(pin, plain_posture):
     assert "no engine is configured" not in _run("show", "--cwd", str(plain_posture.repo)).output
 
 
+def test_show_equals_the_plugin_copys_show_when_telemetry_has_no_engine(pin, plain_posture):
+    """nexus-sby49.14: the line comes from the reader, so the stdlib show prints it as nx does (RDR-259 Decision 5)."""
+    pin(plain_posture)
+    _telemetry_account(plain_posture)
+    mine = _run("show", "--cwd", str(plain_posture.repo)).output
+    theirs = _plugin_show(plain_posture)
+    assert MISSING_ENDPOINT in theirs, "the plugin copy's own show reports it"
+    assert _without_versions(mine) == _without_versions(theirs)
+
+
+def test_show_json_equals_the_plugin_copys_json_when_telemetry_has_no_engine(pin, plain_posture):
+    pin(plain_posture)
+    _telemetry_account(plain_posture)
+    mine = json.loads(_run("show", "--cwd", str(plain_posture.repo), "--json").stdout)
+    theirs = json.loads(_plugin_show(plain_posture, "--json"))
+    mine.pop("versions"), theirs.pop("versions")
+    assert mine == theirs
+    assert sum(MISSING_ENDPOINT in p["what"] for p in mine["problems"]) == 1, "once, not once per layer"
+
+
 def test_the_missing_endpoint_line_is_in_the_json_problems(pin, plain_posture):
     pin(plain_posture)
     _telemetry_account(plain_posture)

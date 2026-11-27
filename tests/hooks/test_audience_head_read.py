@@ -453,12 +453,9 @@ def test_the_byte_search_is_bounded_and_a_truncated_miss_is_unknown(audience, tm
     assert audience.index_names_project(gd) == "unknown", "the name lies past the bound and the file is longer than it"
     monkeypatch.setattr(audience, "INDEX_SEARCH_MAX_BYTES", 1 << 20)
     assert audience.index_names_project(gd) == "yes"
-    big = tmp_path / "big-gitdir"
-    big.mkdir()
-    (big / "index").write_bytes(b"DIRC" + (2).to_bytes(4, "big") + (0).to_bytes(4, "big") + b"\0" * (20 << 20))
-    monkeypatch.setattr(audience, "INDEX_SEARCH_MAX_BYTES", 1 << 20)
-    assert audience.index_names_project(str(big)) == "unknown"
     assert audience.INDEX_SEARCH_MAX_BYTES == 1 << 20
+    # (the entry-walk's own bound, a long index with every path before the file, is
+    # test_a_large_index_still_finds_the_project_file_and_a_scan_past_the_bound_is_unknown below)
 
 
 def test_the_search_bound_constant_is_a_named_few_mib():
@@ -474,11 +471,16 @@ def test_the_search_bound_constant_is_a_named_few_mib():
 def test_a_sparse_index_entry_or_extension_says_unknown(audience, tmp_path):
     """A sparse index folds `.nexus/` into a directory entry (the path ends at its NUL) and carries an `sdir` extension."""
     header = b"DIRC" + (2).to_bytes(4, "big") + (1).to_bytes(4, "big")
-    for n, body in enumerate((b"\0" * 62 + b".nexus/\0\0\0\0", b"\0" * 62 + b"README\0\0" + b"sdir" + (0).to_bytes(4, "big"))):
-        gd = tmp_path / ("sparse-" + str(n))
-        gd.mkdir()
-        (gd / "index").write_bytes(header + body)
-        assert audience.index_names_project(str(gd)) == "unknown"
+    gd = tmp_path / "sparse-0"
+    gd.mkdir()
+    (gd / "index").write_bytes(header + b"\0" * 62 + b".nexus/\0\0\0\0")
+    assert audience.index_names_project(str(gd)) == "unknown"
+    # A sparse index with the extension but no `.nexus/` entry: entries sort by path, so the scan reaches README, which sorts after
+    # the file, without meeting the directory entry that would fold it: the file is not there.
+    gd = tmp_path / "sparse-1"
+    gd.mkdir()
+    (gd / "index").write_bytes(header + b"\0" * 62 + b"README\0\0" + b"sdir" + (0).to_bytes(4, "big"))
+    assert audience.index_names_project(str(gd)) == "no"
     plain = tmp_path / "plain-gitdir"
     plain.mkdir()
     (plain / "index").write_bytes(header + b"\0" * 62 + b"README\0\0")
@@ -492,3 +494,113 @@ def test_a_staged_deletion_is_the_tables_first_row_and_reads_no_head(audience, t
     run_git(repo, "rm", "-q", PROJECT)
     shim.install(monkeypatch)
     assert audience.guard_mode(_p(repo), head=True) == "seatbelt" and shim.calls() == []
+
+
+# ---------------------------------------------------------------------------
+# nexus-sby49.14: advice_block takes the union whatever subagent_git says, and a large index is not a reason to run git
+# ---------------------------------------------------------------------------
+
+_COMMITTED_ROW = "whole_disk_scan"
+
+
+def _repo_whose_head_has_a_row_the_working_copy_dropped(tmp_path, *, working: str):
+    repo = init_repo(tmp_path / "r", {PROJECT: _j(subagent_git="strict", advice_block=[_COMMITTED_ROW])})
+    _set_wt(repo, working)
+    return repo
+
+
+def test_a_committed_advice_row_survives_a_working_tree_that_is_already_strict(audience, tmp_path, shim, monkeypatch):
+    repo = _repo_whose_head_has_a_row_the_working_copy_dropped(tmp_path, working=_j(subagent_git="strict"))
+    shim.install(monkeypatch)
+    assert audience.advice_blocked(_p(repo)) == frozenset() and shim.calls() == [], "the default reads no HEAD"
+    assert audience.advice_blocked(_p(repo), head=True) == {_COMMITTED_ROW}
+    assert shim.verbs() == ["cat-file"], "one git process, though the working tree is already strict"
+
+
+def test_a_committed_advice_row_survives_a_user_file_that_is_already_strict(audience, tmp_path, shim, monkeypatch):
+    from tests.hooks.audience_harness import strict_home  # noqa: PLC0415
+
+    strict_home(audience.HOME)
+    repo = _repo_whose_head_has_a_row_the_working_copy_dropped(tmp_path, working=_j())
+    shim.install(monkeypatch)
+    assert audience.advice_blocked(_p(repo), head=True) == {_COMMITTED_ROW}
+    assert shim.verbs() == ["cat-file"]
+
+
+def test_the_guard_and_the_clause_still_skip_head_when_the_answer_is_already_strict(audience, tmp_path, shim, monkeypatch):
+    """Only the advice answer depends on HEAD once strict: guard_mode and forced_strict_clause keep their no-git path."""
+    repo = _repo_whose_head_has_a_row_the_working_copy_dropped(tmp_path, working=_j(subagent_git="strict"))
+    shim.install(monkeypatch)
+    assert audience.guard_mode(_p(repo), head=True) == "strict"
+    assert audience.forced_strict_clause(_p(repo), head=True) is None
+    assert shim.calls() == []
+
+
+@pytest.mark.parametrize("reader", ["guard_mode", "advice_blocked", "forced_strict_clause"])
+def test_every_reader_the_hooks_call_takes_head(audience, tmp_path, shim, monkeypatch, reader):
+    repo = init_repo(tmp_path / "r", {PROJECT: _j(subagent_git="strict", advice_block=[_COMMITTED_ROW])})
+    _set_wt(repo, _j())
+    shim.install(monkeypatch)
+    answer = getattr(audience, reader)(_p(repo), head=True)
+    assert answer in ("strict", frozenset({_COMMITTED_ROW}), None), (reader, answer)
+    assert getattr(audience, reader)(_p(repo)) in ("seatbelt", frozenset(), None), "and without head the working tree alone answers"
+
+
+def _index(entries: "list[bytes]", version: int = 2) -> bytes:
+    out = b"DIRC" + version.to_bytes(4, "big") + len(entries).to_bytes(4, "big")
+    for path in entries:
+        entry = b"\0" * 62 + path + b"\0"
+        out += entry + b"\0" * (-len(entry) % 8)
+    return out + b"\0" * 20
+
+
+@pytest.mark.parametrize("paths,answer", [
+    ([b"README", b"src/a.py"], "no"),
+    ([b".gitignore", b".nexus/other.json", b"README"], "no"),
+    ([b".gitignore", b".nexus/project.json", b"README"], "yes"),
+    ([b".github/x.yml", b".nexus/", b"README"], "unknown"),
+    ([], "no"),
+])
+def test_the_scan_walks_sorted_entries_and_stops_at_the_first_path_after_the_file(audience, tmp_path, paths, answer):
+    gd = tmp_path / "gitdir"
+    gd.mkdir()
+    (gd / "index").write_bytes(_index(paths))
+    assert audience.index_names_project(str(gd)) == answer
+
+
+def test_a_large_index_with_nothing_for_the_project_is_no_not_unknown(audience, tmp_path, monkeypatch):
+    """The old byte search called anything past its bound "unknown" and so ran git for a plain large repository."""
+    gd = tmp_path / "gitdir"
+    gd.mkdir()
+    (gd / "index").write_bytes(_index([f"src/f{i:05d}.py".encode() for i in range(3000)]))
+    monkeypatch.setattr(audience, "INDEX_SEARCH_MAX_BYTES", 4096)
+    assert (gd / "index").stat().st_size > 4096 * 10
+    assert audience.index_names_project(str(gd)) == "no"
+
+
+def test_a_large_index_still_finds_the_project_file_and_a_scan_past_the_bound_is_unknown(audience, tmp_path, monkeypatch):
+    gd = tmp_path / "gitdir"
+    gd.mkdir()
+    early = [b".nexus/project.json"] + [f"src/f{i:05d}.py".encode() for i in range(3000)]
+    (gd / "index").write_bytes(_index(early))
+    monkeypatch.setattr(audience, "INDEX_SEARCH_MAX_BYTES", 4096)
+    assert audience.index_names_project(str(gd)) == "yes"
+    late = tmp_path / "late"
+    late.mkdir()
+    # Every entry sorts before the file ('.' is the lowest printable path byte), so the bound is reached before the answer.
+    (late / "index").write_bytes(_index([f".a{i:05d}".encode() for i in range(3000)]))
+    assert audience.index_names_project(str(late)) == "unknown"
+
+
+def test_a_plain_repository_with_a_large_index_runs_no_git_for_settings(audience, tmp_path, shim, monkeypatch):
+    repo = init_repo(tmp_path / "r", {PROJECT: _j(), **{f"src/f{i:04d}.py": "x\n" for i in range(300)}})
+    _set_wt(repo, None)  # the working file is gone and the index still names it: git is asked
+    shim.install(monkeypatch)
+    audience.guard_mode(_p(repo), head=True)
+    assert shim.verbs() == ["cat-file"]
+    plain = init_repo(tmp_path / "plain", {f"src/f{i:04d}.py": "x\n" for i in range(300)})
+    monkeypatch.setattr(audience, "INDEX_SEARCH_MAX_BYTES", 512)
+    shim.install(monkeypatch)
+    before = len(shim.calls())
+    audience.guard_mode(_p(plain), head=True)
+    assert len(shim.calls()) == before, "no settings file and an index that does not name one: no git"

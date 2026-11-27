@@ -552,14 +552,26 @@ def _read_file(label: str, path: str, role: str, *, who: str, follow: bool, keys
 # ---------------------------------------------------------------------------
 
 
+_INDEX_ENTRY_FIXED = 62  # ctime, mtime, dev, ino, mode, uid, gid, size (40 bytes), the object id (20), the flags (2)
+_INDEX_CHUNK = 16 * 1024
+_PROJECT_PATH = b".nexus/project.json"
+
+
+_INDEX_ENTRY_FIXED = 62  # ctime, mtime, dev, ino, mode, uid, gid, size (40 bytes), the object id (20), the flags (2)
+_INDEX_CHUNK = 16 * 1024
+_PROJECT_PATH = b".nexus/project.json"
+
+
 def index_names_project(gitdir: str) -> str:
     """Whether the git index names ``.nexus/project.json``: ``"yes"``, ``"no"`` or ``"unknown"``.
 
     A plain ``rm`` of the working copy leaves the index entry, so this says a project file may exist when the working one is
-    gone. A stdlib byte search of index versions 2 and 3 (full paths), reading at most ``INDEX_SEARCH_MAX_BYTES``. Version 4
-    (prefix-compressed), a split index (``sharedindex.*``), a sparse index (a ``.nexus/`` directory entry or an ``sdir``
-    extension), a sparse checkout, a miss past the bound and any read error are "unknown", which the caller treats as "may name
-    it": git is then asked, and only a failure of git itself makes it strict.
+    gone. Index versions 2 and 3 list entries sorted by path, so the scan walks the entries in order and stops at the first path
+    that sorts after ``.nexus/project.json``: a repository with a large index reads a few kilobytes. A directory entry for
+    ``.nexus/`` (a sparse index folds the directory into one) sorts before the file and is "unknown", because the file may be
+    under it. Version 4 (prefix-compressed), a split index (``sharedindex.*``), a sparse checkout, a scan that reaches
+    ``INDEX_SEARCH_MAX_BYTES`` before it passes the path, a malformed entry and any read error are "unknown", which the caller
+    treats as "may name it": git is then asked, and only a failure of git itself makes it strict.
     """
     try:
         try:
@@ -573,19 +585,43 @@ def index_names_project(gitdir: str) -> str:
         except FileNotFoundError:
             return "no"
         with handle:
-            data = handle.read(INDEX_SEARCH_MAX_BYTES + 1)
-        if len(data) < 12 or data[:4] != b"DIRC" or int.from_bytes(data[4:8], "big") not in (2, 3):
-            return "unknown"
-        truncated = len(data) > INDEX_SEARCH_MAX_BYTES
-        window = data[:INDEX_SEARCH_MAX_BYTES]
-        if b".nexus/project.json" in window:
-            return "yes"
-        # A sparse index folds `.nexus/` into one directory entry (the path then ends at its NUL) and carries an `sdir`
-        # extension; neither names the file, and the file may be under them.
-        if truncated or b".nexus/\x00" in window or b"sdir" in window:
-            return "unknown"
+            data = handle.read(_INDEX_CHUNK)
+            if len(data) < 12 or data[:4] != b"DIRC" or int.from_bytes(data[4:8], "big") not in (2, 3):
+                return "unknown"
+            version = int.from_bytes(data[4:8], "big")
+            count = int.from_bytes(data[8:12], "big")
+            pos = 12
+            for _ in range(count):
+                # An entry is its fixed part, the path and a NUL, padded to a multiple of eight bytes: read until the path ends.
+                while True:
+                    fixed = _INDEX_ENTRY_FIXED
+                    if version == 3 and len(data) > pos + 60 and data[pos + 60] & 0x40:
+                        fixed += 2  # the extended flags
+                    end = data.find(b"\0", pos + fixed) if len(data) > pos + fixed else -1
+                    if end != -1:
+                        if end >= INDEX_SEARCH_MAX_BYTES:
+                            return "unknown"
+                        break
+                    if len(data) >= INDEX_SEARCH_MAX_BYTES:
+                        return "unknown"
+                    more = handle.read(_INDEX_CHUNK)
+                    if not more:
+                        return "unknown"
+                    data += more
+                path = data[pos + fixed:end]
+                if path == _PROJECT_PATH:
+                    return "yes"
+                if path == b".nexus/" or path > _PROJECT_PATH:
+                    return "unknown" if path == b".nexus/" else "no"
+                length = fixed + len(path) + 1
+                pos += (length + 7) // 8 * 8
+                while len(data) < pos + 12 and len(data) < INDEX_SEARCH_MAX_BYTES:
+                    more = handle.read(_INDEX_CHUNK)
+                    if not more:
+                        break
+                    data += more
         return "no"
-    except OSError:
+    except (OSError, ValueError):
         return "unknown"
 
 
@@ -801,22 +837,24 @@ def _combine(s: Settings, copies: "list[tuple[str, _FileRead]]", session: "_File
     s.user.update({k: v for k, v in user.values.items() if k in s.user})
 
 
-def read_settings(payload: object, head: bool = False, full: bool = False) -> Settings:
+def read_settings(payload: object, head: bool = False, full: bool = False, advice: bool = False) -> Settings:
     """Read both files and return the effective settings. Never raises: a failure answers ``subagent_git`` strict.
 
     With *head*, the strictness keys' ``HEAD`` read runs when it can change the answer and a project file may exist (the
     working-tree file exists, or the git index names it): the result is not already strict and, for a checkout with no
     working-tree file, the index check allows it. A repository with no settings file therefore runs no git process. *full* reads
-    ``HEAD`` whatever the working tree says (``show`` and ``check``). Call it with *head* only where the decision depends on it:
+    ``HEAD`` whatever the working tree says (``show`` and ``check``). *advice* says the answer uses ``advice_block``, which takes the
+    union of the copies, so a ``HEAD`` row can add to it even when ``subagent_git`` is already strict; without it a strict reading
+    skips ``HEAD``, since nothing in ``HEAD`` can loosen it. Call it with *head* only where the decision depends on it:
     a guard about to pass a command the strict scan would deny, an advice row that would only warn.
     """
     try:
-        return _read_settings(payload, head or full, full)
+        return _read_settings(payload, head or full, full, advice)
     except BaseException as exc:  # noqa: BLE001 -- the reader never raises
         return _failed(exc)
 
 
-def _read_settings(payload: object, head: bool, full: bool) -> Settings:
+def _read_settings(payload: object, head: bool, full: bool, advice: bool = False) -> Settings:
     s = Settings()
     user = _read_user()
     root = session_root(payload)
@@ -831,7 +869,7 @@ def _read_settings(payload: object, head: bool, full: bool) -> Settings:
         copies.append(("project (cwd checkout)", cwdc))
     already_strict = any(fr.values.get("subagent_git") == STRICT for _, fr in copies) or user.values.get("subagent_git") == STRICT
     headc = None
-    if head and root and session is not None and (full or not already_strict):
+    if head and root and session is not None and (full or advice or not already_strict):
         wt_exists = os.path.lexists(os.path.join(root, *PROJECT_FILE_PARTS))
         gd = git_dir(root)
         if gd is not None and (wt_exists or index_names_project(gd) != "no"):
@@ -907,7 +945,7 @@ def forced_strict_clause(payload: object, head: bool = False) -> "str | None":
 def advice_blocked(payload: object, head: bool = False) -> "frozenset[str]":
     """The advice row ids a project or the user switched to block. Empty on any error (a row only warns)."""
     try:
-        return frozenset(str(r) for r in read_settings(payload, head=head).values["advice_block"])  # type: ignore[union-attr]
+        return frozenset(str(r) for r in read_settings(payload, head=head, advice=head).values["advice_block"])  # type: ignore[union-attr]
     except BaseException:  # noqa: BLE001
         return frozenset()
 
@@ -917,9 +955,55 @@ def settings_problems(payload: object, head: bool = True) -> "list[Problem]":
     remote-branch check). Reads ``HEAD`` by default, since a committed copy that cannot be read is a problem to report; a
     repository with no settings file still starts no ``git`` process. An empty list on any error."""
     try:
-        return list(read_settings(payload, head=head).problems)
+        problems = list(read_settings(payload, head=head, full=head).problems)
+        extra = _telemetry_endpoint_problem()
+        if extra is not None:
+            problems.append(extra)
+        return problems
     except BaseException:  # noqa: BLE001 -- a notice must never fail the hook
         return []
+
+
+def telemetry_endpoint_missing(config_dir: "str | os.PathLike[str]") -> bool:
+    """Whether the telemetry senders would find no engine under *config_dir*, the account's ``.config/nexus``.
+
+    The decision is the senders': the plugin's ``_endpoint_resolve.pinned_endpoint`` when it sits beside this file, and the
+    wheel's mirror of it (``nexus.hooks.telemetry_endpoint``) when it does not. This file is the same bytes in both places and
+    the plugin runs with no ``nexus`` importable, so each side asks its own. True when the answer cannot be had.
+    """
+    try:
+        from pathlib import Path  # noqa: PLC0415
+
+        try:
+            from _endpoint_resolve import pinned_endpoint  # noqa: PLC0415 -- the plugin's resolver, beside this file
+        except ImportError:
+            from nexus.hooks.telemetry_endpoint import telemetry_endpoint_missing as _mirror  # noqa: PLC0415 -- the wheel's
+            return bool(_mirror(Path(config_dir)))
+        return pinned_endpoint(Path(config_dir)) == (None, None)
+    except BaseException:  # noqa: BLE001 -- no answer is no engine
+        return True
+
+
+def _telemetry_endpoint_problem() -> "Problem | None":
+    """The problem ``telemetry`` on with no engine under the account's config directory is (RDR-259 Decision 9), or None.
+
+    A fact about the machine, not a fault in a settings file, so ``check`` does not count it. None when telemetry is off or the
+    account has no home (that is its own problem). Never raises.
+    """
+    try:
+        if _user_values()["telemetry"] is not True:
+            return None
+        home = account_home()
+        if not home or not telemetry_endpoint_missing(os.path.join(home, ".config", "nexus")):
+            return None
+        return Problem(
+            USER_LABEL, "telemetry",
+            "telemetry is on, but no engine is configured under the account's config directory; "
+            "an engine named only in the environment is not used for telemetry",
+            "no events are sent", "environment",
+        )
+    except BaseException:  # noqa: BLE001
+        return None
 
 
 def telemetry_enabled() -> bool:
@@ -1155,6 +1239,9 @@ def build_report(cwd: "str | None" = None, versions: "dict[str, str | None] | No
     payload = {"cwd": cwd}
     s = read_settings(payload, head=True, full=True)
     problems = list(s.problems)
+    extra = _telemetry_endpoint_problem()
+    if extra is not None:
+        problems.append(extra)
     branch = s.values.get("integration_branch")
     if s.session_root and isinstance(branch, str):
         extra = _branch_problem(s.session_root, branch)

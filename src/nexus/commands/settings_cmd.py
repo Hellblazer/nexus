@@ -12,16 +12,12 @@ from pathlib import Path
 
 import click
 
-#: The message the telemetry report gives when ``telemetry`` is on and the account names no engine (RDR-259 Decision 9).
-TELEMETRY_NO_ENGINE = (
-    "telemetry is on, but no engine is configured under the account's config directory; "
-    "an engine named only in the environment is not used for telemetry"
-)
+from nexus.hooks.telemetry_endpoint import telemetry_endpoint_missing  # noqa: F401 -- the report's decision lives there now
+
 _PLUGIN_RECORD_NOTE = (
     "the plugin's version is not in Claude Code's record of installed plugins; "
     "run python3 <plugin root>/hooks/scripts/_audience.py show for it"
 )
-_DEFAULT_TENANT = "default"
 
 
 def cli_version() -> str | None:
@@ -56,83 +52,14 @@ def plugin_version_from_record() -> str | None:
     return min(found)[1] if found else None
 
 
-def telemetry_endpoint_missing(config_dir: Path) -> bool:
-    """True when no engine is named under *config_dir*, the account's ``.config/nexus``.
-
-    This must agree with the plugin's ``_endpoint_resolve.pinned_endpoint(config_dir)`` (nexus-sby49.10): the same three sources and
-    no environment leg. An engine is a ``credentials.service_url`` in ``config.yml`` (no ``user:password@`` in it) with a token
-    (a fresh data-token lease for that URL, the file's ``service_token``, or a live lease's token when the lease names that same
-    origin), or a live local supervisor lease alone; and no bearer goes over plain http off this machine (nexus-ec37o), so an
-    ``http`` URL that is not loopback names no engine either. Nothing here reads ``NX_SERVICE_*`` or any other environment variable.
-    """
-    from nexus._log_safe_url import has_userinfo  # noqa: PLC0415
-    from nexus.config import persisted_credentials  # noqa: PLC0415
-    from nexus.db.service_endpoint import host_port_url, is_loopback_host, normalize_origin, origins_equal  # noqa: PLC0415
-
-    def carries_a_bearer(url: str) -> bool:
-        origin = normalize_origin(url)
-        return origin is not None and (origin[0] == "https" or is_loopback_host(origin[1]))
-
-    lease = _lease(config_dir)
-    if lease is not None and not lease.get("token"):
-        lease = None
-    lease_url = host_port_url(lease["host"], lease["port"]) if lease is not None else ""
-    try:
-        credentials = persisted_credentials(config_dir)
-    except Exception:  # noqa: BLE001 -- an unreadable config.yml names no engine
-        credentials = {}
-    url = credentials.get("service_url", "").strip().rstrip("/")
-    if url:
-        if has_userinfo(url) or not carries_a_bearer(url):
-            return True
-        if credentials.get("service_token", "").strip() or (lease is not None and origins_equal(url, lease_url)):
-            return False
-        return _data_token(config_dir, url) is None
-    return lease is None or not carries_a_bearer(lease_url)
-
-
-def _lease(config_dir: Path) -> dict[str, str] | None:
-    """The live local supervisor lease under *config_dir* as ``{"host", "port", "token"}``, or None."""
-    from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415
-
-    try:
-        record = ServiceRegistry(dir=config_dir, tier="storage_service").discover(service_identity())
-        if record is None:
-            return None
-        endpoint = record.endpoint
-        if int(endpoint.get("port", 0)) <= 0:
-            return None
-        return {"host": str(endpoint.get("host", "127.0.0.1")), "port": str(endpoint["port"]), "token": str(endpoint.get("token", ""))}
-    except Exception:  # noqa: BLE001 -- any failure reads as no lease
-        return None
-
-
-def _data_token(config_dir: Path, url: str) -> str | None:
-    from nexus.db.data_token import DataTokenManager  # noqa: PLC0415
-
-    try:
-        return DataTokenManager(config_dir=config_dir).fresh_lease_token(url, _DEFAULT_TENANT, near_expiry_threshold=0.0)
-    except Exception:  # noqa: BLE001
-        return None
-
-
 def build_report(cwd: str | None) -> dict:
-    """The reader's report, with the versions nx knows and the telemetry missing-endpoint line when it applies."""
+    """The reader's report (the telemetry missing-endpoint line is the reader's own), with the versions nx knows."""
     from nexus.hooks import _audience  # noqa: PLC0415
 
     plugin = plugin_version_from_record()
     report = _audience.build_report(cwd, versions={"plugin": plugin, "nx": cli_version()})
     if plugin is None:
         report["versions"]["note"] = _PLUGIN_RECORD_NOTE
-    telemetry = next((row for row in report["settings"] if row["key"] == "telemetry"), None)
-    try:
-        home = _audience.account_home()
-    except Exception:  # noqa: BLE001 -- the reader already reports an account home that cannot be read
-        home = None
-    if telemetry is not None and telemetry["value"] is True and home:
-        if telemetry_endpoint_missing(Path(home) / ".config" / "nexus"):
-            problem = _audience.Problem(_audience.USER_LABEL, "telemetry", TELEMETRY_NO_ENGINE, "no events are sent", "environment")
-            report["problems"].append(dict(problem._asdict()))
     return report
 
 

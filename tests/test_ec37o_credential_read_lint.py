@@ -315,8 +315,8 @@ _allow(ALLOWED, _ROUTING, "_read_service_lease", "thin wrapper over the shared l
 _allow(ALLOWED, _ROUTING, "_read_config_yml_credentials", "thin wrapper over the shared credential-file reader; its answer feeds the bound resolver", "reference to read_config_yml_credentials")
 _allow(ALLOWED, _ROUTING, "_read_data_token_lease", _DT_LEASE, "reference to read_data_token_lease")
 _allow(ALLOWED, _EP, "pinned_endpoint", "the telemetry senders' resolver (RDR-259): the saved service_token goes with the saved URL, the lease token only to the lease's own endpoint (origins_equal), and no bearer goes over cleartext off this machine", "reference to read_storage_service_lease", 'lease.get("token")', "reference to read_config_yml_credentials", "reference to read_data_token_lease", "reference to read_data_token_lease", 'lease["token"]', 'lease["token"]')
-_allow(ALLOWED, "src/nexus/commands/settings_cmd.py", "telemetry_endpoint_missing", "answers whether the plugin's pinned_endpoint would name an engine: presence only, nothing is sent", "reference to persisted_credentials", 'lease.get("token")')
-_allow(ALLOWED, "src/nexus/commands/settings_cmd.py", "_lease", "the live lease as a dict for telemetry_endpoint_missing's presence check; nothing is sent", 'lease.get("token")')
+_allow(ALLOWED, "src/nexus/hooks/telemetry_endpoint.py", "telemetry_endpoint_missing", "answers whether the plugin's pinned_endpoint would name an engine: presence only, nothing is sent", "reference to persisted_credentials", 'lease.get("token")')
+_allow(ALLOWED, "src/nexus/hooks/telemetry_endpoint.py", "_lease", "the live lease as a dict for telemetry_endpoint_missing's presence check; nothing is sent", 'lease.get("token")')
 _allow(ALLOWED, "conexus/hooks/scripts/mailbox_drain.py", "_resolve_endpoint", _DT_LEASE + "; the drain then holds it to the cleartext rule", "reference to read_data_token_lease")
 # -- the data-token manager's own lease file
 _DT = "src/nexus/db/data_token.py"

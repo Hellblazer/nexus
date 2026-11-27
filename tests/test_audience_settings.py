@@ -94,7 +94,24 @@ def test_the_module_is_stdlib_only_and_reads_one_environment_variable():
                 imported.update(a.name.split(".")[0] for a in n.names)
             elif isinstance(n, ast.ImportFrom) and n.level == 0:
                 imported.add((n.module or "").split(".")[0])
-        assert imported <= stdlib | {"__future__"}, imported - stdlib
+        # The module imports at import time only what the standard library has. The one thing it takes from a sibling is a helper
+        # the plugin keeps beside it (``_exec_path``, ``_endpoint_resolve``) or that nexus keeps for the wheel's copy, imported
+        # inside a function that falls back on ImportError (nexus-sby49.14): the same bytes run in both places, and neither has
+        # the other's helper.
+        siblings = {"_exec_path", "_endpoint_resolve", "nexus"}
+        assert imported - stdlib - {"__future__"} <= siblings, imported - stdlib - siblings
+        module_level = {
+            (n.module or "").split(".")[0] if isinstance(n, ast.ImportFrom) else a.name.split(".")[0]
+            for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom)) for a in getattr(n, "names", [])
+        }
+        assert module_level <= stdlib | {"__future__"}, module_level - stdlib
+        for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+            for n in ast.walk(fn):
+                if isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[0] in siblings:
+                    assert any(
+                        isinstance(t, ast.Try) and any(h.type is not None and "ImportError" in ast.dump(h.type) for h in t.handlers)
+                        for t in ast.walk(fn)
+                    ), f"{fn.name} imports {n.module} with no ImportError fallback"
         reads = []
         for n in ast.walk(tree):
             if isinstance(n, ast.Attribute) and n.attr == "environ" and getattr(n.value, "id", "") == "os":

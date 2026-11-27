@@ -188,6 +188,14 @@ def test_each_problem_is_a_line_and_the_count_is_in_the_model_line(tmp_path):
     assert ".nexus/project.json" in context and "conexus.json" in context
 
 
+def test_telemetry_on_with_no_engine_is_a_line_of_the_notice(tmp_path):
+    """RDR-259 Decision 9: the notice reports the missing telemetry endpoint as show and check do."""
+    repo = _repo(tmp_path / "repo")
+    out = _out(_run(tmp_path, repo, _home(tmp_path / "home", {"version": 1, "telemetry": True})))
+    assert "no engine is configured under the account's config directory" in out["systemMessage"]
+    assert "1 problem" in _context(out)
+
+
 def test_no_account_home_is_reported_as_the_environment(tmp_path):
     repo = _repo(tmp_path / "repo")
     out = _out(_run(tmp_path, repo, None))
