@@ -129,7 +129,7 @@ where each value came from, and no page a new user reads first.
 8.5.7 users have no files; Sam's own sessions depend on the flag; old
 plugins meet new checkouts and the reverse; two legacy marker files had to be
 either accepted for a window or dropped at once (Sam dropped them at once, in
-this release); and the Phase 2 gating on `develop` (unreleased) must never
+this release: T2 `nexus/sam-ruling-rdr259-stage4-in-859-2026-11-26`); and the Phase 2 gating on `develop` (unreleased) must never
 ship.
 
 #### Gap 7: The relationship to Claude Code's own configuration is unsettled
@@ -142,13 +142,14 @@ and whether a permission `ask` rule survives the plugin's PermissionRequest
 auto-approve. The spikes answered both (Research 10). The second answer is a
 defect in every shipped release: the plugin's PermissionRequest allow
 silently overrides a user's `ask` rule for any conexus tool (shown for a
-Bash command; that it holds for conexus MCP tools is inferred from the
-plugin printing the same answer, record 26). A further spike shows the
+Bash command, record 26, and reproduced for a conexus MCP tool under v8.5.7's
+`hooks.json`, record 52). A further spike shows the
 PermissionRequest answer is not needed for the auto-approval itself: an
 allow given on PreToolUse alone approves a Bash command that has no rule,
 and leaves a project-scope `ask` or `deny` rule in force (Research 11,
-record 33); the MCP-tool and user-scope cases are the early auto-approve
-release's own spike ("What ships when").
+record 33); records 51 and 52 later ran the MCP-tool and user-scope cases
+with the real plugin (the early auto-approve release's spike, "What ships
+when") and got the same answers.
 
 #### Gap 8: A repository could use its file to weaken a protection
 
@@ -397,7 +398,8 @@ records hold the commands and outputs.
   (record 32; Apple M4 Max, Python 3.13): `guard_mode` reading both files with
   the cwd five directories down averaged 59.5 us, and a fresh interpreter that
   imports `_audience` and calls two readers took 22.4 ms against 21.2 ms bare.
-  Native Windows and the `HEAD` read path were not measured.
+  Native Windows and the `HEAD` read path were not measured here; records 57
+  to 59 measured them later (Critical Assumptions, below).
 
 **Research 11 (gate round 1 evidence, 2026-11-26; records
 `nexus_rdr/259-research-33` to `-40`).**
@@ -466,33 +468,74 @@ What is still assumed after the spikes:
   and `clear` in Desktop for that channel, other Desktop versions. If a
   surface hides it, `nx settings check` and the deny-text clause (Decision
   4) still tell the user.
-- [ ] Which commit an isolation worktree is cut from. **Status**: Unsettled
-  (Research 10: origin's default branch in the spike, the primary's tracked
-  branch in nexus). **Method**: Spike. The design no longer depends on it
-  (Decision 1, which copy is read).
-- [ ] A PreToolUse-only allow behaves for a conexus MCP tool, and under a
+- [ ] Which commit an isolation worktree is cut from. **Status**: Unsettled,
+  and left open on purpose (Research 10: origin's default branch in the
+  spike, the primary's tracked branch in nexus). No later record settles it.
+  The design does not depend on it (Decision 1, which copy is read), so
+  closing this RDR does not wait for it.
+- [x] A PreToolUse-only allow behaves for a conexus MCP tool, and under a
   user-scope `ask` rule, as it did for a Bash command under a project-scope
-  rule (Decision 9). **Status**: Verified for Bash, default and
-  `acceptEdits`, project scope (record 33); auto mode verified by
-  cc-validation scenario 28 at Claude Code 2.1.251, not re-run at 2.1.332
-  (record 43); a conexus MCP tool and a user-scope `ask` rule inferred, not
-  tested. **Method**: the early release's own spike ("What ships when"),
-  with the real plugin in a sandboxed session.
-- [ ] `CLAUDE_PROJECT_DIR` reaches the nx-side hooks (the MCP server's hook
-  tools), not only command hooks. **Status**: Documented for command hooks
-  only. **Method**: Spike in Stage 1; where it is absent the reader uses the
-  payload `cwd`, as today.
-- [ ] The reader's file reads stay within the 5 ms design budget on native
+  rule (Decision 9). **Status**: Verified. Record 33 covered Bash, default
+  and `acceptEdits`, project scope. Records 51 and 52 ran the early
+  release's spike with the real plugin's hook and a conexus MCP tool
+  (Claude Code 2.1.332, sandboxed config directory): with no rule the tool
+  ran with no prompt; a user-scope and a project-scope `ask` rule stopped it
+  and raised a prompt; a `deny` rule withheld the tool. That held in default
+  and `acceptEdits` mode, for a main session and a general-purpose subagent
+  (a plugin-defined subagent in default mode), and in auto mode for a main
+  session and a subagent, where an `ask` rule is honoured and not decided by the
+  classifier (record 52, dialogs captured in default and auto mode).
+  A control run of v8.5.7's `hooks.json` with a user-scope `ask` rule
+  reproduced the defect (record 52). cc-validation scenario 35 repeats the
+  `ask` cases against a stub tool (record 56), and scenario 28 showed the
+  PreToolUse decision governs in auto mode at 2.1.251 (record 43). The
+  plugin half shipped in v8.5.8 and the CLI half in v8.5.9. Limits: one run
+  per cell, with a small model; the dialog was captured in default and auto
+  mode only, and the `acceptEdits` and subagent cells were observed as
+  denials plus the PermissionRequest event.
+- [x] `CLAUDE_PROJECT_DIR` reaches the nx-side hooks (the MCP server's hook
+  tools), not only command hooks. **Status**: Measured (record 54, Claude
+  Code 2.1.332, headless, a test plugin's stdio MCP server): the server
+  process has the variable in its environment at launch, the project root,
+  the same on every call including a worktree subagent's. The `mcp_tool`
+  hook input template does not substitute `${CLAUDE_PROJECT_DIR}` (it
+  becomes the empty string); only payload fields such as `${cwd}` do. So the
+  reader takes the payload `cwd` first and the variable as the fallback.
+  Not checked: the real conexus server launched through uv, a
+  marketplace-installed plugin, Desktop and Cowork. The design does not
+  depend on those, because the reader has the payload `cwd` either way.
+- [x] The reader's file reads stay within the 5 ms design budget on native
   Windows (the laptop measured about 60 us warm and 1.2 ms cold, Research
   10), and the strictness keys' `HEAD` read, one git process, adds
-  under 50 ms at the median on both platforms. **Status**: the file reads
-  measured on the laptop only; the `HEAD` read not measured. **Method**:
-  measure in Stage 1.
-- [ ] A stdlib walk of the git index entries, in path order, tells whether
+  under 50 ms at the median on both platforms. **Status**: Measured
+  (nexus-sby49.15 and nexus-sby49.8, native Windows 11 on qwent and the
+  laptop). The file reads cost 0.1 to 0.3 ms warm and 0.2 to 0.5 ms cold on
+  Windows (record 57). The first `HEAD` read design, two git processes,
+  missed: 67 to 76 ms at the median on Windows (record 58). The one-process
+  `cat-file --batch` read of nexus-sby49.8 adds 22 to 23 ms at the median
+  on Windows (p90 up to 28 ms) and 8.4 to 8.8 ms on the laptop, every cell
+  under the 50 ms bound at the median and at p90 (record 59). Limits: a Git
+  for Windows spawn varied by a factor of two between runs on the same
+  machine, so the margin is real but not fixed, and the Windows slot was
+  shared. A separate cost, recorded and not changed: the first
+  `account_home()` call in a fresh interpreter takes about 12 ms on native
+  Windows (ctypes import and the shell call, records 57 and 59), paid once
+  per hook process. The 5 ms budget is stated for the file reads, which meet
+  it; a reader of the budget as the whole first call would see it missed on
+  Windows by that lookup.
+- [x] A stdlib walk of the git index entries, in path order, tells whether
   `.nexus/project.json` is tracked, for index versions 2 and 3 and for a
-  linked worktree's own index (Decision 1). **Status**: verified for a
-  version 2 index in a plain repository (record 46); version 3 and linked
-  worktrees inferred, not tested. **Method**: Stage 1 test over each.
+  linked worktree's own index (Decision 1). **Status**: Verified. Record 46
+  covered a version 2 index in a plain repository. Record 55 (git 2.53.0)
+  covered version 3, version 4 (the path is not found, so it must read as
+  "may name it"), a split index and a sparse index (both false negatives
+  without that rule), a cone sparse checkout, a staged deletion and a linked
+  worktree's own index. The Stage 1 tests in
+  `tests/hooks/test_audience_head_read.py` cover version 2, 3 and 4, a
+  linked worktree's index, split and sparse indexes, a bounded scan and the
+  sorted-entry walk. Not checked (record 55): a cold cache, `GIT_INDEX_FILE`
+  or `core.worktree` overrides, submodule gitdirs, other git versions,
+  Windows.
 
 Acknowledged minor assumptions, which nothing in the design rests on:
 
@@ -592,7 +635,8 @@ too, once per session, since a committed copy that cannot be read is a
 problem to report, and the deny text's "could not be read" clause reads it
 for the decision it explains. No other hook path reads `HEAD`. The bound:
 one git process on those paths, adding under 50 ms at the median on the
-laptop and on native Windows, measured in Stage 1. The 5 ms design budget
+laptop and on native Windows; measured at 8.4 to 8.8 ms on the laptop and 22
+to 23 ms on native Windows (record 59). The 5 ms design budget
 for the file reads (Decision 2's reader) is separate. No cache is used.
 
 The two conditions are a deliberate trade: a repository that has never had
@@ -896,6 +940,13 @@ tool call until its timeout; a symbolic link could point it at any file the
 user can read. A repository that wants to share one settings file between
 checkouts commits a copy.
 
+The user file's link row changed after acceptance, on Sam's decision of
+2026-11-27 (T2 `nexus/sam-ruling-rdr259-close-2026-11-27`). The accepted text
+refused a link in both files. He chose to follow a link in the user file, so
+a dotfile manager's link works; a link to nothing and a target that is not a
+regular file still read strict, and the project file keeps the `lstat`
+refusal.
+
 The user-file row departs from the rework, which left a broken user file at
 the seatbelt. A user writes `conexus.json` only to change something, and the
 most likely change is `strict`; a broken file should not silently take away
@@ -981,6 +1032,9 @@ the machine rather than a file (no account home, a repository owned by
 another user, a missing remote branch in a shallow clone, telemetry on with
 no engine configured) is printed marked "environment, not counted" and does
 not change the exit code, so the same checkout passes in CI and on a laptop.
+The accepted text said `check` exits 1 when there are any problems; the
+exclusion of environment problems is the implementer's decision, reviewed in
+the review gate (nexus-sby49.18), not a ruling by Sam.
 
 Both commands import `nexus.hooks._audience`, the byte copy the hooks use,
 so the report is the hooks' own reading. The plugin copy is also runnable:
@@ -1019,18 +1073,19 @@ settings` is a long-lived public command; Sam's decision S5.
 
 | Who | What changes |
 | --- | --- |
-| 8.5.7 user, no files | Guard stays the seatbelt. Keeps, now without nexus ids: the search-scope row, the four brief questions, the dispatch sentence, the T1 nudge for built-in agents. Loses: the SubagentStart Git row, which 8.5.7 shows to every user (`subagent_start.py:155-156` at v8.5.7, record 38) and which now appears only with `strict` (ruling 3); and telemetry (it stops unless they set `telemetry: true`; it only ever went to their own engine). Auto-approve still approves every allowlisted tool with no prompt (ruling 4; the D2 prompt never shipped), and a user's own `ask` rule for a conexus tool is expected to prompt where 8.5.7's PermissionRequest answer overrode it (Decision 9; shown for a project-scope rule, record 33, and confirmed for user scope by the early release's spike); a `deny` rule already held, since a PermissionRequest hook "can't approve what a deny rule refuses" (Research 6). The compaction count is measured against their default branch instead of `origin/develop`. |
+| 8.5.7 user, no files | Guard stays the seatbelt. Keeps, now without nexus ids: the search-scope row, the four brief questions, the dispatch sentence, the T1 nudge for built-in agents. Loses: the SubagentStart Git row, which 8.5.7 shows to every user (`subagent_start.py:155-156` at v8.5.7, record 38) and which now appears only with `strict` (ruling 3); and telemetry (it stops unless they set `telemetry: true`; it only ever went to their own engine). Auto-approve still approves every allowlisted tool with no prompt (ruling 4; the D2 prompt never shipped), and a user's own `ask` rule for a conexus tool is expected to prompt where 8.5.7's PermissionRequest answer overrode it (Decision 9; shown for a project-scope rule, record 33, and for both scopes with a conexus MCP tool by the early release's spike, records 51 and 52); a `deny` rule already held, since a PermissionRequest hook "can't approve what a deny rule refuses" (Research 6). The compaction count is measured against their default branch instead of `origin/develop`. |
 | Sam | The flag file has no effect from this release. To keep today's behaviour outside nexus he writes `conexus.json` with `subagent_git: strict` and `telemetry: true` on each machine where he wants them; his `remote-test-hosts` file stays as it is. Deleting `maintainer-profile` is his to do; `show` reports it as retired. |
 | nexus checkout | `.nexus/project.json` sets `subagent_git: strict`, `preflight`, `ci_wait`, `credential_helper`, `integration_branch: develop` and the local-and-cloud brief question. `.nexus/dev-process.json` is deleted. The 8.5.7 helper does read it (`_audience.py:46-48` at v8.5.7, record 38), but it also reads the Phase 1 marker, which nexus keeps, so an 8.5.7 plugin still gives nexus the full guard. |
 | Old plugin (8.5.7) with a new nexus checkout | 8.5.7 reads the Phase 1 marker `scripts/agent-worktree-preflight.sh`, which stays (it is nexus's preflight), so nexus keeps the full guard. A user repository's new `project.json` is ignored by the old plugin. |
-| New plugin with an old checkout (an older nexus branch, a bisect) | No `project.json`, so the checkout reads as plain: the seatbelt. Neither legacy marker (`.nexus/dev-process.json`, `scripts/agent-worktree-preflight.sh`) is read, there is no compatibility window, and `show` does not mention them. The markers exist only in nexus's own checkouts, which carry `project.json` now. (Sam, 2026-11-26: Stage 4 ships with Stages 1 to 3 in 8.5.9, not two client releases later.) |
+| New plugin with an old checkout (an older nexus branch, a bisect) | No `project.json`, so the checkout reads as plain: the seatbelt. Neither legacy marker (`.nexus/dev-process.json`, `scripts/agent-worktree-preflight.sh`) is read, there is no compatibility window, and `show` does not mention them. The markers exist only in nexus's own checkouts, which carry `project.json` now. (Sam, 2026-11-26: Stage 4 ships with Stages 1 to 3 in 8.5.9, not two client releases later; T2 `nexus/sam-ruling-rdr259-stage4-in-859-2026-11-26`.) |
 | Old nx with new plugin, or the reverse | A normal state, not a short window: a plugin can update before its CLI (`nx_hook_shim.py:5-6`), RDR-143's lockstep arrives only at the next session, and it skips editable installs, where the skew can last indefinitely (record 36). During it the plugin's command hooks (the guard, the Stop guard, advice, credential) follow the settings, and the nx-side hooks (auto-approve, SubagentStart, SubagentStop, the SessionStart context) follow the installed CLI's release, which for 8.5.7 means ungated texts and a PermissionRequest answer. So the first-prompt notice names `nx settings show` only when the installed nx has it (Decision 4), `show` prints both versions and warns when they differ (Decision 5), and the auto-approve fix is made on both sides so either one closes it (Decision 9). No state is written that either side misreads. |
 | `develop` (Phase 2, unreleased) | Its `maintainer()` gating is undone on the Phase 3 branch before release (ruling 8); a lint (Decision 11) fails while any `maintainer` or `account_flag` symbol remains, so the gated tip cannot ship. |
 
 **There is no window, so there is no removal test.** The draft planned a
 `LEGACY_ACCEPTED_UNTIL` constant two client releases out and a
 version-keyed test that failed once the markers outlived it (developer item
-21). Sam's ruling put the removal in the first release, so neither exists.
+21). Sam's ruling put the removal in the first release (T2
+`nexus/sam-ruling-rdr259-stage4-in-859-2026-11-26`), so neither exists.
 Instead the tests pin the absence: a marker alone reads plain, a marker
 beside a `project.json` changes nothing, `show` reports neither, and the
 reader has no `LEGACY_MARKERS` or `LEGACY_ACCEPTED_UNTIL` name
@@ -1188,13 +1243,15 @@ them. Under that model:
   every shipped release. A PreToolUse allow alone still approves a tool that
   has no rule, in default mode, in `acceptEdits` and for a subagent, and it
   leaves a project-scope `ask` rule prompting and a `deny` rule denying
-  (record 33, for a Bash command; a conexus MCP tool and a user-scope `ask`
-  rule are untested, and the early release's spike tests both). In auto mode the
+  (record 33, for a Bash command; records 51 and 52 repeat it for a conexus
+  MCP tool with a user-scope and a project-scope `ask` rule). In auto mode the
   PreToolUse decision governs and PermissionRequest is never consulted
   (`tests/cc-validation/scenarios/28_pretooluse_governs_auto_mode.sh`,
   verified live at Claude Code 2.1.251, record 43), so removing the
-  PermissionRequest answer changes nothing there; that scenario has not been
-  re-run at 2.1.332. No reader of Claude Code's permission files is needed,
+  PermissionRequest answer changes nothing there; scenario 28 itself has not
+  been re-run at 2.1.332, but records 51 and 52 observed the same at 2.1.332
+  (no rule ran, an `ask` rule was honoured, a `deny` rule stopped the tool).
+  No reader of Claude Code's permission files is needed,
   so none of the sources a hook cannot read (`--settings`, server-managed
   settings, MDM profiles) matter.
 
@@ -1221,8 +1278,8 @@ Loosenings that remain, and why each is acceptable:
   their own Claude Code settings, and a project with one in its tracked
   `.claude/settings.json`; with no PermissionRequest answer, Claude Code is
   expected to apply both. That is shown for a project-scope rule (record
-  33) and is confirmed for a user-scope rule by the early release's spike
-  ("What ships when"). Sam's decision S4.
+  33) and for both scopes with a conexus MCP tool by the early release's
+  spike (records 51 and 52; scenario 35, record 56). Sam's decision S4.
 
   The draft's `confirm_tools` setting stays dropped. It existed because the
   `ask` route was unproven; with the PreToolUse-only answer, Claude Code's own
@@ -1281,7 +1338,9 @@ itself scans the plugin and `src/nexus/hooks/`, not `tests/`; the harness's
 `flagged_home` goes with the posture change). Rebasing therefore includes re-expressing the golden replay in
 the new postures (project-strict for the nexus checkout, plain for a user's
 repository) so that it still proves the strict path did not move. The
-prerequisite is open: the fix is not yet on `develop` (record 35).
+prerequisite is met: nexus-5y47c landed on `develop` first, the Phase 3
+branch was rebased onto it with the golden replay re-expressed in the new
+postures, and the fix shipped in v8.5.9.
 
 The full guard's deny text now reaches any user who opts in (developer item
 22). It keeps "orchestrator", which is the plugin's own documented term (its
@@ -1317,7 +1376,7 @@ the registry key on it.
   appears only after its Provenance label (Decision 2), failing when fewer
   than three labelled texts were seen across the two strict fixtures.
   "orchestrator" leaves the forbidden lexicon as process vocabulary.
-- **The ask-answer frame exception.** Until Sam answers S6 the frame in
+- **The ask-answer frame exception.** Until the S6 change lands the frame in
   `mailbox_drain.py` keeps "Sam" and `<<<sam-words`. It is not expressed in
   the behaviour leg's allowlist, which accepts only manifest `live: false`
   rows with `until: phase-N` or `D<n>` and fails an entry that matches
@@ -1418,7 +1477,7 @@ distrust real answers, and `CLAUDE.md` edits are his. Sam's decision S6
 | 17 | `remote-test-hosts` a separate file | Kept as a separate file (Sam, 2026-11-26; folding it is Out of Scope). |
 | 18 | Manifest vocabulary; SETTING row must call its reader | Kept, with more lint rules (D11). |
 | 19 | Both strict fixtures block the same row; "orchestrator" leaves the lexicon | Rows made distinct; "orchestrator" kept as product vocabulary (D11). |
-| 20 | Seven tools auto-approved; an `ask` rule claimed as the users' route, unverified | Refuted by the spike (record 26): the plugin's PermissionRequest allow overrides an `ask` rule. Auto-approve now answers on PreToolUse only, for every allowlisted tool, which a second spike shows still approves a Bash command with no rule and leaves a project-scope `ask` rule and a `deny` rule in force (record 33), so the `ask` rule is expected to be the route, confirmed for user scope by the early release's spike (D9, S4). |
+| 20 | Seven tools auto-approved; an `ask` rule claimed as the users' route, unverified | Refuted by the spike (record 26): the plugin's PermissionRequest allow overrides an `ask` rule. Auto-approve now answers on PreToolUse only, for every allowlisted tool, which a second spike shows still approves a Bash command with no rule and leaves a project-scope `ask` rule and a `deny` rule in force (record 33), so the `ask` rule is the route, confirmed for user and project scope with a conexus MCP tool by the early release's spike (records 51 and 52; D9, S4). |
 | 21 | No removal test for the window | Moot: no window. Tests pin the absence of the markers instead (D7). |
 | 22 | Strict deny text says "orchestrator" and "STRUCTURE-AGNOSTIC" | Term defined once; shouting removed (D10). |
 
@@ -1505,16 +1564,17 @@ outside Claude Code.
 - Fixes the shipped override of a user's `ask` rule (record 26) with no new
   code: a spike shows a PreToolUse allow approves a Bash command that has
   no rule and leaves a project-scope `ask` rule and a `deny` rule in force,
-  in default mode, `acceptEdits` and a subagent (record 33); a conexus MCP
-  tool and a user-scope rule are the early release's spike.
+  in default mode, `acceptEdits` and a subagent (record 33); records 51 and
+  52 repeat it with a conexus MCP tool and a user-scope rule.
 - Claude Code applies its own rules from every source it reads, including
   the ones a hook cannot read (`--settings`, server-managed settings, MDM).
 
 **Cons**:
 
-- Bash stood in for an MCP tool, and only a project-scope `ask` rule was
-  tried; both are the early release's spike. Auto mode rests on scenario 28,
-  verified at Claude Code 2.1.251 (record 43). It overrides scenario 07's
+- Record 33 used Bash and a project-scope `ask` rule; records 51 and 52
+  repeated the matrix with a conexus MCP tool at both scopes, one run per
+  cell. Auto mode rests on scenario 28 at Claude Code 2.1.251 (record 43)
+  and on records 51 and 52 at 2.1.332. It overrides scenario 07's
   hedge; a Claude Code version that stops honouring the PreToolUse answer
   would show prompts, the safe direction.
 
@@ -1555,7 +1615,8 @@ and the spike shows it is enough.
 ### Consequences
 
 - Every user gets the plugin's process by default, with no nexus words in it,
-  except the ask-answer frame's "Sam" until S6 is answered.
+  except the ask-answer frame's "Sam" until the S6 change lands (Sam decided
+  it comes after this release, with his `CLAUDE.md` edits).
 - Sam's experience outside nexus depends on a file he writes on each
   machine, the same as anyone's.
 - Two public contracts are created (two files, one command) that must be
@@ -1574,10 +1635,10 @@ and the spike shows it is enough.
 - **Risk**: A PreToolUse-only allow does not approve a conexus MCP tool in
   some mode or Claude Code version (a version flip is what cc-validation
   scenario 07 watches for), so users meet prompts they did not meet before.
-  **Mitigation**: The early release's own spike with the real plugin in
+  **Mitigation**: The early release's own spike ran with the real plugin in
   default, `acceptEdits` and auto mode, for a main session and a subagent
-  ("What ships when"), and scenarios 07, 28 and the new `ask`-rule scenario
-  at every Claude Code pin bump. The failure is a prompt, not a silent
+  (records 51 and 52), and scenarios 07, 28 and 35 (the `ask`-rule scenario,
+  record 56) run at every Claude Code pin bump. The failure is a prompt, not a silent
   approval, so it fails in the safe direction.
 - **Risk**: A malformed project file in a stranger's repository gives a user
   the full guard unexpectedly.
@@ -1625,8 +1686,11 @@ and the spike shows it is enough.
 
 ### Prerequisites
 
-- [ ] Sam's answers to S1-S6 (below).
-- [ ] nexus-5y47c on `develop` (Decision 10); open (record 35).
+- [x] Sam's answers to S1-S6 (below): all six decided as recommended on
+  2026-11-26, T2 `nexus/sam-ruling-rdr-259-s1-s6-2026-11-26`. S6 is a later
+  change, made on the day he edits his `CLAUDE.md` files.
+- [x] nexus-5y47c on `develop` (Decision 10): on `develop` before the Phase 3
+  branch rebased onto it, and in the v8.5.9 tag.
 - [x] Stage 0 spikes recorded (records 26 to 33, and 37).
 
 This RDR's implementation steps are called *stages* so they are not confused
@@ -1671,10 +1735,13 @@ is on `develop`, Phase 3 is the rework branch). What ships when:
   and does not run under a `deny` rule. What an `ask` rule does in auto mode
   is recorded by neither scenario (record 48), so the spike measures it
   first and records it; it is not part of the gate. The edited tests pass
-  at the tag. Sam cuts it. S4.
+  at the tag. Sam cuts it. S4. Done: records 51 and 52 ran this spike with
+  the real plugin, and in auto mode an `ask` rule is honoured (record 52).
+  The plugin half shipped as conexus 8.5.8 and the CLI half in 8.5.9.
 - Stages 1 to 3 ship together, with the portability plan's Phases 2 and 3, in
   the next client release (ruling 8).
-- Stage 4 ships in the same release (8.5.9), by Sam's ruling of 2026-11-26.
+- Stage 4 ships in the same release (8.5.9), by Sam's ruling of 2026-11-26
+  (T2 `nexus/sam-ruling-rdr259-stage4-in-859-2026-11-26`).
 
 ### Minimum Viable Validation
 
@@ -1687,6 +1754,18 @@ user-visible message naming the file and suggesting `subagent_git`; and
 `python3 <plugin root>/hooks/scripts/_audience.py show` reports each state.
 The same run on a P2 machine with `nx settings show` gives the same output
 except for the version lines (Decision 5).
+
+Where it ran. The live run on the laptop is cc-validation scenario 36
+(`tests/cc-validation/scenarios/36_rdr259_settings_mvv.sh`), 42 of 42
+checks, recorded on the Stage 1 bead nexus-sby49.16. On native Windows the
+live Claude run was not made. By Sam's ruling of 2026-11-27 (T2
+`nexus/sam-ruling-rdr259-close-2026-11-27`) the Windows clause is met by the
+git-guard tests (`tests/test_routing_subagent_git_write.py`,
+`tests/test_routing_subagent_git_write_gaps.py`,
+`tests/test_routing_subagent_git_dash_c_worktree.py`) passing on native
+Windows on qwent. 195 of those tests had failed on qwent from a bash and WSL
+launcher fault in the test harness. The Windows run: <WINDOWS-RUN: counts
+and commit to be filled at close>.
 
 ### Stage 0: Measure (no release), done 2026-11-25 and 2026-11-26
 
@@ -1740,16 +1819,17 @@ On the portability plan's Phase 3 branch, rebased onto nexus-5y47c.
    texts (Decision 2); the orchestration-skill line on worktree base commits
    (Decision 8).
 4. Spikes left open by Stage 0 (the auto-approve spike belongs to the early
-   release, "What ships when", and is not repeated here): which
-   hook event shows the user a `systemMessage` (settled, records 60 and 61:
-   UserPromptSubmit, not SessionStart); `CLAUDE_PROJECT_DIR` in the nx-side
-   hooks; the reader's cost on
-   native Windows; the strictness keys' `HEAD` read's cost on the guard and
-   advice paths, on the laptop and on native Windows; and the index check on
-   a version 3 index and a linked worktree's index. Desktop's display of
-   `systemMessage` was a hand check by Sam (record 61). A new cc-validation scenario runs a user-scope and a
-   project-scope `ask` rule against the PreToolUse-only answer, beside 07
-   and 28.
+   release, "What ships when", and is not repeated here), all now recorded:
+   which hook event shows the user a `systemMessage` (records 53 and 60 to
+   62: UserPromptSubmit, not SessionStart); `CLAUDE_PROJECT_DIR` in the
+   nx-side hooks (record 54); the reader's cost on native Windows (record
+   57); the strictness keys' `HEAD` read's cost on the guard and advice
+   paths, on the laptop and on native Windows (records 58 and 59); and the
+   index check on a version 3 index and a linked worktree's index (record
+   55). Desktop's display of `systemMessage` was a hand check by Sam
+   (records 60 and 61). The new cc-validation scenario that runs a
+   user-scope and a project-scope `ask` rule against the PreToolUse-only
+   answer is scenario 35 (record 56), beside 07 and 28.
 5. The first-prompt problem notice (a plugin-side stdlib UserPromptSubmit
    hook, checking that the installed nx has `nx settings`) and the deny-text
    clause for an unreadable file.
@@ -1765,11 +1845,15 @@ no telemetry child started without `telemetry_child_env()`, and no
 PermissionRequest entry for the conexus matcher; the lint passes on the
 existing drop-meter reads it names as allowed; the re-expressed golden
 replay is green over the recorded corpus; the byte-budget test passes with
-every key at its cap; the Minimum Viable Validation passes on the laptop and
-on native Windows; the file reads stay within the 5 ms design budget on
-native Windows; the strictness keys' `HEAD` read adds under 50 ms at the
-median on the guard and advice paths, on the laptop and on native Windows; a
-plain repository with no settings file runs no git process for settings on
+every key at its cap; the Minimum Viable Validation passes on the laptop (cc-validation scenario
+36, 42 of 42), and on native Windows its clause is met by the git-guard tests
+(`tests/test_routing_subagent_git_write.py`, `_gaps.py` and
+`_dash_c_worktree.py`) passing on qwent, by Sam's ruling of 2026-11-27 (T2
+`nexus/sam-ruling-rdr259-close-2026-11-27`) <WINDOWS-RUN: counts and commit
+to be filled at close>; the file reads stay within the 5 ms design budget on
+native Windows (record 57); the strictness keys' `HEAD` read adds under 50 ms
+at the median on the guard and advice paths, on the laptop and on native
+Windows (record 59); a plain repository with no settings file runs no git process for settings on
 any path; the step 4 spikes are recorded.
 
 ### Stage 2: Un-gate and move nexus's words
@@ -1806,7 +1890,8 @@ notes name the telemetry change and the two new files.
 
 The plan was to remove the legacy markers and their tests when a
 version-keyed window test failed, two client releases after Stages 1 to 3.
-Sam ruled on 2026-11-26 that Stage 4 ships with them in 8.5.9: the markers
+Sam ruled on 2026-11-26 (T2 `nexus/sam-ruling-rdr259-stage4-in-859-2026-11-26`)
+that Stage 4 ships with them in 8.5.9: the markers
 realistically exist only in nexus's own checkouts, which now carry
 `.nexus/project.json`, and anyone else falls to the seatbelt. So there is no
 window, no `LEGACY_ACCEPTED_UNTIL` and no window test; the reader never reads
@@ -1855,7 +1940,8 @@ None.
   with no prompt, with a user or project `ask` rule it prompts, with a
   `deny` rule it is denied; in auto mode, by scenario 16 and 28's
   observables, the tool runs with no rule and not under `deny`, and what an
-  `ask` rule does is recorded.
+  `ask` rule does is recorded. Run 2026-11-26 as records 51 and 52; in auto
+  mode an `ask` rule is honoured and the tool does not run.
 - **Scenario**: every variable in Decision 9's list (`NX_SERVICE_URL`,
   `NX_SERVICE_HOST`, `NX_SERVICE_PORT`, `NX_SERVICE_TOKEN`, `NX_MINT_TOKEN`,
   `NX_MINT_TENANT`, `NX_CONFIG_DIR`, `XDG_CONFIG_HOME`, `http_proxy`,
@@ -1907,7 +1993,11 @@ None.
 
 The reader corpus drives both byte copies through every failure row and
 precedence pair; the behaviour leg runs the real registrations; the lint
-holds the table, the docs and the absence of the person signal together. Done means the Stage 1 to 3 ship-when lines hold.
+holds the table, the docs and the absence of the person signal together. Done means the Stage 1 to 3 ship-when lines hold. The one Stage 1 clause
+that is met by a stand-in is the Minimum Viable Validation on native
+Windows: the live run was made on the laptop (scenario 36), and on Windows
+the git-guard tests stand for it by Sam's ruling of 2026-11-27 (T2
+`nexus/sam-ruling-rdr259-close-2026-11-27`).
 
 ### Performance Expectations
 
@@ -1915,9 +2005,10 @@ The reader adds a directory walk and at most two small file reads on every
 call, and at most one git process on the guard and advice decisions that
 the committed strictness keys could change, in a project that has a
 settings file (Decision 1). On the laptop the file reads cost about 60
-microseconds warm and 1.2 ms cold (Research 10, record 32); native Windows
-is measured in Stage 1 against the 5 ms design budget, and the `HEAD` read
-against the 50 ms bound.
+microseconds warm and 1.2 ms cold (Research 10, record 32). On native
+Windows the file reads cost 0.1 to 0.5 ms against the 5 ms design budget
+(record 57), and the `HEAD` read adds 22 to 23 ms at the median against the
+50 ms bound, 8.4 to 8.8 ms on the laptop (record 59).
 
 ## Finalization Gate
 
@@ -1935,30 +2026,37 @@ the design.
 
 ### Assumption Verification
 
-Six assumptions remain (Critical Assumptions), each with a spike,
-measurement or hand check in Stage 1 or the early release. The one the direction leans on is that a
-PreToolUse-only allow behaves for a conexus MCP tool and under a user-scope
-`ask` rule as it did for Bash under a project-scope rule (record 33; auto
-mode rests on scenario 28, record 43); its failure mode is an unexpected prompt, the safe
-direction. The worktree base commit no longer matters to the design
-(Decision 1). Three
-minor assumptions are acknowledged and carry no decision.
+Six assumptions are listed (Critical Assumptions). Five are settled by a
+spike, a measurement or a hand check: the Desktop notice (records 60 and 61),
+the PreToolUse-only allow for a conexus MCP tool and a user-scope `ask` rule
+(records 51 and 52, with record 33 and scenarios 28 and 35 behind them),
+`CLAUDE_PROJECT_DIR` in the nx-side hooks (record 54), the cost budgets
+(records 57 to 59) and the index walk (records 46 and 55 and the Stage 1
+tests). The sixth, the worktree base commit, stays open on purpose and no
+longer matters to the design (Decision 1). The assumption the direction
+leaned on, the PreToolUse-only allow, held; its failure mode would have been
+an unexpected prompt, the safe direction. Three minor assumptions are
+acknowledged and carry no decision.
 
 #### API Verification
 
 | API Call | Library | Verification |
 | --- | --- | --- |
-| PreToolUse `permissionDecision: allow` vs `permissions.ask` | Claude Code | Docs (stated), and spike, record 33 (project-scope `ask`; user scope untested) |
+| PreToolUse `permissionDecision: allow` vs `permissions.ask` | Claude Code | Docs (stated), and spikes, record 33 (Bash, project-scope `ask`) and records 51, 52 and 56 (a conexus MCP tool and a stub tool, user and project scope) |
 | PermissionRequest `allow` vs `permissions.ask` | Claude Code | Spike, record 26 (the allow wins) |
-| PreToolUse-only allow for a conexus MCP tool, and in auto mode | Claude Code | Spike, record 33 (Bash, default and `acceptEdits`, project-scope `ask`); scenario 28 for auto mode at 2.1.251 (record 43); MCP tool and user-scope `ask` in the early release's spike |
+| PreToolUse-only allow for a conexus MCP tool, and in auto mode | Claude Code | Spikes, record 33 (Bash, default and `acceptEdits`, project-scope `ask`) and records 51 and 52 (a conexus MCP tool, default, `acceptEdits` and auto mode, both scopes, Claude Code 2.1.332); scenario 28 for auto mode at 2.1.251 (record 43) |
 | Settings a worktree subagent runs under | Claude Code | Spike, record 28 (the main session's) |
 | Hook payload `cwd` in a worktree subagent | Claude Code | Spike, record 29 (the worktree); base commit unsettled |
 | `systemMessage` at SessionStart and at UserPromptSubmit | Claude Code | Spike, record 30 (CLI, project hook, `startup`); Desktop hides the SessionStart one and shows the UserPromptSubmit one (records 60 and 61) |
-| `git cat-file --batch` outcomes (the spike drew them from `git ls-tree`), and the ordered index walk | git | Spike, record 46 (git 2.53.0, index version 2) |
+| `git cat-file --batch` outcomes (the case table was first drawn from `git ls-tree`), and the ordered index walk | git | Spikes, record 59 (`cat-file --batch`, git 2.53.0), record 46 (`ls-tree`, index version 2) and record 55 (index versions 2 to 4, split, sparse, linked worktree) |
 
 ### Scope Verification
 
-The Minimum Viable Validation is Stage 1's ship-when, on P0 and on Windows.
+The Minimum Viable Validation is Stage 1's ship-when. It ran live on the
+laptop (cc-validation scenario 36, 42 of 42). On native Windows the clause is
+met by the git-guard tests passing on qwent, by Sam's ruling of 2026-11-27
+(T2 `nexus/sam-ruling-rdr259-close-2026-11-27`): <WINDOWS-RUN: counts and
+commit to be filled at close>.
 
 ### Cross-Cutting Concerns
 
@@ -2080,4 +2178,5 @@ each machine where he wants strict and telemetry; delete
 - 2026-11-26: Gate round 1 — BLOCKED (1 Critical, 6 Significant, 1 ship-blocker(s)); blob `46f4df2ba82a`; critique `nexus_rdr/259-gate-critique-2026-11-26-r1`.
 - 2026-11-26: Gate round 2 — PASSED (0 Critical, 9 Significant, 0 ship-blocker(s)); blob `25fa8e275868`; critique `nexus_rdr/259-gate-critique-2026-11-26-r2`.
 - 2026-11-26: post-gate fix round (scope cuts and seven fixes, Sams ruling `nexus/sam-ruling-rdr-259-scope-and-fixes-2026-11-26`); fix check `nexus_rdr/259-fix-check-e4db84c2c7e3` PASS; S1-S6 decided as recommended (`nexus/sam-ruling-rdr-259-s1-s6-2026-11-26`).
-- 2026-11-27: Amended 2026-11-27 to match the reviewed code (grant 3), nexus-sby49.18. The HEAD read is one `cat-file --batch` process and the index check walks its entries in path order; the problem notice is a UserPromptSubmit hook on a session's first prompt (records 60 and 61) and reads HEAD; a user file that is a link is followed; `credential_helper` is one line; `show` lists `project (cwd checkout)` and no legacy marker; `check` does not count environment problems; no legacy window exists, because Sam pulled Stage 4 into 8.5.9 (ruling 2026-11-26); the lint exempts the name in `RETIRED_USER_FILES`; `_engine_endpoint` is deleted; the staged-deletion trade is stated in Decision 1. No Decision's intent changed.
+- 2026-11-27: Amended 2026-11-27 to match the reviewed code (grant 3), nexus-sby49.18. The HEAD read is one `cat-file --batch` process and the index check walks its entries in path order; the problem notice is a UserPromptSubmit hook on a session's first prompt (records 60 and 61) and reads HEAD; a user file that is a link is followed; `credential_helper` is one line; `show` lists `project (cwd checkout)` and no legacy marker; `check` does not count environment problems; no legacy window exists, because Sam pulled Stage 4 into 8.5.9 (ruling 2026-11-26); the lint exempts the name in `RETIRED_USER_FILES`; `_engine_endpoint` is deleted; the staged-deletion trade is stated in Decision 1. Three Decisions changed in intent after acceptance, each with its authority: Decision 7, Stage 4 and Gap 6 (no compatibility window; Sam's ruling of 2026-11-26, T2 `nexus/sam-ruling-rdr259-stage4-in-859-2026-11-26`); Decision 5 (`check` does not count environment problems; the implementer's decision, reviewed in the nexus-sby49.18 gate); Decision 4's user-file link row (a link is followed, a dangling link or a non-regular target still reads strict, the project file keeps its `lstat` refusal; Sam's decision of 2026-11-27, T2 `nexus/sam-ruling-rdr259-close-2026-11-27`).
+- 2026-11-27: Corrected 2026-11-27 for close: measured assumptions cited, intent changes listed with their authority, the Windows clause per Sam's ruling (nexus-sby49).
