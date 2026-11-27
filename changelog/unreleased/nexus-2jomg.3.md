@@ -1,0 +1,3 @@
+### Added
+
+- **The engine release now refuses a tag that carries an undeclared both-halves wire change.** `engine-service-release.yml`'s `create-release` job runs `scripts/check_engine_release_pairing.py --tag <engine tag>` on a full checkout, before the release is created and before either build matrix starts. It scans `<previous engine-service-v* tag>..<the tagged commit>` with the wire-pairing check (the check's own default range follows the client's `v*` tags and never covered an engine cut). The previous tag is the highest version below the one being cut; a missing previous tag, a shallow checkout or a tag that is not `engine-service-vX.Y.Z` exits 2, a failed gate. The engine-release skill's tag step runs it on the frozen commit first (nexus-2jomg.3).
