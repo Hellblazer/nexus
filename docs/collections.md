@@ -163,8 +163,8 @@ because a plain label is a knowledge collection. Three things to know first:
   plain target passes and a prefixed target is refused. If a minted
   collection's row cannot be read at all, the rename stops and asks for the
   flag. A plain label still has its embedding model read from its name, so
-  renaming it to a prefixed name (`foo` to `knowledge__x`) stops on a model
-  mismatch and needs the flag. A named label such as `code__foo` still stops
+  renaming it to a two-segment prefixed name (`foo` to `knowledge__x`) stops
+  on a model mismatch and needs the flag. A named label such as `code__foo` still stops
   with a prefix or model mismatch when the new name reads as another type
   or embedding model (`code__foo` to `docs__foo`, or to a bare label).
   `--force-prefix-change` lets it through and switches off the model-token
