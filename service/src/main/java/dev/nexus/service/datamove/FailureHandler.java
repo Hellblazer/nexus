@@ -82,7 +82,8 @@ public interface FailureHandler {
      * The decision: the move is reported with {@code reason}, as {@code blocked:} or {@code failed:}. {@code sqlstate} is the
      * SQLSTATE the decision rests on, or null when nothing raised one; {@code retries} is the consecutive transient count
      * after this failure, or {@link #NOT_COUNTED} when the handler counted none. Both are for the engine log
-     * ({@link MoveEvents}) and change nothing the worker does.
+     * ({@link MoveEvents}); one thing more: a BLOCKED disposition that counted none and carries no page keeps the page the move already holds
+     * ({@code DataMoveWorker#report}).
      */
     record Disposition(Kind kind, String reason, String sqlstate, int retries, PageInfo page) {
         /** A reason never carries a credential, whoever built it (a handler, a test, a finisher). */

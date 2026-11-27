@@ -507,14 +507,12 @@ public final class DataMoveWorker implements AutoCloseable {
         FailureHandler.Stage stage = failure.stage();
         String detail = failure.detail();
         FailureHandler.Disposition d;
-        boolean handlerFailed = false;
         try {
             d = failures.onFailure(failure);
         } catch (RuntimeException e) {
             // Disposition masks its reason, and oneLine masks the exception text before it cuts it
             d = FailureHandler.Disposition.blocked(detail + " (the failure handler failed: "
                 + FailureHandler.oneLine(e.toString()) + ")");
-            handlerFailed = true;
         }
         // a failure of any kind ends a run of deferrals that began in an earlier pass: a wait that follows it reports its own age
         finisher.forget(move.label());
@@ -526,8 +524,9 @@ public final class DataMoveWorker implements AutoCloseable {
             // a handler that counted no retry leaves the row's count as it was
             int retries = d.retries() >= 0 ? d.retries() : move.transientRetries();
             MoveEvents.blocked(move.label(), stage.name(), failure.tenant(), retries, sqlstate, d.reason());
-            // a handler that could not decide counted nothing, so it clears no page a counted failure latched (the rule a deferral follows)
-            var page = handlerFailed ? keptPage(move) : d.page();
+            // a blocked disposition that counted nothing and carries no page (the handler threw, or could not record the retry count, or the row
+            // was no longer open) changes nothing about the needs-an-operator state, so it clears no page a counted failure latched: the rule a deferral follows
+            var page = d.page() == null && d.retries() < 0 ? keptPage(move) : d.page();
             states.blocked(move, d.reason(), page);
             if (page != null && page.entered() && states.announce(move.label())) {
                 MoveEvents.needsOperator(move.label(), page.step(), sqlstate, page.boundMs(), retries,
