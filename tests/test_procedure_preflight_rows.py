@@ -291,6 +291,25 @@ def test_r37_never_requires_the_manifest_to_hold_every_live_bead(repo: Path) -> 
     assert "refresh_bead_id_manifest" not in _inner(cmd)
 
 
+def test_r37_the_bead_row_reports_a_red_docs_reference_rot_and_never_refuses(repo: Path) -> None:
+    """docs_reference_rot is class A in report mode (RDR-258 Phase 1): CI lists a dangling citation and develop stays
+    green, so the local step prints the red and passes. The same command with a pytest that fails is run for real."""
+    _change(repo, {"docs/a.md": "a\n"})
+    cmd = _command(_Run(repo)(), "the bead ids cited in docs/")
+    [check] = [c["check"] for c in _Run(repo)()["checks"] if c["check"].startswith("the bead ids cited in docs/")]
+    assert "report only: docs_reference_rot is class A" in check
+    red = cmd.replace("uv run pytest", "sh -c 'echo FAILED tests/test_docs_reference_rot.py::test_cited_bead_ids_resolve; "
+                      "echo \"1 failed in 0.10s\"; exit 1' --")
+    proc = subprocess.run(["bash", "-c", red], capture_output=True, text=True, cwd=repo, timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "test_cited_bead_ids_resolve" in proc.stdout, "the red tail is still printed"
+    assert "docs_reference_rot is class A, report only" in proc.stdout
+    # the control: the gated command alone (no report wrapper) refuses on the same red
+    gated_red = cmd.split(' || { echo "preflight: docs_reference_rot', 1)[0].replace(
+        "uv run pytest", "sh -c 'echo \"1 failed in 0.10s\"; exit 1' --")
+    assert subprocess.run(["bash", "-c", gated_red], capture_output=True, text=True, cwd=repo, timeout=60).returncode != 0
+
+
 def test_r37_the_bead_row_selects_exactly_its_two_lint_tests() -> None:
     """The row selects by -k substring; a later test whose name contains either fragment would
     run too, unseen by any pin (bead-row review r1, note b). Collect over the row's own argv."""

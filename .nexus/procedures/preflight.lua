@@ -129,6 +129,13 @@ local function gated(command, may_select_nothing)
     .. " tail -n 30 \"$log\"; echo \"red, or no clean pytest summary line; full log: $log\"; fi; false; }"
 end
 
+-- A class-A check in report mode (RDR-258 Phase 1) never refuses: CI lists its open items in an advisory job and develop stays
+-- green, so the push does not stop on it here either. The gated command runs as before and its red tail is printed; the
+-- step then passes. The note says why, so a red tail above it is not read as a refusal.
+local function reported(command, note)
+  return command .. " || { echo \"" .. note .. "\"; true; }"
+end
+
 -- A default-loop guard judges only what its own invocation collected, so it runs in
 -- the same invocation as the changed tests. It is
 -- tests/test_mode_declarations_are_explicit.py (voyage names in a test without
@@ -437,9 +444,11 @@ local CLASSES = {
       -- bead filed since the last refresh (2026-11-09, two uncited beads).
       if any(files, "^docs/") then
         table.insert(out, step("the bead ids cited in docs/ are in the manifest (the freshness half needs bd;"
-            .. " when it fails, run scripts/refresh_bead_id_manifest.py and commit tests/fixtures/bead_ids.txt with the doc)",
-          gated(PYTEST .. " " .. NOT_SLOW
+            .. " when it fails, run scripts/refresh_bead_id_manifest.py and commit tests/fixtures/bead_ids.txt with the doc;"
+            .. " report only: docs_reference_rot is class A, CI lists the open citations and does not fail develop)",
+          reported(gated(PYTEST .. " " .. NOT_SLOW
             .. " -k 'cited_bead_ids_resolve or bead_id_manifest_is_fresh_where_bd_is' tests/test_docs_reference_rot.py"),
+            "preflight: docs_reference_rot is class A, report only (RDR-258 Phase 1): the red above is listed, not refused"),
           false))
       end
       -- CI's docs lane also runs the fragment check (a fragment-only or

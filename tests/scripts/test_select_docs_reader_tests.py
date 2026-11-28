@@ -22,8 +22,34 @@ def test_real_tree_selects_the_incident_test_and_clears_the_floor() -> None:
     files = sel.select(REPO_ROOT)
     # The red that motivated the lane (15f4c7a94) must be in it.
     assert "tests/catalog/test_rdr_dependency_edges.py" in files
-    assert "tests/test_docs_reference_rot.py" in files
     assert len(files) >= sel.MIN_SELECTED, files
+
+
+def test_the_class_a_docs_reference_rot_check_is_not_selected() -> None:
+    """RDR-258 Phase 1 step 2 (nexus-2jomg.2): the test reads docs/ and still would be selected by the pattern, but it is a
+    report-mode check, so neither ``test-docs-readers`` (pytest-gate needs it) nor the push gate's docs-readers proof, both
+    of which run this selection, may keep a dangling citation blocking. The advisory job runs it."""
+    rot = "tests/test_docs_reference_rot.py"
+    assert rot in sel.EXCLUDED and sel.EXCLUDED[rot]
+    assert rot not in sel.select(REPO_ROOT)
+    # the pattern itself still reaches it: only the exclusion keeps it out, and a rename of the file would not
+    assert sel._ANCHORED_DOCS.search((REPO_ROOT / rot).read_text(encoding="utf-8"))
+
+
+def test_an_excluded_file_is_left_out_and_its_neighbours_are_not(tmp_path: pathlib.Path, monkeypatch) -> None:
+    (tmp_path / "tests").mkdir()
+    for name in ("test_docs_reference_rot.py", "test_other_reader.py"):
+        (tmp_path / "tests" / name).write_text('x = REPO_ROOT / "docs"\n')
+    assert sel.select(tmp_path) == ["tests/test_other_reader.py"]
+    monkeypatch.setattr(sel, "EXCLUDED", {})
+    assert sel.select(tmp_path) == ["tests/test_docs_reference_rot.py", "tests/test_other_reader.py"]
+
+
+def test_main_prints_the_selection_without_the_excluded_file(capsys) -> None:
+    assert sel.main(["--repo", str(REPO_ROOT)]) == 0
+    printed = capsys.readouterr().out.split()
+    assert "tests/test_docs_reference_rot.py" not in printed
+    assert "tests/catalog/test_rdr_dependency_edges.py" in printed
 
 
 @pytest.mark.parametrize(

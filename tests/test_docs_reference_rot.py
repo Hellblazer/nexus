@@ -52,6 +52,10 @@ from pathlib import Path
 
 import pytest
 
+# Class A, report mode (RDR-258 Phase 1 step 2, nexus-2jomg.2): develop never fails on a dangling citation. The six tests that
+# read the repo's own docs (marked `class_a` below, beside the module's `lint`) run in the advisory `test-class-a-report` job,
+# which lists every open citation (path:line: value) in the job summary; the 2-week review fixes them in a batch. The planted
+# and blob tests pin this module's own scanner, not the tree, so they stay blocking in `test-lint`.
 pytestmark = pytest.mark.lint
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -349,6 +353,7 @@ def _report(kind: str, bad: list[Cite]) -> str:
 # ── the three legs ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.class_a
 def test_cited_commit_shas_resolve() -> None:
     cites = _sha_cites()
     assert len(cites) >= 100, f"only {len(cites)} commit-shaped citations found; the scan is broken"
@@ -357,6 +362,7 @@ def test_cited_commit_shas_resolve() -> None:
     assert not bad, _report("commit", bad)
 
 
+@pytest.mark.class_a
 def test_sha_allowlist_carries_no_dead_rows() -> None:
     """A row for a value no longer cited, or one that now resolves, is a
     rule nobody can see the reason for; delete it."""
@@ -367,6 +373,7 @@ def test_sha_allowlist_carries_no_dead_rows() -> None:
     assert not resolving, f"SHA_ALLOWLIST rows that resolve as commits now: {resolving}"
 
 
+@pytest.mark.class_a
 def test_cited_rdr_ids_resolve() -> None:
     cites = _scan(_RDR_RE)
     assert len(cites) >= 100, f"only {len(cites)} RDR citations found; the scan is broken"
@@ -377,6 +384,7 @@ def test_cited_rdr_ids_resolve() -> None:
     assert not dead, f"RDR_ALLOWLIST rows that resolve or are no longer cited: {dead}"
 
 
+@pytest.mark.class_a
 def test_cited_jdr_ids_resolve() -> None:
     """No allowlist: a JDR number that resolves to nothing is a broken
     anchor in an append-only registry (docs/rdr/joint/TEMPLATE.md)."""
@@ -395,6 +403,7 @@ def test_planted_bogus_jdr_is_detected(tmp_path: Path) -> None:
     assert "999" not in _jdr_files()
 
 
+@pytest.mark.class_a
 def test_cited_bead_ids_resolve() -> None:
     """Runs everywhere, CI included: the store is the tracked manifest."""
     ids = _manifest_ids()
@@ -409,6 +418,7 @@ def test_cited_bead_ids_resolve() -> None:
     assert not dead, f"BEAD_ALLOWLIST rows that resolve or are no longer cited: {dead}"
 
 
+@pytest.mark.class_a
 def test_bead_id_manifest_is_fresh_where_bd_is() -> None:
     """The manifest is a snapshot; this is what keeps it honest. Where bd
     answers, every manifest id must be a real bead (no phantom keeps a

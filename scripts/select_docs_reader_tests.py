@@ -43,16 +43,26 @@ _ANCHORED_DOCS = re.compile(
 #: suite stopped reading docs. 32 selected on 2026-10-05.
 MIN_SELECTED: int = 20
 
+#: Test files that read docs/ and are NOT selected, because they are class-A checks in report mode (RDR-258 Phase 1 step 2,
+#: nexus-2jomg.2): ``test-docs-readers`` is a blocking job that pytest-gate needs, and the push gate's docs-readers proof runs
+#: this selection, so selecting the file would keep a dangling citation blocking. The advisory ``test-class-a-report`` job runs
+#: it instead, and lists the open citations. File name -> reason.
+EXCLUDED: dict[str, str] = {
+    "tests/test_docs_reference_rot.py": "class A, report mode: dangling citations are listed by test-class-a-report, never a develop red",
+}
+
 
 def select(repo: pathlib.Path) -> list[str]:
-    """Repo-relative paths of the test files that read the docs tree, sorted."""
+    """Repo-relative paths of the test files that read the docs tree, sorted, less the :data:`EXCLUDED` class-A checks."""
     tests = repo / "tests"
     found: list[str] = []
     for path in sorted(tests.rglob("test_*.py")):
         text = path.read_text(encoding="utf-8", errors="replace")
         # Comment text never reads the tree, so drop everything after a '#'.
         if any(_ANCHORED_DOCS.search(line.split("#", 1)[0]) for line in text.splitlines()):
-            found.append(path.relative_to(repo).as_posix())
+            relative = path.relative_to(repo).as_posix()
+            if relative not in EXCLUDED:
+                found.append(relative)
     return found
 
 

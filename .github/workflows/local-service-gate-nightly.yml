@@ -584,6 +584,7 @@ jobs:
         run: |
           set -euo pipefail
           uv run python scripts/class_a_report.py \
+            --require tests/test_docs_reference_rot=5 \
             --name "class-A checks (nightly)" \
             --min-tests 1 \
             --items-out class-a-items-nightly.json \
