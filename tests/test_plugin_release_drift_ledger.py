@@ -47,6 +47,10 @@ from tests._ledger_terminal import ledger_terminal  # noqa: F401  (a fixture, us
 
 pytestmark = pytest.mark.usefixtures("ledger_terminal")
 
+#: The two tests that check the tree's own ledger. The others run the same functions on a synthetic world, and their report-mode
+#: lines are dropped (tests/_ledger_terminal.py), so only the tree's findings reach the push gate.
+LEDGER_LIVE_TESTS = ("test_every_drifted_file_is_declared_in_the_ledger", "test_the_ledger_has_no_stale_entries")
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 LEDGER = REPO_ROOT / "conexus" / "PENDING_RELEASE.md"
 MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"

@@ -94,7 +94,8 @@ def settle(ledger: str, findings: list[str], examined: int, *, environ: Mapping[
     path = env.get(REPORT_FILE_ENV, "").strip()
     if path:
         # pytest-xdist workers print to a pipe nothing reads; a file every worker appends to survives them (one short write
-        # per line, so concurrent workers do not interleave inside a line). A CI step prints the file after the run.
+        # per line, so concurrent workers do not interleave inside a line). Nothing sets the variable yet and no workflow step
+        # prints the file: it is the hook a later step can use to read the lines of an xdist run.
         with open(path, "a", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
     return examined > 0
