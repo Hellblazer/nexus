@@ -38,6 +38,7 @@ import sys
 from pathlib import Path
 
 import lupa.lua54 as lua54
+import plugin_surface
 import pytest
 import yaml
 from click.testing import CliRunner
@@ -58,7 +59,6 @@ from tests._preflight_harness import (
     BASH,
     BEAD_MANIFEST,
     CI,
-    DRIFT,
     EVERYTHING,
     FOLD_CHECK,
     MARK,
@@ -377,9 +377,8 @@ def test_the_docs_rows_agree_with_ci_on_every_path(repo: Path, path: str) -> Non
 
 
 def _drift_paths() -> list[str]:
-    on = yaml.safe_load(DRIFT.read_text(encoding="utf-8"))
-    triggers = on.get("on", on.get(True))
-    return list(triggers["push"]["paths"])
+    # The paths the plugin ledger job watches: scripts/plugin_surface.py's list, since ci.yml calls the workflow (RDR-258 Phase 4).
+    return list(plugin_surface.SURFACE_PATHS)
 
 
 @pytest.mark.parametrize("watched", _drift_paths())

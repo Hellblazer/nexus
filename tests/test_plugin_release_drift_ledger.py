@@ -40,6 +40,7 @@ import subprocess
 import sys
 
 import ledger_mode
+import plugin_surface
 import pytest
 
 from tests._ledger_terminal import ledger_terminal  # noqa: F401  (a fixture, used through pytestmark)
@@ -723,13 +724,12 @@ class TestTheCIWiringItself:
     def test_the_path_filter_covers_every_surface_prefix(self) -> None:
         """A surface prefix outside the trigger paths is a surface whose drift
         never triggers the check -- undeclared drift merging on a green PR."""
-        wf = self._workflow()
-        on = wf[True] if True in wf else wf["on"]
-        patterns = " ".join(on["push"]["paths"])
+        # The paths live in scripts/plugin_surface.py since ci.yml calls this workflow (RDR-258 Phase 4).
+        patterns = " ".join(plugin_surface.SURFACE_PATHS)
         missing = [p for p in SURFACE if p.rstrip("/") not in patterns]
         assert not missing, (
-            f"SURFACE prefixes not covered by the workflow's path filter: "
-            f"{missing}. Drift there would never trigger this workflow, so it "
+            f"SURFACE prefixes not covered by plugin_surface.SURFACE_PATHS: "
+            f"{missing}. Drift there would never trigger this check, so it "
             f"could merge undeclared on a green PR."
         )
 
@@ -737,10 +737,7 @@ class TestTheCIWiringItself:
         """nexus-rbmja.5: the ledger parser moved to ``scripts/plugin_ledger.py``
         (rbmja.2); an edit there changes what this check computes, so it must
         trigger the workflow as the cut script's own path does."""
-        wf = self._workflow()
-        on = wf[True] if True in wf else wf["on"]
-        for event in ("push", "pull_request"):
-            assert "scripts/plugin_ledger.py" in on[event]["paths"], event
+        assert "scripts/plugin_ledger.py" in plugin_surface.SURFACE_PATHS
 
     def _fetch_step(self) -> dict:
         steps = self._workflow()["jobs"]["ledger"]["steps"]

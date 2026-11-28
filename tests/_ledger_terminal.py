@@ -8,6 +8,7 @@ would list its findings nowhere a run (the push gate, a CI log) could read them.
 """
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 
 import ledger_mode
@@ -18,7 +19,8 @@ import pytest
 def ledger_terminal(capfd: pytest.CaptureFixture[str]) -> Iterator[None]:
     def sink(line: str) -> None:
         with capfd.disabled():
-            print(f"\n{line}", flush=True)
+            sys.stdout.write(f"\n{line}\n")
+            sys.stdout.flush()
 
     ledger_mode.set_sink(sink)
     try:

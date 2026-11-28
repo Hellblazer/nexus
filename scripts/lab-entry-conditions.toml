@@ -328,6 +328,13 @@ ci_step = "Does the native-build trip-wire run? (suite audit item 8)"
 reason = "The decision script that gates the native trip-wire job (does the diff reach its inputs). It checks no lane work; its verdict is whether the job runs."
 
 [[excluded]]
+script = "scripts/plugin_surface.py"
+ci_workflow = "ci.yml"
+ci_job = "changes"
+ci_step = "Did the plugin surface change? (RDR-258 Phase 4)"
+reason = "The decision script that gates the plugin ledger job (does the diff reach the plugin surface). It checks no lane work; its verdict is whether the job runs."
+
+[[excluded]]
 script = "scripts/select_affected_integration_tests.py"
 ci_workflow = "ci.yml"
 ci_job = "changes"

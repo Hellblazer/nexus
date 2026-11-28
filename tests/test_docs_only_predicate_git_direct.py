@@ -96,6 +96,8 @@ def test_changes_job_outputs_contract_unchanged() -> None:
         # Suite audit item 8 (Sam 2026-11-19): the native-build trip-wire's job gate, from its own step
         # (scripts/native_trip_wire_svc.py; tests/scripts/test_native_trip_wire_svc.py).
         "svc": "${{ steps.svc.outputs.svc }}",
+        # RDR-258 Phase 4: whether the plugin surface changed, so plugin-ledger-gate takes a runner (scripts/plugin_surface.py).
+        "plugin": "${{ steps.plugin.outputs.plugin }}",
     }
 
 

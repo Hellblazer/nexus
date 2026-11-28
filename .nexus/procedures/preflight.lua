@@ -323,8 +323,8 @@ local CLASSES = {
     end,
   },
   {
-    -- The paths the drift-ledger workflow watches
-    -- (.github/workflows/plugin-drift-ledger.yml, on.push.paths). The ledger
+    -- The paths the drift-ledger job watches (scripts/plugin_surface.py,
+    -- SURFACE_PATHS; ci.yml's plugin-ledger-gate calls the workflow). The ledger
     -- itself is a standing check of every code push, and every plugin path
     -- is code; the class adds the hook tests when a hook changed.
     name = "plugin",

@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 
 #: The workflows that run on a push to develop and share this rule.
-ONE_AT_A_TIME_ON_DEVELOP = ("windows-pg-bundle-rehearsal.yml", "plugin-drift-ledger.yml")
+ONE_AT_A_TIME_ON_DEVELOP = ("windows-pg-bundle-rehearsal.yml",)  # plugin-drift-ledger.yml is called by ci.yml since RDR-258 Phase 4
 
 CANCEL_OFF_DEVELOP = "${{ github.ref != 'refs/heads/develop' }}"
 

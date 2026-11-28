@@ -237,6 +237,8 @@ jobs:
       # Suite audit item 8 (Sam 2026-11-19): whether the native-build trip-wire (engine-service-build) runs at all.
       # scripts/native_trip_wire_svc.py decides; its docstring has the two proofs a skip needs.
       svc: ${{ steps.svc.outputs.svc }}
+      # RDR-258 Phase 4: whether the plugin surface changed, so plugin-ledger-gate takes a runner. scripts/plugin_surface.py.
+      plugin: ${{ steps.plugin.outputs.plugin }}
     # The svc step reads the base commit's trip-wire check run (checks: read).
     permissions:
       contents: read
@@ -391,6 +393,28 @@ jobs:
             true|false) ;;
             *)
               echo "::error::the trip-wire gate produced no usable svc output ('$svc') — cannot prove whether its inputs changed, refusing to silently skip the native build"
+              exit 1
+              ;;
+          esac
+
+      - name: Did the plugin surface change? (RDR-258 Phase 4)
+        id: plugin
+        # Same diff base as the steps above. plugin-ledger-gate skips (no runner) on `false` unless the event is a pull request
+        # into main, where it always runs. Every doubt answers true; an empty diff between good commits exits 1.
+        run: |
+          set -euo pipefail
+          python3 scripts/plugin_surface.py --repo . --event "${{ github.event_name }}" \
+            --before "${{ github.event.before }}" --base "${{ github.event.pull_request.base.sha }}" \
+            --output "$GITHUB_OUTPUT"
+
+      - name: Verify the plugin predicate is usable (fail loud, never default-skip)
+        run: |
+          set -euo pipefail
+          plugin="${{ steps.plugin.outputs.plugin }}"
+          case "$plugin" in
+            true|false) ;;
+            *)
+              echo "::error::the plugin-surface step produced no usable output ('$plugin'), so plugin-ledger-gate cannot prove whether its inputs changed; refusing to skip it silently"
               exit 1
               ;;
           esac
@@ -1868,6 +1892,26 @@ jobs:
           python3 scripts/assert_integration_affected_ran.py --aggregate shards --all "$first/integration-all.txt" \
             --min-executed 1100 --max-skipped 40
 
+  plugin-ledger-gate:
+    # RDR-258 Phase 4 (Sam, 2026-11-27, T2 nexus/sam-ruling-rdr258-plugin-ledger-release-gate-2026-11-27): the plugin ledger
+    # (conexus/PENDING_RELEASE.md against the pinned tags) used to run in its own workflow, which pytest-gate could not read.
+    # A `needs:` entry cannot name another workflow's job, but a job that calls a reusable workflow is a job here, so the
+    # workflow became callable and this is the one caller (it no longer triggers on push or pull_request itself: the tree is
+    # tested once). pytest-gate reads this job's result the way it reads mcpb-resolve-gate's: blocking on a pull request into
+    # main, a ::warning:: elsewhere.
+    #
+    # COST: no runner on a push or a pull request into develop whose diff leaves the plugin surface alone (job-level `if` on
+    # the `changes` job's `plugin` output, scripts/plugin_surface.py; a skipped job starts nothing). A pull request into main,
+    # the release PR, always runs it, because that is the check the release needs whatever the diff says.
+    name: plugin ledger gate
+    needs: [changes]
+    if: ${{ needs.changes.outputs.plugin == 'true' || (github.event_name == 'pull_request' && github.base_ref == 'main') }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/plugin-drift-ledger.yml
+    with:
+      ledger_mode: block
+
   pytest-gate:
     # nexus-n0ful: required-check fan-in over the sharded `test` matrix.
     #
@@ -1920,7 +1964,7 @@ jobs:
     # condition for the exact same reason.
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, integration-release-floor, mcpb-resolve-gate, constraints-resolve-gate]
+    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, integration-release-floor, mcpb-resolve-gate, constraints-resolve-gate, plugin-ledger-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1940,6 +1984,8 @@ jobs:
           integration_floor_result="${{ needs.integration-release-floor.result }}"
           mcpb_result="${{ needs.mcpb-resolve-gate.result }}"
           constraints_result="${{ needs.constraints-resolve-gate.result }}"
+          plugin_ledger_result="${{ needs.plugin-ledger-gate.result }}"
+          plugin_changed="${{ needs.changes.outputs.plugin }}"
           event_name="${{ github.event_name }}"
           base_ref="${{ github.base_ref }}"
 
@@ -2063,6 +2109,28 @@ jobs:
             fi
           elif [ "$constraints_result" != "success" ]; then
             echo "::warning::constraints-resolve-gate reported '$constraints_result' (advisory off the release PR; the release battery's resolve leg blocks before a tag)"
+          fi
+
+          # plugin-ledger-gate (RDR-258 Phase 4, Sam 2026-11-27): the plugin ledger against the pinned tags. Blocking on a PR into
+          # main, where the job always runs; elsewhere it runs only when the plugin surface changed, and a red is a warning.
+          # NON-VACUITY: the surface predicate must be a real boolean, and on a PR into main `skipped` is a failure.
+          echo "plugin-ledger-gate result: $plugin_ledger_result (plugin surface changed: $plugin_changed)"
+          case "$plugin_changed" in
+            true|false) ;;
+            *)
+              echo "::error::the changes job gave no usable plugin-surface output ('$plugin_changed'), so plugin-ledger-gate's skip cannot be told from a silent one"
+              exit 1
+              ;;
+          esac
+          if [ "$event_name" = "pull_request" ] && [ "$base_ref" = "main" ]; then
+            if [ "$plugin_ledger_result" != "success" ]; then
+              echo "::error::PR targets main but plugin-ledger-gate reported '$plugin_ledger_result' instead of success — the plugin changes not yet live must be declared in conexus/PENDING_RELEASE.md, or the shipped ones removed, before a release PR can merge"
+              exit 1
+            fi
+          elif [ "$plugin_changed" = "true" ] && [ "$plugin_ledger_result" != "success" ]; then
+            echo "::warning::plugin-ledger-gate reported '$plugin_ledger_result' (advisory off the release PR; the release PR into main blocks on it)"
+          elif [ "$plugin_changed" = "false" ] && [ "$plugin_ledger_result" != "skipped" ]; then
+            echo "::warning::plugin-ledger-gate reported '$plugin_ledger_result' where the plugin surface did not change (expected skipped)"
           fi
 
           # nexus-rpaat: the affected-integration job MUST succeed when the

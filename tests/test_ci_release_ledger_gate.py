@@ -187,6 +187,9 @@ _BASE_VALUES = {
     # nexus-zzkko: the always-run mcpb resolve gate (resolves only when its inputs changed).
     "needs.mcpb-resolve-gate.result": "success",
     "needs.constraints-resolve-gate.result": "success",
+    # RDR-258 Phase 4: the plugin ledger job runs only when the plugin surface changed (or on a PR into main).
+    "needs.plugin-ledger-gate.result": "skipped",
+    "needs.changes.outputs.plugin": "false",
     "github.event_name": "push",
     "github.base_ref": "",
 }
@@ -225,6 +228,9 @@ def _pytest_gate_script(**overrides: str) -> str:
     job = _doc()["jobs"][FANIN_JOB_NAME]
     step = _find_step(job, "Verify the pytest suite")
     values = {**_BASE_VALUES, **overrides}
+    if (values["github.event_name"], values["github.base_ref"]) == ("pull_request", "main"):
+        if "needs.plugin-ledger-gate.result" not in overrides:
+            values["needs.plugin-ledger-gate.result"] = "success"  # it always runs there; its cases: test_plugin_ledger_gate_wiring
     return _render(step["run"], values)
 
 

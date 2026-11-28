@@ -28,40 +28,22 @@
 # native build, no service, no PG.
 name: plugin drift ledger
 
+# RDR-258 Phase 4 (Sam, 2026-11-27, T2 nexus/sam-ruling-rdr258-plugin-ledger-release-gate-2026-11-27): this workflow no longer
+# triggers itself. ci.yml's `plugin-ledger-gate` job calls it (a called workflow is a job its caller can `need:`), and
+# pytest-gate reads that job's result: blocking when the event is a pull request into main, a ::warning:: otherwise, the
+# shape of mcpb-resolve-gate. Run by one caller, the tree is tested once (CI cost discipline: never test the same tree
+# twice), and the job costs a runner only when the plugin surface changed or the pull request targets main
+# (scripts/plugin_surface.py decides, in the `changes` job). The surface paths this file's `paths:` filter used to carry are
+# scripts/plugin_surface.py's SURFACE_PATHS. No `concurrency:` here: a called workflow inherits its caller's group, and its
+# own would collide with it. `workflow_dispatch` stays for a hand run.
 on:
-  push:
-    branches: [develop]
-    paths: &surface
-      - 'conexus/hooks/**'
-      - 'conexus/commands/**'
-      - 'conexus/skills/**'
-      - 'conexus/agents/**'
-      - 'conexus/resources/**'
-      - 'conexus/mcp/**'
-      - 'conexus/launch/**'
-      - 'conexus/PENDING_RELEASE.md'
-      - 'sn/hooks/**'
-      - 'sn/.mcp.json'
-      - 'tool-spill/hooks/**'
-      - 'tool-spill/.claude-plugin/plugin.json'
-      - 'prose-edit/skills/**'
-      - 'prose-edit/agents/**'
-      - 'prose-edit/.claude-plugin/plugin.json'
-      - 'conexus/.mcp.json'
-      - '.claude-plugin/marketplace.json'
-      - 'scripts/plugin_ledger.py'
-      - 'scripts/plugin_channel.py'
-      - 'tests/test_plugin_release_drift_ledger.py'
-      - '.github/workflows/plugin-drift-ledger.yml'
-  pull_request:
-    branches: [main, develop]
-    paths: *surface
-
-concurrency:
-  # One run at a time on develop, the newest push waiting; other refs cancel
-  # superseded runs (Sam, 2026-10-18, nexus-1wf1s), as ci.yml.
-  group: plugin-drift-ledger-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
+  workflow_call:
+    inputs:
+      ledger_mode:
+        description: "NX_LEDGER_MODE for the ledger test: block (default) or report (scripts/ledger_mode.py)"
+        type: string
+        default: block
+  workflow_dispatch:
 
 jobs:
   ledger:
@@ -136,6 +118,8 @@ jobs:
           # very commit carried undeclared SKILL.md drift. These tests are
           # pure git/YAML; they need no substrate anywhere.
           NX_TEST_T2_SUBSTRATE: "none"
+          # block (the default) fails on a finding; report lists it and still fails a run that examined nothing.
+          NX_LEDGER_MODE: ${{ inputs.ledger_mode }}
         run: |
           set -euo pipefail
           uv run pytest tests/test_plugin_release_drift_ledger.py -q -rs 2>&1 \

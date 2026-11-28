@@ -35,7 +35,6 @@ REPO_ROOT = Path(hd.__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / ".nexus" / "procedures" / "preflight.lua"
 SOURCE = SCRIPT.read_bytes()
 CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-DRIFT = REPO_ROOT / ".github" / "workflows" / "plugin-drift-ledger.yml"
 BASH = shutil.which("bash")
 ZSH = shutil.which("zsh")
 MARK = "'integration and not lived_in and not keyed_voyage and not mandatory_regression_pin and not pg_bundle_artifact'"

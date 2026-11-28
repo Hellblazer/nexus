@@ -66,13 +66,18 @@ def _annotation(ledger: str, text: str) -> str:
     return f"::warning title={title}::{esc}"
 
 
+def _stdout(line: str) -> None:
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+
+
 def settle(ledger: str, findings: list[str], examined: int, *, environ: Mapping[str, str] | None = None) -> bool:
     """True when the check passes. In block mode that is ``not findings`` and nothing is printed. In report mode it is
     ``examined > 0``, after the findings and the summary are printed."""
     env = os.environ if environ is None else environ
     if mode(env) == BLOCK:
         return not findings
-    emit = _sink or (lambda line: print(line, file=sys.stdout, flush=True))
+    emit = _sink or _stdout
     annotate = env.get("GITHUB_ACTIONS") == "true"
     for text in findings:
         emit(f"{FINDING_PREFIX} {ledger}: {_flat(text)}")
