@@ -886,11 +886,27 @@ PR's gate before step 2 [Sam].
 
 #### Step 2: Report on develop [Sam]
 
-Each of the three reports a missing entry on develop and blocks on the release
-PR into main; the push gate's changelog, plugin-ledger and cloud-leg checks
-follow. Fewer ledger-only fix-up commits are expected, since an entry can be
-written when the release needs it (inferred, not read); the ledger-and-ceiling
-commit share measures it.
+Each of the three reports a missing entry on develop (a push, or a pull request
+into develop) and blocks on the release PR into main; the push gate's changelog,
+plugin-ledger and cloud-leg checks follow (their `Spec.default_mode` is report,
+and `--ledger-report` stays as the on-record request). Fewer ledger-only fix-up
+commits are expected, since an entry can be written when the release needs it
+(inferred, not read); the ledger-and-ceiling commit share measures it.
+
+Sam's ruling of 2026-11-28 (T2 `nexus/sam-ruling-rdr258-phase4-step2-2026-11-28`)
+adds a fourth check, report only: a develop push and CI list each commit that
+changes shipped code and has no changelog fragment naming its bead
+(`scripts/changelog_coverage.py`; the push gate's `changelog-coverage` check,
+`--skip-changelog-coverage '<reason>'` to override it on the record, and a step
+of CI's `changes` job). The release PR into main runs the same script in report
+mode, in `release-ledger-gate`, while the fragment format check
+(`changelog_fold.py check`) blocks there. A run that examined nothing is a
+refusal, with two passes that carry a `PUSH_CHECK_NOTE ... examined nothing`
+line: a push range of merge commits only (a release back-merge), which the gate
+confirms with git, and a range of release-preparation and revert commits only.
+The suite pins the rule: only `changelog-coverage` may pass that way, an exit 10
+with no vacuous line still refuses on a merge-only range, and a range with a
+real commit is examined.
 
 ### Phase 5: Flake quarantine. Sam decides the merge-gate change; the implementer builds the marker and the nightly job without him.
 
@@ -1142,3 +1158,4 @@ split into its own RDR at accept if Sam prefers.
 - 2026-11-27: Gate round 4 — PASSED (0 Critical, 7 Significant, 0 ship-blocker(s)); blob `f4923e254b8b`; critique `nexus_rdr/258-gate-critique-2026-11-27-r4`.
 - 2026-11-27: Accepted by Sam (T2 `nexus/sam-ruling-rdr258-accept-2026-11-27`), on round 4's PASS (`nexus_rdr/258-gate-latest`). Round 3's planning blocker is disposed by Phase 1 step 7 (4cd68e5d09); round 4's 7 Significant residuals are discover-at-implementation and are carried to their phase beads under epic nexus-2jomg.
 - 2026-11-27: Amended on Sam's word (T2 `nexus/sam-ruling-rdr258-retire-by-default-and-half-pins-2026-11-27`): rule (b) and Phase 1 step 5 make retirement the default (a class-A check with no guard catch in 60 days is deleted unless the review keeps it with a written reason); Phase 6 deletes at least half of the about 386 repository pins, the list approved by Sam in one batch.
+- 2026-11-28: Phase 4 step 2 text amended to match the reviewed code and Sam's ruling of 2026-11-28 (T2 `nexus/sam-ruling-rdr258-phase4-step2-2026-11-28`): the develop listing of missing fragments (report only), the merge-only pass and its suite-pinned rule, `--skip-changelog-coverage`, and the release PR's coverage step in report mode. Wording only.
