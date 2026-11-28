@@ -355,6 +355,25 @@ def test_a_wire_check_that_cannot_verify_is_still_refused_only_a_finding_is_repo
     assert _git("rev-parse", "refs/heads/develop", cwd=origin) == before
 
 
+def test_a_wire_check_that_crashes_with_exit_one_is_refused_not_reported(armed, fake_nx) -> None:
+    """An uncaught exception exits 1 too (a ledger decode error, an import error, the script's own git timeout). Only the check's
+    own finding header (UNDECLARED (n) or STALE (n)) makes an exit 1 a report; a traceback refuses. The tip's script is the real
+    one with its entry point replaced, so the gate can still read the wire predicates from it."""
+    origin, work = armed
+    before = _git("rev-parse", "refs/heads/develop", cwd=origin)
+    real = (REPO_ROOT / "scripts" / "check_wire_contract_pairing.py").read_text()
+    entry = "    sys.exit(main())\n"
+    assert real.endswith(entry), "the script's entry point moved; update this test"
+    crashing = real[: -len(entry)] + '    raise RuntimeError("ledger decode boom")\n'
+    sha = _commit_paths(work, "a wire check that crashes", {"scripts/check_wire_contract_pairing.py": crashing,
+                                                              "service/src/main/java/A.java": "class A {}\n"})
+    proc = _push(work, fake_nx, sha)
+    assert proc.returncode == 14 and "PUSH_REFUSED_WIRE_LEDGER" in proc.stdout, proc.stdout + proc.stderr
+    assert "Traceback" in proc.stdout and "ledger decode boom" in proc.stdout
+    assert "PUSH_CHECK_REPORT" not in proc.stdout
+    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == before
+
+
 def test_a_stale_ledger_entry_is_reported_like_an_undeclared_commit(armed, fake_nx) -> None:
     """An Unshipped entry whose commit is already an ancestor of the newest v* tag (the arming commit, tagged v1.0.0) is the
     check's other exit-1 finding."""

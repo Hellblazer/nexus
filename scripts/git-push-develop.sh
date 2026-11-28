@@ -157,9 +157,9 @@
 # docstring the table). ALWAYS: scripts/file_size_ratchet.py check, scripts/changelog_fold.py check and
 # scripts/context_budgets.py check (the context-size ceilings of plugin skills, agents, commands and resources: under a
 # second, so a tree already over a ceiling is caught on any push). When the diff reaches them: the wire-pairing check for what
-# that script treats as wire (or the ledger), which REPORTS and does not refuse (RDR-258 Phase 2: its exit 1 prints
-# PUSH_CHECK_REPORT wire-ledger and the push goes on; its exit 2, a missing script and a vacuous pass still refuse; the release PR
-# into main and the engine release block it); tests/scripts/test_cloud_leg.py for docs/; the plugin release-drift ledger test
+# that script treats as wire (or the ledger), which REPORTS and does not refuse (RDR-258 Phase 2: an exit 1 whose output has the
+# check's own UNDECLARED (n) or STALE (n) header prints PUSH_CHECK_REPORT wire-ledger and the push goes on; any other exit 1, a
+# crashed script's traceback, its exit 2, a missing script and a vacuous pass still refuse); tests/scripts/test_cloud_leg.py for docs/; the plugin release-drift ledger test
 # (run with NX_REQUIRE_PLUGIN_DRIFT_CHECK=1, so a tagless tree fails instead of skipping) for conexus/, sn/, tool-spill/,
 # prose-edit/ and marketplace.json; tests/test_integration_pg_cluster.py (run with -m "not slow", so the integration marker is
 # not excluded; it needs no engine and takes about 20 s) for a change to the throwaway-cluster setup (tests/_engine_substrate.py,

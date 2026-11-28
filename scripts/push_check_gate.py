@@ -42,8 +42,9 @@ accepted proof is printed (tree, start, duration, host) and its particulars go i
 wire-ledger REPORTS and does not refuse (RDR-258 Phase 2, nexus-2jomg.3): its exit 1 (an undeclared both-halves commit, or a stale
 ledger entry) prints ``PUSH_CHECK_REPORT wire-ledger ...`` with the script's output and the push goes on, ``PUSH_CHECKS_PASSED`` carrying
 ``reported=wire-ledger``. The release PR into main (the lint bucket's pairing test, ``NX_WIRE_PAIRING_MODE``) and the engine release
-(``scripts/check_engine_release_pairing.py``) still block it. Only the script's exit 1 is a finding: its exit 2 ("could not read git"),
-a missing script, a timeout and a pass without its marker are refusals, as for every other check.
+(``scripts/check_engine_release_pairing.py``) still block it. Only an exit 1 whose output carries the check's own finding header
+(``UNDECLARED (n)`` or ``STALE (n)`` at the start of a line) is a finding: any other exit 1 (a traceback from a crashed script), its exit
+2 ("could not read git"), a missing script, a timeout and a pass without its marker are refusals, as for every other check.
 
 A selected check whose script is missing from the tip, or whose run passes without the marker a real run prints (a
 vacuous pass), or a pytest check that skips any test (except the one named opt-in skip of the cloud-leg file), is a refusal,
@@ -156,7 +157,8 @@ class Spec:
     min_passed: int = 0             # pytest checks: at least this many tests must pass
     skip_ok: str = ""               # pytest checks: the one skip reason (a substring) that is known and legitimate
     env: tuple[tuple[str, str], ...] = ()   # extra environment the check runs with
-    report: bool = False            # the check's exit 1 is a finding the push reports (PUSH_CHECK_REPORT), not a refusal
+    report_header: str = ""         # a regex (multiline): an exit 1 whose output has a line matching it is a finding the push
+                                    # reports (PUSH_CHECK_REPORT); any other exit 1, a crash's traceback among them, refuses
     report_note: str = ""           # the sentence a report carries after its heading: what still blocks the finding, and where
 
 
@@ -178,7 +180,8 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
     Spec("wire-ledger", "PUSH_REFUSED_WIRE_LEDGER", "run", ("scripts/check_wire_contract_pairing.py", LEDGER_PATH),
          "uv run python scripts/check_wire_contract_pairing.py",
          f"declare each flagged commit under `## Unshipped` in {LEDGER_PATH} (or move a shipped entry to `## Shipped`)",
-         marker=r"wire-contract ledger clean", report=True,
+         # The header check_wire_contract_pairing.py's _format_report writes for each finding it returns exit 1 for.
+         marker=r"wire-contract ledger clean", report_header=r"^(UNDECLARED|STALE) \(\d+\)",
          report_note="Reported, not refused: develop reports a both-halves wire change; the release PR into main and the engine "
                      "release still block it (RDR-258 Phase 2)."),
     Spec("cloud-leg", "PUSH_REFUSED_CLOUD_LEG", "run", ("tests/scripts/test_cloud_leg.py",),
@@ -371,7 +374,7 @@ class Outcome:
     detail: str = ""                # why it is red: the excerpt of its output, or the vacuity reason
     seconds: float = 0.0
     lines: list[str] = field(default_factory=list)
-    reported: bool = False          # ok, but the check exited 1 and its Spec.report says to print that, not refuse
+    reported: bool = False          # ok, but the check exited 1 with the finding header its Spec.report_header names: print it, not refuse
 
 
 _NOISE = re.compile(r"^(nexus test tmp:|tenant pool:|-+ posix_spawn census|\d+ spawns:|NOTE: nexus-)")
@@ -501,7 +504,7 @@ def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str]) 
     except OSError as exc:
         return Outcome(spec.name, False, f"could not start: {exc}", time.monotonic() - started)
     seconds = time.monotonic() - started
-    if returncode == 1 and spec.report:
+    if returncode == 1 and spec.report_header and re.search(spec.report_header, out, re.MULTILINE):
         return Outcome(spec.name, True, _excerpt(out), seconds, reported=True)
     if returncode != 0:
         return Outcome(spec.name, False, _excerpt(out), seconds)

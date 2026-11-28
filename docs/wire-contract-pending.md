@@ -19,12 +19,6 @@ carries no method signature for a contract change to reconcile against) is a
 
 **Rules, enforced by `tests/test_wire_contract_pairing_lint.py`:**
 
-- Where "fails the lint" below bites (RDR-258 Phase 2): on the release PR into
-  main, and in the engine release, whose `create-release` job runs
-  `scripts/check_engine_release_pairing.py` over `<previous engine-service-v*
-  tag>..<the tagged commit>`. On develop (a push, or a PR into develop) the lint
-  and the push gate report the same finding and do not fail; the ledger's format
-  and these rules are unchanged.
 - Every both-halves commit MUST be listed under `## Unshipped` below, naming
   the owning bead and the engine tag that carries its engine half. A flagged
   commit absent from this section is UNDECLARED and fails the lint.
