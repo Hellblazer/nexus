@@ -47,6 +47,8 @@ def tools(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def generation(tools: Path) -> Path:
+    if os.name == "nt":
+        pytest.skip("the stand-in generation's interpreter is a #!/bin/sh script (the real build is TestRealDispatchers)")
     return gen_core.build_generation(
         "conexus", tools=tools, run=FakeUv(), platform=WIN, now=lambda: 1_790_000_000.0, version="7.1.0",
     )
