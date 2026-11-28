@@ -17,6 +17,7 @@ fixtures' behaviour instead of grepping for them.
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 
@@ -38,6 +39,15 @@ PRODUCT_WRITTEN_ENV_KEYS: tuple[str, ...] = ("NEXUS_PG_BIN", "NX_T1_SESSION", "N
 ENGINE_DB_ENV_KEYS: tuple[str, ...] = (
     "NX_DB_URL", "NX_DB_USER", "NX_DB_PASS",
     "NX_DB_ADMIN_URL", "NX_DB_ADMIN_USER", "NX_DB_ADMIN_PASS",
+)
+
+
+#: The inputs of ``nexus.config.is_local_mode`` and the keys that travel with cloud posture: the explicit mode switch, the
+#: managed endpoint and its credential, the storage backend, the Voyage key ``set_credentials`` sets, and the config
+#: directory that holds the ``install.mode`` record. A raw write to any of them, or a raw rebind of ``is_local_mode``, is
+#: cloud-mode state carried to the next test (RDR-258 Phase 1 step 3, nexus-2jomg.2).
+MODE_ENV_KEYS: tuple[str, ...] = (
+    "NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN", "NX_STORAGE_BACKEND", "VOYAGE_API_KEY", "NEXUS_CONFIG_DIR",
 )
 
 
@@ -117,3 +127,30 @@ def _no_leaked_engine_db_env() -> Generator[None]:
             "treats an empty NX_DB_ADMIN_* as set).",
             pytrace=False,
         )
+
+
+@pytest.fixture(autouse=True)
+def _restore_mode_state() -> Generator[None]:
+    """Put the mode state back after every test, so no test can hand cloud mode to the next (nexus-2jomg.2).
+
+    The mode-declarations census exists because a test that names a cloud embedder and declares no mode would
+    pass only if an earlier test had left cloud mode behind. A test that sets the mode through ``monkeypatch``
+    (``cloud_mode``) is undone by pytest. What outlives it is a raw write: ``os.environ["NX_LOCAL"] = "0"`` in
+    product code, or ``nexus.config.is_local_mode = ...`` assigned rather than patched. This fixture snapshots
+    :data:`MODE_ENV_KEYS` and the ``is_local_mode`` binding before the test and puts both back after it, so the
+    leak ends at the test that made it. A plugin fixture, so the snapshot precedes every conftest fixture's
+    ``monkeypatch`` and the comparison follows its undo (see the module docstring); restored rather than failed,
+    as for :func:`_restore_product_written_env`, because a test may assert the write.
+
+    Not covered: a write made outside any test (collection, a session fixture), which the snapshot takes as the
+    starting state.
+    """
+    before = {k: os.environ.get(k) for k in MODE_ENV_KEYS}
+    bound = getattr(sys.modules.get("nexus.config"), "is_local_mode", None)
+    try:
+        yield
+    finally:
+        restore_changed_keys(before)
+        config = sys.modules.get("nexus.config")
+        if bound is not None and getattr(config, "is_local_mode", None) is not bound:
+            config.is_local_mode = bound
