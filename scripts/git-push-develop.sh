@@ -74,6 +74,10 @@
 #                                 context-budget, wire-ledger, cloud-leg, plugin-ledger, pg-cluster, docs-readers, write-seam, or
 #                                 check-gate (the whole gate, for a gate that cannot start). Flags only, with no
 #                                 environment twin: an exported variable from an earlier session overrides nothing.
+#     --ledger-report <reason>    Run the changelog, cloud-leg and plugin-ledger checks in report mode (RDR-258 Phase 4): a
+#                                 finding is listed (PUSH_CHECK_REPORT) and not refused, a run that examined nothing still is.
+#                                 On the record like a skip (the push record's skips carry "<check>-report"). A flag only:
+#                                 NX_LEDGER_MODE in the environment is ignored by the gate.
 #   A bad flag exits 64 with PUSH_REFUSED_USAGE before anything is fetched.
 #
 #   A vouched MERGE commit also vouches for everything it merges in (the
@@ -428,7 +432,7 @@ trap _release_push_lock EXIT
 # assignment. Parsed before the first remote call: a typo costs nothing.
 _usage_refuse() {
   echo "PUSH_REFUSED_USAGE $*"
-  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range[=<digest>] --skip-scope-audit --skip-lock --batch-minutes --tenant-check --skip-scrub --red-fix --proof --skip-<check> (see the header of $0)."
+  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range[=<digest>] --skip-scope-audit --skip-lock --batch-minutes --tenant-check --skip-scrub --red-fix --proof --skip-<check> --ledger-report (see the header of $0)."
   exit 64
 }
 _vouch_args=()
@@ -443,6 +447,9 @@ _check_proofs=()        # --proof files, in order
 for _skip_key in FILE_SIZE CHANGELOG CONTEXT_BUDGET WIRE_LEDGER CLOUD_LEG PLUGIN_LEDGER PG_CLUSTER DOCS_READERS WRITE_SEAM CHECK_GATE; do
   unset "_CHECK_SKIP_${_skip_key}"
 done
+# --ledger-report (RDR-258 Phase 4) is a flag and nothing else, for the same reason: a variable inherited from an earlier session
+# must not put the changelog, cloud-leg and plugin-ledger checks in report mode.
+unset _CHECK_LEDGER_REPORT
 while [[ $# -gt 0 ]]; do
   _arg="$1"
   case "$_arg" in
@@ -473,7 +480,8 @@ while [[ $# -gt 0 ]]; do
     --source | --remote | --branch | --allowed-paths | --allowed-paths-from \
       | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check | --skip-scrub | --red-fix \
       | --proof | --skip-file-size | --skip-changelog | --skip-context-budget | --skip-wire-ledger | --skip-cloud-leg \
-      | --skip-plugin-ledger | --skip-pg-cluster | --skip-docs-readers | --skip-write-seam | --skip-check-gate) ;;
+      | --skip-plugin-ledger | --skip-pg-cluster | --skip-docs-readers | --skip-write-seam | --skip-check-gate \
+      | --ledger-report) ;;
     *) _usage_refuse "unknown flag $_name" ;;
     esac
     if (( _has_val )); then
@@ -504,6 +512,7 @@ while [[ $# -gt 0 ]]; do
       _skip_key="$(printf '%s' "${_skip_key//-/_}" | tr '[:lower:]' '[:upper:]')"
       printf -v "_CHECK_SKIP_${_skip_key}" '%s' "$_val"
       ;;
+    --ledger-report) _CHECK_LEDGER_REPORT="$_val" ;;
     --batch-minutes) NX_PUSH_BATCH_MINUTES="$_val" ;;
     --tenant-check)
       [[ "$_val" == "0" || "$_val" == "1" ]] || _usage_refuse "--tenant-check takes 0 or 1, got '$_val'"
@@ -988,6 +997,7 @@ if [[ "$branch" == "develop" ]]; then
     [[ -n "$_check_workdir" && -d "$_check_workdir" ]] || { _check_workdir=""; _check_gate_error "no temp directory for the tip's tree (TMPDIR=${TMPDIR:-/tmp})"; }
     _check_args=(--repo "$_scrub_root" --base "refs/remotes/$remote/$branch" --tip "$tip" --workdir "$_check_workdir" --python "$_check_py")
     for _check_proof in "${_check_proofs[@]+"${_check_proofs[@]}"}"; do _check_args+=(--proof "$_check_proof"); done
+    [[ -z "${_CHECK_LEDGER_REPORT:-}" ]] || _check_args+=(--ledger-report "$_CHECK_LEDGER_REPORT")
     for _check_name in file-size changelog context-budget wire-ledger cloud-leg plugin-ledger pg-cluster docs-readers write-seam; do
       _check_var="_CHECK_SKIP_$(printf '%s' "${_check_name//-/_}" | tr '[:lower:]' '[:upper:]')"
       [[ -z "${!_check_var:-}" ]] || _check_args+=(--skip "$_check_name=${!_check_var}")
@@ -1009,6 +1019,11 @@ if [[ "$branch" == "develop" ]]; then
       if [[ "$_check_line" == "PUSH_CHECK_SKIPPED "* ]]; then
         _check_rest="${_check_line#PUSH_CHECK_SKIPPED }"
         _check_skip_records+=("${_check_rest%% reason=*}=${_check_rest#* reason=}")
+      elif [[ "$_check_line" == "PUSH_CHECK_LEDGER_MODE "*" source=flag reason="* ]]; then
+        # "PUSH_CHECK_LEDGER_MODE <check> mode=report source=flag reason=<text>": a ledger check run in report mode is an
+        # override like a skip, and goes in the record as "<check>-report=<reason>".
+        _check_rest="${_check_line#PUSH_CHECK_LEDGER_MODE }"
+        _check_skip_records+=("${_check_rest%% *}-report=${_check_rest#* reason=}")
       elif [[ "$_check_line" == "PUSH_PROOF_ACCEPTED "* ]]; then
         # "PUSH_PROOF_ACCEPTED <leg> tree=<12> started_at=<iso> elapsed_s=<n> host=<h> file=<f>": no field holds a space.
         read -r _ _pp_leg _pp_tree _pp_start _pp_secs _pp_host _ <<<"$_check_line"

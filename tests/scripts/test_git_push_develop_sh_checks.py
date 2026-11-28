@@ -534,6 +534,28 @@ def test_a_skip_overrides_one_check_and_its_reason_is_in_the_summary_and_the_rec
     assert _git("rev-parse", "refs/heads/develop", cwd=origin) == sha
 
 
+def test_ledger_report_is_a_flag_on_the_record_and_the_environment_cannot_stand_in_for_it(armed, fake_nx,
+                                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """RDR-258 Phase 4: the changelog, cloud-leg and plugin-ledger checks run in report mode only under --ledger-report, which
+    is recorded like a skip; NX_LEDGER_MODE in the environment demotes nothing."""
+    origin, work = armed
+    before = _git("rev-parse", "refs/heads/develop", cwd=origin)
+    sha = _commit_paths(work, "bad fragment", {"changelog/unreleased/nexus-xyz.md": "### Nonsense\n\n- a bullet\n"})
+    monkeypatch.setenv("NX_LEDGER_MODE", "report")
+    proc = _push(work, fake_nx, sha)
+    assert proc.returncode == 14 and "PUSH_REFUSED_CHANGELOG" in proc.stdout, proc.stdout + proc.stderr
+    assert "PUSH_CHECK_LEDGER_MODE changelog mode=block source=default" in proc.stdout
+    assert "NX_LEDGER_MODE='report' in the environment is ignored" in proc.stderr
+    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == before
+    proc = _push(work, fake_nx, "--ledger-report", "the fragments are being rewritten, nexus-xyz", sha)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "PUSH_CHECK_LEDGER_MODE changelog mode=report source=flag reason=the fragments are being rewritten, nexus-xyz" in proc.stdout
+    assert "PUSH_CHECK_REPORT changelog: LEDGER-FINDING changelog:" in proc.stderr
+    (record,) = _records(fake_nx[1])
+    assert _opt(record, "--skip") == ["changelog-report=the fragments are being rewritten, nexus-xyz"]
+    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == sha
+
+
 def test_a_skip_does_not_cover_another_red_check(armed, fake_nx) -> None:
     _origin, work = armed
     sha = _commit_paths(work, "both", {"tests/test_big.py": "x = 1\n" * 1001, "scripts/changelog_fold.py": "import sys\nsys.exit(0)\n"})

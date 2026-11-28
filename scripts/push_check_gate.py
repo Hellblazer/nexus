@@ -51,6 +51,13 @@ vacuous pass), or a pytest check that skips any test (except the one named opt-i
 never a skip. ``--skip NAME=REASON`` overrides one check, on the record: the reason is
 printed as ``PUSH_CHECK_SKIPPED NAME reason=...`` (the push script hands those lines to ``nx ci record-push``).
 
+The changelog, cloud-leg and plugin-ledger checks also take a MODE (RDR-258 Phase 4, scripts/ledger_mode.py): block, or report
+(a finding is listed as ``PUSH_CHECK_REPORT`` lines, at most eight per check and then a ``+N more`` line, and not refused). The mode is the
+spec's ``default_mode`` (block) or, with ``--ledger-report REASON``, report on the record: each selected ledger check prints
+``PUSH_CHECK_LEDGER_MODE NAME mode=... source=default|flag [reason=...]`` and the push script records a ``source=flag`` one as
+``NAME-report=REASON``. ``NX_LEDGER_MODE`` in the environment is ignored (``PUSH_CHECK_NOTE`` says so): a variable left exported
+demotes nothing.
+
 Exit codes: 0 every selected check passed (or was skipped by name, or reported), 14 a refusal (``PUSH_REFUSED_<CHECK>`` lines on standard
 output, each with the command to reproduce it), 15 the gate could not run (``PUSH_REFUSED_CHECK_GATE_ERROR``). Nothing
 here passes silently on a fault. A checkout whose remote branch has no ``scripts/file_size_ratchet.py`` is not armed:
@@ -142,6 +149,8 @@ CONTEXT_PLUGINS = ("conexus", "sn", "prose-edit", "tool-spill")
 CONTEXT_CEILINGS = "tests/fixtures/context-budgets.txt"
 CONTEXT_SCRIPT = "scripts/context_budgets.py"
 LEDGER_MODE_SCRIPT = "scripts/ledger_mode.py"
+#: Findings a passing report-mode check relays, per check; the rest are a "+N more" line (the plugin ledger can list hundreds).
+MAX_REPORT_FINDINGS = 8
 MAX_REPORT_LINES = 40
 MAX_REPORT_CHARS = 3500
 
@@ -163,8 +172,8 @@ class Spec:
     report_header: str = ""         # a regex (multiline): an exit 1 whose output has a line matching it is a finding the push
                                     # reports (PUSH_CHECK_REPORT); any other exit 1, a crash's traceback among them, refuses
     report_note: str = ""           # the sentence a report carries after its heading: what still blocks the finding, and where
-    ledger: str = ""                # a class-A ledger check: it runs under NX_LEDGER_MODE (scripts/ledger_mode.py)
-    default_mode: str = "block"     # a ledger check's mode when NX_LEDGER_MODE is unset ("report" is RDR-258 Phase 4 step 2)
+    ledger: str = ""                # a class-A ledger check: it runs in block or report mode (scripts/ledger_mode.py)
+    default_mode: str = "block"     # a ledger check's mode without --ledger-report ("report" is RDR-258 Phase 4 step 2)
 
 
 SPECS: dict[str, Spec] = {s.name: s for s in (
@@ -494,7 +503,13 @@ def skip_problem(name: str, out: str) -> str | None:
             f"(skip reasons: {'; '.join(other)[:300] or 'not printed'})")
 
 
-def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str]) -> Outcome:
+def ledger_mode_for(spec: Spec, ledger_reason: str = "") -> tuple[str, str]:
+    """(mode, source) a class-A ledger check runs in: ``report`` with source ``flag`` when ``--ledger-report`` gave a reason,
+    else the spec's own ``default_mode`` with source ``default``."""
+    return (ledger_mode.REPORT, "flag") if ledger_reason else (spec.default_mode, "default")
+
+
+def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str], ledger_reason: str = "") -> Outcome:
     started = time.monotonic()
     missing = [n for n in spec.needs if not (tree / n).exists()]
     if missing:
@@ -505,12 +520,10 @@ def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str]) 
     env["NX_TEST_T2_SUBSTRATE"] = "none"
     env.update(dict(spec.env))
     if spec.ledger:
-        # One switch for the class-A ledgers: block (default) refuses a finding, report lists it. Pinned into the child so the
-        # check reads the mode this gate judged, and a bad value refuses here, not as a quiet default.
-        try:
-            env[ledger_mode.ENV] = ledger_mode.mode(os.environ) if os.environ.get(ledger_mode.ENV, "").strip() else spec.default_mode
-        except ledger_mode.LedgerModeError as exc:
-            return Outcome(spec.name, False, str(exc), time.monotonic() - started)
+        # The class-A ledgers' mode is pinned into the child and comes from the spec or the --ledger-report flag, never from
+        # NX_LEDGER_MODE in the caller's environment: an override on this gate is a flag, on the record, and a variable left
+        # exported by an earlier session demotes nothing.
+        env[ledger_mode.ENV] = ledger_mode_for(spec, ledger_reason)[0]
     try:
         returncode, out = _run_child(command_for(spec.name, python, pytest_cmd), tree, env)
     except subprocess.TimeoutExpired as exc:
@@ -734,7 +747,7 @@ def _reproduce_note(tip: str) -> str:
 
 
 def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[str, str], workdir: Path, python: str,
-             out=sys.stdout, err=sys.stderr, repush: tuple[str, str] = ("", "")) -> int:
+             out=sys.stdout, err=sys.stderr, repush: tuple[str, str] = ("", ""), ledger_report: str = "") -> int:
     if "check-gate" in skips:
         print(f"PUSH_CHECK_SKIPPED check-gate reason={skips['check-gate']}", file=out)
         return EXIT_OK
@@ -762,10 +775,20 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
         specs = {n: SPECS[n] for n in selected}
 
         def one(name: str) -> Outcome:
-            return run_check(specs[name], tree, [python], pytest_cmd)
+            return run_check(specs[name], tree, [python], pytest_cmd, ledger_report)
 
         outcomes: dict[str, Outcome] = {}
         live = [n for n in runnable if n not in skips]
+        if os.environ.get(ledger_mode.ENV, "").strip():
+            print(f"PUSH_CHECK_NOTE {ledger_mode.ENV}={os.environ[ledger_mode.ENV]!r} in the environment is ignored here: the "
+                  "ledger checks run in the mode their spec names, and --ledger-report '<reason>' is the override, on the record",
+                  file=err)
+        for name in live:
+            if SPECS[name].ledger:
+                mode, source = ledger_mode_for(SPECS[name], ledger_report)
+                # The line the push script records when the mode is an override (source=flag): "<check>-report=<reason>".
+                reason = f" reason={ledger_report}" if source == "flag" else ""
+                print(f"PUSH_CHECK_LEDGER_MODE {name} mode={mode} source={source}{reason}", file=out)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(live))) as pool:
             for name, outcome in zip(live, pool.map(one, live)):
                 outcomes[name] = outcome
@@ -788,8 +811,15 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
                 continue
             if outcome.ok:
                 ran.append(f"{name}({outcome.seconds:.1f}s)")
-                for line in outcome.lines:
+                findings = [ln for ln in outcome.lines if ln.startswith("LEDGER-FINDING")]
+                for line in findings[:MAX_REPORT_FINDINGS]:
                     print(f"PUSH_CHECK_REPORT {name}: {line}", file=err)
+                if len(findings) > MAX_REPORT_FINDINGS:
+                    print(f"PUSH_CHECK_REPORT {name}: +{len(findings) - MAX_REPORT_FINDINGS} more finding(s); "
+                          f"reproduce: {SPECS[name].reproduce}", file=err)
+                for line in outcome.lines:
+                    if not line.startswith("LEDGER-FINDING"):
+                        print(f"PUSH_CHECK_REPORT {name}: {line}", file=err)
                 continue
             refusals.append(name)
             print(f"{spec.token} {name} is red at the tip's tree ({tip[:12]}); selected by {selected[name]}.", file=out)
@@ -867,6 +897,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tip", required=True, help="the commit to push; its tree is what the checks read")
     parser.add_argument("--proof", action="append", default=[], type=Path, help="a watched_pytest.py --status file (repeatable)")
     parser.add_argument("--skip", action="append", default=[], type=parse_skip, help="NAME=REASON (repeatable)")
+    parser.add_argument("--ledger-report", default="", metavar="REASON",
+                        help="run the changelog, cloud-leg and plugin-ledger checks in report mode (a finding is listed, not "
+                             "refused), on the record; NX_LEDGER_MODE in the environment changes nothing here")
     parser.add_argument("--repush-prefix", default="", help="the push command up to its shas, for the re-push line of a refusal")
     parser.add_argument("--repush-suffix", default="", help="the shas of the push command, for the re-push line of a refusal")
     parser.add_argument("--workdir", type=Path, default=None, help="a directory for the tip's tree (default: a temp dir)")
@@ -885,7 +918,7 @@ def main(argv: list[str] | None = None) -> int:
             raise GateError(f"the work directory {workdir} does not exist")
         try:
             return run_gate(args.repo, args.base, args.tip, args.proof, dict(args.skip), workdir, args.python,
-                            repush=(args.repush_prefix, args.repush_suffix))
+                            repush=(args.repush_prefix, args.repush_suffix), ledger_report=" ".join(args.ledger_report.split()))
         finally:
             if own_workdir:
                 shutil.rmtree(workdir, ignore_errors=True)

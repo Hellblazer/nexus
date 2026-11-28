@@ -218,7 +218,10 @@ check "mandatory-pins"            mandatory_pins_run
 #    PG bundle parity, deadline ordering).
 #    NX_TEST_T2_SUBSTRATE=none: none of them needs the engine (120 passed, 0 skipped
 #    under none, 2026-10-25), so none takes the suite lease.
-check "pin-tests"                 env NX_TEST_T2_SUBSTRATE=none uv run pytest -q -p no:cacheprovider \
+#    NX_LEDGER_MODE=block (RDR-258 Phase 4): the plugin ledger is a release gate, so a
+#    NX_LEDGER_MODE=report left exported by another session must not turn its findings
+#    into a listing here.
+check "pin-tests"                 env NX_TEST_T2_SUBSTRATE=none NX_LEDGER_MODE=block uv run pytest -q -p no:cacheprovider \
                                     tests/test_engine_version.py tests/test_plugin_release_drift_ledger.py \
                                     tests/test_ci_release_ledger_gate.py tests/test_pg_bundle_version_parity.py \
                                     tests/test_embed_deadline_default_ordering.py

@@ -133,6 +133,9 @@ surfaces the whole fix list. The checks:
 - the pin sweep -- the pin tests that are not lint-marked,
   `check_wire_contract_pairing.py`, and `ruff check src`. The lint-marked ones run
   in PR CI's `test-lint`; a lint red shows there about 12 minutes into the PR's run.
+  The sweep pins `NX_LEDGER_MODE=block`: the plugin ledger, the changelog fragments
+  and the cloud-leg route ledger report on develop and block on a release, so run
+  any of them by hand for a release with `NX_LEDGER_MODE=block` (RDR-258 Phase 4).
 - `mineru-weights-published` -- the MinerU weights tag (`WEIGHTS_ASSET_TAG`, F35) serves this tree's pinned
   `MANIFEST.tsv` and every asset at its pinned size: one GET and one HEAD per asset against the public download
   URL, so it needs the network (offline reads UNVERIFIED). An absent tag or asset FAILS with step 8b's upload as
