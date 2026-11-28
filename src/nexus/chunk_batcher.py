@@ -39,6 +39,8 @@ from dataclasses import dataclass, field
 
 import structlog
 
+from nexus.collection_errors import ChunkMetadataKeyRefusedError
+
 _log = structlog.get_logger(__name__)
 
 #: Service write cap (nexus.db.limits MAX_RECORDS_PER_WRITE parity).
@@ -80,6 +82,22 @@ class _ThrottleSignal:
 
 class _ThrottleBreakerOpen(Exception):
     """Raised inside ``_flush_batch`` instead of issuing a flush once the breaker is open."""
+
+
+def _chunk_key_refusal(exc: BaseException) -> ChunkMetadataKeyRefusedError | None:
+    """The engine's ``chunk_metadata_key_refused`` refusal in *exc*'s cause chain, or ``None``.
+
+    The flush callback may wrap the typed error, so the chain is walked, not only the top. Not
+    bisected (:meth:`ChunkBatcher._flush_batch`): the refusal is about the writer's metadata keys,
+    which every half of a batch carries, so halving only multiplies refused requests."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        if isinstance(cur, ChunkMetadataKeyRefusedError):
+            return cur
+        seen.add(id(cur))
+        cur = cur.__cause__ or cur.__context__
+    return None
 
 
 def _throttle_signal(exc: BaseException) -> _ThrottleSignal | None:
@@ -127,6 +145,9 @@ class _FileState:
     #: the failure in ``failed`` was a throttle (or a deferral caused by one), not a bad file
     #: (nexus-eoido): the run summary reports the two separately
     failed_throttled: bool = False
+    #: the failure in ``failed`` was the engine's chunk-key refusal (nexus-6pfgb.66); kept as the typed
+    #: error so the run summary can name the keys and their homes
+    failed_refused: ChunkMetadataKeyRefusedError | None = None
     finished_adding: bool = False
     #: opaque caller payload handed back on completion/failure (e.g. the
     #: deferred post-store hook arguments for this file)
@@ -221,6 +242,9 @@ class ChunkBatcher:
         #: nexus-eoido: the subset of ``_failed_files`` that failed because the service throttled
         #: the run (or because the breaker deferred them), path -> error
         self._throttled_files: dict[str, str] = {}
+        #: nexus-6pfgb.66: the subset of ``_failed_files`` the engine refused for chunk metadata keys, path -> the
+        #: typed error itself
+        self._refused_files: dict[str, ChunkMetadataKeyRefusedError] = {}
         self._throttle_breaker_threshold = throttle_breaker_threshold
         self._consecutive_throttled = 0
         self._throttle_breaker_open = False
@@ -288,6 +312,14 @@ class ChunkBatcher:
         breaker deferred) rather than rejected. Their next run retries them like any failed file."""
         with self._lock:
             return dict(self._throttled_files)
+
+    @property
+    def refused_files(self) -> dict[str, ChunkMetadataKeyRefusedError]:
+        """file path -> the engine's chunk-key refusal, for the files in ``failed_files`` whose batch the
+        engine refused for chunk metadata keys. The batch failed once, not bisected; a re-run is refused
+        the same way until the writer is fixed."""
+        with self._lock:
+            return dict(self._refused_files)
 
     @property
     def throttle_retry_after(self) -> float | None:
@@ -582,6 +614,7 @@ class ChunkBatcher:
 
         error: str | None = None
         throttle: _ThrottleSignal | None = None
+        refusal: ChunkMetadataKeyRefusedError | None = None
         deferred_by_breaker = False
         t0 = time.monotonic()
         try:
@@ -611,7 +644,10 @@ class ChunkBatcher:
                 from nexus.rate_brake import get_brake  # noqa: PLC0415 — leaf module, only on the throttle arm
 
                 get_brake().trip(throttle.retry_after, source="chunk_batcher")
-            bisect = len(pend.file_counts) >= 2 and (
+            # nexus-6pfgb.66: a chunk-key refusal is not bisected either. Every half carries the same
+            # writer keys, so halving a batch of F files sends up to 2F-1 requests the engine refuses.
+            refusal = _chunk_key_refusal(exc)
+            bisect = refusal is None and len(pend.file_counts) >= 2 and (
                 throttle is None or (throttle.deadline_abort and not bisected)
             )
             if bisect:
@@ -686,6 +722,7 @@ class ChunkBatcher:
                 if error is not None and state.failed is None:
                     state.failed = error
                     state.failed_throttled = throttled
+                    state.failed_refused = refusal
                 self._settle_file_locked(path, settled)
             self._count_throttle_locked(
                 collection, error, throttle, deferred_by_breaker=deferred_by_breaker,
@@ -825,6 +862,8 @@ class ChunkBatcher:
             self._failed_files[path] = state.failed
             if state.failed_throttled:
                 self._throttled_files[path] = state.failed
+            if state.failed_refused is not None:
+                self._refused_files[path] = state.failed_refused
         settled.append((path, state.failed, state.context))
 
     def _invoke_callbacks(self, settled: list[_Settled]) -> None:
