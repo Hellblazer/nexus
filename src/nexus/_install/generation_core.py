@@ -278,7 +278,13 @@ def swap_link(target: str, link: Path | str, ops: LinkOps | None = None) -> None
                 f"{link} exists and is not a link (a directory, or a file bigger than a pointer); "
                 "refusing to replace it. Move it aside and run `nx self install` again."
             )
-        os.unlink(link)  # an empty or damaged pointer: nothing in it to keep
+        try:
+            os.unlink(link)  # a pointer READ and found empty or damaged: nothing in it to keep
+        except OSError as exc:
+            raise GenerationError(
+                f"could not replace the damaged pointer {link}: {exc}. Close whatever holds it (or move it "
+                "aside) and run `nx self install --bootstrap` again."
+            ) from exc
     try:
         ops.create(target, new)
     except OSError as exc:
@@ -945,17 +951,6 @@ def populate_launchers(
     return lines
 
 
-def _shim_python_request(generation: Path) -> str:
-    """The interpreter the dispatcher venv is made with: the generation's own
-    base interpreter (``pyvenv.cfg`` ``home``), else a version request."""
-    try:
-        home = _pyvenv_value((generation / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace"), "home")
-    except OSError:
-        home = ""
-    candidate = Path(home) / "python.exe" if home else None
-    return str(candidate) if candidate is not None and candidate.is_file() else "3.12"
-
-
 def ensure_dispatchers(
     tools: Path | None, generation: Path | str, dist: str = "conexus", *,
     run=None, platform: str | None = None, progress: bool = False,
@@ -985,14 +980,8 @@ def ensure_dispatchers(
         recorded = marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
     except OSError as exc:
         raise GenerationError(f"could not prepare the dispatcher directory {bin_dir}: {exc}") from exc
-    # uv removes a managed Python it no longer needs, or the venv is deleted: every dispatcher is
-    # then dead and `nx` cannot run to say so. The next run rebuilds the venv and refreshes every file.
-    stranded = not python.is_file() and any((bin_dir / layout.exe_name(n, platform=platform)).is_file() for n in names)
-    try:
-        cfg_home = _pyvenv_value((venv / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace"), "home")
-        stranded = stranded or (bool(cfg_home) and not os.path.isdir(cfg_home))
-    except OSError:
-        pass
+    have = any((bin_dir / layout.exe_name(n, platform=platform)).is_file() for n in names)
+    stranded = _dispatch().is_stranded(venv, python, have)  # the next run rebuilds the venv and refreshes every file
     refresh = (bool(recorded) and recorded != DISPATCH_VERSION) or stranded
     todo = [
         n for n in names
@@ -1004,7 +993,7 @@ def ensure_dispatchers(
         lines.append(f"the dispatcher environment {venv} is gone or its Python is; rebuilding it")
     if stranded or not python.is_file():
         flag = "--clear" if stranded else "--allow-existing"
-        _run(["uv", "venv", flag, "--python", _shim_python_request(gen), str(venv)], run, "uv venv (dispatchers)",
+        _run(["uv", "venv", flag, "--python", _dispatch().python_request(gen), str(venv)], run, "uv venv (dispatchers)",
              progress=progress)
     staging = root / f".dispatch-wheels.{os.getpid()}"
     try:
@@ -1327,14 +1316,23 @@ def repair_layout(
     layout = _layout()
     root = layout._root(tools)
     ops = ops or LinkOps(platform)
+    lines: list[str] = []
     try:
         current = layout.current_generation(tools=root, platform=platform)
     except layout.LayoutError:
-        return []
+        # A torn `current` (empty or headerless, read and found damaged): point it at the newest complete
+        # generation, the likeliest one it named. Anything else (absent, a link, a directory) is not ours.
+        newest = layout.list_generations(tools=root)
+        if not newest or not _dispatch().is_torn_pointer(layout.current_link(tools=root)):
+            return []
+        lines.append(f"{layout.current_link(tools=root)} was damaged: pointing it at {newest[-1].name}")
+        if dry_run:
+            return lines
+        swap_link(str(newest[-1]), layout.current_link(tools=root), ops)
+        current = newest[-1]
     if not current.is_dir():
         return []
     entry = current_launcher_dir(root)
-    lines: list[str] = []
     if not (launcher_dir(current) / layout.exe_name("nx", platform=platform)).is_file():
         lines.append(f"building the launcher directory {launcher_dir(current)}")
         if not dry_run:
@@ -1420,7 +1418,7 @@ def migrate_legacy(
 
     ``migrate_legacy.sh`` in Python, in its order and for its reasons: read the
     uv receipt's extras one last time (the only bridge for ``[local]``), build
-    side-by-side leaving uv's tree untouched, flip, put ``current\\bin`` first on
+    side-by-side leaving uv's tree untouched, flip, put ``<tools>\\bin`` first on
     the user PATH (the Windows shim step), and register the legacy tree for a
     LATER, SEPARATE reap. This never reaps and never runs ``uv tool uninstall``
     (which deletes the tree every live holder is running from). A failure after

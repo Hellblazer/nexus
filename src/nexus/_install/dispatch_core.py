@@ -108,21 +108,31 @@ def sweep_litter(directory: Path) -> None:
 TORN_MAX_BYTES = 4096
 
 
+#: ``layout_core.POINTER_MAGIC``, restated (this module imports nothing); a test pins the two equal.
+POINTER_MAGIC = "nx-pointer 1"
+
+
 def is_torn_pointer(path: Path) -> bool:
-    """Whether *path* is a small regular file where a pointer should be but is not a valid one.
+    """Whether *path* is a small regular file where a pointer should be, READ SUCCESSFULLY, and not a valid one.
 
     ``write_pointer`` fsyncs before the replace, but a restored backup, an antivirus rewrite or a
     crash on a disk that lies can still leave an empty or headerless ``current``. Nothing there is
-    worth keeping, and refusing to replace it left no way back (``nx`` itself cannot run). A
-    directory, a link and a file bigger than a pointer are never torn. The caller has already
-    asked ``is_link``, so a valid pointer does not reach here.
+    worth keeping, and refusing to replace it left no way back (``nx`` itself cannot run). Only
+    content that was read counts: a pointer that cannot be opened for a moment (an antivirus lock) is
+    not evidence of damage, and deleting it would destroy a good one. A directory, a link and a file
+    bigger than a pointer are never torn.
     """
     try:
         if path.is_symlink() or os.path.isjunction(path) or not path.is_file():
             return False
-        return path.stat().st_size <= TORN_MAX_BYTES
+        with open(path, "rb") as handle:
+            raw = handle.read(TORN_MAX_BYTES + 1)
     except OSError:
         return False
+    if len(raw) > TORN_MAX_BYTES:
+        return False
+    lines = raw.decode("utf-8", errors="replace").split("\n")
+    return not (len(lines) >= 3 and lines[0].rstrip("\r") == POINTER_MAGIC and lines[1].strip() and not lines[2].strip())
 
 
 def sweep_staging(root: Path, older_than_s: float = 3600.0) -> None:
@@ -135,4 +145,27 @@ def sweep_staging(root: Path, older_than_s: float = 3600.0) -> None:
                 shutil.rmtree(staging, ignore_errors=True)
         except OSError:
             pass
+
+
+def venv_home(venv: Path) -> str:
+    """The ``home =`` of *venv*'s ``pyvenv.cfg`` (its base interpreter's directory), or ``""``."""
+    try:
+        text = (venv / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = re.search(r"^home *= *(.*)$", text, re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def python_request(generation: Path) -> str:
+    """The interpreter the dispatcher venv is made with: the generation's own base interpreter, else a version."""
+    home = venv_home(generation)
+    return str(Path(home) / "python.exe") if home and (Path(home) / "python.exe").is_file() else "3.12"
+
+
+def is_stranded(venv: Path, python: Path, have_dispatchers: bool) -> bool:
+    """Whether dispatchers already exist but the venv they run on is gone or its Python is: uv removes
+    a managed Python it no longer needs, and then every dispatcher is dead and `nx` cannot say so."""
+    home = venv_home(venv)
+    return (have_dispatchers and not python.is_file()) or (bool(home) and not os.path.isdir(home))
 

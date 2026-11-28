@@ -755,6 +755,34 @@ class TestWhatCompleteMeansOnWindows:
         assert not self._complete(windows)
 
 
+class TestADamagedPointerBesideALegacyTree:
+    """The dispatcher tells a user with a damaged ``current`` to run ``--bootstrap``; ``_existing_install``
+    used to refuse it whenever an unreaped ``uv tool`` tree sat beside it ("already installed")."""
+
+    @pytest.fixture
+    def windows(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
+        world = _make_world(tmp_path / "w")
+        monkeypatch.setattr(self_cmd, "_is_windows", lambda platform=None: True)
+        monkeypatch.setenv("NX_USER_PATH_STORE", str(world.path_store))
+        monkeypatch.setenv("UV_TOOL_DIR", str(world.uv_tools))
+        (lc.venv_bin(world.uv_tools / "conexus", platform="win32")).mkdir(parents=True)  # a working legacy tree
+        return world
+
+    def test_a_torn_current_is_repaired_not_refused_even_with_a_legacy_tree(self, windows: World) -> None:
+        (windows.tools / "current").write_bytes(b"")
+        assert self_cmd._existing_install(windows.tools, windows.bin) is None
+
+    def test_a_healthy_current_with_no_shims_beside_a_legacy_tree_is_still_that_install(self, windows: World) -> None:
+        """The control: the legacy tree makes it complete, as it always did."""
+        generation = _receipted_generation(windows)
+        (windows.tools / "current").write_bytes(f"nx-pointer 1\n{generation}\n".encode())
+        assert self_cmd._existing_install(windows.tools, windows.bin) is not None
+
+    def test_a_current_that_is_a_big_file_is_not_called_damaged(self, windows: World) -> None:
+        (windows.tools / "current").write_bytes(b"x" * 5000)
+        assert self_cmd._existing_install(windows.tools, windows.bin) is not None
+
+
 class TestAResumeNeedsTheRightVersionAndAHealthyGeneration:
     """A leftover generation is finished only when it is what a fresh build would
     produce: the running program's version, answering the console-script lookup

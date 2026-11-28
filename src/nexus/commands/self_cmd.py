@@ -561,6 +561,8 @@ def _existing_install(tools: Path, bin_dir: Path) -> str | None:
             return None
         if _shims_are_in_place(tools, bin_dir):
             return f"generation {current.name} under {tools}"
+    if _generation()._dispatch().is_torn_pointer(tools / install_layout.CURRENT_LINK_NAME):
+        return None  # a damaged pointer is what --bootstrap repairs, a legacy tree beside it or not
     legacy = install_layout.uv_conexus_venv(platform=_plat())
     if install_layout.venv_bin(legacy, platform=_plat()).is_dir() and not _generation_interpreter_gone(legacy):
         return f"a `uv tool` install at {legacy}"
@@ -1771,9 +1773,8 @@ def _windows_build_flip_shims(
 def _windows_flip_and_path(
     generation: Path, *, tools: Path, bootstrap: bool = False, restoring: bool = False,
 ) -> None:
-    """Make *generation* current (``activate_generation``; *restoring* flips first) and repoint the
-    logon task. On the bootstrap path the failure names the same ``--bootstrap`` command, because
-    the plain one has no ``nx`` to run there."""
+    """Make *generation* current (``activate_generation``; *restoring* flips first) and repoint the logon
+    task. On the bootstrap path the failure names the same ``--bootstrap`` command (no ``nx`` to run there)."""
     core = _generation()
     try:
         _echo_path_result(core.activate_generation(tools, generation, platform=_plat(), restoring=restoring))

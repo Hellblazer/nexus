@@ -464,7 +464,18 @@ _DISPATCH_SOURCE_HASHES = {"1": "f6751ee27b58b6b95a3966551608a573c90121204ed6f32
 def test_the_dispatch_version_names_this_exact_source() -> None:
     import hashlib
 
-    digest = hashlib.sha256(Path(dispatch.__file__).read_bytes()).hexdigest()
+    # CRLF folded to LF: a checkout with core.autocrlf=true (the win-release runner's) has the same source.
+    digest = hashlib.sha256(Path(dispatch.__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
     assert _DISPATCH_SOURCE_HASHES.get(gen_core.DISPATCH_VERSION) == digest, (
         f"_nx_dispatch.py changed (sha256 {digest}): bump generation_core.DISPATCH_VERSION and add it here"
     )
+
+
+def test_the_pinned_hash_is_the_same_for_a_crlf_checkout() -> None:
+    import hashlib
+
+    lf = Path(dispatch.__file__).read_bytes().replace(b"\r\n", b"\n")
+    crlf = lf.replace(b"\n", b"\r\n")
+    assert hashlib.sha256(crlf.replace(b"\r\n", b"\n")).hexdigest() == hashlib.sha256(lf).hexdigest()
+    assert hashlib.sha256(lf).hexdigest() == _DISPATCH_SOURCE_HASHES[gen_core.DISPATCH_VERSION]
+

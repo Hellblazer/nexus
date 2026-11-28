@@ -115,6 +115,106 @@ class TestATornPointerIsNotADeadEnd:
         assert "uv tool run --from conexus nx self install --bootstrap" in problem and "damaged" in problem
 
 
+class TestOnlyAConfirmedReadMakesAPointerTorn:
+    """A valid pointer that cannot be read for a moment (an antivirus lock) used to look 'not a link',
+    small and regular, and was deleted."""
+
+    def test_a_valid_pointer_the_layout_cannot_read_just_now_is_never_deleted(
+        self, tools: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        a, b = _gen(tools, "gen-A"), _gen(tools, "gen-B")
+        _flip(a, tools)
+        before = (tools / "current").read_bytes()
+        monkeypatch.setattr(lc, "read_pointer", lambda p: None)  # the layout's read fails this once
+        real_open = open
+
+        def locked(path, *args, **kwargs):
+            if str(path).endswith("current"):
+                raise PermissionError(13, "being used by another process")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(dispatch_core, "open", locked, raising=False)
+        with pytest.raises(gen_core.GenerationError):
+            _flip(b, tools)
+        assert (tools / "current").read_bytes() == before
+
+    def test_a_valid_pointer_is_not_torn_with_either_line_ending(self, tools: Path) -> None:
+        for newline in ("\n", "\r\n"):
+            pointer = tools / "current"
+            pointer.write_bytes(f"nx-pointer 1{newline}C:\\tools\\gen-A{newline}".encode())
+            assert not dispatch_core.is_torn_pointer(pointer), repr(newline)
+
+    @pytest.mark.parametrize("body", [b"", b"nx-pointer 1", b"nx-pointer 1\n\n", b"junk\n", b"\xff\xfe\x00\x01"])
+    def test_a_confirmed_empty_short_or_headerless_read_is_torn(self, tools: Path, body: bytes) -> None:
+        pointer = tools / "current"
+        pointer.write_bytes(body)
+        assert dispatch_core.is_torn_pointer(pointer)
+
+    def test_the_header_this_module_restates_is_layout_cores(self) -> None:
+        assert dispatch_core.POINTER_MAGIC == lc.POINTER_MAGIC
+
+    def test_a_torn_pointer_that_cannot_be_deleted_is_a_generation_error_with_the_way_back(
+        self, tools: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tools / "current").write_bytes(b"")
+
+        def refused(path, *a, **k):
+            raise PermissionError(5, "Access is denied")
+
+        setattr_in(monkeypatch, GEN, "os.unlink", refused)
+        with pytest.raises(gen_core.GenerationError, match=r"could not replace the damaged pointer.*nx self install --bootstrap"):
+            _flip(_gen(tools, "gen-A"), tools)
+
+
+class TestRepairHealsATornCurrent:
+    def _box(self, tmp_path: Path) -> tuple[Path, Path, FakeUv]:
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        uv = FakeUv()
+        gen = gen_core.build_generation("conexus", tools=tools, run=uv, platform=WIN, now=lambda: 1_790_000_000.0, version="7.1.0")
+        return tools, gen, uv
+
+    def _repair(self, tools: Path, uv: FakeUv, tmp_path: Path, **kw) -> list[str]:
+        store = gen_core.FileUserPath(tmp_path / "p.txt")
+        store.write("C:\\Windows", 2)
+        return gen_core.repair_layout(
+            tools, ops=Ops(WIN), platform=WIN, store=store, uv_bin="C:\\uv", run=uv, environ={"PATH": ""}, **kw,
+        )
+
+    def test_it_points_a_damaged_current_at_the_newest_complete_generation_and_finishes_the_repair(
+        self, tmp_path: Path,
+    ) -> None:
+        tools, gen, uv = self._box(tmp_path)
+        newer = gen_core.build_generation("conexus", tools=tools, run=uv, platform=WIN, now=lambda: 1_790_000_100.0, version="7.2.0")
+        (tools / "current").write_bytes(b"")
+        lines = self._repair(tools, uv, tmp_path)
+        assert lc.current_generation(tools=tools, platform=WIN) == newer
+        assert any("was damaged" in line and newer.name in line for line in lines), lines
+        assert (tools / "bin" / "nx.exe").is_file(), "and the rest of the repair ran on it"
+        assert gen.is_dir()
+
+    def test_a_dry_run_says_so_and_changes_nothing(self, tmp_path: Path) -> None:
+        tools, gen, uv = self._box(tmp_path)
+        (tools / "current").write_bytes(b"")
+        lines = self._repair(tools, uv, tmp_path, dry_run=True)
+        assert any("was damaged" in line for line in lines)
+        assert (tools / "current").read_bytes() == b""
+
+    def test_a_current_that_is_a_directory_or_absent_is_not_ours_to_heal(self, tmp_path: Path) -> None:
+        tools, gen, uv = self._box(tmp_path)
+        assert self._repair(tools, uv, tmp_path) == []
+        (tools / "current").mkdir()
+        assert self._repair(tools, uv, tmp_path) == []
+        assert (tools / "current").is_dir()
+
+    def test_a_damaged_current_with_no_generation_to_name_is_left_alone(self, tmp_path: Path) -> None:
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        (tools / "current").write_bytes(b"")
+        assert self._repair(tools, FakeUv(), tmp_path) == []
+        assert (tools / "current").read_bytes() == b""
+
+
 class TestReplaceRetries:
     def test_a_reader_holding_the_pointer_open_is_waited_out(self, tools: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         a, b = _gen(tools, "gen-A"), _gen(tools, "gen-B")
