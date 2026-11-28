@@ -204,6 +204,7 @@ WORKFLOWS = REPO / ".github" / "workflows"
 #: that starts them.
 NO_ENGINE_OR_POSTGRES = {
     ("windows-pg-bundle-rehearsal.yml", "conformance"): "runs the supervisor conformance suite under NX_TEST_T2_SUBSTRATE=none",
+    ("windows-pg-bundle-rehearsal.yml", "git-guard-windows"): "runs the git-guard routing tests under NX_TEST_T2_SUBSTRATE=none",
 }
 _STARTS_ENGINE_OR_POSTGRES = ("windows-engine-leg", "engine_windows_smoke", "pg_bundle_windows_smoke", "build_pg_bundle_windows", "nexus-service.exe", "postgres.exe")
 

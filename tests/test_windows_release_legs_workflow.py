@@ -733,7 +733,7 @@ PHASE3_WINDOWS_MODULES = (
     "src/nexus/daemon/aspect_worker_daemon.py",
 )
 #: What .44 proved green on native Windows, run as one pytest process.
-WINDOWS_TEST_SET = (
+WINDOWS_SERIAL_SET = (
     "tests/daemon/", "tests/test_process_group_safety.py", "tests/test_session_sweep_orphan_trackers.py",
     "tests/test_win_console.py", "tests/test_winsec.py", "tests/test_winproc_core.py",
     "tests/test_install_generation_real_windows.py", "tests/test_install_lease_windows.py",
@@ -758,12 +758,18 @@ WINDOWS_TEST_SET = (
     "tests/test_install_source.py", "tests/test_pdf_stack.py", "tests/test_installer_rebuild.py",
     # The MinerU CLI (8 reds on native Windows that nothing ran) and the server spawn's Job Object test.
     "tests/test_mineru_cmd.py", "tests/test_mineru_spawn_windows_flags.py",
-    # The git-guard routing tests (522 pass natively, 0 skips) spawn Git for Windows' bash through
-    # tests/_git_bash.py; they and the helper are workflow triggers.
-    "tests/test_routing_subagent_git_write.py", "tests/test_routing_subagent_git_write_gaps.py",
-    "tests/test_routing_subagent_git_dash_c_worktree.py",
     "tests/test_context.py::TestSubagentHookInjection", "tests/test_context.py::TestSessionHookInjection",
 )
+#: The git-guard routing tests (522 pass natively, 0 skips), which spawn Git for Windows' bash through
+#: tests/_git_bash.py; they and the helper are workflow triggers. They run in the job's second, parallel
+#: pytest: about 17,000 process starts made them 1753 s serially on native Windows, which pushed the
+#: one-pytest set past the job's 30-minute limit.
+WINDOWS_PARALLEL_SET = (
+    "tests/test_routing_subagent_git_write.py", "tests/test_routing_subagent_git_write_gaps.py",
+    "tests/test_routing_subagent_git_dash_c_worktree.py",
+)
+#: Everything the job runs natively, the set and the parallel step (the encoding lints read this).
+WINDOWS_TEST_SET = WINDOWS_SERIAL_SET + WINDOWS_PARALLEL_SET
 #: Windows-set test files that are deliberately not workflow triggers (the loop that reads this).
 RIDES_ALONG = (
     "tests/test_install_source.py", "tests/test_pdf_stack.py", "tests/test_installer_rebuild.py",
@@ -814,8 +820,13 @@ def test_the_windows_job_runs_the_whole_set_in_one_pytest_with_a_junit_floor() -
     job = _doc(REHEARSAL)["jobs"]["conformance"]
     run_steps = [s["run"] for s in job["steps"] if "pytest" in s.get("run", "")]
     assert len(run_steps) == 1, "non-vacuity: exactly one pytest step in the job"
-    for target in WINDOWS_TEST_SET:
+    for target in WINDOWS_SERIAL_SET:
         assert target in run_steps[0], target
+    for target in WINDOWS_PARALLEL_SET:
+        # The git-guard files run in git-guard-windows: in this serial pytest their ~17,000 process starts
+        # (1753 s natively) pushed the job past its 30-minute limit (six develop runs cancelled, 2026-11-27).
+        assert target not in run_steps[0], f"{target} belongs to git-guard-windows, not the serial set"
+    assert not re.search(r"\s-n\s", run_steps[0]), "the set stays one serial pytest process"
     assert "--junitxml=windows-tests-junit.xml" in run_steps[0]
     # default addopts stay: integration, slow and lint tests need services a runner step does not have.
     assert 'addopts=""' not in run_steps[0]

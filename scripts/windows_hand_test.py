@@ -19,8 +19,9 @@ CI's own checkout fixup step, and runs
 ``lab-run-win.cmd uv run --python 3.13 --frozen pytest ... -p no:cacheprovider``
 with ``NX_TEST_T2_SUBSTRATE=none``, as the CI job does. A commit that is not
 in ``origin/develop`` travels as an incremental git bundle over scp. ``--set``
-reads the Windows-set step's pytest arguments and runs CI's non-vacuity floor
-step after it; ``--check`` reads the workflow's ``on.push.paths`` and says
+reads the pytest arguments of the set's step and then the git-guard-windows job's
+(those tests under xdist), and runs both CI floor steps after them;
+``--check`` reads the workflow's ``on.push.paths`` and says
 whether this branch's diff touches them. Everything CI-specific is read from
 the workflow file, never copied, so a hand run cannot drift from CI.
 
@@ -53,6 +54,11 @@ SET_STEP: str = "Windows test set"
 #: stub (Git for Windows has core.symlinks=false); a hand run does the same.
 FIXUP_STEP: str = "Checkout fixups (LF, symlinks materialised)"
 FLOOR_STEP: str = "Non-vacuity floor"
+#: The git-guard tests' job (they run under xdist there) and its pytest and floor steps; --set runs them after
+#: the set, since the set alone is not the whole Windows suite.
+PARALLEL_JOB: str = "git-guard-windows"
+PARALLEL_STEP: str = "Windows git-guard tests (parallel)"
+PARALLEL_FLOOR_STEP: str = "Git-guard non-vacuity floor"
 DEFAULT_HOST: str = "qwentescence"
 LAB_RUN_WIN: str = r"C:\build\lab\lab-run-win.cmd"
 CLONE_URL: str = "https://github.com/Hellblazer/nexus.git"
@@ -130,13 +136,18 @@ def ci_step_run(name: str, workflow: Path = WORKFLOW, job: str = SET_JOB) -> str
     return runs[0]
 
 
-def ci_set_args(workflow: Path = WORKFLOW) -> list[str]:
-    """The pytest arguments of the workflow's "Windows test set" step, as CI
-    passes them (its ``--junitxml`` included: the floor step reads that file)."""
-    words = shlex.split(ci_step_run(SET_STEP, workflow))
+def ci_step_args(name: str, workflow: Path = WORKFLOW, job: str = SET_JOB) -> list[str]:
+    """The pytest arguments of the workflow step called *name*, as CI passes
+    them (its ``--junitxml`` included: a floor step reads that file)."""
+    words = shlex.split(ci_step_run(name, workflow, job))
     if words.count("pytest") != 1:
-        raise SystemExit(f"windows_hand_test: the {SET_STEP!r} step must run pytest exactly once; its shape changed")
+        raise SystemExit(f"windows_hand_test: the {name!r} step must run pytest exactly once; its shape changed")
     return words[words.index("pytest") + 1:]
+
+
+def ci_set_args(workflow: Path = WORKFLOW) -> list[str]:
+    """The pytest arguments of the workflow's "Windows test set" step."""
+    return ci_step_args(SET_STEP, workflow)
 
 
 def push_paths(workflow: Path = WORKFLOW) -> list[str]:
@@ -323,10 +334,16 @@ def run_with_heartbeat(argv: Sequence[str], *, interval: float = HEARTBEAT_S,
 
 
 def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle: str | None,
-                  fixup: str, floor: str | None, patch: str | None = None) -> str:
+                  fixup: str, floor: str | None, patch: str | None = None,
+                  more_runs: Sequence[Sequence[str]] = (), more_floors: Sequence[str] = ()) -> str:
     """The PowerShell (pwsh) script the remote side runs. Any setup failure
     (a git call's nonzero exit, a terminating error, the commit not checked
-    out) exits SETUP_FAILED before pytest can run on the wrong tree."""
+    out) exits SETUP_FAILED before pytest can run on the wrong tree.
+
+    *more_runs* are further pytest runs after the first (the job's parallel
+    step), each run whatever the one before it did, as CI's ``!cancelled()``
+    steps are; the first nonzero pytest code is the run's code. *more_floors*
+    follow *floor*, and a red floor turns a green run into FLOOR_FAILED."""
     base = rf"C:\build\hand\{session}"
     repo = base + "\\nexus"
     fail = SETUP_FAILED
@@ -408,15 +425,18 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
     lines += [
         "$ErrorActionPreference = 'Continue'",
         "$env:NX_TEST_T2_SUBSTRATE = 'none'",
-        f"& {_ps_quote(LAB_RUN_WIN)} uv run --python 3.13 --frozen pytest "
-        + " ".join(_ps_quote(a) for a in pytest_args)
-        + " -p no:cacheprovider",
-        "$code = $LASTEXITCODE",
     ]
-    if floor is not None:
+    for i, args in enumerate([pytest_args, *more_runs]):
+        lines += [
+            f"& {_ps_quote(LAB_RUN_WIN)} uv run --python 3.13 --frozen pytest "
+            + " ".join(_ps_quote(a) for a in args)
+            + " -p no:cacheprovider",
+            "$code = $LASTEXITCODE" if i == 0 else "if ($code -eq 0) { $code = $LASTEXITCODE }",
+        ]
+    for step in [*([floor] if floor is not None else []), *more_floors]:
         lines += [
             "# CI's non-vacuity floor step, verbatim from the workflow:",
-            floor.rstrip(),
+            step.rstrip(),
             f"if ($code -eq 0 -and $LASTEXITCODE -ne 0) {{ $code = {FLOOR_FAILED} }}",
         ]
     lines.append("exit $code")
@@ -499,7 +519,7 @@ def _main(argv: Sequence[str] | None, *, run: Runner, beat: Callable[[Sequence[s
     ap.add_argument("--session", help="your session name: work goes under C:\\build\\hand\\<session>")
     ap.add_argument("--host", default=DEFAULT_HOST)
     ap.add_argument("--ref", default="HEAD", help="the commit to test (default HEAD of this checkout)")
-    ap.add_argument("--set", action="store_true", help="run CI's whole Windows test set and its floor")
+    ap.add_argument("--set", action="store_true", help="run CI's whole Windows suite (the set, then the git-guard job) and both floors")
     ap.add_argument("--check", action="store_true", help="say whether this branch needs a Windows run; exit 1 if so")
     ap.add_argument("--uncommitted", action="store_true",
                     help="also test the working tree's uncommitted changes (for an agent that cannot commit)")
@@ -509,7 +529,10 @@ def _main(argv: Sequence[str] | None, *, run: Runner, beat: Callable[[Sequence[s
         return _check(run)
     if not ns.session or not _SESSION_RE.fullmatch(ns.session) or ns.session.lower() in _WINDOWS_DEVICE_NAMES:
         raise SystemExit("windows_hand_test: --session must be 1-40 ASCII letters, digits, - or _, and not a device name")
-    args = (ci_set_args() if ns.set else []) + [_check_pytest_arg(a) for a in ns.pytest_args]
+    extra = [_check_pytest_arg(a) for a in ns.pytest_args]
+    args = (ci_set_args() if ns.set else []) + extra
+    # The whole job: the set, then the parallel git-guard step, each with the caller's extra arguments.
+    more_runs = [ci_step_args(PARALLEL_STEP, job=PARALLEL_JOB) + extra] if ns.set else []
     if not args:
         raise SystemExit("windows_hand_test: give pytest arguments after --, or --set")
 
@@ -554,7 +577,8 @@ def _main(argv: Sequence[str] | None, *, run: Runner, beat: Callable[[Sequence[s
         script = remote_script(
             ns.session, sha, args, bundle=bundle_remote,
             fixup=ci_step_run(FIXUP_STEP), floor=ci_step_run(FLOOR_STEP) if ns.set else None,
-            patch=patch_remote,
+            patch=patch_remote, more_runs=more_runs,
+            more_floors=[ci_step_run(PARALLEL_FLOOR_STEP, job=PARALLEL_JOB)] if ns.set else [],
         )
         local_ps1 = Path(tmp) / "win-hand.ps1"
         local_ps1.write_text(script, encoding="utf-8")

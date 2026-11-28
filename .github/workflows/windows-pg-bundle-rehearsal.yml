@@ -24,7 +24,9 @@
 #                 daemon tests, the stop channel's console sequence, the owner-only
 #                 DACL helper, the session sweep and the plugin's lease read), in
 #                 one pytest run with a junit floor. It is a job of its own so its
-#                 result does not hide the bundle's.
+#                 result does not hide the bundle's;
+#   git-guard-windows: the git-guard routing tests under xdist, with a floor of their
+#                 own, kept out of conformance's serial set by their runtime.
 # The release legs run the smoke again at tag time.
 #
 # Triggers: a push to develop that touches those inputs (the mac rehearsal's
@@ -37,8 +39,9 @@
 # NX_WINDOWS_RELEASE_LEGS switch mean nothing queues for it until Sam has
 # registered it and flipped the variable. One runner runs one job at a time, so a
 # rehearsal in flight delays a release leg by about its length, and a push that
-# touches both sets of inputs runs bundle, then engine, then conformance (about a
-# quarter of an hour in all).
+# touches both sets of inputs runs the Windows jobs one after another (run
+# 46004481488 on 2026-11-27: conformance 23.5 min, bundle 4, label 2, engine 4.5;
+# git-guard-windows adds about 11, so about 45 minutes in all).
 #
 # The file keeps its name although it now rehearses the engine as well: a rename
 # would churn the concurrency group, AGENTS.md and the tests that name it for no
@@ -449,7 +452,7 @@ jobs:
       # the ceiling of 204 (0 failed, run 44675562916). The gate's plain-Python cases stay in the set and run on Windows.
       - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py --ignore=tests/daemon/test_spawn_lock_hold.py --ignore=tests/daemon/test_storage_service_running.py --ignore=tests/hooks/test_session_facts_posix.py --ignore=tests/daemon/test_legacy_chash_guard_real_pg.py --ignore=tests/daemon/test_storage_stop_invisible.py --ignore=tests/daemon/test_stop_real_processes_posix.py --ignore=tests/hooks/test_compact_outcome_harness_posix.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_install_lease_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_install_source.py tests/test_pdf_stack.py tests/test_installer_rebuild.py tests/test_mineru_cmd.py tests/test_mineru_spawn_windows_flags.py tests/test_routing_subagent_git_write.py tests/test_routing_subagent_git_write_gaps.py tests/test_routing_subagent_git_dash_c_worktree.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
+          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py --ignore=tests/daemon/test_spawn_lock_hold.py --ignore=tests/daemon/test_storage_service_running.py --ignore=tests/hooks/test_session_facts_posix.py --ignore=tests/daemon/test_legacy_chash_guard_real_pg.py --ignore=tests/daemon/test_storage_stop_invisible.py --ignore=tests/daemon/test_stop_real_processes_posix.py --ignore=tests/hooks/test_compact_outcome_harness_posix.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_install_lease_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_install_source.py tests/test_pdf_stack.py tests/test_installer_rebuild.py tests/test_mineru_cmd.py tests/test_mineru_spawn_windows_flags.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
       # A run that skipped itself on Windows would pass having proved nothing. The
       # floor is sized from the measured run above: junit counts an xfail as a skip,
@@ -534,13 +537,65 @@ jobs:
       # grown by 1637 tests as the set's directories gained files, so the old floor sat far under it.
       # The floor is about 90% of the passes (5200) and the ceiling the measured skips plus the
       # margin of 13 (211), under the 6% cap the workflow test holds (5200 * 6 // 100 = 312).
-      # 2026-11-27: the three git-guard routing test files joined the set (522 tests, 0 skips on qwent's
-      # Windows side). Floor and ceiling are unchanged: the floor is Sam's pre-declared criterion and the
-      # added passes only widen the margin above it.
+      # 2026-11-27: the three git-guard routing test files run natively too (522 tests, 0 skips on qwent's
+      # Windows side), in the git-guard-windows job below, not in this set, so this floor and ceiling are
+      # unchanged and count the set alone.
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |
           uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 5200 --max-skipped 211 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.test_install_lease_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_pretooluse_allows_through_uv_and_the_shim --require-passed tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows --require-passed tests.test_off_cwd_resolver_real_windows.TestRealWindows --require-passed tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows --require-passed test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale --require-passed test_help_states_the_autostart_default_and_installs_nothing --require-passed test_the_server_outlives_the_desktop_extensions_job
+
+  # The git-guard routing tests, natively, in a job of their own with xdist workers. They are spawn-bound: 522
+  # tests start about 17,000 processes (4,168 guard interpreters at 200-340 ms each on native Windows, about 12,000
+  # git calls at about 40 ms, 427 Git bash), against 212 s for all of them on macOS. Serially they took 1753 s on
+  # qwent's Windows side (scripts/windows_hand_test.py, 2026-11-27); inside the conformance job's one pytest they
+  # pushed it past its 30-minute limit on every develop run from 83f83fcf7f on (six cancelled at about 30:10).
+  # Process starts there scale poorly with workers (-n 8: 600 s, 2.9x), so even a parallel step would leave
+  # conformance at about 35 minutes; a job of its own keeps conformance's serial set and its timeout as they were.
+  # Nothing in these files shares state across tests (each builds its repos under tmp_path), and the main unit
+  # suite runs them under xdist on every develop commit. Same gate, runner and triggers as conformance, and
+  # nothing waits on either: a red here turns the run red exactly as a red there does.
+  git-guard-windows:
+    name: Git-guard routing tests, parallel (win-release)
+    if: ${{ github.actor == 'Hellblazer' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
+    runs-on: win-release
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      NX_TEST_T2_SUBSTRATE: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      # The same fixups as the conformance job: LF text, and each tracked symlink as a copy of its target.
+      - name: Checkout fixups (LF, symlinks materialised)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config core.autocrlf false
+          git rm -r -q --cached .
+          git reset -q --hard HEAD
+          $links = @(git ls-files -s | Where-Object { $_ -match '^120000 ' } | ForEach-Object { ($_ -split "`t", 2)[1] })
+          if ($links.Count -eq 0) { throw 'no tracked symlinks found; this step has nothing to do and its premise moved' }
+          foreach ($rel in $links) {
+            $stub = Join-Path $PWD $rel
+            $target = [IO.Path]::GetFullPath((Join-Path (Split-Path $stub) (Get-Content -Raw -LiteralPath $stub).Trim()))
+            if (-not (Test-Path -LiteralPath $target)) { throw "symlink $rel points at $target, which does not exist" }
+            Remove-Item -LiteralPath $stub -Force
+            Copy-Item -LiteralPath $target -Destination $stub -Recurse
+            Write-Host "materialised $rel <- $target"
+          }
+
+      - name: Windows git-guard tests (parallel)
+        run: |
+          uv run --python 3.13 --frozen pytest tests/test_routing_subagent_git_write.py tests/test_routing_subagent_git_write_gaps.py tests/test_routing_subagent_git_dash_c_worktree.py -n 8 -p no:cacheprovider -q -rs --junitxml=windows-git-guard-junit.xml
+
+      # Their own floor: about 90% of the 522 that pass natively (470), and a ceiling of no skip, since none of
+      # these tests skips on native Windows today.
+      - name: Git-guard non-vacuity floor
+        if: ${{ !cancelled() }}
+        run: |
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-git-guard-junit.xml --min-passed 470 --max-skipped 0
 
   # RDR-229 P3.6 (nexus-21kr3): the label test against the real engine on native Windows. It cannot ride the
   # conformance job's pytest step: that step runs NX_TEST_T2_SUBSTRATE=none under the default addopts, which
