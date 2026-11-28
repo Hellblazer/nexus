@@ -483,3 +483,28 @@ def test_guard_catches_ignore_ledger_ceiling_and_allowlist_data_files() -> None:
     assert rrr.guard_catches(an_with(["tests/plans/test_plan_step_tool_allowlist.py"]), guards) == {"c": 1}
     assert rrr.is_ledger_file("docs/wire-contract-pending.md")
     assert not rrr.is_ledger_file("tests/test_pending_jobs.py")
+
+
+def test_a_fallback_fix_pick_is_unattributed_unless_a_rule_that_ignores_the_fix_commit_labels_it_first() -> None:
+    fb = {"fix_distance": 3, "touched_test": True, "fix_touched_product": True, "fix_is_fix": True,
+          "fix_pick": "fallback"}
+    assert rrr.label_item(_item(**fb), _RUN) == (rrr.UNATTRIBUTED, "unattributed:fix-pick-fallback")
+    assert rrr.label_item(_item(**{**fb, "fix_pick": "qualified"}), _RUN) == (rrr.PRODUCT, "product:fix-touched-src")
+    pin = _item(**fb, file="", item="TestRealWindows.test_the_walk_finds_the_uv_entries", venue="windows",
+                msg="AssertionError: {'conexus': 18, 'sn': 4}")
+    assert rrr.label_item(pin, _RUN) == (rrr.ACCOUNTING, "accounting:meta-msg")
+    assert rrr.label_item(_item(**fb), {"rerun_green": True, "unresolved": False}) == (rrr.FLAKE, "flake:rerun-green")
+
+
+def test_the_accounting_caveat_counts_fallback_picks_in_every_category_and_in_the_product_figure() -> None:
+    def it(category: str, pick: str, product: bool) -> dict:
+        return {"category": category, "derived": False, "fix_distance": 1, "fix_pick": pick,
+                "fix_touched_product": product}
+
+    an = {"runs": {1: {"category": rrr.ACCOUNTING}, 2: {"category": rrr.UNATTRIBUTED}},
+          "items": [it(rrr.ACCOUNTING, "fallback", True), it(rrr.ACCOUNTING, "qualified", True),
+                    it(rrr.ACCOUNTING, "qualified", False), it(rrr.STALE, "fallback", True),
+                    it(rrr.UNATTRIBUTED, "fallback", True)]}
+    text = rrr.accounting_caveat(an)
+    assert "1 of the 3 and 1 of the 2 rest on a fallback pick" in text
+    assert f"{{'{rrr.ACCOUNTING}': 1, '{rrr.STALE}': 1, '{rrr.UNATTRIBUTED}': 1}}" in text

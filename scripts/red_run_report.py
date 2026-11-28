@@ -32,13 +32,20 @@ not resolved within its next ``GREEN_CANDIDATES_MAX`` successful runs is unresol
 
 Fix signal. The commits in ``<red sha>..<resolving green sha>`` are the fix range, so the range ends
 at the first run that passed the failing job, not at the first success. For an item the fix is the
-FIRST commit in that range that touched the failing test's file, at whatever distance: the range is
-already bounded by the job passing, so no commit-count window is applied (an earlier 10-commit
-window missed census fixes at distance 11 to 15). ``fix_distance`` records how far it is.
-``fix_touched_product`` says whether that commit also touched ``src/`` or ``service/src/main/``
-(the 258-research-15 reading), ``fix_is_fix`` whether its subject is ``fix``-typed, and
-``fix_table_only`` whether its diff to the file is only table-like lines. A run whose resolving
-green ran on the same sha is a rerun-green. ``fix_product_commit`` on the run is the range-wide form.
+FIRST commit in that range that touched the failing test's file and can be its fix, at whatever
+distance: the range is already bounded by the job passing, so no commit-count window is applied (an
+earlier 10-commit window missed census fixes at distance 11 to 15). A commit cannot be the fix when
+its change to the file is only docstring or comment lines (unless the commit is ``fix``-typed and
+touches product code), or only adds table rows that declare a file the same commit adds
+(``red_run_fix_signal``). ``fix_pick`` is ``qualified``, ``doc_only_skipped`` (a doc-only commit was
+passed over for a later one) or ``fallback``: no commit qualified, so the first one that touched the file
+is kept, so the reading is never silently empty, and it is not a fix reading. ``fix_commit``,
+``fix_distance``, ``fix_touched_product`` (whether that commit also touched ``src/`` or
+``service/src/main/``, the 258-research-15 reading), ``fix_is_fix`` (its subject is ``fix``-typed) and
+``fix_table_only`` (its diff to the file is only table rows, defined in ``red_run_fix_signal``;
+None when no code line changed) describe the picked commit, the fallback one included, where they are
+informational. ``range_touched_product`` is the run's ``fix_product_commit``, a range-wide hint for
+hand review. A run whose resolving green ran on the same sha is a rerun-green.
 
 Categories. The six of strand B plus ``unattributed``, assigned by the ordered rules in
 ``label_item``: build step, infra signature (``##[error]`` lines of a step with no named test),
@@ -46,8 +53,10 @@ accounting (lint-bucket jobs, ratchet and floor steps, census and pin messages, 
 names, count pins on an entries dict), harness, then for a named test a timing message is flake, a
 fix commit that changed the test and product code is a product defect, a test edited to go green is
 stale or ambient-coupled, and a test that went green with no commit touching it, or that no later
-run verifiably resolved, is ``unattributed``: the record cannot say whether it was flaky, ambient,
-or fixed in ``src/`` without touching the test. ``unattributed`` is counted in none of strand B's six;
+run verifiably resolved, or whose every touching commit has a ``fallback`` fix pick (rule
+``unattributed:fix-pick-fallback``, after the rules that do not read the fix commit), is
+``unattributed``: the record cannot say whether it was flaky, ambient, or fixed in ``src/`` without
+touching the test. ``unattributed`` is counted in none of strand B's six;
 the MVV prints it beside flake and stale with the bracket each implies. A step with no named test
 falls back to the pytest failed-count (Windows: portability). A run takes the category of the
 majority of its non-derived items (ties by ``PRIORITY``). Strand B's classifier is gone; the rules
@@ -84,6 +93,8 @@ from typing import Any
 
 import red_run_inventory as inventory_module
 import red_run_stuck
+from red_run_fix_signal import ChangeReader
+from red_run_fix_signal import is_table_line as is_table_line    # re-exported: callers and tests read it here
 from red_run_inventory import Inventory
 
 Row = dict[str, Any]
@@ -434,6 +445,7 @@ class History:
         self._anc: dict[tuple[str, str], bool] = {}
         self._src: dict[tuple[str, str], str] = {}
         self.commits: dict[str, Row] = {}
+        self.changes = ChangeReader(repo, _git)
 
     def is_ancestor(self, older: str, newer: str) -> bool:
         key = (older, newer)
@@ -478,27 +490,11 @@ class History:
         return bool(re.search(rf"^\s*(?:async\s+)?def {re.escape(name)}\(", self._src[key], re.M))
 
     def table_only(self, sha: str, path: str) -> bool | None:
-        """Whether a commit's change to one file is only table-like lines (None: no change found)."""
-        out = _git(self.repo, "show", "--no-color", "--no-renames", "-U0", "--format=", sha, "--", path)
-        changed = [ln[1:] for ln in out.splitlines()
-                   if ln[:1] in "+-" and not ln.startswith(("+++", "---"))]
-        if not changed:
-            return None
-        return all(is_table_line(ln) for ln in changed)
+        """Whether a commit's change to one file is only table rows (None: no code line changed); see ``red_run_fix_signal``."""
+        return self.changes.analyse(sha, path).table_only
+
 
 FIX_SUBJECT_RE: re.Pattern[str] = re.compile(r"^fix(\(|:|!)", re.I)
-#: A diff line that is data, not logic: a string, tuple, list or dict entry, a comment, a blank, or
-#: a bare key/value. A census, pin or allowlist table edit is made only of these; an assertion,
-#: control flow or definition line is not.
-_LOGIC_RE: re.Pattern[str] = re.compile(
-    r"^\s*(assert|def|class|import|from|return|if|elif|else|for|while|with|raise|yield|try|except|"
-    r"@|async)\b")
-_TABLE_RE: re.Pattern[str] = re.compile(
-    r"""^\s*(#.*|["'(\[{].*|[\w./:-]+\s*[:=]\s*["'(\[{\d].*|[\w./-]+,?|[)\]}],?)?\s*$""")
-
-
-def is_table_line(line: str) -> bool:
-    return not _LOGIC_RE.match(line) and bool(_TABLE_RE.match(line))
 
 
 GH_SLUG: str = "Hellblazer/nexus"
@@ -741,20 +737,35 @@ def _recover_path(it: Row, hist: History) -> None:
 
 
 def _fix_signal(it: Row, rng: Sequence[str], green: Row | None, hist: History) -> None:
-    """Fix fields of one item: the first commit in the fix range that touched the failing file."""
-    touching = [(n, c) for n, c in enumerate(rng, 1)
-                if any(item_matches_path(it, f) for f in hist.files(c))]
-    it["touched_test"] = None if green is None else bool(touching)
-    it["fix_commit"] = touching[0][1][:12] if touching else None
-    it["fix_distance"] = touching[0][0] if touching else None
+    """Fix fields of one item: the first commit in the fix range that touched the failing file and can be its fix.
+
+    A commit whose change to the file is only docstring or comment lines (unless the commit is ``fix``-typed and
+    touches product code), or only declares a file the same commit adds, is passed over (``red_run_fix_signal``).
+    ``fix_pick`` is ``qualified``, ``doc_only_skipped`` (a doc-only commit was passed over for a later one) or,
+    when no commit qualifies, ``fallback``: the first commit that touched the file is kept, so the reading is
+    never silently empty. The commits are read in order and the pick stops at the first that qualifies.
+    """
+    touching = ((n, c, next(f for f in hist.files(c) if item_matches_path(it, f)))
+                for n, c in enumerate(rng, 1) if any(item_matches_path(it, f) for f in hist.files(c)))
+    pick, first, doc_skipped = None, None, False
+    for cand in touching:
+        first = first or cand
+        change = hist.changes.analyse(cand[1], cand[2])
+        real_fix = bool(FIX_SUBJECT_RE.match(hist.commits.get(cand[1], {}).get("subj", ""))) and any(
+            is_product(f) for f in hist.files(cand[1]))
+        if change.qualifies or (change.doc_only and real_fix):
+            pick = cand
+            break
+        doc_skipped = doc_skipped or change.doc_only
+    it["touched_test"] = None if green is None else first is not None
+    it["fix_pick"] = ("doc_only_skipped" if doc_skipped else "qualified") if pick else ("fallback" if first else None)
+    pick = pick or first
+    it["fix_commit"] = pick[1][:12] if pick else None
+    it["fix_distance"] = pick[0] if pick else None
     it["fix_touched_product"] = None if green is None else (
-        any(is_product(f) for f in hist.files(touching[0][1])) if touching else False)
-    it["fix_table_only"] = None
-    it["fix_is_fix"] = bool(touching) and bool(
-        FIX_SUBJECT_RE.match(hist.commits.get(touching[0][1], {}).get("subj", "")))
-    if touching:
-        path = next(f for f in hist.files(touching[0][1]) if item_matches_path(it, f))
-        it["fix_table_only"] = hist.table_only(touching[0][1], path)
+        any(is_product(f) for f in hist.files(pick[1])) if pick else False)
+    it["fix_is_fix"] = bool(pick) and bool(FIX_SUBJECT_RE.match(hist.commits.get(pick[1], {}).get("subj", "")))
+    it["fix_table_only"] = hist.table_only(pick[1], pick[2]) if pick else None
 
 
 def extract(snapshot: Path, repo: Path, *, conclusions: Sequence[str] = DEFAULT_CONCLUSIONS,
@@ -813,6 +824,7 @@ def extract(snapshot: Path, repo: Path, *, conclusions: Sequence[str] = DEFAULT_
         for it in items:
             _recover_path(it, hist)
             _fix_signal(it, rng, green, hist)
+            it["range_touched_product"] = rec["fix_product_commit"]    # range-wide hint for hand review
             out_items.append(it)
     if any(r["green_run"] and not r["rerun_green"] for r in out_runs) and not hist.commits:
         raise RuntimeError(f"no commit was read from {repo} although runs have later greens: "
@@ -915,6 +927,8 @@ def label_item(item: Row, run: Row) -> tuple[str, str]:
         return STALE, "stale:windows-venue"
     if run["unresolved"]:
         return UNATTRIBUTED, "unattributed:no-verified-green"
+    if item.get("fix_pick") == "fallback":
+        return UNATTRIBUTED, "unattributed:fix-pick-fallback"    # no touching commit can be the fix
     if item["fix_distance"] is not None:
         if item["fix_table_only"]:
             return ACCOUNTING, "accounting:fix-table-edit"
@@ -1083,13 +1097,24 @@ def accounting_caveat(an: Mapping[str, Any]) -> str:
     items = [i for i in an["items"] if i["category"] == ACCOUNTING and not i["derived"]]
     tied = [i for i in items if i.get("fix_distance") is not None]
     prod = [i for i in tied if i.get("fix_touched_product")]
+    fallback = _fallback_by_category(an)
     return (f"accounting share {_pct(acc, total)} of all {total} red runs (floor) to {_pct(acc, attributed)} "
             f"of the {attributed} attributed runs (unattributed and unlabelled runs left out); where the "
             "unattributed runs fall is not known. Caveat (258-research-15): accounting is what a check "
             f"guards, not whether a given red was a product defect; {len(items)} accounting items, "
             f"{len(tied)} followed by a fix commit that touched the failing file, {len(prod)} of those "
             "by a commit that also touched src/ or service/src/main/ (research-15 found 3 real "
-            "product catches among 18 such items)")
+            "product catches among 18 such items); "
+            f"{sum(1 for i in tied if i.get('fix_pick') == 'fallback')} of the {len(tied)} and "
+            f"{sum(1 for i in prod if i.get('fix_pick') == 'fallback')} of the {len(prod)} rest on a fallback pick "
+            "(every commit that touched the file only edited docstrings or comments, or declared its own "
+            f"new file), and items with a fallback pick in all categories are {dict(sorted(fallback.items()))}")
+
+
+def _fallback_by_category(an: Mapping[str, Any]) -> collections.Counter[str]:
+    """Non-derived items whose fix pick is a fallback, per category."""
+    return collections.Counter(i["category"] for i in an["items"]
+                               if not i["derived"] and i.get("fix_pick") == "fallback")
 
 
 def unattributed_caveat(an: Mapping[str, Any]) -> str:
@@ -1101,7 +1126,9 @@ def unattributed_caveat(an: Mapping[str, Any]) -> str:
     product = sum(1 for r in runs if r["fix_product_commit"])
     short = sum(1 for r in runs if r["range_len"] <= 1)
     return (f"unattributed {n} runs {dict(sorted(rules.items()))}: no commit touched the failing test "
-            "before a later run verifiably passed its job, or no such run exists in the window. The "
+            "before a later run verifiably passed its job, or no such run exists in the window, or every "
+            "commit that touched it only edited docstrings or comments or declared its own new file "
+            f"(items with that fallback pick, all categories: {dict(sorted(_fallback_by_category(an).items()))}). The "
             "record cannot say whether each was flaky, ambient-coupled or fixed in src/ without touching "
             f"the test; {product} have a fix-typed commit touching src/ or service/src/main in their fix "
             f"range (product candidates), {short} a fix range of one commit or none. Counted in none of "
