@@ -35,6 +35,8 @@ _LAB_RUNNER = re.compile(r"['\"]lab-[a-z0-9]+")
 #: bytecode on the job's own work dir, which the pool discards after the job (nexus-vdhcl).
 _MAC_POOL_RUNNER = re.compile(r"['\"]lab-mac-[a-z0-9]+")
 _PYTHON_USERS = re.compile(r"\b(uv|pytest|python3?)\b")
+#: Every job that runs pytest on a Linux pool class. A new one carries the same wiring and is added here.
+POOL_PYTEST_JOBS = [("ci.yml", "test"), ("quarantine-nightly.yml", "pytest")]
 
 
 def pool_pytest_jobs(docs: dict[str, dict]) -> list[tuple[str, str, dict]]:
@@ -72,6 +74,8 @@ def prefix_problems(spec: dict) -> list[str]:
     if not dirs.startswith("/dev/shm/"):
         problems.append(f"the prefix directory must sit under /dev/shm/, got {dirs!r}")
     for part in ("github.run_id", "github.run_attempt", "matrix.python-version", "matrix.shard"):
+        if part.startswith("matrix.") and not spec.get("strategy"):
+            continue  # a job without a matrix (the quarantine nightly's, nexus-2jomg.6) has no leg to tell apart
         if part not in dirs:
             problems.append(f"the prefix directory is not unique per job: {part} missing from {dirs!r}")
     if "mkdir -m 0700" not in run:
@@ -103,8 +107,8 @@ def _load() -> dict[str, dict]:
 
 def test_every_lab_pool_pytest_job_keeps_bytecode_on_dev_shm() -> None:
     jobs = pool_pytest_jobs(_load())
-    # non-vacuity: today exactly the ci.yml `test` job; a scan that found none passed nothing
-    assert [(f, j) for f, j, _ in jobs] == [("ci.yml", "test")], (
+    # non-vacuity: today the ci.yml `test` job and the quarantine nightly's `pytest` job; a scan that found none passed nothing
+    assert [(f, j) for f, j, _ in jobs] == POOL_PYTEST_JOBS, (
         f"pool pytest jobs found: {[(f, j) for f, j, _ in jobs]}; a new one needs the same wiring and a line here"
     )
     for fname, jid, spec in jobs:
@@ -245,7 +249,7 @@ def shared_venv_problems(spec: dict, script_text: str) -> list[str]:
 
 def test_every_lab_pool_pytest_job_is_wired_for_the_shared_venv() -> None:
     jobs = pool_pytest_jobs(_load())
-    assert [(f, j) for f, j, _ in jobs] == [("ci.yml", "test")]
+    assert [(f, j) for f, j, _ in jobs] == POOL_PYTEST_JOBS
     text = _SCRIPT.read_text(encoding="utf-8")
     for fname, jid, spec in jobs:
         assert shared_venv_problems(spec, text) == [], f"{fname}:{jid}"

@@ -1,25 +1,43 @@
 name: Flake quarantine (nightly)
 
-# RDR-258 Phase 5 (nexus-2jomg.6). Runs only the tests listed in tests/quarantine.toml (`-m quarantine`),
-# once a day, and reports each one's pass or fail over the run plus its age and 14-day deadline
-# (scripts/quarantine_report.py). Sam's ruling, 2026-11-27: a quarantine lasts 14 days, then the test is
-# fixed or deleted. The job only reddens on the deadline rule, a broken registry, or a run that examined
-# nothing for a listed test; a quarantined test that fails is the expected state and shows in the report.
-# A test that passes is NOT released: remove its entry by hand.
+# RDR-258 Phase 5 (nexus-2jomg.6). Runs only the tests listed in tests/quarantine.toml, once a day and on
+# dispatch, NX_QUARANTINE_PASSES times each (5, see below), then reports each test's results over the passes,
+# its age and its 14-day deadline (scripts/quarantine_report.py). Sam's ruling, 2026-11-27: a quarantine lasts
+# 14 days, then the test is fixed or deleted.
 #
-# CI-cost discipline: schedule and dispatch only, never push or pull request (a nightly never re-tests a tree
-# CI tested); a concurrency group; every deterministic artifact cached as in local-service-gate-nightly.yml
-# (uv wheels, ONNX models, Maven repo, PG bundle).
+# WHAT REDDENS THE JOB: a registry the rules refuse; a runner exit that is not "all passed" or "a quarantined
+# test failed" (exit 1 with no failed or errored testcase is a conftest guard or a build error, and exit 5 is
+# "nothing selected"); an entry past its deadline; a listed test that no pass examined (no testcase, or only
+# skips). A quarantined test that fails is the expected state: the report says "failed k of N". A test that
+# passes is not released by any job; its entry is removed by hand.
 #
-# RUNNER: ubuntu-latest, as every scheduled workflow in this repo (the lab pool runs the push and PR jobs that
-# feed required checks, ci.yml; the nightlies are hosted, local-service-gate-nightly.yml is the model). A
-# quarantined test that flakes only under pool load will not show that here; the report would then read green
-# for it, and a pool venue is a follow-up for Sam if the candidates' `venues` say so.
+# TWO KINDS OF ENTRY (the registry's `kind`). pytest entries run as `pytest -m quarantine` on the pytest pool
+# class. java entries (`Class::method`) run through surefire, `-Dtest=Class#method`, on the Service CI class,
+# because that is where Maven runs (it needs Docker for the jOOQ codegen, which the pytest class is not probed
+# for).
 #
-# EMPTY REGISTRY (it ships empty): the first job prints "0 quarantined" and the second never starts, so pytest
-# is not run on an empty selection (it exits 5 there). With entries, exit 5 is a failure.
+# RUNNER. The flakes this exists for were seen on the lab pool (10 of the first 13 candidates), so the tests run
+# there, with the shapes the repo already uses: the pytest job is engine-bundle-canary.yml's (a hosted job builds
+# the service jar, a pool job runs pytest on lab-6c18g) with the shard job's pool handling from ci.yml (host
+# binary probe, no Actions cache for $HOME paths, persistent-home primes); the java job is service-ci.yml's
+# (lab-16c16g, Docker probe). Repo variable NX_CI_POOL=off sends both to ubuntu-latest. No pull_request trigger,
+# so no fork clause. The first and last jobs are light and hosted.
 #
-# `on.schedule` fires only from the default branch: it starts running when this file reaches main.
+# PASSES: 5 a night. The selection is the 13 first candidates: about 9 pytest tests, ~2 minutes a pass with the
+# engine substrate, and 4 java classes, ~4 minutes a pass with the jOOQ codegen. About 10 and 20 minutes, inside the
+# 60-minute job caps (estimates, to be replaced by the first runs' times), and a test that flakes 1 run in 5 shows
+# in a night with probability 1 - 0.8^5 = 0.67, nearly certain over the 14 days. One run a night would show a
+# 1-in-5 flake once in three nights. Retune the number with the registry's size; it is one env var.
+#
+# EMPTY REGISTRY (it ships empty): the first job prints "0 quarantined", builds nothing, and every later job is
+# skipped, so pytest is never run on an empty selection (it exits 5 there).
+#
+# CI-cost discipline: schedule and dispatch only, never push or pull request (a nightly never re-tests a tree CI
+# tested); a concurrency group; the jar is built once, only when a pytest entry exists.
+#
+# `on.schedule` fires only from the default branch: it starts running when this file reaches main. The RDR's
+# table said "extend local-service-gate-nightly.yml"; this is its own workflow because its venue differs from
+# that nightly's (the pool, not hosted).
 
 on:
   schedule:
@@ -33,63 +51,110 @@ concurrency:
   group: quarantine-nightly
   cancel-in-progress: true
 
+env:
+  NX_QUARANTINE_PASSES: "5"
+
 jobs:
-  registry:
-    name: quarantine registry (count and check)
+  prepare:
+    name: registry check and service jar
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
+    env:
+      NX_JOOQ_CACHE: "off"
     outputs:
-      count: ${{ steps.count.outputs.count }}
+      pytest: ${{ steps.select.outputs.pytest }}
+      java: ${{ steps.select.outputs.java }}
+      revision: ${{ steps.revision.outputs.revision }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           # A DISPATCH gets the branch you picked; the schedule falls back to develop (see
           # local-service-gate-nightly.yml and tests/test_workflow_dispatch_ref_lint.py).
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'develop' }}
+          persist-credentials: false
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+      - name: Resolve the one revision every job tests
+        # Named revision, not sha: see engine-bundle-canary.yml (CodeQL's cache-poisoning query).
+        id: revision
+        run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: "3.12"
           enable-cache: false
 
-      - name: Count the registry (fails on a malformed registry)
-        id: count
+      - name: Read the registry (a malformed one fails here)
+        id: select
         shell: bash
         run: |
-          # Standard library only: no project sync, so an empty registry costs a few seconds.
-          n="$(uv run --no-project python scripts/quarantine_report.py count)"
-          echo "count=$n" >> "$GITHUB_OUTPUT"
-          if [ "$n" = "0" ]; then
+          # Standard library only, no project sync: an empty registry costs seconds.
+          pytest_ids="$(uv run --no-project python scripts/quarantine_report.py select --kind pytest)"
+          java_ids="$(uv run --no-project python scripts/quarantine_report.py select --kind java)"
+          {
+            echo "pytest=$([ -n "$pytest_ids" ] && echo true || echo false)"
+            echo "java=$([ -n "$java_ids" ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+          if [ -z "$pytest_ids" ] && [ -z "$java_ids" ]; then
             echo "0 quarantined" | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            echo "$n quarantined; the run job follows" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
-  quarantine:
-    name: quarantined tests (-m quarantine)
-    needs: registry
-    # Not on an empty registry, and not when the count step failed (count is then empty).
-    if: ${{ !cancelled() && needs.registry.outputs.count != '' && needs.registry.outputs.count != '0' }}
-    runs-on: ubuntu-latest
+      - name: Set up GraalVM 25.0.3
+        if: steps.select.outputs.pytest == 'true'
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+
+      - name: Restore the Maven cache and set Central retries
+        if: steps.select.outputs.pytest == 'true'
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: package
+
+      - name: Build shaded jar (no tests, no native)
+        if: steps.select.outputs.pytest == 'true'
+        working-directory: service
+        run: ./mvnw -q -DskipTests package
+
+      - name: Upload jar for the pytest job
+        if: steps.select.outputs.pytest == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: quarantine-service-jar
+          path: service/target/nexus-service-1.0-SNAPSHOT.jar
+          retention-days: 1
+          if-no-files-found: error
+
+  pytest:
+    name: quarantined pytest tests
+    needs: prepare
+    if: ${{ needs.prepare.outputs.pytest == 'true' }}
+    runs-on: ${{ vars.NX_CI_POOL == 'off' && 'ubuntu-latest' || 'lab-6c18g' }}
     timeout-minutes: 60
     env:
-      PG_VERSION: "17.5"
-      PGVECTOR_VERSION: "v0.8.7"
-      MANYLINUX_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
-      # Armed as in ci.yml's pytest job: an absent or stale service jar fails loudly instead of skipping the
-      # engine-substrate tests, so a listed test cannot go "green" by skipping.
+      # An absent or stale jar fails the substrate loudly instead of skipping it (ci.yml's pytest job).
       NX_T2_SUBSTRATE_EXPECTED: "1"
     steps:
+      - name: Host binaries present (labrun-owz)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          NX_CI_HOST_BINARIES: bash git curl tar gzip xz unzip python3 rg ps pgrep setsid flock timeout ipcs uuidgen shellcheck sha256sum
+        run: |
+          set -u
+          [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
+          missing=0
+          for b in $NX_CI_HOST_BINARIES; do
+            command -v "$b" >/dev/null 2>&1 || { echo "host missing: $b"; missing=1; }
+          done
+          exit "$missing"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'develop' }}
-          # Full depth and tags, as the sibling nightly: a quarantined test may read git history.
-          fetch-depth: 0
-          fetch-tags: true
+          ref: ${{ needs.prepare.outputs.revision }}
+          persist-credentials: false
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: "3.12"
           enable-cache: false
@@ -102,7 +167,38 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-3.12-
 
-      - name: Cache ONNX model
+      - name: Shared dependencies venv (pool only; nexus-dvk18)
+        # ci.yml's shard job, step for step (tests/scripts/test_ci_pyc_shm_lint.py pins both this and the next
+        # step for every pytest job on a lab-* runner): the dependencies are built once per host under
+        # $NX_LAB_CACHE_ROOT and each job layers a thin venv on tmpfs. Never fails the job: on any problem it
+        # reports used=false and the sync step below runs.
+        id: sharedvenv
+        if: runner.environment == 'self-hosted' && runner.os == 'Linux'
+        run: scripts/ci_shared_venv.sh --group dev --smoke-import nexus
+
+      - name: Bytecode to /dev/shm (PYTHONPYCACHEPREFIX, pool only; nexus-m643n)
+        # Collection alone writes ~116 MB of .pyc to the pool host's NVMe; with the prefix on a per-job /dev/shm
+        # directory the disk write is about 23 MB. Excluded when the shared venv took the job (a prefix hides
+        # its precompiled pyc). The last step of the job removes the directory.
+        if: runner.environment == 'self-hosted' && runner.os == 'Linux' && steps.sharedvenv.outputs.used != 'true'
+        env:
+          NX_PYC_DIR: /dev/shm/nx-pyc-${{ github.run_id }}-${{ github.run_attempt }}-quarantine
+        run: |
+          set -euo pipefail
+          if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+            rm -rf "$NX_PYC_DIR" 2>/dev/null || true
+            if mkdir -m 0700 "$NX_PYC_DIR" 2>/dev/null; then
+              echo "PYTHONPYCACHEPREFIX=$NX_PYC_DIR" >> "$GITHUB_ENV"
+              echo "bytecode prefix: $NX_PYC_DIR"
+            else
+              echo "::notice::could not create $NX_PYC_DIR; bytecode stays in the default location"
+            fi
+          else
+            echo "::notice::no writable /dev/shm on this runner; bytecode stays in the default location"
+          fi
+
+      - name: Cache MiniLM ONNX model
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.cache/chroma
@@ -110,101 +206,248 @@ jobs:
           restore-keys: |
             chromadb-onnx-${{ runner.os }}-
 
-      - name: Set up JDK 25 (service jar build)
+      - name: Fetch the service jar
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: quarantine-service-jar
+          path: service/target
+
+      - name: Re-stamp the jar mtime
+        # git stamps every checked-out file at checkout time, so a downloaded jar looks older than the sources it
+        # was built from (the same note as ci.yml's step of this name).
+        run: touch service/target/nexus-service-1.0-SNAPSHOT.jar
+
+      - name: Set up Java (to launch the service jar)
         uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
         with:
-          java-version: "25.0.3"
-          distribution: "graalvm"
+          java-version: '25.0.3'
+          distribution: 'graalvm'
 
-      - name: Restore the Maven cache and set Central retries (service jar build)
-        uses: ./.github/actions/maven-cache
+      - name: Cache the pinned PG bundle
+        # The substrate downloads our pinned PG bundle into this per-tag dir; the pool's $HOME outlives the job.
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
-          job-class: package
+          path: ~/.cache/nexus-test-substrate
+          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
 
       - name: Install ripgrep
         run: scripts/ci_install_ripgrep.sh
 
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
+        uses: ./.github/actions/prime-bge-onnx
+        with:
+          persistent-home: ${{ runner.environment == 'self-hosted' }}
+
       - name: Install project + dev deps
+        # Skipped when the shared venv took the job; otherwise syncs into the venv location the shared-venv step reported.
+        if: steps.sharedvenv.outputs.used != 'true'
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
         run: uv sync --group dev
 
-      - name: Restore compiled PG bundle cache
-        # Same key as ci.yml's CA-3 job and the sibling nightly (seeded on main by pg-bundle-cache-seed.yml).
-        id: pg-bundle-cache
+      - name: Run the quarantined pytest tests, NX_QUARANTINE_PASSES times
+        # Each pass is its own pytest process over the registry's nodeids, with the marker as a selection check
+        # (a marker that did not apply selects nothing, exit 5, red) and NX_QUARANTINE_STRICT=1 (every entry
+        # must collect). `classify` decides per pass: exit 0 is fine; exit 1 is fine only with a failed or
+        # errored testcase in that pass's junit (a quarantined test failing is the expected state); anything
+        # else is red. The report job reads the junit for the per-test results.
+        shell: bash
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
+          # With the shared venv uv must not sync. '0', never '': uv rejects an empty boolean.
+          UV_NO_SYNC: ${{ steps.sharedvenv.outputs.used == 'true' && '1' || '0' }}
+        run: |
+          if [ "${{ runner.environment }}" = "self-hosted" ]; then
+            export TMPDIR="$RUNNER_TEMP/tmp"
+            mkdir -p "$TMPDIR"
+            export NX_ONNX_INTRA_OP_THREADS=2
+          fi
+          mkdir -p quarantine-results
+          mapfile -t ids < <(uv run --no-project python scripts/quarantine_report.py select --kind pytest)
+          [ "${#ids[@]}" -gt 0 ] || { echo "::error::the first job counted pytest entries but select found none"; exit 1; }
+          bad=0
+          for i in $(seq 1 "$NX_QUARANTINE_PASSES"); do
+            junit="quarantine-results/pytest-$i.xml"
+            rc=0
+            NX_QUARANTINE_STRICT=1 uv run pytest -o addopts="" -m quarantine -q --color=no -p no:cacheprovider \
+              --junitxml="$junit" "${ids[@]}" || rc=$?
+            uv run --no-project python scripts/quarantine_report.py classify --rc "$rc" --junit "$junit" || bad=1
+          done
+          exit "$bad"
+
+      - name: Keep the junit
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: quarantine-junit-pytest
+          path: quarantine-results
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Remove the bytecode prefix (pool only; nexus-m643n)
+        # Last step, if: always(): the /dev/shm pages are charged to this job's grant and outlive it otherwise.
+        if: always() && runner.environment == 'self-hosted' && runner.os == 'Linux'
+        run: |
+          case "${PYTHONPYCACHEPREFIX:-}" in
+            /dev/shm/nx-pyc-*) rm -rf -- "$PYTHONPYCACHEPREFIX" || echo "::notice::could not remove $PYTHONPYCACHEPREFIX" ;;
+            *) echo "no /dev/shm bytecode prefix to remove" ;;
+          esac
+
+  java:
+    name: quarantined java tests
+    needs: prepare
+    if: ${{ needs.prepare.outputs.java == 'true' }}
+    runs-on: ${{ vars.NX_CI_POOL == 'off' && 'ubuntu-latest' || 'lab-16c16g' }}
+    timeout-minutes: 60
+    env:
+      NX_JOOQ_CACHE: "off"
+      NX_ONNX_INTRA_OP_THREADS: ${{ vars.NX_CI_POOL == 'off' && '' || '4' }}
+    steps:
+      - name: Host binaries present (labrun-owz)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          NX_CI_HOST_BINARIES: bash git curl tar python3 docker
+        run: |
+          set -u
+          [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
+          missing=0
+          for b in $NX_CI_HOST_BINARIES; do
+            command -v "$b" >/dev/null 2>&1 || { echo "host missing: $b"; missing=1; }
+          done
+          docker info >/dev/null 2>&1 || { echo "host missing: a running docker daemon (docker info failed)"; missing=1; }
+          exit "$missing"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          ref: ${{ needs.prepare.outputs.revision }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Set up GraalVM JDK 25
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+
+      - name: Restore the Maven cache and set Central retries
+        # save: false, because a run filtered to a few test methods resolves only part of the `test` class
+        # (tests/test_maven_cache_coverage_lint.py: only a whole-class build may save the entry).
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: test
+          save: 'false'
+
+      - name: Cache MiniLM ONNX model
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
-          path: bundle
-          key: pg-bundle-linux-amd64-ubuntu-latest-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ env.MANYLINUX_IMAGE }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            chromadb-onnx-${{ runner.os }}-
 
-      - name: Build PG + pgvector bundle from source (cache miss only)
-        if: steps.pg-bundle-cache.outputs.cache-hit != 'true'
+      - name: Prime ONNX model on cache miss
         run: |
-          set -euo pipefail
-          bundle="$GITHUB_WORKSPACE/bundle"
-          mkdir -p "$bundle"
-          docker run --rm \
-            -e PG_VERSION -e PGVECTOR_VERSION -e BUNDLE_PREFIX="$bundle" \
-            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
-            "$MANYLINUX_IMAGE" /bin/bash -c '
-              set -eux
-              bash "'"$GITHUB_WORKSPACE"'/scripts/build_pg_bundle.sh"
-            '
-
-      - name: Point provisioning at the bundle
-        run: |
-          set -euo pipefail
-          if [ ! -x "$GITHUB_WORKSPACE/bundle/bin/initdb" ]; then
-            echo "::error::bundle/bin/initdb missing after cache-restore/build"
-            exit 1
+          MODEL_DIR="$HOME/.cache/chroma/onnx_models/all-MiniLM-L6-v2"
+          if [ ! -f "$MODEL_DIR/onnx/model.onnx" ]; then
+            echo "ONNX model not in cache; downloading."
+            mkdir -p "$MODEL_DIR"
+            curl -fsSL https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz \
+              -o "$RUNNER_TEMP/onnx.tar.gz"
+            tar -xzf "$RUNNER_TEMP/onnx.tar.gz" -C "$MODEL_DIR"
+            test -f "$MODEL_DIR/onnx/model.onnx" || { echo "model.onnx missing after extract"; exit 1; }
+          else
+            echo "ONNX model restored from cache."
           fi
-          {
-            echo "NEXUS_PG_BIN=$GITHUB_WORKSPACE/bundle/bin"
-            echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/bundle/lib"
-            echo "NEXUS_CA3_BUNDLE=$GITHUB_WORKSPACE/bundle"
-          } >> "$GITHUB_ENV"
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         uses: ./.github/actions/prime-bge-onnx
+        with:
+          persistent-home: ${{ runner.environment == 'self-hosted' }}
 
-      - name: Build the stamped gate jar
-        run: scripts/build-gate-jar.sh
+      - name: Prime ms-marco cross-encoder ONNX (cache or pinned HF revision)
+        uses: ./.github/actions/prime-crossencoder-onnx
+        with:
+          persistent-home: ${{ runner.environment == 'self-hosted' }}
 
-      - name: Run the quarantined tests
-        # Exit codes, one by one (never masked): 0 all passed; 1 a quarantined test failed (the expected state,
-        # shown by the report below, not a red nightly); 5 nothing was selected although the registry lists
-        # tests, a failure; anything else (2 interrupted, 3 internal, 4 usage, which includes the registry
-        # check in tests/_quarantine.py) fails the job.
+      - name: Run the quarantined java tests, NX_QUARANTINE_PASSES times
+        # Surefire with the group exclusion cleared (an integration-tagged class runs) and `-Dtest=Class#method`;
+        # a name surefire cannot find fails the build (no specified tests), which `classify` reads as red.
+        # Exit 1 is fine only with a failed or errored testcase in the pass's reports; a build error has none.
         shell: bash
         run: |
-          set +e
-          NX_QUARANTINE_RESULTS="$GITHUB_WORKSPACE/quarantine-results.json" \
-            uv run pytest -o addopts="" -m quarantine -q -rA --color=no -p no:cacheprovider
-          rc=$?
-          set -e
-          case "$rc" in
-            0|1) echo "pytest exit $rc" ;;
-            5) echo "::error::the registry lists ${{ needs.registry.outputs.count }} tests but pytest selected none"; exit 1 ;;
-            *) echo "::error::pytest exited $rc"; exit "$rc" ;;
-          esac
+          selector="$(uv run --no-project python scripts/quarantine_report.py select --kind java --format surefire)"
+          [ -n "$selector" ] || { echo "::error::the first job counted java entries but select found none"; exit 1; }
+          bad=0
+          for i in $(seq 1 "$NX_QUARANTINE_PASSES"); do
+            out="quarantine-results/java-$i"
+            mkdir -p "$out"
+            rm -rf service/target/surefire-reports
+            rc=0
+            (cd service && ./mvnw -q test "-Dtest=$selector" -Dtest.excluded.groups= -Dnexus.test.forks=1) || rc=$?
+            if [ -d service/target/surefire-reports ]; then
+              find service/target/surefire-reports -name 'TEST-*.xml' -exec cp {} "$out"/ \;
+            fi
+            uv run --no-project python scripts/quarantine_report.py classify --rc "$rc" --junit "$out" || bad=1
+          done
+          exit "$bad"
 
-      - name: Report each test's result, age and deadline
-        # Always, so a red run still says which listed tests ran. Exit 1 past a deadline (fix or delete the test),
-        # 3 when a listed test has no result (the run examined nothing for it). A passing test is not released here.
+      - name: Keep the junit
         if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: quarantine-junit-java
+          path: quarantine-results
+          retention-days: 30
+          if-no-files-found: ignore
+
+  report:
+    name: report (results, age, deadline)
+    needs: [prepare, pytest, java]
+    # Whatever the pass jobs did, once an entry exists: the report is what turns "ran nothing" and "past the
+    # deadline" red.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.prepare.outputs.pytest == 'true' || needs.prepare.outputs.java == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          ref: ${{ needs.prepare.outputs.revision }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Fetch the passes' junit
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: quarantine-junit-*
+          path: quarantine-results
+
+      - name: Report each test's results, age and deadline
+        # Exit 1 past a deadline (fix or delete the test, then remove its entry), 3 when a listed test was not
+        # examined by any pass (no testcase, or only skips). A passing test is not released here.
         shell: bash
         run: |
           rc=0
-          uv run python scripts/quarantine_report.py --results quarantine-results.json --expect-all > quarantine-report.txt || rc=$?
+          uv run --no-project python scripts/quarantine_report.py --junit quarantine-results --expect-all > quarantine-report.txt || rc=$?
           cat quarantine-report.txt
           { echo '```'; cat quarantine-report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
-      - name: Keep the results
+      - name: Keep the report
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: quarantine-results
-          path: |
-            quarantine-results.json
-            quarantine-report.txt
+          name: quarantine-report
+          path: quarantine-report.txt
           retention-days: 30
           if-no-files-found: ignore
