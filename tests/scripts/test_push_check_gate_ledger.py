@@ -7,19 +7,13 @@ exits with a fixed code, so each refusal is one case and none depends on the rea
 """
 from __future__ import annotations
 
-import importlib.util
 import io
 import sys
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-_spec = importlib.util.spec_from_file_location("push_check_gate", REPO_ROOT / "scripts" / "push_check_gate.py")
-assert _spec and _spec.loader
-gate = importlib.util.module_from_spec(_spec)
-sys.modules["push_check_gate"] = gate
-_spec.loader.exec_module(gate)
+import push_check_gate as gate  # scripts/ is on pythonpath: the one instance test_ledger_mode.py shares
 
 OK = "changelog_fold check: ok"
 FINDING = "LEDGER-FINDING changelog: nexus-x.md has no section"
@@ -90,13 +84,18 @@ def test_report_mode_with_zero_findings_passes_unreported_and_prints_nothing(tmp
 # ── S2: a ledger check that crashes still refuses under --ledger-report ─────
 
 def test_a_crash_with_a_traceback_is_refused_even_after_findings_were_printed(tmp_path: Path) -> None:
-    body = f"print({FINDING!r})\nraise RuntimeError('boom')\n"
-    _refused(_run(_tree(tmp_path, "", body=body), REASON), "RuntimeError: boom")
+    # Prints everything a passing report-mode run prints, then crashes: only the non-zero exit makes it a refusal.
+    body = f"print({OK!r})\nprint({FINDING!r})\nprint({SUMMARY!r})\nraise RuntimeError('boom')\n"
+    outcome = _run(_tree(tmp_path, "", body=body), REASON)
+    _refused(outcome, "RuntimeError: boom")
+    assert "exit 0 but" not in outcome.detail, "refused for its exit code, not by one of the output checks"
 
 
 def test_exit_two_is_refused_under_report_mode(tmp_path: Path) -> None:
-    outcome = _run(_tree(tmp_path, "could not read the fragments", 2), REASON)
-    _refused(outcome, "could not read the fragments")
+    # A passing run's output (marker and summary) with exit 2: only the exit code makes it a refusal.
+    outcome = _run(_tree(tmp_path, f"{OK}\n{SUMMARY_NONE}", 2), REASON)
+    _refused(outcome, SUMMARY_NONE)
+    assert "exit 0 but" not in outcome.detail, "refused for its exit code, not by one of the output checks"
 
 
 def test_a_timeout_is_refused_under_report_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
