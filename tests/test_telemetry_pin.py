@@ -398,7 +398,10 @@ def test_the_poster_child_is_started_with_the_built_environment(plugin_account, 
     dump.write_text(
         "import json, os, sys\n"
         "sys.stdin.buffer.read()\n"
-        f"open({str(out)!r}, 'w', encoding='utf-8').write(json.dumps(dict(os.environ)))\n",
+        # Write aside, then rename: the file appears only once it is whole, so the settle below can
+        # never read it half-written (a 2026-11-28 develop red read it empty, under CI load).
+        f"open({str(out) + '.tmp'!r}, 'w', encoding='utf-8').write(json.dumps(dict(os.environ)))\n"
+        f"os.replace({str(out) + '.tmp'!r}, {str(out)!r})\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(lib, "__file__", str(dump))
