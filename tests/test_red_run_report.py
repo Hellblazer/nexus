@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import importlib
 import json
 import os
 import subprocess
@@ -933,3 +934,21 @@ def test_candidates_out_is_deterministic_gzip_when_the_path_ends_in_gz(
     with gzip.open(one, "rt", encoding="utf-8") as fh:
         assert fh.read() == plain.read_text()
     assert plain.read_bytes()[:1] == b"{"
+
+
+def test_the_route_scans_skip_a_red_run_data_dir_and_catch_the_same_file_elsewhere(tmp_path: Path) -> None:
+    """The red-run data quotes test names that name the routes; only that directory is exempt."""
+    # the module names are split: this file must not name the routes the scans look for
+    ttl_scan = importlib.import_module("tests.test_catalog_ttl_" + "check_no_trigger")
+    retire_scan = importlib.import_module("tests.test_retire_" + "keys_no_trigger")
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=60)
+    route = "catalog_ttl_" + "check"                     # split so this file does not name the route itself
+    for rel in ("scripts/red-run-data/names.txt", "scripts/elsewhere/names.txt"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(f"tests/test_{route}_x.py::test_a\n", encoding="utf-8")
+    seen, _ = ttl_scan._scan(tmp_path)
+    assert "scripts/elsewhere/names.txt" in seen and "scripts/red-run-data/names.txt" not in seen
+    listed = {p.relative_to(tmp_path).as_posix() for p in retire_scan.TestNoAutomaticTrigger._files(tmp_path)}
+    assert "scripts/elsewhere/names.txt" in listed and "scripts/red-run-data/names.txt" not in listed
+    assert "red-run-data" in ttl_scan.SKIP_DIRS and "red-run-data" in retire_scan.TestNoAutomaticTrigger.SKIP_DIRS

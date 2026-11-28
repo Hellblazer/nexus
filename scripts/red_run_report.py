@@ -3,7 +3,7 @@
 """Red-run report over a snapshot of develop CI runs (RDR-258 Phase 0 step 2, nexus-2jomg.1).
 
     red_run_report.py fetch-green-jobs --snapshot DIR --out GREENDIR
-    red_run_report.py extract --snapshot DIR --green-jobs GREENDIR --repo . --out scripts/red-run-extraction-2026-09-23_2026-11-23.jsonl.gz
+    red_run_report.py extract --snapshot DIR --green-jobs GREENDIR --repo . --out scripts/red-run-data/red-run-extraction-2026-09-23_2026-11-23.jsonl.gz
     red_run_report.py report  --extraction FILE [--top 15] [--repo .] [--sample RULE N --seed S]
     red_run_report.py mvv     --extraction FILE
     red_run_report.py candidates --extraction FILE --out FILE.json[.gz]

@@ -49,8 +49,9 @@ NAMING_ALLOWED = {
 }
 NAMES = ("catalog-ttl-check", "CatalogTtlCheck", "catalogTtlCheck", "catalog_ttl_check", "catalog_documents_ttl_put_at")
 #: Not scanned: version control, environments and build output, and prose that only describes the routes.
+#: The RDR-258 red-run report's CI-log extracts quote any test name or log line, so they name routes without calling them (nexus-2jomg.1).
 SKIP_DIRS = {".git", ".venv", "node_modules", "target", "__pycache__", "docs", "web", ".mypy_cache", ".ruff_cache",
-             ".pytest_cache", ".beads", ".claude", "build", "dist"}
+             ".pytest_cache", ".beads", ".claude", "build", "dist", "red-run-data"}
 #: Directories the brief names; each that exists must have been scanned (a gate that scanned none is vacuous).
 NAMED_ROOTS = ("src", "scripts", "conexus", ".github", "deploy")
 SERVICE_MAIN = ROOT / "service" / "src" / "main" / "java" / "dev" / "nexus" / "service"

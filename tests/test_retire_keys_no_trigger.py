@@ -81,8 +81,9 @@ class TestNoAutomaticTrigger:
              "/v1/admin/chunk-keys", "admin/chunk-keys", "retire-keys", "retire_keys")
     #: Not scanned: version control, environments and build output, and prose (docs, the site, any *.md) that only
     #: describes the verb. Everything else is: src, scripts, conexus, .github, deploy, hooks, tests, the engine.
+    #: The RDR-258 red-run report's CI-log extracts quote any test name or log line, so they name routes without calling them (nexus-2jomg.1).
     SKIP_DIRS = {".git", ".venv", "node_modules", "target", "__pycache__", "docs", "web", ".mypy_cache",
-                 ".ruff_cache", ".pytest_cache", ".beads", ".claude", "build", "dist"}
+                 ".ruff_cache", ".pytest_cache", ".beads", ".claude", "build", "dist", "red-run-data"}
     #: Directories the brief names; each that exists must have been scanned (a gate that scanned none is vacuous).
     NAMED_ROOTS = ("src", "scripts", "conexus", ".github", "deploy")
 
