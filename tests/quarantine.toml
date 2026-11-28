@@ -32,3 +32,110 @@
 # bead = "nexus-xxxxx"
 # reason = "times out under pool load"
 # source = "<64 hex digits>"
+
+[[quarantine]]
+nodeid = "ChashVectorConcurrencyTest::concurrentChashAndVectorUpserts_noServerErrors"
+kind = "java"
+since = 2026-11-28
+deadline = 2026-12-12
+bead = "nexus-2jomg.6"
+reason = "RDR-258 Phase 0 red-run report (develop c6c88465bd): flake candidate, 2026-09-23..2026-11-23"
+source = "d3c8776f5afa66c2a92c7ea9a474bc228f517b8047fd11bd7775ab37e60c8162"
+
+[[quarantine]]
+nodeid = "HybridSearchFunctionParityIntegrationTest::hybridSearch_denseRegime_gateContainment"
+kind = "java"
+since = 2026-11-28
+deadline = 2026-12-12
+bead = "nexus-2jomg.6"
+reason = "RDR-258 Phase 0 red-run report (develop c6c88465bd): flake candidate, 2026-09-23..2026-11-23"
+source = "d3c8776f5afa66c2a92c7ea9a474bc228f517b8047fd11bd7775ab37e60c8162"
+
+[[quarantine]]
+nodeid = "ManifestSearchShortPageIntegrationTest::aFanOutArmWhoseRerunRunsIntoItsBound_isMarkedTimedOut_notServedAShortPage"
+kind = "java"
+since = 2026-11-28
+deadline = 2026-12-12
+bead = "nexus-2jomg.6"
+reason = "RDR-258 Phase 0 red-run report (develop c6c88465bd): flake candidate, 2026-09-23..2026-11-23"
+source = "d3c8776f5afa66c2a92c7ea9a474bc228f517b8047fd11bd7775ab37e60c8162"
+
+[[quarantine]]
+nodeid = "tests/hooks/test_heredoc_pipe_budget.py::test_no_heredoc_body_exceeds_degraded_pipe_capacity"
+kind = "pytest"
+since = 2026-11-28
+deadline = 2026-12-12
+bead = "nexus-2jomg.6"
+reason = "RDR-258 Phase 0 red-run report (develop c6c88465bd): flake candidate, 2026-09-23..2026-11-23"
+source = "d3c8776f5afa66c2a92c7ea9a474bc228f517b8047fd11bd7775ab37e60c8162"
+path_source = "summary"
+
+[[quarantine]]
+nodeid = "tests/hooks/test_mailbox_drain_hook.py::TestAskAnswerPeerFallback::test_a_get_slower_than_the_cap_gives_up_and_is_answer_not_checked"
+kind = "pytest"
+since = 2026-11-28
+deadline = 2026-12-12
+bead = "nexus-2jomg.6"
+reason = "RDR-258 Phase 0 red-run report (develop c6c88465bd): flake candidate, 2026-09-23..2026-11-23"
+source = "d3c8776f5afa66c2a92c7ea9a474bc228f517b8047fd11bd7775ab37e60c8162"
+path_source = "summary"
+
+[[quarantine]]
+nodeid = "tests/integration/test_rdr223_pdf_journey.py::test_a_dry_run_never_touches_the_row_of_a_real_run_of_the_same_bytes"
+kind = "pytest"
+since = 2026-11-28
+deadline = 2026-12-12
+bead = "nexus-2jomg.6"
+reason = "RDR-258 Phase 0 red-run report (develop c6c88465bd): flake candidate, 2026-09-23..2026-11-23"
+source = "d3c8776f5afa66c2a92c7ea9a474bc228f517b8047fd11bd7775ab37e60c8162"
+path_source = "traceback"
+
+[[quarantine]]
+nodeid = "tests/test_llm_anthropic_backend.py::TestTransport::test_backoff_without_retry_after_is_seeded_jitter"
+kind = "pytest"
+since = 2026-11-28
+deadline = 2026-12-12
+bead = "nexus-2jomg.6"
+reason = "RDR-258 Phase 0 red-run report (develop c6c88465bd): flake candidate, 2026-09-23..2026-11-23"
+source = "d3c8776f5afa66c2a92c7ea9a474bc228f517b8047fd11bd7775ab37e60c8162"
+path_source = "summary"
+
+[[quarantine]]
+nodeid = "tests/test_nx_answer.py::TestContinuationGoLiveMidPrefixFailure::test_deadline_exhausted_mid_prefix_never_hands_off"
+kind = "pytest"
+since = 2026-11-28
+deadline = 2026-12-12
+bead = "nexus-2jomg.6"
+reason = "RDR-258 Phase 0 red-run report (develop c6c88465bd): flake candidate, 2026-09-23..2026-11-23"
+source = "d3c8776f5afa66c2a92c7ea9a474bc228f517b8047fd11bd7775ab37e60c8162"
+path_source = "summary"
+
+[[quarantine]]
+nodeid = "tests/test_rdr250_pool_filter_log.py::test_a_refused_unparsed_or_timed_out_call_names_its_cause_in_the_log_and_the_reason[exc2-timeout-filter_timeout]"
+kind = "pytest"
+since = 2026-11-28
+deadline = 2026-12-12
+bead = "nexus-2jomg.6"
+reason = "RDR-258 Phase 0 red-run report (develop c6c88465bd): flake candidate, 2026-09-23..2026-11-23"
+source = "d3c8776f5afa66c2a92c7ea9a474bc228f517b8047fd11bd7775ab37e60c8162"
+path_source = "summary"
+
+[[quarantine]]
+nodeid = "tests/test_session_end_launcher.py::test_hooks_json_session_end_timeout_covers_service_summary"
+kind = "pytest"
+since = 2026-11-28
+deadline = 2026-12-12
+bead = "nexus-2jomg.6"
+reason = "RDR-258 Phase 0 red-run report (develop c6c88465bd): flake candidate, 2026-09-23..2026-11-23"
+source = "d3c8776f5afa66c2a92c7ea9a474bc228f517b8047fd11bd7775ab37e60c8162"
+path_source = "summary"
+
+[[quarantine]]
+nodeid = "tests/test_t2_concurrency.py::test_memory_get_under_concurrent_write_load"
+kind = "pytest"
+since = 2026-11-28
+deadline = 2026-12-12
+bead = "nexus-2jomg.6"
+reason = "RDR-258 Phase 0 red-run report (develop c6c88465bd): flake candidate, 2026-09-23..2026-11-23"
+source = "d3c8776f5afa66c2a92c7ea9a474bc228f517b8047fd11bd7775ab37e60c8162"
+path_source = "summary"
