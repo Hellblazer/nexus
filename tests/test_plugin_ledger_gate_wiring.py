@@ -88,11 +88,11 @@ def _fan_in_segment() -> str:
 
 
 def _run_fan_in(event: str, base: str, result: str, changed: str) -> subprocess.CompletedProcess[str]:
+    assert BASH, "bash is on every host that runs this suite (a missing one is a failure, not a skip)"
     script = f'set -euo pipefail\nevent_name={event}\nbase_ref={base}\nplugin_ledger_result={result}\nplugin_changed="{changed}"\n' + _fan_in_segment()
     return subprocess.run([BASH, "-c", script], capture_output=True, text=True, check=False, env={**os.environ})
 
 
-@pytest.mark.skipif(BASH is None, reason="needs bash")
 @pytest.mark.parametrize(("event", "base", "result", "changed", "code", "annotation"), [
     ("pull_request", "main", "success", "true", 0, ""),
     ("pull_request", "main", "success", "false", 0, ""),
