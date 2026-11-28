@@ -147,7 +147,7 @@ jobs:
     name: Create GitHub Release (engine-service-v* tag only)
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/engine-service-v')
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       # nexus-3wh8d.28: a tag whose tree carries a changeset listed in scripts/release-holds.txt gets no release,
       # and both publish matrices need this job, so nothing is built or attached. The engine-release skill runs

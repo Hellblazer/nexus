@@ -8,7 +8,7 @@ output: the previous-tag computation (numeric order, rerun, out-of-order cut, ig
 previous tag, shallow checkout), the kill-control (an undeclared both-halves commit between two
 engine tags fails, the same commit declared in the ledger passes), and the wiring in
 ``engine-service-release.yml`` (the step runs before anything is created or built, on a full
-checkout, and nothing else in that workflow moved).
+checkout; the create-release job's steps are pinned by name, so a step added or dropped there fails a test).
 """
 from __future__ import annotations
 
@@ -235,6 +235,21 @@ def test_nothing_else_in_the_release_workflow_runs_the_check() -> None:
     jobs = yaml.safe_load(text)["jobs"]
     assert [n for n, j in jobs.items() if "check_engine_release_pairing.py" in yaml.safe_dump(j)] == ["create-release"]
     assert jobs["create-release"]["if"] == "startsWith(github.ref, 'refs/tags/engine-service-v')"
+
+
+def test_create_release_keeps_its_other_steps_and_gains_only_the_check() -> None:
+    """The job's steps, by name, in order: the checkout (now full depth), the held-changeset check, the new check, then the
+    release creation. A step added, dropped or reordered here fails this test, so 'nothing else moved' is pinned and not
+    claimed. The timeout is 10 because the checkout now fetches full history."""
+    job = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["create-release"]
+    assert [s.get("name") or s["uses"].split("@")[0] for s in job["steps"]] == [
+        "actions/checkout",
+        "Refuse a tag that carries a held changeset",
+        "Refuse a tag that carries an undeclared both-halves wire change",
+        "Create GitHub Release (idempotent)",
+    ]
+    assert job["timeout-minutes"] == 10
+    assert "needs" not in job
 
 
 def test_the_engine_release_skill_names_the_check() -> None:
