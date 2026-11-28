@@ -96,9 +96,11 @@ POSIX_FILES = (
     "install_generation.sh", "layout.sh", "layout_core.py", "lease_core.py", "_nx_lease.py", "overrides.txt",
 )
 #: What the Windows build loads: the core and the siblings it reaches lazily.
+#: ``_nx_dispatch.py`` is the dispatcher source ``generation_core.ensure_dispatchers``
+#: reads from beside itself (nexus-f9bgu.47): the target's ``migrate_legacy`` runs it.
 WINDOWS_FILES = (
-    "generation_core.py", "layout_core.py", "gc_core.py", "lease_core.py", "_nx_lease.py", "winproc_core.py",
-    "overrides.txt",
+    "generation_core.py", "layout_core.py", "gc_core.py", "lease_core.py", "_nx_lease.py", "_nx_dispatch.py",
+    "winproc_core.py", "overrides.txt",
 )
 
 #: The Python the build runs with (``install_generation.sh --python`` and

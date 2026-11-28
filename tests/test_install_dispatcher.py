@@ -364,3 +364,10 @@ class TestDispatcherModule:
         assert top == {"os", "sys"}
         assert nested == {"subprocess"}
         assert not [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
+
+    def test_a_target_release_stages_the_dispatcher_source_with_its_generation_core(self) -> None:
+        """The target's ``migrate_legacy`` runs ``ensure_dispatchers``, which reads this file from
+        beside the staged ``generation_core.py``."""
+        from nexus import target_installer
+
+        assert "_nx_dispatch.py" in target_installer.WINDOWS_FILES
