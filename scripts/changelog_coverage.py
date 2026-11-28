@@ -20,27 +20,36 @@ plugin ledger, not by a root fragment (``changelog_fold.py``'s docstring). A mar
 documentation, not code.
 
 **Names its bead** is what the repo already does: the commit subject ends ``(<bead-id>)`` (``nexus-3ceda.2``,
-``nexus-clfse.2 step 1``). A commit whose subject names no bead falls back to the first bead id in its body; one with none at all
-is a finding ("names no bead"). **Covered** means the bead has an entry in the range, in either of two ways: a fragment named
-``<bead-id>.md`` or ``<bead-id>-<slug>.md`` (``nexus-abc`` matches ``nexus-abc.md`` and ``nexus-abc-cli.md``, never
-``nexus-abc.1.md``), or an entry that CITES the bead in parentheses, the repo's ``(nexus-...)`` convention (a fix that shares
-another bead's fragment, or an entry the release already folded into ``CHANGELOG.md``). The citing text is a fragment in
-``<head>``'s tree and every line the range ADDS to a fragment or to ``CHANGELOG.md``; the added lines are what keep this true on a
-release PR, where the fold has deleted the fragments and written the entries into ``CHANGELOG.md``.
+``nexus-clfse.2 step 1``), or ``(GH #1689)`` for a GitHub issue, whose fragment is ``gh-1689.md``. A commit whose subject names no bead falls back to the first bead id in its body; one with none at all
+is a finding ("names no bead"). **Covered** means the range holds an entry for the bead, in one of three ways:
+
+* a fragment named ``<bead-id>.md`` or ``<bead-id>-<slug>.md`` (``nexus-abc`` matches ``nexus-abc.md`` and ``nexus-abc-cli.md``,
+  never ``nexus-abc.1.md``), in ``<head>``'s tree or added in the range;
+* an entry that CITES the bead in parentheses, the repo's ``(nexus-...)`` convention: a fragment in ``<head>``'s tree, or a line
+  the range ADDS to a fragment or to ``CHANGELOG.md`` (what a release fold writes). A bead cited only in an older release's
+  ``CHANGELOG.md`` section is NOT covered: a later commit for it is a new change and wants its own entry;
+* an entry ADDED IN THE RANGE that cites a SIBLING under the same epic (``nexus-sby49.8`` leans on a range entry citing
+  ``nexus-sby49.3``). One entry for an epic's children is how the repo writes them: 8.5.9 shipped the plugin settings work
+  (``nexus-sby49.3``, ``.4``, ``.20`` cited) with four commits on ``.8`` and ``.11``, described by those entries and cited by none.
+  The cost is that an epic's entry covers every child commit in the range, so a child that deserved its own line is not listed.
 
 **Exempt, and why.** A merge commit (it changes nothing of its own; the commits it brings are examined). A revert (``Revert "..."``:
 the change it undoes carries the entry). A release-preparation commit (subject ``chore(release)...``, ``release: ...`` or
 ``release(scope): ...``; ``release.yml: ...`` and ``release-foo: ...`` are not: it moves versions and folds the fragments this
 check looks for). A commit that changes no behaviour, narrowly: either (a) every shipped file it touches is a ``.py`` or ``.java``
 file whose only difference is comments or, for Python, docstrings (compared as the parsed tree with docstrings removed, and for
-Java as the text with comments removed), so a string literal, an annotation or a signature change is NOT exempt; or (b) its message
-carries a ``Changelog: none`` trailer line, the author's explicit statement that nothing a user sees changed (give the reason after
-it). A user reads the changelog for behaviour; a comment or docstring edit has none to report, and (b) is the one escape for what
-(a) cannot prove, visible in the commit message for review.
+Java as the text with comments removed), so a string literal, an annotation or a signature change is NOT exempt; the docstrings of
+``src/nexus/mcp/`` and ``src/nexus/commands/`` are tool descriptions and CLI help a user reads, so there only comments are
+exempt; or (b) its message carries a ``Changelog: none`` trailer line, the author's explicit statement that nothing a user sees
+changed (give the reason after it). A user reads the changelog for behaviour; a comment or docstring edit has none to report, and
+(b) is the one escape for what (a) cannot prove, visible in the commit message for review.
+
+A range whose commits are all release preparation has nothing to check: in report mode that is a warning and a pass. A range with
+no commit at all, or one that examined nothing in block mode, is an error (the check would prove nothing).
 
 ``NX_LEDGER_MODE`` (scripts/ledger_mode.py): ``block`` (default) exits 10 on a finding; ``report`` lists each as
 ``LEDGER-FINDING changelog-coverage: <sha> <subject>: <why>``, prints the summary line and exits 0, and still exits 10 when it
-examined no commit. Nothing runs this yet: wiring it is RDR-258 Phase 4 step 2 (Sam).
+examined no commit (bar the release-prep-only range above). Nothing runs this yet: wiring it is RDR-258 Phase 4 step 2 (Sam).
 
 Standard library only.
 """
@@ -62,13 +71,21 @@ SHIPPED_PREFIXES: tuple[str, ...] = ("src/nexus/", "service/src/main/", "mcpb/sr
 SHIPPED_FILES: tuple[str, ...] = ("web/install.sh", "web/install.ps1")
 FRAGMENT_DIR = "changelog/unreleased"
 RELEASE_TARGET = "origin/main"
-BEAD = re.compile(r"\b(nexus-[a-z0-9]+(?:\.[0-9]+)*)\b")
+#: A bead id, or a GitHub issue the way the repo cites one ("GH #1689", "Closes #1689"), which names the fragment ``gh-1689.md``.
+BEAD = re.compile(r"\b(nexus-[a-z0-9]+(?:\.[0-9]+)*)\b|\b(?:GH|Closes|Fixes) #([0-9]+)\b")
+
+
+def item_ids(text: str) -> list[str]:
+    """The ids ``text`` names, in order: ``nexus-abc.1`` for a bead and ``gh-1689`` for ``GH #1689``."""
+    return [bead or f"gh-{issue}" for bead, issue in BEAD.findall(text)]
 EXEMPT_SUBJECT = re.compile(r'^(Revert "|chore\(release\)|release(\([^)]*\))?:)')
 #: A trailer line in the commit message: the author's statement that no behaviour changed.
 NO_CHANGELOG = re.compile(r"^Changelog:\s*none\b", re.IGNORECASE | re.MULTILINE)
 #: A bead cited in a parenthetical, the repo's "(nexus-xyz)" convention: "(nexus-a)", "(CodeQL, nexus-b)", "(nexus-c; nexus-d)".
 PAREN = re.compile(r"\(([^()]*)\)")
 _JAVA_TOKENS = re.compile(r'"""[\s\S]*?"""|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|//[^\n]*|/\*[\s\S]*?\*/')
+#: Python trees whose docstrings are text a user reads (MCP tool descriptions, CLI help): a docstring edit there is behaviour.
+DOCSTRING_IS_TEXT: tuple[str, ...] = ("src/nexus/mcp/", "src/nexus/commands/")
 EXIT_OK = 0
 EXIT_BAD = 10
 
@@ -89,8 +106,8 @@ def shipped(path: str) -> bool:
 
 
 def beads(commit: Commit) -> list[str]:
-    """The bead ids the commit names: its subject's, else its body's, in order, without repeats."""
-    found = BEAD.findall(commit.subject) or BEAD.findall(commit.body)
+    """The ids the commit names (beads, and GitHub issues as ``gh-N``): its subject's, else its body's, in order, without repeats."""
+    found = item_ids(commit.subject) or item_ids(commit.body)
     return list(dict.fromkeys(found))
 
 
@@ -104,14 +121,14 @@ def family(bead: str) -> str:
 
 
 def covered(bead: str, stems: set[str], cites: set[str], range_cites: set[str]) -> bool:
-    """A fragment is named for the bead, or an entry cites it, or a range entry cites a sibling under the same epic (one entry
-    for an epic's children). A sibling cited only by an older release does not count."""
+    """A fragment is named for the bead, or an entry cites it, or an entry ADDED IN THE RANGE cites a sibling under the same epic
+    (one entry for an epic's children; the module docstring says what that covers)."""
     return has_fragment(bead, stems) or bead in cites or family(bead) in {family(c) for c in range_cites}
 
 
 def cited(text: str) -> set[str]:
     """Bead ids that ``text`` cites in parentheses."""
-    return {b for group in PAREN.findall(text) for b in BEAD.findall(group)}
+    return {b for group in PAREN.findall(text) for b in item_ids(group)}
 
 
 def _strip_docstrings(tree: ast.AST) -> ast.AST:
@@ -130,10 +147,12 @@ def _java_code(text: str) -> str:
 
 
 def code_equal(path: str, old: str, new: str) -> bool:
-    """True when ``old`` and ``new`` differ only in comments (and, for Python, docstrings). False for any other file type."""
+    """True when ``old`` and ``new`` differ only in comments (and, for Python outside ``DOCSTRING_IS_TEXT``, docstrings). False
+    for any other file type."""
     if path.endswith(".py"):
+        strip = _strip_docstrings if not path.startswith(DOCSTRING_IS_TEXT) else (lambda tree: tree)
         try:
-            return ast.dump(_strip_docstrings(ast.parse(old))) == ast.dump(_strip_docstrings(ast.parse(new)))
+            return ast.dump(strip(ast.parse(old))) == ast.dump(strip(ast.parse(new)))
         except SyntaxError:
             return False
     if path.endswith(".java"):
@@ -188,30 +207,31 @@ def fragment_stems(repo: Path, base: str, head: str) -> set[str]:
 
 
 def cited_beads(repo: Path, base: str, head: str) -> tuple[set[str], set[str]]:
-    """(every bead ``head``'s ``CHANGELOG.md`` or this range's entries cite, the beads only this range's entries cite).
+    """(the beads an entry cites, the beads an entry ADDED IN THE RANGE cites).
 
-    This range's entries are the fragments in ``head``'s tree and every line the range adds to a fragment or to ``CHANGELOG.md``
-    (what the release fold writes). The second set is what a sibling bead may lean on; the first is what the bead itself may."""
-    text = []
+    The first set is what a bead itself may lean on: fragments in ``head``'s tree plus every line the range adds to a fragment or to
+    ``CHANGELOG.md`` (what the release fold writes). The second, the lines the range adds, is all a sibling bead may lean on. A
+    ``CHANGELOG.md`` section from before the range cites nothing here."""
+    head_fragments = []
     for line in _git(repo, "ls-tree", "-r", "--name-only", head, f"{FRAGMENT_DIR}/").splitlines():
         if line.endswith(".md") and Path(line).name != "README.md":
-            text.append(_git(repo, "show", f"{head}:{line}"))
+            head_fragments.append(_git(repo, "show", f"{head}:{line}"))
     patch = _git(repo, "log", "--no-merges", "--format=", "-p", "-U0", "--no-color", f"{base}..{head}", "--", f"{FRAGMENT_DIR}/",
                  "CHANGELOG.md")
-    text.extend(ln[1:] for ln in patch.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
-    in_range = cited("\n".join(text))
-    changelog = subprocess.run(["git", "-C", str(repo), "show", f"{head}:CHANGELOG.md"], capture_output=True, text=True, check=False)
-    return in_range | cited(changelog.stdout), in_range  # a tree with no CHANGELOG.md cites nothing
+    added = cited("\n".join(ln[1:] for ln in patch.splitlines() if ln.startswith("+") and not ln.startswith("+++")))
+    return added | cited("\n".join(head_fragments)), added
 
 
-def examine(repo: Path, base: str, head: str) -> tuple[list[str], int]:
-    """(findings, commits examined). A commit is examined unless it is exempt; the range's merges are not commits here."""
+def examine(repo: Path, base: str, head: str) -> tuple[list[str], int, int]:
+    """(findings, commits examined, release-preparation commits skipped). A release-prep or revert commit is not examined; the
+    range's merges are not commits here."""
     stems = fragment_stems(repo, base, head)
     cites, range_cites = cited_beads(repo, base, head)
     findings: list[str] = []
-    examined = 0
+    examined = prep = 0
     for c in commits_in(repo, base, head):
         if EXEMPT_SUBJECT.match(c.subject):
+            prep += 1
             continue
         examined += 1
         touched = [p for p in c.paths if shipped(p)]
@@ -227,7 +247,7 @@ def examine(repo: Path, base: str, head: str) -> tuple[list[str], int]:
             want = " or ".join(f"{FRAGMENT_DIR}/{b}.md" for b in named)
             findings.append(f"{label}: changes shipped code ({touched[0]}) and has no fragment: add {want}, "
                             "or cite the bead in another entry, or add a 'Changelog: none' trailer if no behaviour changed")
-    return findings, examined
+    return findings, examined, prep
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -240,11 +260,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         mode = args.mode or ledger_mode.mode()
         base = args.base or default_base(args.repo, args.head)
-        findings, examined = examine(args.repo, base, args.head)
+        findings, examined, prep = examine(args.repo, base, args.head)
     except (ledger_mode.LedgerModeError, RuntimeError) as exc:
         sys.stderr.write(f"error: {exc}\n")
         return EXIT_BAD
     env = {**os.environ, ledger_mode.ENV: mode}
+    if mode == ledger_mode.REPORT and examined == 0 and prep > 0:
+        sys.stdout.write(f"{ledger_mode.SUMMARY_PREFIX} {LEDGER}: 0 finding(s), 0 item(s) examined (mode=report): the range holds "
+                         f"only {prep} release-preparation or revert commit(s), so there is nothing to check\n")
+        if env.get("GITHUB_ACTIONS") == "true":
+            sys.stdout.write(f"::warning title={LEDGER}::the range holds only release-preparation or revert commits, so nothing was checked\n")
+        return EXIT_OK
     if mode == ledger_mode.REPORT:
         return EXIT_OK if ledger_mode.settle(LEDGER, findings, examined, environ=env) else EXIT_BAD
     if examined == 0:

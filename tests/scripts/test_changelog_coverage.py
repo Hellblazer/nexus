@@ -227,6 +227,52 @@ def test_a_changelog_none_trailer_exempts_and_says_why_in_the_message(repo: tupl
     assert run(root, base).returncode == 10
 
 
+def test_a_bead_cited_only_in_an_older_changelog_section_is_not_covered(repo: tuple[Path, str]) -> None:
+    root, _base = repo
+    history = commit(root, "docs: an earlier release (nexus-x)", CHANGELOG_dot_md="## [0.9.0]\n\n- **old.** (nexus-old3)\n")
+    commit(root, "fix: a follow-up to a released bead (nexus-old3)", src__nexus__a_dot_py="x = 1\n")
+    done = run(root, history)
+    assert done.returncode == 10 and "nexus-old3" in done.stderr, "a later change to a released bead wants its own entry"
+
+
+def test_docstrings_a_user_reads_are_behaviour_but_other_docstrings_are_not(repo: tuple[Path, str]) -> None:
+    root, _base = repo
+    src = 'def f():\n    """old"""\n    return 1\n'
+    seed = commit(root, "chore: seed (nexus-s)", src__nexus__mcp__tool_dot_py=src, src__nexus__commands__cmd_dot_py=src,
+                  src__nexus__other_dot_py=src, changelog__unreleased__nexus_dash_s_dot_md="### Added\n\n- s\n")
+    commit(root, "docs: other docstring (nexus-d1)", src__nexus__other_dot_py=src.replace("old", "new"))
+    assert run(root, seed).returncode == 0
+    commit(root, "docs: tool description (nexus-d2)", src__nexus__mcp__tool_dot_py=src.replace("old", "new"))
+    commit(root, "docs: cli help (nexus-d3)", src__nexus__commands__cmd_dot_py=src.replace("old", "new"))
+    commit(root, "docs: a comment in a tool (nexus-d4)", src__nexus__mcp__tool_dot_py=src.replace("old", "new") + "# note\n")
+    done = run(root, seed)
+    assert done.returncode == 10 and "nexus-d2" in done.stderr and "nexus-d3" in done.stderr
+    assert "nexus-d1" not in done.stderr and "nexus-d4" not in done.stderr, "comments stay exempt there too"
+
+
+def test_a_github_issue_is_an_item_whose_fragment_is_gh_n(repo: tuple[Path, str]) -> None:
+    assert cc.item_ids("fix(preflight): doctor (GH #1689)") == ["gh-1689"]
+    assert cc.item_ids("fix: a (nexus-abc.1) Closes #7") == ["nexus-abc.1", "gh-7"]
+    root, base = repo
+    commit(root, "fix(preflight): doctor (GH #1689)", src__nexus__a_dot_py="x = 1\n")
+    assert run(root, base).returncode == 10
+    commit(root, "docs: entry (GH #1689)", changelog__unreleased__gh_dash_1689_dot_md="### Fixed\n\n- doctor\n")
+    assert run(root, base).returncode == 0
+
+
+def test_a_range_of_only_release_preparation_warns_and_passes_in_report_mode_only(repo: tuple[Path, str]) -> None:
+    root, base = repo
+    commit(root, "chore(release): v1.2.3", src__nexus__engine_version_py="V = 1\n")
+    commit(root, 'Revert "fix: a"', src__nexus__a_dot_py="x = 1\n")
+    done = run(root, base, "--mode", "report", env={"GITHUB_ACTIONS": "true"})
+    assert done.returncode == 0, done.stderr
+    assert "LEDGER-REPORT changelog-coverage: 0 finding(s), 0 item(s) examined (mode=report)" in done.stdout
+    assert "only 2 release-preparation or revert commit(s)" in done.stdout and "::warning title=changelog-coverage::" in done.stdout
+    assert run(root, base).returncode == 10, "block mode still refuses a range with nothing to check"
+    empty = run(root, git(root, "rev-parse", "HEAD"), "--mode", "report")
+    assert empty.returncode == 10 and "LEDGER-VACUOUS" in empty.stdout, "no commit at all is still an error"
+
+
 @pytest.mark.parametrize(("subject", "exempt"), [
     ("chore(release): v1.2.3", True), ("release: v1.2.3", True), ("release(8.5.9): fold", True), ('Revert "fix: a"', True),
     ("release.yml: pin the runner (nexus-r1)", False), ("release-notes: tidy (nexus-r2)", False), ("releases: x (nexus-r3)", False),
