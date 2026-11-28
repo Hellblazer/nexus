@@ -377,7 +377,7 @@ that names no release is not a go.
 uv run python scripts/check_engine_release_pairing.py --tag engine-service-vX.Y.Z --commit "$TAG_SHA"   # exit 0 = every both-halves commit since the previous engine tag is declared
 ```
 
-It scans `<previous engine-service-v* tag>..TAG_SHA` through `check_wire_contract_pairing.py --rev-range`; the previous tag is the highest version below the one you name. Exit 1 names each undeclared commit (or stale ledger entry): declare it under `## Unshipped` in a reviewed commit and freeze a new `TAG_SHA` that carries it (Step 1b). A declared entry does not stop the tag, only an undeclared one does; Step 3b still decides the deploy. Exit 2 means the range could not be named (shallow checkout, no tags, a tag that is not `engine-service-vX.Y.Z`): fix the checkout and rerun, never tag on it.
+It scans `<previous engine-service-v* tag>..TAG_SHA` through `check_wire_contract_pairing.py --rev-range`; the previous tag is the highest version below the one you name. Exit 1 names one of two findings, each fixed in a reviewed commit that a new frozen `TAG_SHA` carries (Step 1b). An UNDECLARED commit (in the range, absent from the ledger): declare it under `## Unshipped`; once declared it does not stop the tag, and Step 3b still decides the deploy. A STALE entry (an `## Unshipped` entry whose commit is already an ancestor of the newest published `v*` client tag, whatever the engine range holds): move it to `## Shipped`; a declared but stale entry does stop the tag. Exit 2 means the range could not be named (shallow checkout, no tags, a tag that is not `engine-service-vX.Y.Z`): fix the checkout and rerun, never tag on it.
 
 ```bash
 git tag -a engine-service-vX.Y.Z -m "engine-service X.Y.Z" <commit>   # <commit> must be on origin
