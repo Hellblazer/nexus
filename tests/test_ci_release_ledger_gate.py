@@ -174,7 +174,6 @@ _BASE_VALUES = {
     "needs.changes.outputs.code": "true",
     "needs.test.result": "success",
     "needs.test-lint.result": "success",
-    "needs.test-mode-census.result": "success",
     # nexus-q99w4: the docs-reader leg runs only on a doc-only diff.
     "needs.test-docs-readers.result": "skipped",
     "needs.release-ledger-gate.result": "skipped",

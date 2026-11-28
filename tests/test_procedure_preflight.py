@@ -128,11 +128,12 @@ def test_a_python_change_gets_ruff_its_tests_and_the_standing_checks(
         "':(glob)src/**/*.py' | xargs -0 -r uvx ruff@0.15.18 check --force-exclude -- )",
         # R13: the default-loop guard that judges only what its invocation collected
         # rides in the same invocation as the changed tests; NOT_SLOW so a changed lint- or
-        # slow-marked file is collected, not deselected.
+        # slow-marked file is collected, not deselected. NX_CLASS_A_MODE=report: the census is a class-A check in
+        # report mode (RDR-258 Phase 1), so an offender is a warning here and the step does not refuse.
         "( set -o pipefail; { git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
         "':(glob)tests/**/test_*.py' && printf '%s\\0' "
         "tests/test_mode_declarations_are_explicit.py; } | "
-        "xargs -0 -r uv run pytest -q -rf -p no:randomly --color=no -m 'not integration and not slow and not class_a' -- )",
+        "xargs -0 -r env NX_CLASS_A_MODE=report uv run pytest -q -rf -p no:randomly --color=no -m 'not integration and not slow and not class_a' -- )",
     ]
     assert _bare(_commands(out)["code"]) == [
         "scripts/build-gate-jar.sh",

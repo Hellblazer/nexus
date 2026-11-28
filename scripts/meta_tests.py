@@ -85,7 +85,9 @@ ENV = {"NX_TEST_T2_SUBSTRATE": "none", "NX_WIRE_PAIRING_MODE": "report"}
 #: The guard run, as CI's census-only job runs it (.github/workflows/ci.yml): tests/conftest.py
 #: skip-marks every item outside the census module, so the changed test files are collected (the
 #: census judges them) but none executes, and any non-zero exit is a real red.
-GUARD_ENV = {"NX_CENSUS_ONLY_JOB": "1", "NX_SCENARIO_SKIP_BUDGET": "999"}
+#: NX_CLASS_A_MODE=report (RDR-258 Phase 1 step 3): the census is a class-A check in report mode, so an offender is a warning
+#: here, as in CI's advisory census job it is a listed item, and the guard's PASSED line still proves the census ran.
+GUARD_ENV = {"NX_CENSUS_ONLY_JOB": "1", "NX_SCENARIO_SKIP_BUDGET": "999", "NX_CLASS_A_MODE": "report"}
 #: What a green run of this script does not cover, printed at the end of every run.
 NOT_COVERED = (
     "not covered here: the rest of the -m lint bucket and the full-corpus census job (develop CI runs them; push-train"

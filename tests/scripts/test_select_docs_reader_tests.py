@@ -102,7 +102,6 @@ _DOC_ONLY = {
     "needs.changes.outputs.code": "false",
     "needs.test.result": "skipped",
     "needs.test-lint.result": "skipped",
-    "needs.test-mode-census.result": "skipped",
 }
 
 

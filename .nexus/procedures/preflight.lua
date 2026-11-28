@@ -139,7 +139,9 @@ end
 -- A default-loop guard judges only what its own invocation collected, so it runs in
 -- the same invocation as the changed tests. It is
 -- tests/test_mode_declarations_are_explicit.py (voyage names in a test without
--- cloud_mode; it reads request.session.items and must not be lint-marked). The
+-- cloud_mode; it reads request.session.items and must not be lint-marked). It is a
+-- class-A check in report mode (RDR-258 Phase 1 step 3): the step sets NX_CLASS_A_MODE=report,
+-- so an offender is a warning and the step does not refuse where CI no longer does. The
 -- other guard the memory file named, tests/test_cli_runner_output_invariant.py, became
 -- a lint test (dc2a2cca0), which default addopts deselect, so naming it here would
 -- run nothing; the standing lint bucket carries it (a test pins that).
@@ -169,7 +171,7 @@ local CLASSES = {
           .. " invocation (a changed lint-marked file runs here too; integration-marked ones run in the integration"
           .. " row, slow-marked ones in the nightly gate)",
           gated(piped("{ " .. live({":(glob)tests/**/test_*.py"}) .. " && printf '%s\\0' "
-            .. words(CHANGED_TEST_GUARDS) .. "; }", PYTEST .. " " .. CHANGED_MARKS .. " --")), false))
+            .. words(CHANGED_TEST_GUARDS) .. "; }", "env NX_CLASS_A_MODE=report " .. PYTEST .. " " .. CHANGED_MARKS .. " --")), false))
       end
       -- tests/test_cli_registration.py checks every command module is wired into
       -- cli.py; no test that shares a subject with a command module names it, so a

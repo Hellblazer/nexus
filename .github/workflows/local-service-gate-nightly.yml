@@ -526,6 +526,34 @@ jobs:
             --deselect tests/test_pdf_subsystem.py::TestFormulaPreservationOnRealPdf::test_mineru_path_preserves_formulas \
             --junit-xml=slow-s6dei.xml
 
+      - name: Mode-declarations census report (RDR-258 Phase 1, nightly)
+        # The census reads the whole collected corpus, so it is its own invocation (NX_CENSUS_ONLY_JOB skip-marks every
+        # test outside the census modules, which keeps it cheap: about two minutes, no engine). Same reporter and floors as
+        # ci.yml's test-mode-census job; report mode: the reporter exits 0 on an offender, so only a structural failure (a floor
+        # missed, a crash, a report over nothing) reds the nightly, and there is no `continue-on-error`. `if: always()` runs it
+        # after a red slow-tests step too.
+        if: always()
+        env:
+          NX_TEST_T2_SUBSTRATE: "none"
+          NX_SCENARIO_SKIP_BUDGET: "999"
+        run: |
+          set -euo pipefail
+          NX_CENSUS_ONLY_JOB=1 uv run python scripts/class_a_report.py \
+            --name "mode-declarations census (nightly)" \
+            --min-tests 15 \
+            --require "tests/test_mode_declarations_are_explicit::test_mode_declarations_are_explicit=1" \
+            --items-out class-a-items-census-nightly.json \
+            -- uv run pytest tests/ -q
+
+      - name: Upload the census items (kept 30 days)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: class-a-items-census-nightly
+          path: class-a-items-census-nightly.json
+          retention-days: 30
+          if-no-files-found: warn
+
       - name: Non-vacuity — slow tests actually ran (nexus-s6dei)
         # Same shape as the nexus-5opzu guard above: a gate that skip-passes
         # on a missing prerequisite reads as a broken gate, not a pass.
@@ -588,6 +616,7 @@ jobs:
             --name "class-A checks (nightly)" \
             --require tests/test_module_seam=2 \
             --min-tests 1 \
+            --require "tests/test_mode_declarations_are_explicit::test_the_mode_census_runs_in_a_lint_run_over_the_full_collection=1" \
             --items-out class-a-items-nightly.json \
             -- uv run pytest -m class_a -q -p no:cacheprovider
 

@@ -72,6 +72,7 @@ import subprocess
 import sys
 import shutil
 import tempfile
+import warnings
 
 import tests._engine_substrate as _substrate
 from tests import _tmp_root
@@ -165,7 +166,7 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
     offenders = _scan_offenders(request.session.items)
 
     if offenders:
-        pytest.fail(_census_failure(offenders))
+        _fail_or_report(_census_failure(offenders))
 
 
 #: A lint run that collected fewer items than this was path-scoped: the census needs the whole tests/ tree.
@@ -173,6 +174,7 @@ _FULL_CORPUS_FLOOR = 20_000
 
 
 @pytest.mark.lint
+@pytest.mark.class_a
 def test_the_mode_census_runs_in_a_lint_run_over_the_full_collection(
     request: pytest.FixtureRequest, full_collection: list,
 ) -> None:
@@ -190,7 +192,7 @@ def test_the_mode_census_runs_in_a_lint_run_over_the_full_collection(
     )
     offenders = _scan_offenders(scope)
     if offenders:
-        pytest.fail(_census_failure(offenders))
+        _fail_or_report(_census_failure(offenders))
 
 
 def _default_addopts_markexpr() -> str:
@@ -214,7 +216,23 @@ def _default_selection(items: list) -> list:
     return [i for i in items if expr.evaluate(MarkMatcher.from_markers(i.iter_markers()))]
 
 
+#: A class-A check in report mode (RDR-258 Phase 1 step 3): with ``NX_CLASS_A_MODE=report`` the census's offenders are a
+#: warning and the test passes. The pre-push sweep (scripts/meta_tests.py) and the preflight guard step set it, so the census
+#: refuses nowhere locally that it no longer refuses in CI; CI's advisory jobs leave it unset, so the test fails and the reporter
+#: lists the offenders.
+CLASS_A_MODE_ENV = "NX_CLASS_A_MODE"
+
+
+def _fail_or_report(message: str) -> None:
+    if os.environ.get(CLASS_A_MODE_ENV) == "report":
+        warnings.warn(message, stacklevel=2)
+    else:
+        pytest.fail(message)
+
+
 def _census_failure(offenders: list[str]) -> str:
+    """The failure text: a capped sample for a reader, then EVERY offender as a ``CLASS_A_ITEM <nodeid>`` line, which
+    scripts/class_a_report.py reads into its items (the human sample stays short; the record does not)."""
     sample = "\n  ".join(offenders[:20])
     suffix = (
         f"\n  ... (+{len(offenders) - 20} more)"
@@ -232,6 +250,8 @@ def _census_failure(offenders: list[str]) -> str:
         "at module/class scope) if the test asserts cloud-mode "
         "behavior; or add the nodeid to `_MODE_LINT_EXCLUDE` in "
         "tests/conftest.py with a documented reason."
+        + "\n\nAll offenders, one per line:\n"
+        + "\n".join(f"CLASS_A_ITEM {nodeid}" for nodeid in offenders)
     )
 
 

@@ -1540,6 +1540,7 @@ jobs:
             --name "class-A lint checks" \
             --require tests/test_module_seam=2 \
             --min-tests 1 \
+            --require "tests/test_mode_declarations_are_explicit::test_the_mode_census_runs_in_a_lint_run_over_the_full_collection=1" \
             --items-out class-a-items.json \
             -- uv run pytest -m class_a -q -p no:cacheprovider
 
@@ -1670,7 +1671,31 @@ jobs:
         # Signal 1 (pytest-split active) does not fire here, and Signal 2's
         # ratio stays at the normal ~90% default-loop reduction — so the
         # census actually scans request.session.items instead of skipping.
-        run: NX_CENSUS_ONLY_JOB=1 uv run pytest tests/ -q
+        #
+        # RDR-258 Phase 1 step 3 (nexus-2jomg.2, Sam 2026-11-27): REPORT MODE. This job is not in pytest-gate's `needs:`; the
+        # reporter lists every offending test (the census names them in its failure message) as a ::warning:: and in this
+        # job's summary, and exits 0. It exits 1 only when it examined too little: --min-tests 15 is under the 20 tests that
+        # passed here (the census and its siblings, with 63508 skipped by NX_CENSUS_ONLY_JOB) when this was set, and the
+        # census test itself has its own floor (--require: a siblings-only pass proves nothing about the census), so a corpus
+        # that went all-skipped is a failed report, not a quiet one. EVERY offender is a `CLASS_A_ITEM` line and a row of
+        # the items file (the census message lists them all, the human text stays capped), uploaded below for 30 days.
+        run: |
+          set -euo pipefail
+          NX_CENSUS_ONLY_JOB=1 uv run python scripts/class_a_report.py \
+            --name "mode-declarations census" \
+            --min-tests 15 \
+            --require "tests/test_mode_declarations_are_explicit::test_mode_declarations_are_explicit=1" \
+            --items-out class-a-items-census.json \
+            -- uv run pytest tests/ -q
+
+      - name: Upload the failing items (kept 30 days)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: class-a-items-census
+          path: class-a-items-census.json
+          retention-days: 30
+          if-no-files-found: warn
 
   test-integration-affected:
     # nexus-rpaat: run the integration-marked tests THIS change affects.
@@ -2045,7 +2070,7 @@ jobs:
     # condition for the exact same reason.
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, integration-release-floor, mcpb-resolve-gate, constraints-resolve-gate, plugin-ledger-gate]
+    needs: [changes, test, test-lint, test-docs-readers, release-ledger-gate, test-integration-affected, integration-release-floor, mcpb-resolve-gate, constraints-resolve-gate, plugin-ledger-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -2056,7 +2081,6 @@ jobs:
           code="${{ needs.changes.outputs.code }}"
           test_result="${{ needs.test.result }}"
           test_lint_result="${{ needs.test-lint.result }}"
-          test_mode_census_result="${{ needs.test-mode-census.result }}"
           test_docs_readers_result="${{ needs.test-docs-readers.result }}"
           release_ledger_result="${{ needs.release-ledger-gate.result }}"
           integration_any="${{ needs.changes.outputs.integration_any }}"
@@ -2073,7 +2097,6 @@ jobs:
           echo "changes job result: $changes_result (code=$code)"
           echo "test matrix result: $test_result"
           echo "test-lint result: $test_lint_result"
-          echo "test-mode-census result: $test_mode_census_result"
           echo "test-docs-readers result: $test_docs_readers_result"
           echo "release-ledger-gate result: $release_ledger_result (event=$event_name base_ref=$base_ref)"
           echo "test-integration-affected result: $integration_result (integration_any=$integration_any)"
@@ -2093,10 +2116,9 @@ jobs:
                 echo "::error::code changed but the lint-marker leg (test-lint) reported '$test_lint_result' instead of success"
                 exit 1
               fi
-              if [ "$test_mode_census_result" != "success" ]; then
-                echo "::error::code changed but the mode-declarations census leg (test-mode-census) reported '$test_mode_census_result' instead of success — nexus-vdti6: this is the ONLY leg that gives the RDR-109 census a real, unsharded view of the corpus"
-                exit 1
-              fi
+              # The mode-declarations census (test-mode-census) is NOT read here: RDR-258 Phase 1 step 3 (nexus-2jomg.2, Sam
+              # 2026-11-27) made it a class-A check in report mode, an advisory job that lists the offending tests and never
+              # fails the gate. Its own job still runs, through scripts/class_a_report.py.
               # The shard matrix already covers every docs reader on a code push.
               case "$test_docs_readers_result" in
                 success|skipped) ;;
@@ -2118,13 +2140,6 @@ jobs:
                 success|skipped) ;;
                 *)
                   echo "::error::doc-only diff but the lint-marker leg (test-lint) reported '$test_lint_result' instead of skipped/success"
-                  exit 1
-                  ;;
-              esac
-              case "$test_mode_census_result" in
-                success|skipped) ;;
-                *)
-                  echo "::error::doc-only diff but the mode-declarations census leg (test-mode-census) reported '$test_mode_census_result' instead of skipped/success"
                   exit 1
                   ;;
               esac
@@ -2322,8 +2337,8 @@ jobs:
       # and cost a CI cycle to find. The script runs them in this order, each printing its own verdict, and
       # fails once naming every check that failed. tests/scripts/test_ci_gate_fan_in.py pins what it runs and
       # that each verdict is the check's own; the two wiring tests keep this line honest.
-      # Scope: the step still runs only after the verdict step above passed. A red sibling job (a 3.13 leg, lint,
-      # the mode census) therefore skips it, and that skip is deliberate and pinned by the wiring tests: a red
+      # Scope: the step still runs only after the verdict step above passed. A red sibling job (a 3.13 leg, lint)
+      # therefore skips it, and that skip is deliberate and pinned by the wiring tests: a red
       # 3.12 shard uploads no report anyway. "Every ceiling" means every ceiling of a run whose verdict passed.
       #
       # 1. nexus-ekp7w: the DDL/bytes ratchet (scripts/ddl_ratchet.py fan-in), described above. `--advisory`

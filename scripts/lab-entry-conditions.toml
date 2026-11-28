@@ -282,7 +282,7 @@ reason = "Hand-runnable and cheap as written: `uvx ruff@0.15.18 check src/`; the
 workflow = "ci.yml"
 job = "test-mode-census"
 step = "Run the mode-declarations census against the FULL unsharded corpus"
-run_contains = "NX_CENSUS_ONLY_JOB=1 uv run pytest tests/ -q"
+run_contains = "NX_CENSUS_ONLY_JOB=1 uv run python scripts/class_a_report.py"
 reason = "Hand path in tests/AGENTS.md: `NX_CENSUS_ONLY_JOB=1 NX_TEST_T2_SUBSTRATE=none uv run pytest tests/ -q`. Checklist 3-6b leaves it to develop CI unless 2f selects it."
 
 [[script_less]]
@@ -403,7 +403,7 @@ ci_workflow = "ci.yml"
 ci_job = "test-class-a-report"
 ci_step = "Report the class-A lint checks (docs_reference_rot, module_seam)"
 hand_path = "uv run pytest -m class_a (every class-A lint check, which also runs under -m lint); scripts/meta_tests.py run covers the lint bucket"
-reason = "Report mode (RDR-258 Phase 1): the wrapper lists a class-A check's failing items and never fails develop, so a lane has no gate to run; the checks themselves run by hand under -m lint."
+reason = "Report mode (RDR-258 Phase 1): the wrapper lists a class-A check's failing items and never fails develop, so a lane has no gate to run; the lint checks run by hand under -m lint, and test-mode-census runs the same wrapper over the census (its script-less entry above has the hand path)."
 
 [[excluded]]
 script = "scripts/ci_junit_verdict.py"
