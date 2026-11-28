@@ -142,7 +142,7 @@ def repo(tmp_path: Path) -> tuple[Path, str]:
 
 
 @pytest.mark.parametrize(("path", "expected"), [
-    ("conexus/hooks/x.py", True), ("conexus/skills/a/SKILL.md", True), ("sn/.mcp.json", True), ("conexus/PENDING_RELEASE.md", True),
+    ("conexus/hooks/x.py", True), ("conexus/skills/a/SKILL.md", True), ("sn/.mcp.json", True), ("conexus/.mcp.json", True),
     (".claude-plugin/marketplace.json", True), (".github/workflows/plugin-drift-ledger.yml", True),
     ("conexus/hooksx/a", False), ("conexus/README.md", False), ("sn/x.md", False), ("src/nexus/cli.py", False),
     ("conexus/.mcp.jsonx", False),
