@@ -62,11 +62,19 @@ def test_a_lone_quote_or_a_one_sided_quote_is_not_a_quoted_part() -> None:
 
 # --- reader 1: the MCP corpus list -----------------------------------------------------------------------------
 
+def _no_registry_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``resolve_corpus`` and the shorthand lookup read a collection's registry row through ``nexus.mcp_infra.get_collection_row``, which
+    lists the registry through the service on a cold cache. No row is the answer for a name no registry backs, and it keeps these tests
+    off the engine: they need no tenant."""
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: None)
+
+
 @pytest.fixture
 def corpus_names(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     names = ["all", "notes*", "notes-*", "notes-deadbeef", "$topic", "code__repo__minilm-l6-v2__v1", "plain"]
     monkeypatch.setattr(mcp_core, "_get_collection_names", lambda: names)
     monkeypatch.setattr(mcp_core, "_get_fanout_counts", lambda: dict.fromkeys(names, 100))
+    _no_registry_rows(monkeypatch)
     return names
 
 
@@ -75,17 +83,16 @@ def test_the_corpus_reader_names_exactly_a_quoted_label(corpus_names: list[str],
     assert mcp_core._resolve_corpus_target(f'"{label}"', t3=None) == [label]
 
 
-@pytest.mark.t2_tenant
 def test_the_corpus_reader_keeps_the_unquoted_all_wildcard(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unquoted ``all`` fans out to every collection; the same word quoted names a collection that is not there."""
     names = ["notes*", "plain", "code__repo__minilm-l6-v2__v1"]
     monkeypatch.setattr(mcp_core, "_get_collection_names", lambda: names)
     monkeypatch.setattr(mcp_core, "_get_fanout_counts", lambda: dict.fromkeys(names, 100))
+    _no_registry_rows(monkeypatch)
     assert mcp_core._resolve_corpus_target("all", t3=None) == names
     assert mcp_core._resolve_corpus_target('"all"', t3=None) == []
 
 
-@pytest.mark.t2_tenant
 @pytest.mark.parametrize("label", ["notes*", "notes-*", "notes-deadbeef", "$topic"])
 def test_the_corpus_reader_reads_an_unquoted_glob_label_by_exact_name_as_before(corpus_names: list[str], label: str) -> None:
     """The premise behind ``quote_corpus_label``: this reader does not strip a trailing ``*``, ``-*`` or an 8-hex suffix and does
@@ -93,7 +100,6 @@ def test_the_corpus_reader_reads_an_unquoted_glob_label_by_exact_name_as_before(
     assert mcp_core._resolve_corpus_target(label, t3=None) == [label]
 
 
-@pytest.mark.t2_tenant
 def test_a_quoted_part_in_a_list_is_one_label_beside_ordinary_parts(corpus_names: list[str]) -> None:
     target = mcp_core._resolve_corpus_target('"all",plain,code__repo__minilm-l6-v2__v1', t3=None)
     assert target == ["all", "plain", "code__repo__minilm-l6-v2__v1"]
@@ -104,7 +110,6 @@ def test_a_quoted_label_names_no_collection_that_merely_starts_with_it(corpus_na
     assert mcp_core._resolve_corpus_target('"notes"', t3=None) == []
 
 
-@pytest.mark.t2_tenant
 def test_a_quoted_dunder_label_resolves_as_the_same_name_unquoted(corpus_names: list[str]) -> None:
     name = "code__repo__minilm-l6-v2__v1"
     assert mcp_core._resolve_corpus_target(f'"{name}"', t3=None) == mcp_core._resolve_corpus_target(name, t3=None) == [name]
