@@ -867,7 +867,7 @@ value, trend and alarm line, as in Phase 1 step 1 [Sam]. The push gate's
 file-size and context-budget checks follow. The file-size hot rule in
 AGENTS.md changes with it.
 
-### Phase 4: Ledgers report on develop and block where they are consumed. Sam decides each demotion and any release-path change; the implementer does step 1 and prepares step 2 without him.
+### Phase 4 (CLOSED, 2026-11-28): Ledgers report on develop and block where they are consumed. Sam decides each demotion and any release-path change; the implementer does step 1 and prepares step 2 without him.
 
 **Sam decides**: any change to the release PR's gate in step 1, and step 2.
 **Without Sam**: step 1's source search, and the report-mode code.
