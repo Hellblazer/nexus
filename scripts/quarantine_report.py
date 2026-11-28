@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Report the flake quarantine, and add to it (RDR-258 Phase 5, nexus-2jomg.6).
 
-    quarantine_report.py [report] [--registry P] [--today D] [--json] [--junit PATH]... [--expect-all]
+    quarantine_report.py [--registry P] [--today D] [--junit PATH]... [--expect-all]
     quarantine_report.py select --kind pytest|java [--format lines|surefire|surefire-exclude] [--registry P]
     quarantine_report.py classify --rc N [--junit PATH]...
     quarantine_report.py add --candidates F --bead B --reason R [--since D] [--review REF] [--registry P] NODEID...
@@ -11,8 +11,8 @@
 and flags an entry past its deadline (Sam, 2026-11-27: a quarantine lasts 14 days, then the test is fixed or
 deleted). With ``--junit`` (a junit file, or a directory searched for ``*.xml``; repeatable) it joins each entry's
 runs, "passed N of N", "failed k of N". Exit 1 when any entry is overdue; 3 under ``--expect-all`` when an entry
-has no run that examined it (no testcase, or only skips); 2 on a registry or usage error; 0 otherwise. ``--json``
-prints the same for machines.
+has no run that examined it (no testcase, or only skips); 2 on a registry or usage error; 0 otherwise. ``--today``
+(a fixed clock for tests) belongs to the report: before another subcommand it is an error, never ignored.
 
 ``select`` prints the entries of one kind: one nodeid per line, or the ``-Dtest=`` value surefire takes
 (``surefire``: only those tests; ``surefire-exclude``: everything but them).
@@ -24,7 +24,8 @@ prints the same for machines.
 under ``candidates``. It refuses a nodeid the file does not name. A nodeid found only under ``unattributed`` is
 accepted only with ``--review <ref>`` (the 2-week review's decision, stored in the entry's reason), one nodeid per
 call. ``--since`` may be today or yesterday (UTC), never later or earlier. The registry's ``source`` is the sha256
-of the candidates file.
+of the candidates file. A pytest row the report found no file path for (``path_source`` none) is refused: no run can
+collect it. ``path_source`` is stored in the entry.
 
 Standard library only; the registry format, the candidates reader and the junit tally are in
 ``tests/_quarantine_registry.py``.
@@ -32,7 +33,6 @@ Standard library only; the registry format, the candidates reader and the junit 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from datetime import date
 from pathlib import Path
@@ -96,10 +96,7 @@ def _report(args: argparse.Namespace) -> int:
     rows = [_row(e, today, cases) for e in entries]
     overdue = sum(1 for r in rows if r["overdue"])
     unexamined = [str(r["nodeid"]) for r in rows if args.expect_all and not r["examined"]]
-    if args.json:
-        print(json.dumps({"today": today.isoformat(), "count": len(rows), "overdue": overdue, "entries": rows}, indent=2))
-    else:
-        sys.stdout.write(_text(rows, today))
+    sys.stdout.write(_text(rows, today))
     if unexamined:
         print(f"{len(unexamined)} listed tests were not examined (no run, or only skips): " + ", ".join(unexamined))
     return 1 if overdue else 3 if unexamined else 0
@@ -127,7 +124,7 @@ def _classify(args: argparse.Namespace) -> int:
 def _add(args: argparse.Namespace) -> int:
     added = reg.add_entries(
         args.registry, args.candidates, args.nodeids, bead=args.bead, reason=args.reason,
-        today=args.today or reg.today_utc(), since=args.since, review=args.review,
+        today=reg.today_utc(), since=args.since, review=args.review,
     )
     for e in added:
         print(f"quarantined {e.nodeid} ({e.kind}) since {e.since} until {e.deadline} ({e.bead})")
@@ -140,8 +137,7 @@ def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--registry", type=Path, default=argparse.SUPPRESS, help="the registry file (default tests/quarantine.toml)")
     p = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0], parents=[common])
-    p.add_argument("--today", type=_day, help="the date to age against (default: today, UTC)")
-    p.add_argument("--json", action="store_true")
+    p.add_argument("--today", type=_day, default=None, help="the report's date to age against (default: today, UTC)")
     p.add_argument("--junit", type=Path, action="append", default=[], help="a junit file or a directory of them; repeatable")
     p.add_argument("--expect-all", action="store_true", help="with --junit: exit 3 when an entry was never examined")
     p.set_defaults(func=_report)
@@ -159,7 +155,6 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("--bead", required=True)
     add.add_argument("--reason", required=True)
     add.add_argument("--since", type=_day, help="default: today (UTC); today or yesterday only")
-    add.add_argument("--today", type=_day, help="the date to treat as today (tests)")
     add.add_argument("--review", help="the 2-week review's reference; required for a test only in `unattributed`")
     add.add_argument("nodeids", nargs="+", metavar="NODEID")
     add.set_defaults(func=_add)
@@ -167,7 +162,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.today is not None and args.func is not _report:
+        parser.error("--today is the report's flag; give it without a subcommand")
     if not hasattr(args, "registry"):
         args.registry = reg.REGISTRY_PATH
     try:

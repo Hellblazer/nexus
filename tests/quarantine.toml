@@ -14,9 +14,13 @@
 #   reason   one line: what flakes, and where; a test taken from the `unattributed` class carries the 2-week
 #            review's reference here (`add --review`)
 #   source   sha256 of the candidates file (`red_run_report.py candidates` output) the nodeid came from
+#   path_source  (pytest entries, optional) how the report found the test's file path: "summary" or "traceback"
 #
-# A malformed registry fails every pytest run. With NX_QUARANTINE_STRICT=1 (the nightly) a pytest entry that no
-# collected test has fails the run too, so a quarantine of a deleted or renamed test cannot rot.
+# A malformed registry fails every pytest run. The nightly passes each pytest nodeid to pytest, which exits 4 on a
+# nodeid no test has, so a quarantine of a deleted or renamed test cannot rot there; an ordinary run never aborts
+# on a stale entry.
+# The code checks the format and that deadline = since + 14 days. It does not check `since` or the `--review`
+# reference, which are policy: a hand edit of `since` resets the clock.
 # A passing quarantined test is not released automatically: delete its entry by hand.
 # Past its deadline a test is fixed or deleted, and `scripts/quarantine_report.py` exits 1 until then.
 #

@@ -14,6 +14,7 @@ installed. The pytest plugin that applies the marker lives in ``tests/_quarantin
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -33,6 +34,9 @@ KINDS = ("pytest", "java")
 
 _TABLE = "quarantine"
 _KEYS = ("nodeid", "kind", "since", "deadline", "bead", "reason", "source")
+_OPTIONAL_KEYS = ("path_source",)
+#: how the candidates report found a pytest row's file path (colophon's `path_source`); "none" is refused
+PATH_SOURCES = ("summary", "traceback")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _PYTEST_ID = re.compile(r"[^\s:]+\.py::\S+")
 _JAVA_ID = re.compile(r"[A-Za-z_]\w*::[A-Za-z_]\w*")
@@ -61,6 +65,7 @@ class Entry:
     bead: str
     reason: str
     source: str
+    path_source: str | None = None  # pytest entries added from a candidates row that carries one
 
     def age_days(self, today: date) -> int:
         return (today - self.since).days
@@ -76,7 +81,7 @@ def _entry(raw: Any, index: int) -> Entry:
     where = f"quarantine entry {index}"
     if not isinstance(raw, dict):
         raise RegistryError(f"{where}: not a table")
-    for key in raw.keys() - set(_KEYS):
+    for key in raw.keys() - set(_KEYS) - set(_OPTIONAL_KEYS):
         raise RegistryError(f"{where}: unknown key {key!r}")
     for key in _KEYS:
         if key not in raw:
@@ -103,7 +108,10 @@ def _entry(raw: Any, index: int) -> Entry:
         raise RegistryError(
             f"{where}: deadline {deadline} is not since {since} + {QUARANTINE_DAYS} days ({deadline_for(since)})"
         )
-    return Entry(nodeid, kind, since, deadline, raw["bead"], raw["reason"], raw["source"])
+    path_source = raw.get("path_source")
+    if path_source is not None and path_source not in PATH_SOURCES:
+        raise RegistryError(f"{where}: path_source must be one of {', '.join(PATH_SOURCES)}, not {path_source!r}")
+    return Entry(nodeid, kind, since, deadline, raw["bead"], raw["reason"], raw["source"], path_source)
 
 
 def parse(text: str) -> list[Entry]:
@@ -144,6 +152,7 @@ def render(entry: Entry) -> str:
         f"bead = {_toml_str(entry.bead)}\n"
         f"reason = {_toml_str(entry.reason)}\n"
         f"source = {_toml_str(entry.source)}\n"
+        + (f"path_source = {_toml_str(entry.path_source)}\n" if entry.path_source else "")
     )
 
 
@@ -152,9 +161,17 @@ def surefire_selector(entries: Iterable[Entry]) -> str:
     return ",".join(e.nodeid.replace("::", "#") for e in entries if e.kind == "java")
 
 
+#: surefire's default includes, as -Dtest patterns. A -Dtest of only `!` exclusions replaces the includes and runs
+#: nothing else than the excluded names' complement of an empty set (measured on surefire 3.5.2), so the exclusion
+#: names the defaults first.
+SUREFIRE_DEFAULT_INCLUDES = ("Test*", "*Test", "*Tests", "*TestCase")
+
+
 def surefire_exclusion(entries: Iterable[Entry]) -> str:
-    """The ``-Dtest=`` value that runs everything EXCEPT the java entries: ``!Class#method,!Class#method``."""
-    return ",".join("!" + e.nodeid.replace("::", "#") for e in entries if e.kind == "java")
+    """The ``-Dtest=`` value that runs surefire's default tests EXCEPT the java entries:
+    ``Test*,*Test,*Tests,*TestCase,!Class#method,...``. Empty when there is no java entry (no -Dtest at all)."""
+    excluded = ["!" + e.nodeid.replace("::", "#") for e in entries if e.kind == "java"]
+    return ",".join([*SUREFIRE_DEFAULT_INCLUDES, *excluded]) if excluded else ""
 
 
 # ── candidates file ──────────────────────────────────────────────────────────────────────────────
@@ -176,6 +193,17 @@ class Candidates:
     def unattributed_nodeids(self) -> set[str]:
         return {row["nodeid"] for row in self.unattributed}
 
+    def row_of(self, nodeid: str) -> dict[str, Any]:
+        for row in (*self.candidates, *self.unattributed):
+            if row["nodeid"] == nodeid:
+                return row
+        raise KeyError(nodeid)
+
+    def path_source_of(self, nodeid: str) -> str | None:
+        """colophon's ``path_source`` of a pytest row (None for a java row, or a row that carries none)."""
+        row = self.row_of(nodeid)
+        return row.get("path_source") if _ROW_KINDS[row["kind"]] == "pytest" else None
+
     def kind_of(self, nodeid: str) -> str:
         for row in (*self.candidates, *self.unattributed):
             if row["nodeid"] == nodeid:
@@ -196,10 +224,20 @@ def _rows(doc: dict[str, Any], key: str, path: Path) -> tuple[dict[str, Any], ..
 
 
 def read_candidates(path: Path) -> Candidates:
-    """The only reader of the candidates file shape: a top object with ``header``, ``candidates`` and ``unattributed``."""
-    raw = Path(path).read_bytes()
+    """The only reader of the candidates file shape: a top object with ``header``, ``candidates`` and ``unattributed``,
+    plain JSON or gzipped (``.json.gz``). A row has nodeid, kind (test|java) and, for a test, path_source."""
     try:
-        doc = json.loads(raw)
+        raw = Path(path).read_bytes()
+    except OSError as exc:
+        raise RegistryError(f"cannot read the candidates file {path}: {exc}") from exc
+    text = raw
+    if raw[:2] == b"\x1f\x8b":  # a .json.gz, as committed; `source` stays the hash of these bytes
+        try:
+            text = gzip.decompress(raw)
+        except (OSError, EOFError) as exc:
+            raise RegistryError(f"candidates file {path} is not valid gzip: {exc}") from exc
+    try:
+        doc = json.loads(text)
     except json.JSONDecodeError as exc:
         raise RegistryError(f"candidates file {path} is not JSON: {exc}") from exc
     if not isinstance(doc, dict):
@@ -207,6 +245,20 @@ def read_candidates(path: Path) -> Candidates:
     return Candidates(
         hashlib.sha256(raw).hexdigest(), doc.get("header"), _rows(doc, "candidates", path), _rows(doc, "unattributed", path)
     )
+
+
+def _require_a_collectable_path(cand: Candidates, nodeid: str) -> None:
+    """A pytest row with no file path cannot be collected, so it cannot be quarantined."""
+    row = cand.row_of(nodeid)
+    if _ROW_KINDS[row["kind"]] != "pytest":
+        return
+    if row.get("path_source") == "none":
+        raise RegistryError(
+            f"{nodeid}: the candidates report found no file path for it (path_source none), so no run can collect it; "
+            "it cannot be quarantined until the report resolves its path"
+        )
+    if not _PYTEST_ID.fullmatch(nodeid):
+        raise RegistryError(f"{nodeid}: the candidates row carries no file path (want path/to/test_x.py::test), so no run can collect it")
 
 
 def add_entries(
@@ -238,10 +290,16 @@ def add_entries(
             f"since {start} is more than a day before today ({today}): a backdated entry shortens the {QUARANTINE_DAYS} days"
         )
     cand = read_candidates(candidates)
+    try:
+        existing = registry.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RegistryError(f"cannot read the registry {registry}: {exc}") from exc
     if review is not None and len(wanted) != 1:
         raise RegistryError("--review names one decision: one nodeid per call")
     use_review = False
     for n in wanted:
+        if n in cand.nodeids() or n in cand.unattributed_nodeids():
+            _require_a_collectable_path(cand, n)
         if n in cand.nodeids():
             continue
         if n in cand.unattributed_nodeids():
@@ -254,8 +312,10 @@ def add_entries(
             continue
         raise RegistryError(f"not named by the candidates file {candidates}: {n}")
     note = f"{reason} (2-week review {review})" if use_review else reason
-    new = [Entry(n, cand.kind_of(n), start, deadline_for(start), bead, note, cand.sha256) for n in wanted]
-    existing = registry.read_text(encoding="utf-8")
+    new = [
+        Entry(n, cand.kind_of(n), start, deadline_for(start), bead, note, cand.sha256, cand.path_source_of(n))
+        for n in wanted
+    ]
     if existing and not existing.endswith("\n"):
         existing += "\n"
     joined = existing + ("\n" if existing else "") + "\n".join(render(e) for e in new)

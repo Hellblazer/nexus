@@ -2,9 +2,9 @@
 """RDR-258 Phase 5 (nexus-2jomg.6): the `quarantine` marker is applied from the registry at collection.
 
 Each case runs a real, separate pytest (``pytester.runpytest_subprocess``) with the plugin loaded by ``-p`` and a
-registry the sandbox owns (``NX_QUARANTINE_REGISTRY``). The reach of the two checks is pinned here: a malformed
-registry fails every run, serial or xdist; a registry entry no test has fails only a run that asks for it
-(``NX_QUARANTINE_STRICT=1``, which the nightly sets), never an ordinary scoped or full run.
+registry the sandbox owns (``NX_QUARANTINE_REGISTRY``). The one check is pinned here: a malformed registry fails
+every run, serial or xdist; a registry entry no test has never aborts a run (the nightly passes explicit nodeids and
+pytest itself exits 4 on one it cannot find).
 """
 from __future__ import annotations
 
@@ -31,7 +31,6 @@ def sandbox(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch):
     """A sandbox project with two test files and a registry the case fills in."""
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(_REPO), os.environ.get("PYTHONPATH")])))
     monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
-    monkeypatch.delenv("NX_QUARANTINE_STRICT", raising=False)
     pytester.makeini("[pytest]\nmarkers =\n    quarantine: flake quarantine\n")
     pytester.makepyfile(
         test_alpha="""
@@ -134,50 +133,22 @@ def test_a_java_entry_marks_no_pytest_test(sandbox) -> None:
 # ── an ordinary run never aborts on a stale entry ─────────────────────────────────────────────
 
 
+def test_pytest_itself_exits_4_on_a_nodeid_the_nightly_passes_that_no_test_has(sandbox) -> None:
+    """The nightly's check that an entry still names a test is pytest's own: an explicit missing nodeid is exit 4."""
+    _, registry, run = sandbox
+    registry.write_text(_entry("test_alpha.py::test_renamed_away"))
+    result = run("-m", "quarantine", "test_alpha.py::test_renamed_away")
+    assert result.ret == 4 and "not found" in _said(result) and not _ran(result)
+
+
 @pytest.mark.parametrize("args", [[], ["test_beta.py"], ["test_alpha.py::test_one"], ["-k", "test_three"]])
 def test_an_ordinary_run_does_not_abort_on_an_entry_no_test_has(sandbox, args: list[str]) -> None:
-    pytester, registry, run = sandbox
+    _, registry, run = sandbox
     registry.write_text(_entry("test_alpha.py::test_renamed_away") + "\n" + _entry("test_gone.py::test_x"))
     result = run(*args)
     assert _ran(result), "the run started its tests"
     assert "did not collect" not in _said(result)
     assert result.ret in (0, 1)  # 1 only where test_two ran and fails
-
-
-# ── strict: the nightly's check that every pytest entry still names a collected test ────────────
-
-
-def test_strict_fails_the_run_naming_the_missing_entry_and_runs_nothing(sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, registry, run = sandbox
-    monkeypatch.setenv("NX_QUARANTINE_STRICT", "1")
-    registry.write_text(_entry("test_alpha.py::test_renamed_away"))
-    result = run()
-    assert result.ret == 4
-    assert "test_alpha.py::test_renamed_away" in _said(result) and "did not collect" in _said(result)
-    assert _ran(result) == set()
-
-
-def test_strict_fails_for_a_deleted_file_too(sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, registry, run = sandbox
-    monkeypatch.setenv("NX_QUARANTINE_STRICT", "1")
-    registry.write_text(_entry("test_gone.py::test_x"))
-    result = run()
-    assert result.ret == 4 and "test_gone.py::test_x" in _said(result) and not _ran(result)
-
-
-def test_strict_passes_when_every_pytest_entry_collects_even_if_a_filter_deselects_it(sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, registry, run = sandbox
-    monkeypatch.setenv("NX_QUARANTINE_STRICT", "1")
-    registry.write_text(_entry("test_alpha.py::test_one"))
-    result = run("-k", "test_three")
-    assert result.ret == 0 and _ran(result) == {"test_beta.py::test_three[1]", "test_beta.py::test_three[2]"}
-
-
-def test_strict_does_not_look_for_java_entries_among_pytest_tests(sandbox, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, registry, run = sandbox
-    monkeypatch.setenv("NX_QUARANTINE_STRICT", "1")
-    registry.write_text(_entry("Foo::bar", kind="java"))
-    assert run("test_beta.py").ret == 0
 
 
 # ── a malformed registry fails every run ───────────────────────────────────────────────────────

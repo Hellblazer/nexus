@@ -113,6 +113,21 @@ class TestParse:
             reg.parse("[[quarantine\n")
 
 
+class TestPathSource:
+    def test_an_entry_may_carry_a_known_path_source(self) -> None:
+        (e,) = reg.parse(_block() + 'path_source = "traceback"\n')
+        assert e.path_source == "traceback"
+
+    @pytest.mark.parametrize("value", ["none", "java", ""])
+    def test_an_unknown_path_source_is_refused(self, value: str) -> None:
+        with pytest.raises(reg.RegistryError, match="path_source"):
+            reg.parse(_block() + f'path_source = "{value}"\n')
+
+    def test_render_then_parse_round_trips_with_a_path_source(self) -> None:
+        e = reg.Entry(NODE, "pytest", date(2026, 11, 27), date(2026, 12, 11), "b", "r", SHA, "summary")
+        assert reg.parse(reg.render(e)) == [e]
+
+
 class TestAge:
     def _entry(self) -> reg.Entry:
         return reg.parse(_block())[0]
@@ -145,22 +160,30 @@ class TestRender:
         entries = reg.parse(_block() + "\n" + _block(nodeid=JAVA, kind="java"))
         assert reg.surefire_selector(entries) == "ChashVectorConcurrencyTest#concurrentChashAndVectorUpserts_noServerErrors"
         assert reg.surefire_selector([]) == ""
-        assert reg.surefire_exclusion(entries) == "!ChashVectorConcurrencyTest#concurrentChashAndVectorUpserts_noServerErrors"
+        # surefire runs ONLY the excluded names' complement when -Dtest is exclusions alone (measured on 3.5.2), so the
+        # exclusion names surefire's default includes first
+        assert reg.surefire_exclusion(entries) == (
+            "Test*,*Test,*Tests,*TestCase,!ChashVectorConcurrencyTest#concurrentChashAndVectorUpserts_noServerErrors"
+        )
+        assert reg.surefire_exclusion([]) == ""
 
 
 UNATTRIBUTED = "tests/test_gamma.py::test_three"
 JAVA_U = "SomeIntegrationTest::someMethod"
 
 
-def _row(nodeid: str, kind: str = "test") -> dict:
-    return {"nodeid": nodeid, "kind": kind, "red_runs": 3, "first_red": "2026-10-01", "last_red": "2026-11-20",
-            "venues": ["self-hosted"], "rule": "flake:timing-message", "run_ids": 3}
+def _row(nodeid: str, kind: str = "test", path_source: str | None = None) -> dict:
+    row = {"nodeid": nodeid, "kind": kind, "red_runs": 3, "first_red": "2026-10-01", "last_red": "2026-11-20",
+           "venues": ["self-hosted"], "rule": "flake:timing-message", "run_ids": [1, 2, 3]}
+    row["path_source"] = path_source or ("java" if kind == "java" else "summary")  # colophon's: summary|traceback|none, java for java
+    return row
 
 
 def _candidates(tmp_path: Path, candidates: list[tuple[str, str]] | None = None, unattributed: list[tuple[str, str]] | None = None) -> Path:
     doc = {
         "header": {"window": ["2026-09-23", "2026-11-23"], "archive_sha256": "1" * 64, "extraction_sha256": "2" * 64,
-                   "script_commit": "3" * 40, "candidate_tests": 2, "unattributed_tests": 1},
+                   "script_sha256": "3" * 64, "path_sources": {"summary": 1, "java": 1}, "candidate_tests": 2,
+                   "unattributed_tests": 2, "red_runs": 9, "snapshot_final": True, "extraction": "x.jsonl.gz"},
         "candidates": [_row(n, k) for n, k in ([(NODE, "test"), (JAVA, "java")] if candidates is None else candidates)],
         "unattributed": [_row(n, k) for n, k in ([(UNATTRIBUTED, "test"), (JAVA_U, "java")] if unattributed is None else unattributed)],
     }
@@ -184,6 +207,24 @@ class TestCandidates:
         assert c.header["window"] == ["2026-09-23", "2026-11-23"]
         assert c.nodeids() == {NODE, JAVA}  # `candidates` only
         assert c.unattributed_nodeids() == {UNATTRIBUTED, JAVA_U}
+
+    def test_reads_a_gzipped_file_and_hashes_the_bytes_as_committed(self, tmp_path: Path) -> None:
+        import gzip
+
+        plain = _candidates(tmp_path)
+        gz = tmp_path / "candidates.json.gz"
+        gz.write_bytes(gzip.compress(plain.read_bytes(), mtime=0))
+        c = reg.read_candidates(gz)
+        assert c.nodeids() == {NODE, JAVA}
+        assert c.sha256 == hashlib.sha256(gz.read_bytes()).hexdigest() != hashlib.sha256(plain.read_bytes()).hexdigest()
+
+    def test_a_truncated_gzip_is_a_registry_error(self, tmp_path: Path) -> None:
+        import gzip
+
+        gz = tmp_path / "c.json.gz"
+        gz.write_bytes(gzip.compress(_candidates(tmp_path).read_bytes())[:-20])
+        with pytest.raises(reg.RegistryError, match="gzip"):
+            reg.read_candidates(gz)
 
     def test_a_row_kind_maps_to_a_registry_kind(self, tmp_path: Path) -> None:
         c = reg.read_candidates(_candidates(tmp_path))
@@ -276,13 +317,53 @@ class TestAdd:
         with pytest.raises(reg.RegistryError, match="no nodeid"):
             _add(self._registry(tmp_path), _candidates(tmp_path), [])
 
-    def test_a_pytest_candidate_without_a_file_is_refused_by_the_registry_rules(self, tmp_path: Path) -> None:
-        """colophon's row for a test with only a function name: it cannot be collected, so it is not quarantined."""
+    def test_a_pytest_candidate_the_report_found_no_path_for_is_refused_and_says_why(self, tmp_path: Path) -> None:
+        bare = "tests/test_dry.py::test_a_dry_run"
+        cand = tmp_path / "c.json"
+        doc = json.loads(_candidates(tmp_path).read_text())
+        doc["candidates"] = [_row(bare, "test", path_source="none")]
+        cand.write_text(json.dumps(doc))
+        registry = self._registry(tmp_path)
+        with pytest.raises(reg.RegistryError, match=r"path_source none.*no run can collect it"):
+            _add(registry, cand, [bare])
+        assert registry.read_text() == ""
+
+    def test_a_pytest_candidate_whose_row_carries_no_file_path_is_refused_and_says_so(self, tmp_path: Path) -> None:
         bare = "test_a_dry_run_never_touches_the_row"
         registry = self._registry(tmp_path)
-        with pytest.raises(reg.RegistryError, match="nodeid"):
+        with pytest.raises(reg.RegistryError, match="candidates row carries no file path"):
             _add(registry, _candidates(tmp_path, candidates=[(bare, "test")]), [bare])
         assert registry.read_text() == ""
+
+    def test_a_pathless_unattributed_row_is_refused_for_the_path_before_the_review_matters(self, tmp_path: Path) -> None:
+        bare = "test_bare"
+        registry = self._registry(tmp_path)
+        with pytest.raises(reg.RegistryError, match="no file path"):
+            _add(registry, _candidates(tmp_path, unattributed=[(bare, "test")]), [bare], review="r")
+
+    @pytest.mark.parametrize("source", ["summary", "traceback"])
+    def test_path_source_of_a_pytest_row_is_stored_in_the_entry(self, tmp_path: Path, source: str) -> None:
+        cand = tmp_path / "c.json"
+        doc = json.loads(_candidates(tmp_path).read_text())
+        doc["candidates"] = [_row(NODE, "test", path_source=source)]
+        cand.write_text(json.dumps(doc))
+        registry = self._registry(tmp_path)
+        _add(registry, cand, [NODE])
+        (entry,) = reg.load(registry)
+        assert entry.path_source == source and f'path_source = "{source}"' in registry.read_text()
+
+    def test_a_java_row_stores_no_path_source(self, tmp_path: Path) -> None:
+        registry = self._registry(tmp_path)
+        _add(registry, _candidates(tmp_path), [JAVA])
+        (entry,) = reg.load(registry)
+        assert entry.path_source is None and "path_source" not in registry.read_text()
+
+    def test_a_missing_candidates_or_registry_file_is_a_registry_error(self, tmp_path: Path) -> None:
+        registry = self._registry(tmp_path)
+        with pytest.raises(reg.RegistryError, match="candidates file"):
+            _add(registry, tmp_path / "absent.json", [NODE])
+        with pytest.raises(reg.RegistryError, match="registry"):
+            _add(tmp_path / "absent.toml", _candidates(tmp_path), [NODE])
 
     @pytest.mark.parametrize("since", [date(2026, 11, 28), date(2027, 1, 1)])
     def test_refuses_a_since_in_the_future(self, tmp_path: Path, since: date) -> None:

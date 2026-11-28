@@ -8,6 +8,7 @@ refusing anything else. Every case runs the script as a subprocess, as the workf
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import subprocess
@@ -15,6 +16,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from tests import _quarantine_registry as reg
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "quarantine_report.py"
 SHA = "d" * 64
@@ -85,16 +88,12 @@ class TestReport:
         assert "OVERDUE" not in next(ln for ln in r.stdout.splitlines() if B in ln)
         assert "1 overdue" in r.stdout
 
-    def test_json_carries_each_entry_and_the_totals(self, registry: Path) -> None:
-        r = _run("--registry", str(registry), "--today", "2026-12-12", "--json")
-        assert r.returncode == 1
-        doc = json.loads(r.stdout)
-        assert (doc["today"], doc["count"], doc["overdue"]) == ("2026-12-12", 2, 1)
-        a = next(e for e in doc["entries"] if e["nodeid"] == A)
-        assert a == {
-            "nodeid": A, "kind": "pytest", "since": "2026-11-27", "deadline": "2026-12-11", "bead": "nexus-x1",
-            "reason": "flaky on the pool", "source": SHA, "age_days": 15, "days_left": -1, "overdue": True,
-        }
+    def test_a_flag_for_the_report_placed_before_another_subcommand_is_an_error_not_ignored(self, registry: Path) -> None:
+        r = _run("--today", "2026-12-12", "select", "--kind", "pytest", "--registry", str(registry))
+        assert r.returncode == 2 and "--today" in r.stderr and r.stdout == ""
+
+    def test_there_is_no_json_flag(self, registry: Path) -> None:
+        assert _run("--registry", str(registry), "--json").returncode == 2
 
     def test_a_broken_registry_exits_two_naming_the_problem(self, tmp_path: Path) -> None:
         path = tmp_path / "q.toml"
@@ -132,9 +131,8 @@ class TestJunit:
         d.mkdir()
         _junit(d / "pytest-1.xml", [(*A_CASE, "passed")])
         _junit(d / "pytest-2.xml", [(*A_CASE, "failed")])
-        r = _run("--registry", str(registry), "--today", "2026-12-03", "--junit", str(d), "--json")
-        a = next(e for e in json.loads(r.stdout)["entries"] if e["nodeid"] == A)
-        assert (a["passed"], a["failed"], a["skipped"], a["runs"], a["result"]) == (1, 1, 0, 2, "passed 1 of 2, failed 1 of 2")
+        r = _run("--registry", str(registry), "--today", "2026-12-03", "--junit", str(d))
+        assert "passed 1 of 2, failed 1 of 2" in next(ln for ln in r.stdout.splitlines() if A in ln)
 
     def test_a_java_entry_is_found_by_class_and_method(self, tmp_path: Path) -> None:
         path = tmp_path / "q.toml"
@@ -196,7 +194,7 @@ class TestSelect:
 
     def test_prints_the_surefire_exclusion_for_java(self, mixed: Path) -> None:
         r = _run("select", "--kind", "java", "--format", "surefire-exclude", "--registry", str(mixed))
-        assert r.stdout.strip() == "!ChashVectorConcurrencyTest#concurrentChashAndVectorUpserts_noServerErrors"
+        assert r.stdout.strip() == "Test*,*Test,*Tests,*TestCase,!ChashVectorConcurrencyTest#concurrentChashAndVectorUpserts_noServerErrors"
 
     def test_prints_nothing_for_a_kind_with_no_entry(self, registry: Path) -> None:
         r = _run("select", "--kind", "java", "--registry", str(registry))
@@ -237,9 +235,11 @@ class TestClassify:
         assert _run("classify", "--rc", "1", "--junit", str(a), "--junit", str(b)).returncode == 0
 
 
-def _row(nodeid: str, kind: str) -> dict:
+def _row(nodeid: str, kind: str, path_source: str | None = None) -> dict:
+    # colophon's real row: path_source is summary|traceback|none for a test and "java" for a java row
     return {"nodeid": nodeid, "kind": kind, "red_runs": 4, "first_red": "2026-10-02", "last_red": "2026-11-25",
-            "venues": ["self-hosted"], "rule": "flake:timing-message", "run_ids": 4}
+            "venues": ["self-hosted"], "rule": "flake:timing-message", "run_ids": [1, 2, 3, 4],
+            "path_source": path_source or ("java" if kind == "java" else "summary")}
 
 
 @pytest.fixture
@@ -247,99 +247,155 @@ def candidates(tmp_path: Path) -> Path:
     path = tmp_path / "candidates.json"
     path.write_text(json.dumps({
         "header": {"window": ["2026-09-23", "2026-11-23"], "archive_sha256": "1" * 64, "extraction_sha256": "2" * 64,
-                   "script_commit": "3" * 40, "candidate_tests": 2, "unattributed_tests": 1},
+                   "script_sha256": "3" * 64, "path_sources": {"summary": 1, "java": 1}, "candidate_tests": 2,
+                   "unattributed_tests": 1, "red_runs": 9, "snapshot_final": True, "extraction": "x.jsonl.gz"},
         "candidates": [_row(A, "test"), _row(J, "java")],
         "unattributed": [_row(B, "test")],
     }))
     return path
 
 
-_ADD = ("--today", "2026-11-27")
+def _all(path: Path) -> dict[str, reg.Entry]:
+    return {e.nodeid: e for e in reg.load(path)}
+
+
+def _add(*args: str) -> subprocess.CompletedProcess[str]:
+    return _run("add", *args)
 
 
 class TestAdd:
     def test_writes_entries_with_kind_a_checked_deadline_and_the_candidates_hash(self, candidates: Path, tmp_path: Path) -> None:
         path = tmp_path / "q.toml"
         path.write_text("# header\n")
-        r = _run("add", *_ADD, "--registry", str(path), "--candidates", str(candidates), "--bead", "nexus-x9", "--reason", "times out", A, J)
+        r = _add("--registry", str(path), "--candidates", str(candidates), "--bead", "nexus-x9", "--reason", "times out", A, J)
         assert r.returncode == 0, r.stderr
-        doc = json.loads(_run("--registry", str(path), "--today", "2026-11-28", "--json").stdout)
-        by = {e["nodeid"]: e for e in doc["entries"]}
-        assert (by[A]["kind"], by[J]["kind"]) == ("pytest", "java")
-        assert (by[A]["deadline"], by[A]["bead"], by[A]["days_left"]) == ("2026-12-11", "nexus-x9", 13)
-        assert by[A]["source"] == hashlib.sha256(candidates.read_bytes()).hexdigest()
+        by = _all(path)
+        assert (by[A].kind, by[J].kind) == ("pytest", "java")
+        assert (by[A].since, by[A].deadline, by[A].bead) == (reg.today_utc(), reg.deadline_for(reg.today_utc()), "nexus-x9")
+        assert by[A].source == hashlib.sha256(candidates.read_bytes()).hexdigest()
+        assert (by[A].path_source, by[J].path_source) == ("summary", None)
         assert path.read_text().startswith("# header\n")
+
+    def test_reads_a_gzipped_candidates_file_and_hashes_the_bytes_as_committed(self, candidates: Path, tmp_path: Path) -> None:
+        gz = tmp_path / "candidates.json.gz"
+        gz.write_bytes(gzip.compress(candidates.read_bytes(), mtime=0))
+        path = tmp_path / "q.toml"
+        path.write_text("")
+        r = _add("--registry", str(path), "--candidates", str(gz), "--bead", "b", "--reason", "r", A)
+        assert r.returncode == 0, r.stderr
+        assert _all(path)[A].source == hashlib.sha256(gz.read_bytes()).hexdigest()
 
     @pytest.mark.parametrize("order", ["before", "after"])
     def test_registry_given_before_or_after_the_subcommand_is_the_one_written(self, candidates: Path, tmp_path: Path, order: str) -> None:
+        """A regression would write into the repo's own registry: its bytes are put back whatever happens."""
+        repo_registry = reg.REGISTRY_PATH
+        original = repo_registry.read_bytes()
         path = tmp_path / "elsewhere.toml"
         path.write_text("")
-        common = [*_ADD, "--candidates", str(candidates), "--bead", "b", "--reason", "r", A]
-        r = _run("--registry", str(path), "add", *common) if order == "before" else _run("add", "--registry", str(path), *common)
+        common = ["--candidates", str(candidates), "--bead", "b", "--reason", "r", A]
+        try:
+            r = _run("--registry", str(path), "add", *common) if order == "before" else _run("add", "--registry", str(path), *common)
+            assert repo_registry.read_bytes() == original, "the repo's own registry was written"
+        finally:
+            repo_registry.write_bytes(original)
         assert r.returncode == 0, r.stderr
         assert path.read_text().count("[[quarantine]]") == 1
 
     def test_refuses_a_nodeid_the_candidates_file_does_not_name(self, candidates: Path, tmp_path: Path) -> None:
         path = tmp_path / "q.toml"
         path.write_text("")
-        r = _run("add", *_ADD, "--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", "tests/test_zzz.py::test_nope")
+        r = _add("--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", "tests/test_zzz.py::test_nope")
         assert r.returncode == 2 and "not named by the candidates file" in r.stderr
         assert path.read_text() == ""
 
     def test_refuses_an_unattributed_nodeid_without_a_review(self, candidates: Path, tmp_path: Path) -> None:
         path = tmp_path / "q.toml"
         path.write_text("")
-        r = _run("add", *_ADD, "--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", B)
+        r = _add("--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", B)
         assert r.returncode == 2 and "unattributed" in r.stderr and "--review" in r.stderr
         assert path.read_text() == ""
 
     def test_accepts_an_unattributed_nodeid_with_a_review_and_keeps_the_ref(self, candidates: Path, tmp_path: Path) -> None:
         path = tmp_path / "q.toml"
         path.write_text("")
-        r = _run("add", *_ADD, "--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "confirmed flaky",
+        r = _add("--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "confirmed flaky",
                  "--review", "2026-12-11 review item 4", B)
         assert r.returncode == 0, r.stderr
-        (entry,) = json.loads(_run("--registry", str(path), "--today", "2026-11-28", "--json").stdout)["entries"]
-        assert entry["nodeid"] == B and "2026-12-11 review item 4" in entry["reason"]
+        assert "2026-12-11 review item 4" in _all(path)[B].reason
 
     def test_a_review_with_two_nodeids_writes_nothing(self, candidates: Path, tmp_path: Path) -> None:
         path = tmp_path / "q.toml"
         path.write_text("")
-        r = _run("add", *_ADD, "--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", "--review", "x", B, A)
+        r = _add("--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", "--review", "x", B, A)
         assert r.returncode == 2
         assert path.read_text() == ""
 
     def test_has_no_flag_that_reads_the_unattributed_class_wholesale(self, candidates: Path, tmp_path: Path) -> None:
         path = tmp_path / "q.toml"
         path.write_text("")
-        r = _run("add", *_ADD, "--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", "--include-unattributed", B)
+        r = _add("--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", "--include-unattributed", B)
         assert r.returncode == 2
         assert path.read_text() == ""
 
     def test_one_refused_nodeid_writes_nothing_for_the_others(self, candidates: Path, tmp_path: Path) -> None:
         path = tmp_path / "q.toml"
         path.write_text("")
-        r = _run("add", *_ADD, "--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", A, B)
+        r = _add("--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", A, B)
         assert r.returncode == 2
+        assert path.read_text() == ""
+
+    def test_a_row_the_report_found_no_path_for_is_refused_with_the_reason(self, tmp_path: Path) -> None:
+        cand = tmp_path / "c.json"
+        cand.write_text(json.dumps({"header": {}, "candidates": [_row("test_bare", "test", path_source="none")], "unattributed": []}))
+        path = tmp_path / "q.toml"
+        path.write_text("")
+        r = _add("--registry", str(path), "--candidates", str(cand), "--bead", "b", "--reason", "r", "test_bare")
+        assert r.returncode == 2 and "path_source none" in r.stderr and "Traceback" not in r.stderr
         assert path.read_text() == ""
 
     def test_requires_a_bead_and_a_reason(self, candidates: Path, tmp_path: Path) -> None:
         path = tmp_path / "q.toml"
         path.write_text("")
-        assert _run("add", *_ADD, "--registry", str(path), "--candidates", str(candidates), A).returncode == 2
+        assert _add("--registry", str(path), "--candidates", str(candidates), A).returncode == 2
         assert path.read_text() == ""
 
-    @pytest.mark.parametrize(("since", "why"), [("2026-11-28", "future"), ("2026-11-20", "backdated")])
-    def test_refuses_a_since_in_the_future_or_more_than_a_day_back(self, candidates: Path, tmp_path: Path, since: str, why: str) -> None:
+    @pytest.mark.parametrize(("offset", "why"), [(1, "future"), (-6, "backdated")])
+    def test_refuses_a_since_in_the_future_or_more_than_a_day_back(self, candidates: Path, tmp_path: Path, offset: int, why: str) -> None:
+        from datetime import timedelta
+
         path = tmp_path / "q.toml"
         path.write_text("")
-        r = _run("add", *_ADD, "--since", since, "--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", A)
+        since = (reg.today_utc() + timedelta(days=offset)).isoformat()
+        r = _add("--since", since, "--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", A)
         assert r.returncode == 2 and why in r.stderr
         assert path.read_text() == ""
+
+    def test_yesterday_is_allowed(self, candidates: Path, tmp_path: Path) -> None:
+        from datetime import timedelta
+
+        path = tmp_path / "q.toml"
+        path.write_text("")
+        since = reg.today_utc() - timedelta(days=1)
+        assert _add("--since", since.isoformat(), "--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", A).returncode == 0
+        assert _all(path)[A].since == since
+
+    def test_a_missing_candidates_file_exits_two_with_a_message_and_no_traceback(self, tmp_path: Path) -> None:
+        path = tmp_path / "q.toml"
+        path.write_text("")
+        r = _add("--registry", str(path), "--candidates", str(tmp_path / "absent.json"), "--bead", "b", "--reason", "r", A)
+        assert r.returncode == 2 and "candidates file" in r.stderr and "Traceback" not in r.stderr
+
+    def test_a_missing_registry_file_exits_two_with_a_message_and_no_traceback(self, candidates: Path, tmp_path: Path) -> None:
+        r = _add("--registry", str(tmp_path / "absent.toml"), "--candidates", str(candidates), "--bead", "b", "--reason", "r", A)
+        assert r.returncode == 2 and "registry" in r.stderr and "Traceback" not in r.stderr
 
     def test_since_defaults_to_today_in_utc_not_the_local_date(self) -> None:
         from datetime import datetime, timezone
 
-        from tests import _quarantine_registry as reg
-
         assert reg.today_utc() == datetime.now(timezone.utc).date()
+
+    def test_there_is_no_today_flag_on_add(self, candidates: Path, tmp_path: Path) -> None:
+        path = tmp_path / "q.toml"
+        path.write_text("")
+        r = _add("--today", "2026-11-27", "--registry", str(path), "--candidates", str(candidates), "--bead", "b", "--reason", "r", A)
+        assert r.returncode == 2 and path.read_text() == ""
