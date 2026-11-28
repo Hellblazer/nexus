@@ -301,7 +301,7 @@ def test_the_relay_of_a_report_is_capped_with_a_more_line(tmp_path: Path, monkey
     many = ["LEDGER-FINDING plugin-ledger: finding %d" % i for i in range(gate.MAX_REPORT_FINDINGS + 5)]
     summary = "LEDGER-REPORT plugin-ledger: %d finding(s), 99 item(s) examined (mode=report)" % len(many)
     monkeypatch.setattr(gate, "run_check", lambda spec, tree, py, pc, reason="": gate.Outcome(spec.name, True, "", 0.1,
-                        [*many, summary] if spec.ledger else []))
+                        [*many, summary] if spec.ledger else [], reported=bool(spec.ledger)))
     code, out, err = _run_gate(repo, base, tip, tmp_path, ledger_report="r")
     shown = [ln for ln in err.splitlines() if "LEDGER-FINDING plugin-ledger" in ln]
     assert code == 0 and len(shown) == gate.MAX_REPORT_FINDINGS

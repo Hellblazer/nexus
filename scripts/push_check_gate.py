@@ -173,6 +173,7 @@ class Spec:
     report_header: str = ""         # a regex (multiline): an exit 1 whose output has a line matching it is a finding the push
                                     # reports (PUSH_CHECK_REPORT); any other exit 1, a crash's traceback among them, refuses
     report_note: str = ""           # the sentence a report carries after its heading: what still blocks the finding, and where
+    report_marker: str = ""         # a regex a ledger check's pass may match INSTEAD of marker, in report mode only
     ledger: str = ""                # a class-A ledger check: it runs in block or report mode (scripts/ledger_mode.py)
     default_mode: str = "block"     # a ledger check's mode without --ledger-report ("report" is RDR-258 Phase 4 step 2)
 
@@ -186,8 +187,9 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
     Spec("changelog", "PUSH_REFUSED_CHANGELOG", "run", ("scripts/changelog_fold.py", LEDGER_MODE_SCRIPT),
          "uv run python scripts/changelog_fold.py check",
          "fix the fragment under changelog/unreleased/ the report names (one fragment per bead, never CHANGELOG.md)",
-         # In report mode a finding exits 0 with the summary line instead of "ok" (a run that examined nothing still exits 10).
-         marker=r"changelog_fold check: ok|LEDGER-REPORT changelog:", ledger="changelog"),
+         # In report mode a finding exits 0 with the summary line instead of "ok" (a run that examined nothing still exits 10);
+         # in block mode only "ok" is a pass, so a LEDGER-REPORT line cannot stand in for it.
+         marker=r"changelog_fold check: ok", report_marker=r"LEDGER-REPORT changelog:", ledger="changelog"),
     Spec("context-budget", "PUSH_REFUSED_CONTEXT_BUDGET", "run", (CONTEXT_SCRIPT,),
          "uv run python scripts/context_budgets.py check",
          "cut the file or move detail into a file loaded on demand, or record a raise in tests/fixtures/context-budgets.txt with "
@@ -539,8 +541,27 @@ def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str], 
         return Outcome(spec.name, True, _excerpt(out), seconds, reported=True)
     if returncode != 0:
         return Outcome(spec.name, False, _excerpt(out), seconds)
-    if spec.marker and not re.search(spec.marker, out):
-        return Outcome(spec.name, False, f"exit 0 but its output has no /{spec.marker}/: a pass that examined nothing is "
+    lines = _LEDGER_LINE.findall(out) if spec.ledger else []
+    findings = [ln for ln in lines if ln.startswith(ledger_mode.FINDING_PREFIX)]
+    if spec.ledger:
+        # The gate pinned the mode, so it holds the child's output to it: a child that exits 0 and prints what its mode forbids
+        # (a finding in block mode, a vacuous run in either, report-mode findings with no tree-level summary) is not a pass.
+        mode = ledger_mode_for(spec, ledger_reason)[0]
+        problem = None
+        if any(ln.startswith(ledger_mode.VACUOUS_PREFIX) for ln in lines):
+            problem = f"it printed a {ledger_mode.VACUOUS_PREFIX} line: a run that examined nothing is vacuous, not green"
+        elif mode == ledger_mode.BLOCK and findings:
+            problem = f"it ran in block mode and printed {len(findings)} {ledger_mode.FINDING_PREFIX} line(s): a finding is a refusal there"
+        elif mode == ledger_mode.REPORT and findings and not any(ln.startswith(ledger_mode.SUMMARY_PREFIX) for ln in lines):
+            problem = (f"it printed {len(findings)} {ledger_mode.FINDING_PREFIX} line(s) and no {ledger_mode.SUMMARY_PREFIX} summary: "
+                       "findings the tree's own check did not settle are not relayed")
+        if problem:
+            return Outcome(spec.name, False, f"exit 0 but {problem}. Last lines:\n{_excerpt(out)}", seconds)
+    marker = spec.marker
+    if marker and spec.ledger and spec.report_marker and ledger_mode_for(spec, ledger_reason)[0] == ledger_mode.REPORT:
+        marker = f"(?:{spec.marker})|(?:{spec.report_marker})"
+    if marker and not re.search(marker, out):
+        return Outcome(spec.name, False, f"exit 0 but its output has no /{marker}/: a pass that examined nothing is "
                        f"vacuous, not green. Last lines:\n{_excerpt(out)}", seconds)
     if spec.min_passed:
         counts = summary_counts(next((ln for ln in reversed(out.splitlines()) if _SUMMARY.search(ln) and " in " in ln), ""))
@@ -550,8 +571,7 @@ def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str], 
                            f"{_excerpt(out)}", seconds)
         if (problem := skip_problem(spec.name, out)) is not None:
             return Outcome(spec.name, False, f"exit 0 but {problem}. Last lines:\n{_excerpt(out)}", seconds)
-    lines = _LEDGER_LINE.findall(out) if spec.ledger else []
-    return Outcome(spec.name, True, "", seconds, lines, reported=any(ln.startswith("LEDGER-FINDING") for ln in lines))
+    return Outcome(spec.name, True, "", seconds, lines, reported=bool(findings))
 
 
 # ── proofs ──────────────────────────────────────────────────────────────────
@@ -752,21 +772,24 @@ def _reproduce_note(tip: str) -> str:
 def _print_report(name: str, spec: Spec, outcome: Outcome, tip: str, selected_by: str, out, err) -> None:
     """The one place a passing check's findings are printed (``PUSH_CHECK_REPORT``), whichever way the check reported them: the
     wire-ledger's own exit 1 (``Outcome.detail`` holds its output; Phase 2) or a class-A ledger's report-mode lines
-    (``Outcome.lines``; Phase 4, at most MAX_REPORT_FINDINGS findings and then a ``+N more`` line). A check that reported nothing
-    prints nothing."""
-    if outcome.detail:
+    (``Outcome.lines``; Phase 4, at most MAX_REPORT_FINDINGS findings and then a ``+N more`` line, then the tree's summary line).
+    A check that reported nothing prints nothing, a report-mode ledger with zero findings included."""
+    if not outcome.reported:
+        return
+    if spec.report_header:
         print(f"{REPORT_TOKEN} {name} is red at the tip's tree ({tip[:12]}); selected by {selected_by}. {spec.report_note}", file=out)
         print(outcome.detail, file=out)
         print(f"  reproduce: {spec.reproduce}   ({_reproduce_note(tip)})", file=out)
         if spec.fix:
             print(f"  fix: {spec.fix}", file=out)
-    findings = [ln for ln in outcome.lines if ln.startswith("LEDGER-FINDING")]
+        return
+    findings = [ln for ln in outcome.lines if ln.startswith(ledger_mode.FINDING_PREFIX)]
     for line in findings[:MAX_REPORT_FINDINGS]:
         print(f"{REPORT_TOKEN} {name}: {line}", file=err)
     if len(findings) > MAX_REPORT_FINDINGS:
         print(f"{REPORT_TOKEN} {name}: +{len(findings) - MAX_REPORT_FINDINGS} more finding(s); reproduce: {spec.reproduce}", file=err)
     for line in outcome.lines:
-        if not line.startswith("LEDGER-FINDING"):
+        if line.startswith(ledger_mode.SUMMARY_PREFIX):
             print(f"{REPORT_TOKEN} {name}: {line}", file=err)
 
 
