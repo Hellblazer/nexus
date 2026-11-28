@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import re
 
-from tests.test_windows_release_legs_workflow import LABEL, REHEARSAL, SWITCH, WINDOWS_PARALLEL_SET, _doc
+from tests.test_windows_release_legs_workflow import LABEL, REHEARSAL, SWITCH, WINDOWS_XDIST_SET, _doc
 
 
-def test_the_git_guard_tests_run_natively_in_a_parallel_job_of_their_own_with_a_floor() -> None:
-    """The three git-guard files are spawn-bound: 1753 s serially on native Windows, 600 s at -n 8 (process
+def test_the_git_guard_tests_run_natively_under_xdist_in_a_job_of_their_own_with_a_floor() -> None:
+    """The three git-guard files are spawn-bound: 1753 s serially on native Windows, 673 s at -n 8 (process
     starts scale poorly there). A job of their own keeps conformance's serial set inside its 30-minute limit."""
     doc = _doc(REHEARSAL)
     job = doc["jobs"]["git-guard-windows"]
@@ -25,8 +25,9 @@ def test_the_git_guard_tests_run_natively_in_a_parallel_job_of_their_own_with_a_
     assert "github.actor == 'Hellblazer'" in job["if"] and SWITCH in job["if"]
     assert "needs" not in job and "needs" not in conformance, "a red in either is the run's red; nothing gates it"
     assert job.get("env") == {"NX_TEST_T2_SUBSTRATE": "none"} == conformance.get("env")
-    # About twice the measured runtime (600 s of pytest plus about 1.5 min of checkout and setup).
-    assert 20 <= job["timeout-minutes"] <= 30, job["timeout-minutes"]
+    # At least twice the measured runtime (673 s of pytest plus about 1.5 min of checkout and setup), and room
+    # for the up-to-30-minute wait a CI leg makes for a hand run holding lab-run-win's slot.
+    assert 25 <= job["timeout-minutes"] <= 40, job["timeout-minutes"]
     steps = job["steps"]
     names = [s.get("name", s.get("uses", "")) for s in steps]
     assert names[0].startswith("actions/checkout@")
@@ -35,9 +36,10 @@ def test_the_git_guard_tests_run_natively_in_a_parallel_job_of_their_own_with_a_
     run_steps = [s["run"] for s in steps if "pytest" in s.get("run", "")]
     assert len(run_steps) == 1, "non-vacuity: exactly one pytest step in the job"
     run = run_steps[0]
-    for target in WINDOWS_PARALLEL_SET:
+    for target in WINDOWS_XDIST_SET:
         assert target in run, target
-    assert re.search(r"\s-n [1-9]\d*\s", run), "the git-guard tests run under xdist"
+    workers = re.search(r"\s-n (\d+)\s", run)
+    assert workers and int(workers.group(1)) >= 2, "the git-guard tests run under xdist, with at least two workers"
     assert "--junitxml=windows-git-guard-junit.xml" in run and 'addopts=""' not in run
     [floor] = [s for s in steps if "check_junit_floor.py" in s.get("run", "")]
     assert floor.get("if") == "${{ !cancelled() }}", "a red pytest step still reports its floor"

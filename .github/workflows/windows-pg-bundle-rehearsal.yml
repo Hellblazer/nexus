@@ -41,7 +41,7 @@
 # rehearsal in flight delays a release leg by about its length, and a push that
 # touches both sets of inputs runs the Windows jobs one after another (run
 # 46004481488 on 2026-11-27: conformance 23.5 min, bundle 4, label 2, engine 4.5;
-# git-guard-windows adds about 11, so about 45 minutes in all).
+# git-guard-windows adds about 12.5, so about 46 minutes in all).
 #
 # The file keeps its name although it now rehearses the engine as well: a rename
 # would churn the concurrency group, AGENTS.md and the tests that name it for no
@@ -372,6 +372,11 @@ jobs:
     name: Windows test set, supervisor conformance and Phase 3 process management (win-release)
     if: ${{ github.actor == 'Hellblazer' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
     runs-on: win-release
+    # Little room left (2026-11-27): the job took 23.5 of these 30 minutes on CI (run 46004481488) and the set
+    # 26:37 by hand on qwent's Windows side, and it grows with every file under tests/daemon/ and tests/hooks/.
+    # Before adding a test file to the set, time it natively (scripts/windows_hand_test.py -- <file>
+    # --durations=40) and count its spawns (about 70 ms each on native Windows); a spawn-heavy file goes in
+    # git-guard-windows or a job of its own, as the git-guard routing tests did, not in this serial pytest.
     timeout-minutes: 30
     defaults:
       run:
@@ -450,6 +455,11 @@ jobs:
       # stub nx through a symlinked generation directory or the bash wrapper, so the module skips on win32 (16 skips).
       # Run here, marked per test and with three plain-Python stub cases marked too, they pushed the count to 207 against
       # the ceiling of 204 (0 failed, run 44675562916). The gate's plain-Python cases stay in the set and run on Windows.
+      # Runtime, not just skips, limits what joins this step: it is the job's whole budget (CI 23.5 of 30 minutes,
+      # native 26:37 by hand, 2026-11-27). Time a new file natively (scripts/windows_hand_test.py -- <file>
+      # --durations=40) and count its spawns (about 70 ms each on native Windows); a spawn-heavy file goes in
+      # git-guard-windows or a job of its own. The three git-guard files (about 17,000 spawns, 1753 s serially)
+      # pushed this job past its limit on six develop runs before they moved.
       - name: Windows test set
         run: |
           uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py --ignore=tests/daemon/test_spawn_lock_hold.py --ignore=tests/daemon/test_storage_service_running.py --ignore=tests/hooks/test_session_facts_posix.py --ignore=tests/daemon/test_legacy_chash_guard_real_pg.py --ignore=tests/daemon/test_storage_stop_invisible.py --ignore=tests/daemon/test_stop_real_processes_posix.py --ignore=tests/hooks/test_compact_outcome_harness_posix.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_install_lease_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_install_source.py tests/test_pdf_stack.py tests/test_installer_rebuild.py tests/test_mineru_cmd.py tests/test_mineru_spawn_windows_flags.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
@@ -550,16 +560,18 @@ jobs:
   # git calls at about 40 ms, 427 Git bash), against 212 s for all of them on macOS. Serially they took 1753 s on
   # qwent's Windows side (scripts/windows_hand_test.py, 2026-11-27); inside the conformance job's one pytest they
   # pushed it past its 30-minute limit on every develop run from 83f83fcf7f on (six cancelled at about 30:10).
-  # Process starts there scale poorly with workers (-n 8: 600 s, 2.9x), so even a parallel step would leave
-  # conformance at about 35 minutes; a job of its own keeps conformance's serial set and its timeout as they were.
+  # Process starts there scale poorly with xdist workers (-n 8: 673 s, 2.6x; -n 16: 514 s with the guard's one-rev-parse
+  # probe), so even an xdist step inside conformance would leave it at about 35 minutes; a job of its own keeps
+  # conformance's serial set and its timeout as they were. Its timeout is 30, not twice its ~12.7 minutes, because a
+  # CI leg waits up to 30 minutes for a hand run holding lab-run-win's slot and the wait counts against it.
   # Nothing in these files shares state across tests (each builds its repos under tmp_path), and the main unit
   # suite runs them under xdist on every develop commit. Same gate, runner and triggers as conformance, and
   # nothing waits on either: a red here turns the run red exactly as a red there does.
   git-guard-windows:
-    name: Git-guard routing tests, parallel (win-release)
+    name: Git-guard routing tests under xdist (win-release)
     if: ${{ github.actor == 'Hellblazer' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
     runs-on: win-release
-    timeout-minutes: 25
+    timeout-minutes: 30
     defaults:
       run:
         shell: pwsh
@@ -586,7 +598,7 @@ jobs:
             Write-Host "materialised $rel <- $target"
           }
 
-      - name: Windows git-guard tests (parallel)
+      - name: Windows git-guard tests (xdist)
         run: |
           uv run --python 3.13 --frozen pytest tests/test_routing_subagent_git_write.py tests/test_routing_subagent_git_write_gaps.py tests/test_routing_subagent_git_dash_c_worktree.py -n 8 -p no:cacheprovider -q -rs --junitxml=windows-git-guard-junit.xml
 

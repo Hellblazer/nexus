@@ -56,9 +56,9 @@ FIXUP_STEP: str = "Checkout fixups (LF, symlinks materialised)"
 FLOOR_STEP: str = "Non-vacuity floor"
 #: The git-guard tests' job (they run under xdist there) and its pytest and floor steps; --set runs them after
 #: the set, since the set alone is not the whole Windows suite.
-PARALLEL_JOB: str = "git-guard-windows"
-PARALLEL_STEP: str = "Windows git-guard tests (parallel)"
-PARALLEL_FLOOR_STEP: str = "Git-guard non-vacuity floor"
+GIT_GUARD_JOB: str = "git-guard-windows"
+GIT_GUARD_STEP: str = "Windows git-guard tests (xdist)"
+GIT_GUARD_FLOOR_STEP: str = "Git-guard non-vacuity floor"
 DEFAULT_HOST: str = "qwentescence"
 LAB_RUN_WIN: str = r"C:\build\lab\lab-run-win.cmd"
 CLONE_URL: str = "https://github.com/Hellblazer/nexus.git"
@@ -340,7 +340,7 @@ def remote_script(session: str, sha: str, pytest_args: Sequence[str], *, bundle:
     (a git call's nonzero exit, a terminating error, the commit not checked
     out) exits SETUP_FAILED before pytest can run on the wrong tree.
 
-    *more_runs* are further pytest runs after the first (the job's parallel
+    *more_runs* are further pytest runs after the first (the git-guard
     step), each run whatever the one before it did, as CI's ``!cancelled()``
     steps are; the first nonzero pytest code is the run's code. *more_floors*
     follow *floor*, and a red floor turns a green run into FLOOR_FAILED."""
@@ -531,8 +531,8 @@ def _main(argv: Sequence[str] | None, *, run: Runner, beat: Callable[[Sequence[s
         raise SystemExit("windows_hand_test: --session must be 1-40 ASCII letters, digits, - or _, and not a device name")
     extra = [_check_pytest_arg(a) for a in ns.pytest_args]
     args = (ci_set_args() if ns.set else []) + extra
-    # The whole job: the set, then the parallel git-guard step, each with the caller's extra arguments.
-    more_runs = [ci_step_args(PARALLEL_STEP, job=PARALLEL_JOB) + extra] if ns.set else []
+    # The whole suite: the set, then the git-guard xdist step, each with the caller's extra arguments.
+    more_runs = [ci_step_args(GIT_GUARD_STEP, job=GIT_GUARD_JOB) + extra] if ns.set else []
     if not args:
         raise SystemExit("windows_hand_test: give pytest arguments after --, or --set")
 
@@ -578,7 +578,7 @@ def _main(argv: Sequence[str] | None, *, run: Runner, beat: Callable[[Sequence[s
             ns.session, sha, args, bundle=bundle_remote,
             fixup=ci_step_run(FIXUP_STEP), floor=ci_step_run(FLOOR_STEP) if ns.set else None,
             patch=patch_remote, more_runs=more_runs,
-            more_floors=[ci_step_run(PARALLEL_FLOOR_STEP, job=PARALLEL_JOB)] if ns.set else [],
+            more_floors=[ci_step_run(GIT_GUARD_FLOOR_STEP, job=GIT_GUARD_JOB)] if ns.set else [],
         )
         local_ps1 = Path(tmp) / "win-hand.ps1"
         local_ps1.write_text(script, encoding="utf-8")

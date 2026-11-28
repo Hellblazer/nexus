@@ -294,22 +294,22 @@ def test_set_in_main_runs_the_ci_set_and_its_floor() -> None:
     assert wht.ci_step_run(wht.FLOOR_STEP).rstrip() in script
 
 
-def test_set_also_runs_the_parallel_git_guard_step_and_its_floor_after_the_set() -> None:
+def test_set_also_runs_the_git_guard_xdist_step_and_its_floor_after_the_set() -> None:
     """CI runs the git-guard tests under xdist in a job of their own (git-guard-windows) with a floor of their own;
     --set is the whole Windows suite, so a hand run that left them out would call a tree green that CI then runs 522
     more tests on."""
     rec = _Recorder(on_origin=True)
     assert wht.main(["--session", "wren", "--set"], run=rec) == 0
     script = rec.scripts[-1]
-    parallel = " ".join(wht._ps_quote(a) for a in wht.ci_step_args(wht.PARALLEL_STEP, job=wht.PARALLEL_JOB))
-    assert "'-n'" in parallel and "tests/test_routing_subagent_git_write.py" in parallel
-    assert parallel in script
+    xdist = " ".join(wht._ps_quote(a) for a in wht.ci_step_args(wht.GIT_GUARD_STEP, job=wht.GIT_GUARD_JOB))
+    assert "'-n'" in xdist and "tests/test_routing_subagent_git_write.py" in xdist
+    assert xdist in script
     set_floor = wht.ci_step_run(wht.FLOOR_STEP).rstrip()
-    guard_floor = wht.ci_step_run(wht.PARALLEL_FLOOR_STEP, job=wht.PARALLEL_JOB).rstrip()
+    guard_floor = wht.ci_step_run(wht.GIT_GUARD_FLOOR_STEP, job=wht.GIT_GUARD_JOB).rstrip()
     assert "windows-git-guard-junit.xml" in guard_floor
     serial = " ".join(wht._ps_quote(a) for a in wht.ci_set_args())
-    assert script.index(serial) < script.index(parallel) < script.index(set_floor) < script.index(guard_floor)
-    # The first red is the run's code: a red set is not masked by a green parallel step, nor the reverse.
+    assert script.index(serial) < script.index(xdist) < script.index(set_floor) < script.index(guard_floor)
+    # The first red is the run's code: a red set is not masked by a green git-guard step, nor the reverse.
     assert script.count("if ($code -eq 0) { $code = $LASTEXITCODE }") == 1
 
 

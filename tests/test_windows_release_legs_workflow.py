@@ -761,15 +761,15 @@ WINDOWS_SERIAL_SET = (
     "tests/test_context.py::TestSubagentHookInjection", "tests/test_context.py::TestSessionHookInjection",
 )
 #: The git-guard routing tests (522 pass natively, 0 skips), which spawn Git for Windows' bash through
-#: tests/_git_bash.py; they and the helper are workflow triggers. They run in the job's second, parallel
-#: pytest: about 17,000 process starts made them 1753 s serially on native Windows, which pushed the
-#: one-pytest set past the job's 30-minute limit.
-WINDOWS_PARALLEL_SET = (
+#: tests/_git_bash.py; they and the helper are workflow triggers. They run under xdist in
+#: the git-guard-windows job: about 17,000 process starts made them 1753 s serially on native Windows,
+#: which pushed conformance's one-pytest set past its 30-minute limit.
+WINDOWS_XDIST_SET = (
     "tests/test_routing_subagent_git_write.py", "tests/test_routing_subagent_git_write_gaps.py",
     "tests/test_routing_subagent_git_dash_c_worktree.py",
 )
-#: Everything the job runs natively, the set and the parallel step (the encoding lints read this).
-WINDOWS_TEST_SET = WINDOWS_SERIAL_SET + WINDOWS_PARALLEL_SET
+#: Everything the workflow runs natively, the set and the git-guard xdist job (the encoding lints read this).
+WINDOWS_TEST_SET = WINDOWS_SERIAL_SET + WINDOWS_XDIST_SET
 #: Windows-set test files that are deliberately not workflow triggers (the loop that reads this).
 RIDES_ALONG = (
     "tests/test_install_source.py", "tests/test_pdf_stack.py", "tests/test_installer_rebuild.py",
@@ -822,7 +822,7 @@ def test_the_windows_job_runs_the_whole_set_in_one_pytest_with_a_junit_floor() -
     assert len(run_steps) == 1, "non-vacuity: exactly one pytest step in the job"
     for target in WINDOWS_SERIAL_SET:
         assert target in run_steps[0], target
-    for target in WINDOWS_PARALLEL_SET:
+    for target in WINDOWS_XDIST_SET:
         # The git-guard files run in git-guard-windows: in this serial pytest their ~17,000 process starts
         # (1753 s natively) pushed the job past its 30-minute limit (six develop runs cancelled, 2026-11-27).
         assert target not in run_steps[0], f"{target} belongs to git-guard-windows, not the serial set"
