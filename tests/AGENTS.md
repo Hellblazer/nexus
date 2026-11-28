@@ -195,12 +195,15 @@ deselects them, so no census has said which of them touch storage.
   (nexus-llo7w); either value now errors every test at setup, naming the variable.
 - `NX_STORAGE_TOUCH_GUARD_MODE=report` prints what would fail without failing it. `NX_STORAGE_TOUCH_SWEEP=1` adds the whole-run shape checks and marks the report as a whole-run one for the ratchet below; set it on a full-suite run, not a scoped one. A run that pytest-split is splitting, or that collects at least `SWEEP_AUTO_FLOOR` tests, asks for them by itself, but an automatic run is advisory (yellow warnings, exit status unchanged). Only an explicit `NX_STORAGE_TOUCH_SWEEP=1` run fails on them, late touches included, and the CI shards export it (nexus-ey246), so on CI each shard gates. **Downgrade trigger:** the first shard red on a late touch that passes on a rerun with no code change moves late touches back to a warning (`_vacuity` in the guard, one line); the shape, children-seen and guard-error checks keep gating. The floors, the shape checks and the advisory semantics: `tests/_storage_touch_guard.py` and [test-running](../docs/agents/test-running.md) § Storage-touch sweep.
 - **The saving is ratcheted over the whole run** (nexus-zv8i7): the NUMBER of tests that minted a
-  tenant, summed over the `nx-storage-touch-report.json` of every shard, must not exceed
-  `provisioned_tests` + `tolerance_tests` (an absolute count, at most 50) in
-  `tests/storage_touch_ceiling.toml`. Check it with `python -m tests._storage_touch_fan_in
+  tenant, summed over the `nx-storage-touch-report.json` of every shard, fails the gate only above
+  `alarm_line_tests` in `tests/storage_touch_ceiling.toml` (5544, Sam 2026-11-27, RDR-258 Phase 1).
+  Between the baseline `provisioned_tests` + `tolerance_tests` (an absolute count, at most 50) and that
+  line the run reports with a warning and passes; every run prints `storage_touch value= delta=
+  trend(10)=` to the job summary (the trend history rides an `actions/cache` entry). A section with no
+  `alarm_line_tests` keeps the old rule: the baseline and its tolerance gate. Check it with `python -m tests._storage_touch_fan_in
   <dir holding the reports> --suite python_unit --shards 6` (`--suite docs_readers --shards 1` for that
   leg). The module is standard library only, because the CI gate runner has no pytest; a test holds
-  that. It exits 1 over the ceiling, when the directory does not hold exactly `--shards` reports (a
+  that. It exits 1 over the alarm line, when the directory does not hold exactly `--shards` reports (a
   missing shard would under-count and pass), on a report from a non-sweep run, and on a repeated run id. A session never gates on its share: it sees only its file neighbourhood of the suite, so
   `provisioned_per_test` in the summary line and the per-report shares in the fan-in output are advice.
   Ceilings are reduce-only (the fan-in prints when one can be lowered); `"measure"` fails the fan-in and
@@ -208,7 +211,7 @@ deselects them, so no census has said which of them touch storage.
   `python_unit` ceiling is armed (measured on CI, `measured_on` in the ceiling file). The CI shards
   export `NX_STORAGE_TOUCH_SWEEP=1` (nexus-ey246), so each shard gates on the whole-run checks, late
   touches included; the docs-readers leg does not export it. Marks only get added, so when the count rises, drop marks a test
-  no longer needs before raising the ceiling.
+  no longer needs, whether or not the run reported it.
   Before pushing, `uv run python scripts/tenant_delta.py` prints how many tests that mint a tenant your
   branch adds against its merge base with origin/develop, per changed module (nexus-g37hn; the marker,
   or `t2_tenant`/`t2_service_env` in the fixture closure, counted at collection). The push script runs
@@ -220,7 +223,7 @@ deselects them, so no census has said which of them touch storage.
   never refused (nexus-xxuvz): a `NOTE:` line names one that hides no count, a `WARNING:` line one that
   does (skipped at head with a count at the merge base, or the reverse; `--strict` fails on it). One skipped
   on both sides is a `NOTE:` and silent under `--quiet-if-zero`.
-- **Consolidate first; a raise beyond the ruling is Sam's call.** Prefer a tenant-free test: patch `nexus.mcp_infra.get_collection_row` or the catalog seam. When a test cannot be tenant-free (the index paths reach the catalog in many places), keep only the case that fails on the defect. Raise `provisioned_tests` only after consolidating to the minimum. Sam's ruling of 2026-10-25 (RDR-232 Phase 1) allowed a same-commit raise with a reason per test for about five irreducible tenant tests; it is not a standing permission. A raise beyond that goes to Sam as an ask, as the 2026-11-09 entry in `tests/storage_touch_ceiling.toml` did ("accepted by Sam"). That file's header requires a reviewed reason in the commit message, and its entries carry the reason as a comment line above the new value.
+- **Consolidate first; a raise beyond the ruling is Sam's call.** Prefer a tenant-free test: patch `nexus.mcp_infra.get_collection_row` or the catalog seam. When a test cannot be tenant-free (the index paths reach the catalog in many places), keep only the case that fails on the defect. A rise past the baseline reports and passes, but consolidate anyway; moving the alarm line (`alarm_line_tests`) is Sam's call (his ruling of 2026-11-27: the first 2-week review rechecks the margin), and it waits until the tests are consolidated to the minimum. Sam's ruling of 2026-10-25 (RDR-232 Phase 1) allowed a same-commit raise with a reason per test for about five irreducible tenant tests; it is not a standing permission. A raise beyond that goes to Sam as an ask, as the 2026-11-09 entry in `tests/storage_touch_ceiling.toml` did ("accepted by Sam"). That file's header requires a reviewed reason in the commit message, and its entries carry the reason as a comment line above the new value.
 - **What the count sees.** Every parametrized case counts. A module-level `pytestmark = pytest.mark.t2_tenant` makes every test later added to that file mint a tenant, pure unit tests included (`tests/test_catalog_pdf_hook.py` went from 11 to 32 that way): compare the `mode=... provisioned=N` line the guard prints for the file before and after. In a file that mixes tenant and pure tests, mark the class or the test that needs the tenant, never the module. Put a new engine-backed test straight into `tests/integration/` with `pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]`; the python_unit leg does not count integration-marked files, so a live-catalog test that sits in the default selection moves there.
 - A guard test that asserts a nested session or child process FAILED goes through
   `assert_session_failed_for(result, "<reason>")` / `assert_exit_failed_for(code, output, "<reason>")`

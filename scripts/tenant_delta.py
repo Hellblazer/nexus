@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """How many tests that mint a test tenant does this branch add? (nexus-g37hn)
 
-pytest-gate's storage-touch fan-in fails a develop run whose python_unit tests mint more
-tenants than ``tests/storage_touch_ceiling.toml`` allows (tolerance 0). Develop went red twice
-on 2026-10-21/22 because a new test requested a tenant and its author never saw the ceiling.
+pytest-gate's storage-touch fan-in reports a develop run whose python_unit tests mint more
+tenants than the baseline ``provisioned_tests`` of ``tests/storage_touch_ceiling.toml`` (a warning and the
+``storage_touch value= delta= trend(10)=`` line, RDR-258 Phase 1) and fails it only above that file's
+``alarm_line_tests``. Before that, develop went red twice on 2026-10-21/22 because a new test requested a
+tenant and its author never saw the ceiling (tolerance 0).
 This compares, for each test module the branch changes, the tests that mint a tenant at HEAD
 and at the merge base with origin/develop, and prints the difference beside the ceiling.
 
@@ -294,11 +296,11 @@ def main(argv: list[str] | None = None) -> int:
     skip_count = f", {len(skip_notes)} skipped at collection (not counted)" if skip_notes else ""
     not_counted = f", {len(uncounted)} not counted at the merge base" if uncounted else ""
     _say(f"tenant delta: {delta:+d} test(s) that mint a tenant across {len(modules)} changed module(s){not_counted}{skip_count}; "
-          f"python_unit ceiling {limit}, tolerance 0 (tests/storage_touch_ceiling.toml)")
+          f"python_unit ceiling {limit} (the baseline; the gate fails only above the alarm line, tests/storage_touch_ceiling.toml)")
     if delta > 0:
-        _say("  develop CI's count usually sits at or just under the ceiling, so a rise will likely fail "
-              "pytest-gate's storage-touch fan-in: make the new test tenant-free, or raise the ceiling in "
-              "the same commit with a reason (tests/AGENTS.md)")
+        _say("  develop CI's count sits at or near the baseline, so a rise is reported by pytest-gate's storage-touch "
+              "fan-in (a warning, the trend in the job summary) and fails it only above the alarm line: make the new "
+              "test tenant-free where you can; the alarm line is Sam's to move (tests/AGENTS.md)")
         return 1 if args.strict else 0
     if risky or risky_skipped or risky_head:
         return 1 if args.strict else 0  # a rise cannot be ruled out where the base could not be counted

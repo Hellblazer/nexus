@@ -111,10 +111,14 @@ def test_the_gate_script_runs_the_storage_touch_fan_in_for_the_workflows_suite_a
     spec.loader.exec_module(module)
     doc = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
     run = str(next(s for s in _steps(doc, "pytest-gate") if _FAN_IN in str(s.get("run", "")))["run"])
-    args = module.parse_args(run.split("ci_gate_fan_in.py", 1)[1].split("${{", 1)[0].split())
+    # the arguments around the one `${{ ... }}` expression (the --bytes-advisory switch): before it, and after its closing braces
+    tail = run.split("ci_gate_fan_in.py", 1)[1]
+    args = module.parse_args(tail.split("${{", 1)[0].split() + tail.rsplit("}}", 1)[1].split())
     touch = [c for c in module.build_checks(args) if "tests._storage_touch_fan_in" in c.argv]
     assert len(touch) == 1, [c.name for c in module.build_checks(args)]
-    assert touch[0].argv[3:] == [args.reports_dir, "--suite", "python_unit", "--shards", str(args.shards)], touch[0].argv
+    # the history and summary flags (RDR-258 Phase 1) ride after the arguments the step has always passed
+    assert touch[0].argv[3:8] == [args.reports_dir, "--suite", "python_unit", "--shards", str(args.shards)], touch[0].argv
+    assert touch[0].argv[8:] == ["--history", args.storage_touch_history, "--summary", args.storage_touch_summary], touch[0].argv
 
 
 def test_an_armed_ceiling_is_a_number() -> None:

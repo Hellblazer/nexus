@@ -2222,6 +2222,20 @@ jobs:
           pattern: ddl-report-shard-*
           path: ddl-reports
 
+      # RDR-258 Phase 1 (nexus-2jomg.2, Sam 2026-11-27): the storage-touch check is REPORT MODE. Every run prints its value, the
+      # change since the previous run and a 10-run trend to this job's summary, and fails only above `alarm_line_tests` in
+      # tests/storage_touch_ceiling.toml. The trend needs the earlier runs: the fan-in keeps them in one small JSON file that this
+      # cache carries from run to run (the newest `storage-touch-history-*` entry restores, a push to develop saves a new one).
+      # A miss (first run, an entry evicted after seven days) only means the trend reads "n/a" until runs accumulate.
+      - name: Restore the storage-touch history
+        if: needs.changes.outputs.code == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: storage-touch-history
+          key: storage-touch-history-${{ github.run_id }}
+          restore-keys: |
+            storage-touch-history-
+
       # One step runs all three whole-run checks (scripts/ci_gate_fan_in.py), because GitHub skips the steps after
       # a failed one: as three steps, a WAL overage in the DDL fan-in hid a tenant-saving overage in the next
       # and cost a CI cycle to find. The script runs them in this order, each printing its own verdict, and
@@ -2246,7 +2260,16 @@ jobs:
       #    checks the inputs agree and the groups partition them.
       - name: Whole-run gate (DDL/bytes fan-in, storage-touch fan-in, shard collection; every one evaluated)
         if: needs.changes.outputs.code == 'true'
-        run: python3 scripts/ci_gate_fan_in.py --reports-dir ddl-reports --suite python_unit --shards 6 ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '--bytes-advisory' || '' }}
+        run: python3 scripts/ci_gate_fan_in.py --reports-dir ddl-reports --suite python_unit --shards 6 ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '--bytes-advisory' || '' }} --storage-touch-history storage-touch-history/history.json --storage-touch-summary "$GITHUB_STEP_SUMMARY"
+
+      # Only a push to develop adds to the trend (a pull request's count is its branch's, not the trunk's), and the save runs
+      # after a failed gate too, so the run that crossed the alarm line is in the trend the next report reads.
+      - name: Save the storage-touch history
+        if: always() && github.event_name == 'push' && needs.changes.outputs.code == 'true' && hashFiles('storage-touch-history/history.json') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: storage-touch-history
+          key: storage-touch-history-${{ github.run_id }}
 
   ca3-pgvector-bundle:
     # RDR-157 P1 CA-3 gate (bead nexus-vwvv5.2): prove the assemble path — a

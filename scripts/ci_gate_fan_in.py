@@ -20,7 +20,8 @@ group and a failure adds an ``::error::`` annotation. The checks run with the re
 this file's path.
 
 ``--advisory`` and ``--bytes-advisory`` belong to the DDL check alone, as they did in the step. The two
-ceiling flags point checks 1 and 2 at other ceiling files (the tests use them); CI leaves them off.
+ceiling flags point checks 1 and 2 at other ceiling files (the tests use them); CI leaves them off. ``--storage-touch-history`` and
+``--storage-touch-summary`` go to check 2 alone: the run history its delta and trend read, and the markdown file its report joins.
 
 STANDARD LIBRARY ONLY, python3 >= 3.11 like the checks it runs: pytest-gate has no pytest installed.
 """
@@ -56,6 +57,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bytes-advisory", action="store_true", help="forwarded to the DDL fan-in")
     parser.add_argument("--ddl-ceilings", help="the DDL fan-in's --ceilings (default: its own)")
     parser.add_argument("--storage-touch-ceilings", help="the storage-touch fan-in's --ceiling-file (default: its own)")
+    parser.add_argument("--storage-touch-history", help="the storage-touch fan-in's --history: the last runs, for its delta and trend")
+    parser.add_argument("--storage-touch-summary", help="the storage-touch fan-in's --summary: a markdown file its report is appended to")
     return parser.parse_args(argv)
 
 
@@ -77,6 +80,10 @@ def build_checks(args: argparse.Namespace) -> list[Check]:
     touch = [py, "-m", "tests._storage_touch_fan_in", args.reports_dir, "--suite", args.suite, "--shards", shards]
     if args.storage_touch_ceilings:
         touch += ["--ceiling-file", args.storage_touch_ceilings]
+    if args.storage_touch_history:
+        touch += ["--history", args.storage_touch_history]
+    if args.storage_touch_summary:
+        touch += ["--summary", args.storage_touch_summary]
     collection = [py, "-m", "tests._shard_collection", args.reports_dir, "--shards", shards]
     return [
         Check("DDL/bytes ratchet over the whole run (fan-in)", ddl),

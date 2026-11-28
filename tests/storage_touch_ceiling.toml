@@ -73,6 +73,14 @@
 # The rest of the Phase 3 stack: the final tree's measured value with per-module reasons, capped at 5410 (linda, Sam's rule).
 provisioned_tests = 5394
 tolerance_tests = 0
+# RDR-258 Phase 1 (nexus-2jomg.2, Sam 2026-11-27): this is a REPORT-MODE check. `provisioned_tests` above is the baseline, where
+# the count stood when the check was demoted (5394 at develop c6c88465bd); a run above it and within `alarm_line_tests` reports
+# (a ::warning:: and the `storage_touch value=... delta=... trend(10)=...` line in the job summary) and passes, so a change that
+# mints a few tenants no longer edits this file. Only a total ABOVE the alarm line fails pytest-gate. 5544 is the baseline plus 150,
+# about 19 days of the 2026-09-23 to 2026-11-23 window's growth outside the one +223 step; only Sam moves the line (his ruling
+# of 2026-11-27: the first 2-week review rechecks the margin). Removing the key restores the old rule: the ceiling and
+# tolerance gate. Must be an integer >= provisioned_tests + tolerance_tests (tests/_storage_touch_fan_in.py refuses anything else).
+alarm_line_tests = 5544
 # 5359 -> 5381 accepted by Sam 2026-11-07 (ask halcyon/rdr243-p3-tenant-ceiling, version 6856e9c9541f1b19, choice 1 "Accept +22"): RDR-243 Phase 3's +22 tenant-minting tests (scripts/tenant_delta.py against origin/develop: canary +10, --sensitive-glob +8, catalog MCP withhold +3, doctor rows +1); each reads the real engine and catalog, the subject being the flag the engine keeps.
 # 5380 -> 5381 (RDR-243 Phase 3 fix r3, 2026-11-07): +1, tests/commands/test_index_repo_sensitive_glob.py 7 -> 8 (the --sensitive-glob re-flag of an existing document relabels its topics: the flag is the one-way row the engine keeps, set through the audited route on a real catalog; scripts/tenant_delta.py against origin/develop reads +22 for the branch).
 # 5379 -> 5380 (RDR-243 Phase 3 fix r1, 2026-11-07): +1, tests/commands/test_index_repo_sensitive_glob.py 6 -> 7 (the per-pattern count and zero-match warning journey on the real engine; scripts/tenant_delta.py against origin/develop reads +21 for the branch: glob +7, canary +10, catalog MCP withhold +3, doctor rows +1).
