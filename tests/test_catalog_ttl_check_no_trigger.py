@@ -58,12 +58,12 @@ SERVICE_MAIN = ROOT / "service" / "src" / "main" / "java" / "dev" / "nexus" / "s
 
 
 def _files(root: Path) -> list[Path]:
-    """The files to scan: what git tracks plus untracked files it does not ignore, so a run's own output under a
-    git-ignored directory (the selector's list or a --status file under ``output/``) is never read; without git, the
-    walk with SKIP_DIRS. The same listing as the chunk routes' no-trigger scan."""
+    """The files to scan: only what git tracks, so a run's own output (the selector's list, or a --status file such as
+    ``aff.json`` that a lab run writes into the repo root, ignored or not) is never read; without git, the walk with
+    SKIP_DIRS. The same listing as the chunk routes' no-trigger scan."""
     try:
         listed = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            ["git", "-C", str(root), "ls-files", "-z", "--cached"],
             capture_output=True, check=True, timeout=60,
         ).stdout.decode("utf-8", "surrogateescape")
     except (OSError, subprocess.SubprocessError):
@@ -98,16 +98,21 @@ def _scan(root: Path = ROOT) -> tuple[dict[str, set[str]], dict[str, int]]:
     return seen, scanned
 
 
-def test_the_scan_skips_git_ignored_output_and_reads_untracked_files(tmp_path: Path) -> None:
-    """A run's selector list under the git-ignored output/ is not read; an untracked, unignored file is (planted)."""
+def test_the_scan_lists_tracked_files_only_never_untracked_or_ignored_ones(tmp_path: Path) -> None:
+    """A tracked file is scanned. An untracked file that names the route is not, whether or not an ignore rule covers
+    it: a lab run's --status file (``aff.json``) or selector list is a run's output, not the repository."""
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=60)
     (tmp_path / ".gitignore").write_text("output/\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "tracked.py").write_text("ROUTE = 'catalog-ttl-" + "check'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", ".gitignore", "src/tracked.py"], check=True, timeout=60)
+    (tmp_path / "aff.json").write_text('{"route": "catalog-ttl-' + 'check"}\n', encoding="utf-8")  # untracked, not ignored
     (tmp_path / "output").mkdir()
     (tmp_path / "output" / "affected.txt").write_text("tests/test_" + "catalog_ttl_check_shapes.py\n", encoding="utf-8")
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "stray.py").write_text("ROUTE = 'catalog-ttl-" + "check'\n", encoding="utf-8")
+    rels = {p.relative_to(tmp_path).as_posix() for p in _files(tmp_path)}
+    assert rels == {".gitignore", "src/tracked.py"}
     seen, _ = _scan(tmp_path)
-    assert seen == {"src/stray.py": {"catalog-ttl-check"}}
+    assert seen == {"src/tracked.py": {"catalog-ttl-check"}}
 
 
 def test_nothing_in_the_repository_names_the_routes_but_the_engine_classes_and_their_tests() -> None:

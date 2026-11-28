@@ -89,15 +89,15 @@ class TestNoAutomaticTrigger:
 
     @classmethod
     def _files(cls, root: Path) -> list[Path]:
-        """The files git tracks, plus untracked files no ignore rule covers: what a commit could carry. A run's own
-        output (a status file under the gitignored ``output/``) names the verb in its argv and is not the repository.
-        Without git (no work tree), the walk with SKIP_DIRS."""
+        """The files git tracks, and no others. A run's own output (a --status file such as ``aff.json`` in the repo
+        root, or one under the gitignored ``output/``) names the verb in its argv and is not the repository, whether or
+        not an ignore rule covers it. Without git (no work tree), the walk with SKIP_DIRS."""
         import os  # noqa: PLC0415 — only this scan walks the tree
         import subprocess  # noqa: PLC0415 — only this scan lists the tree
 
         try:
             listed = subprocess.run(  # noqa: S603, S607 — fixed argv, the repo's own git
-                ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                ["git", "-C", str(root), "ls-files", "-z", "--cached"],
                 capture_output=True, check=True, timeout=60,
             ).stdout.decode("utf-8", "surrogateescape")
         except (OSError, subprocess.SubprocessError):
@@ -134,20 +134,22 @@ class TestNoAutomaticTrigger:
                 seen[rel] = hits
         return seen, scanned
 
-    def test_the_scan_reads_what_a_commit_could_carry_not_ignored_output(self, tmp_path: Path) -> None:
-        """A run's status file under a gitignored output/ named the verb and turned this gate red (RDR-236)."""
+    def test_the_scan_lists_tracked_files_only_never_untracked_or_ignored_ones(self, tmp_path: Path) -> None:
+        """A run's status file named the verb and turned this gate red (RDR-236; again for an ``aff.json`` in the repo
+        root, which no ignore rule covers). Only tracked files are listed."""
         import subprocess  # noqa: PLC0415 — this pin builds a throwaway repo
 
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S603, S607
         (tmp_path / ".gitignore").write_text("output/\n", encoding="utf-8")
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "tracked.py").write_text("x = 1\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)  # noqa: S603, S607
-        (tmp_path / "src" / "new.py").write_text("y = 2\n", encoding="utf-8")  # untracked, not ignored: counts
+        subprocess.run(["git", "-C", str(tmp_path), "add", ".gitignore", "src/tracked.py"], check=True)  # noqa: S603, S607
+        (tmp_path / "aff.json").write_text('{"argv": ["nx", "t3", "retire-keys", "--apply"]}\n', encoding="utf-8")  # untracked, not ignored: not listed
+        (tmp_path / "src" / "new.py").write_text("y = 2\n", encoding="utf-8")  # untracked, not ignored: not listed
         (tmp_path / "output").mkdir()
-        (tmp_path / "output" / "status.txt").write_text("nx t3 retire-keys --apply\n", encoding="utf-8")
+        (tmp_path / "output" / "status.txt").write_text("nx t3 retire-keys --apply\n", encoding="utf-8")  # ignored: not listed
         rels = {p.relative_to(tmp_path).as_posix() for p in self._files(tmp_path)}
-        assert rels == {".gitignore", "src/tracked.py", "src/new.py"}
+        assert rels == {".gitignore", "src/tracked.py"}
 
     def test_nothing_in_the_repository_names_the_routes_but_the_verb_the_engine_and_their_tests(self) -> None:
         seen, scanned = self._scan()
