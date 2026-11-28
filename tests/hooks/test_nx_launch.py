@@ -211,6 +211,29 @@ def test_a_pointer_file_names_the_generation_on_every_host(tmp_path: Path, monke
     assert lookup.current_generation() == str(gen)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [b"", b"nx-pointer 1\n", b"nx-pointer 1\ngen-relative\n", b"nx-pointer 2\n/abs\n", b"\xff\xfe\x00", b"nx-pointer 1\n\n"],
+    ids=["empty", "header-only", "relative-target", "wrong-version", "binary", "blank-target"],
+)
+def test_a_damaged_or_relative_pointer_file_names_no_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: bytes,
+) -> None:
+    """The lookup then falls through to PATH; it never follows a relative target against the cwd."""
+    import importlib
+
+    sys.path.insert(0, str(_LAUNCH.parent.parent / "hooks" / "scripts"))
+    try:
+        lookup = importlib.import_module("_cli_lookup")
+    finally:
+        sys.path.pop(0)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "current").write_bytes(body)
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+    assert lookup.current_generation() is None
+
+
 def test_the_current_directory_is_never_searched(tmp_path: Path) -> None:
     """A program planted in the cwd only is not a CLI. On Windows a bare-name
     spawn and ``shutil.which`` both look there first."""

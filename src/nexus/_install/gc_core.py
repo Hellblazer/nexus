@@ -188,8 +188,10 @@ def _is_entry(entry: Path, prefix: str, platform: str | None) -> bool:
     raises OSError 448 where ``os.path.isdir`` answers False, and a pointer file
     is not a directory at all.
     """
+    layout = _layout()
+    # A dangling gen-* symlink is not an entry on POSIX (it never was); on Windows a pointer is one.
     return entry.name.startswith(prefix) and (
-        _layout().is_link(entry, platform=platform) or os.path.isdir(entry)
+        os.path.isdir(entry) or (layout._is_nt(platform) and layout.is_link(entry, platform=platform))
     )
 
 
@@ -606,6 +608,7 @@ def _remove_all_but_lease(root: Path, lease_name: str, on_error, platform: str |
     junction here deletes what it names, outside the generation. Every child is asked
     ``layout.is_link`` before anything descends into it."""
     layout = _layout()
+    nt = layout._is_nt(platform)
 
     def clear(directory: Path) -> None:
         try:
@@ -619,7 +622,9 @@ def _remove_all_but_lease(root: Path, lease_name: str, on_error, platform: str |
             if directory == root and child.name == lease_name:
                 continue
             try:
-                if layout.is_link(path, platform=platform):
+                # Not layout.is_link: it opens a file to see whether it is a pointer file, and pointers
+                # live in the tools root, never inside a generation (tens of thousands of opens under Defender).
+                if child.is_symlink() or (nt and os.path.isjunction(path)):
                     layout.remove_link(path)  # the link itself; never what it names
                 elif child.is_dir(follow_symlinks=False):
                     clear(path)

@@ -171,8 +171,7 @@ class LinkOps:
         """Put *new* where *link* is in ONE atomic ``os.replace`` when both are pointer
         files, else ``False`` (a directory link of an older era: the caller renames it
         aside). A reader's open handle refuses the replace: retried briefly, then raised."""
-        layout = _layout()
-        if layout.read_pointer(link) is None or layout.read_pointer(new) is None:
+        if _layout().read_pointer(link) is None:
             return False
         last: OSError | None = None
         for _ in range(_REPLACE_RETRIES):
@@ -244,6 +243,8 @@ def _sweep_swap_litter(link: Path, ops: LinkOps) -> None:
                 continue  # in flight
             try:
                 if not ops.is_link(litter):
+                    if kind == "new" and _dispatch().is_torn_pointer(litter):
+                        os.unlink(litter)  # a partial write of an unfinished swap
                     continue
                 if kind == "old" and not os.path.lexists(link):
                     os.rename(litter, link)  # the crash window: restore, never delete
@@ -272,9 +273,12 @@ def swap_link(target: str, link: Path | str, ops: LinkOps | None = None) -> None
 
     present = ops.is_link(link)
     if not present and os.path.lexists(link):
-        raise GenerationError(
-            f"{link} exists and is not a link; refusing to replace it"
-        )
+        if not _dispatch().is_torn_pointer(link):
+            raise GenerationError(
+                f"{link} exists and is not a link (a directory, or a file bigger than a pointer); "
+                "refusing to replace it. Move it aside and run `nx self install` again."
+            )
+        os.unlink(link)  # an empty or damaged pointer: nothing in it to keep
     try:
         ops.create(target, new)
     except OSError as exc:
@@ -342,6 +346,11 @@ def flip_current(
         ):
             swap_link(outgoing, previous, ops)
     swap_link(str(gen), current, ops)
+    if (gen / "Lib" / "site-packages" / "nexus" / "_install").is_dir() and not (
+        gen / "Lib" / "site-packages" / "nexus" / "_install" / "_nx_dispatch.py"
+    ).is_file():
+        _emit([f"nexus: {gen.name} predates pointer files: its own `nx` cannot upgrade or flip from it; "
+               "run `nx self install` from a newer release to move off it"])
 
 
 def rollback_current(
@@ -370,8 +379,8 @@ def register_legacy(
     """Put the legacy uv tree in the GC ledger: ``gen-legacy-uv-tool`` -> *legacy*.
 
     Idempotent (a no-op when the pointer already names it, a refresh when it
-    names something else). The pointer is a junction on Windows, which GC's
-    ``is_link`` reads and removes with ``rmdir``. Returns the pointer's path.
+    names something else). The pointer is a file on Windows (a junction before
+    nexus-f9bgu.47), which GC's ``is_link`` reads and removes. Returns the pointer's path.
     """
     layout = _layout()
     ops = ops or LinkOps(platform)
@@ -765,9 +774,9 @@ def build_generation(
                 f"empty base_interpreter: {gen / 'pyvenv.cfg'}"
             )
         if layout._is_nt(platform):
-            # The launcher directory ``current\\bin`` resolves to: copies of this
-            # generation's own launchers, so the user PATH can name one stable
-            # directory and an upgrade only has to flip the junction.
+            # Copies of this generation's own launchers, which the plugin's hook
+            # launcher runs directly; the user PATH names the dispatchers
+            # (``<tools>\\bin``) and an upgrade only flips the pointer file.
             _emit(populate_launchers(gen, platform=platform))
         # nexus-3yv0o: a build with no requested version records the one it
         # installed, or the installer rebuild rung skips the generation.
@@ -972,15 +981,16 @@ def ensure_dispatchers(
     try:
         bin_dir.mkdir(parents=True, exist_ok=True)
         _dispatch().sweep_litter(bin_dir)
+        _dispatch().sweep_staging(root)
         recorded = marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
     except OSError as exc:
         raise GenerationError(f"could not prepare the dispatcher directory {bin_dir}: {exc}") from exc
-    # uv removes a managed Python it no longer needs, and then every dispatcher is dead and `nx`
-    # cannot run to say so: the next run rebuilds the venv and refreshes every file.
-    stranded = False
+    # uv removes a managed Python it no longer needs, or the venv is deleted: every dispatcher is
+    # then dead and `nx` cannot run to say so. The next run rebuilds the venv and refreshes every file.
+    stranded = not python.is_file() and any((bin_dir / layout.exe_name(n, platform=platform)).is_file() for n in names)
     try:
         cfg_home = _pyvenv_value((venv / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace"), "home")
-        stranded = bool(cfg_home) and not os.path.isdir(cfg_home)
+        stranded = stranded or (bool(cfg_home) and not os.path.isdir(cfg_home))
     except OSError:
         pass
     refresh = (bool(recorded) and recorded != DISPATCH_VERSION) or stranded
@@ -991,7 +1001,7 @@ def ensure_dispatchers(
     if not todo:
         return lines
     if stranded:
-        lines.append(f"the Python behind {venv} is gone; rebuilding the dispatcher environment")
+        lines.append(f"the dispatcher environment {venv} is gone or its Python is; rebuilding it")
     if stranded or not python.is_file():
         flag = "--clear" if stranded else "--allow-existing"
         _run(["uv", "venv", flag, "--python", _shim_python_request(gen), str(venv)], run, "uv venv (dispatchers)",
@@ -1101,8 +1111,8 @@ class PathResult:
 def restart_notice(entry: str) -> str:
     return (
         f"added {entry} to your user PATH, ahead of uv's bin directory. Terminals and "
-        "Claude Code sessions started before now keep running the old nx until they "
-        "are restarted; restart them to pick this up."
+        "Claude Code and MCP hosts started before now may not find nx (or run the old one) "
+        "until restarted; open a new terminal and restart them."
     )
 
 
@@ -1305,7 +1315,7 @@ def repair_layout(
     """Finish or re-establish what a generation layout needs on Windows.
 
     The resumable half of a migration, and the Windows meaning of "repair a uv
-    takeover": uv rewriting its own launchers is harmless because ``current\\bin``
+    takeover": uv rewriting its own launchers is harmless because ``<tools>\\bin``
     precedes them, so the repair is to RE-ENSURE the pieces. In order, each only
     when needed: the current generation's launcher directory (a generation built
     before launcher directories existed has none), the user PATH entry, and the
@@ -1337,8 +1347,7 @@ def repair_layout(
     if not dry_run:
         # Idempotent: writes nothing when every dispatcher is there and its environment runs.
         lines.extend(ensure_dispatchers(root, current, run=run, platform=platform))
-    for name in (layout.CURRENT_LINK_NAME, layout.PREVIOUS_LINK_NAME):
-        pointer = root / name
+    for pointer in (layout.current_link(tools=root), layout.previous_link(tools=root), layout.legacy_generation_link(tools=root)):
         if ops.is_link(pointer) and layout.read_pointer(pointer) is None:
             lines.append(f"turning the directory link {pointer} into a pointer file")
             if not dry_run:
@@ -1364,6 +1373,29 @@ def repair_layout(
             if not dry_run:
                 register_legacy(legacy, root, ops=ops, platform=platform)
     return lines
+
+
+def activate_generation(
+    tools: Path | None, generation: Path | str, *, platform: str | None = None, restoring: bool = False,
+) -> PathResult | None:
+    """Make *generation* current: dispatchers, the user PATH entry, then the flip (no dispatcher, no
+    flip; an open shell never loses ``nx`` between the PATH edit and the flip). *restoring* (undoing a
+    bad flip) flips first and tops the launchers up if it can, so a failure there cannot leave ``current``
+    on the generation being left. Returns the PATH result, or ``None`` when that top-up failed."""
+    def launchers() -> PathResult:
+        ensure_dispatchers(tools, generation, platform=platform)
+        return ensure_launcher_path(tools)
+
+    if not restoring:
+        result = launchers()
+        flip_current(generation, tools, platform=platform)
+        return result
+    flip_current(generation, tools, platform=platform)
+    try:
+        return launchers()
+    except GenerationError as exc:
+        _emit([f"nexus: current is back, but the launchers could not be topped up: {exc}"])
+        return None
 
 
 def ledger_registers(link: Path, tree: Path | str) -> bool:

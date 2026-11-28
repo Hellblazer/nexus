@@ -73,7 +73,10 @@ if "%1"=="tool" if "%2"=="run" (
         exit /b 1
     )
     if defined UV_TORCH_BACKEND (>> "{root}\\uv-env.log" echo UV_TORCH_BACKEND=%UV_TORCH_BACKEND%) else (>> "{root}\\uv-env.log" echo UV_TORCH_BACKEND=^<unset^>)
-    if not exist "{root}\\skip-nx" (
+    if exist "{root}\\build-into-layout" (
+        if not exist "%USERPROFILE%\\.local\\share\\nexus\\tools\\bin" mkdir "%USERPROFILE%\\.local\\share\\nexus\\tools\\bin"
+        copy /y "{root}\\nx-standin.cmd" "%USERPROFILE%\\.local\\share\\nexus\\tools\\bin\\nx.cmd" >nul
+    ) else if not exist "{root}\\skip-nx" (
         if not exist "%USERPROFILE%\\.local\\bin" mkdir "%USERPROFILE%\\.local\\bin"
         copy /y "{root}\\nx-standin.cmd" "%USERPROFILE%\\.local\\bin\\nx.cmd" >nul
     )
@@ -167,6 +170,12 @@ class Box:
         return self._install("nx-standin", self.home / ".local" / "bin", "nx")
 
     def with_nx_in_the_generation_layout(self) -> "Box":
+        """The dispatcher directory, ``<tools>/bin`` (nexus-f9bgu.47)."""
+        layout = self.home / ".local" / "share" / "nexus" / "tools" / "bin"
+        return self._install("nx-standin", layout, "nx")
+
+    def with_nx_in_the_old_generation_layout(self) -> "Box":
+        """``<tools>/current/bin``, where installs before the pointer file put it."""
         layout = self.home / ".local" / "share" / "nexus" / "tools" / "current" / "bin"
         return self._install("nx-standin", layout, "nx")
 
@@ -722,7 +731,10 @@ def test_the_second_run_with_local_still_runs_init(box: Box) -> None:
 
 @needs_pwsh
 @pytest.mark.parametrize(
-    "where", ["with_nx_on_path", "with_nx_in_local_bin", "with_nx_in_the_generation_layout"],
+    "where", [
+        "with_nx_on_path", "with_nx_in_local_bin", "with_nx_in_the_generation_layout",
+        "with_nx_in_the_old_generation_layout",
+    ],
 )
 def test_a_cli_that_already_resolves_skips_the_build(box: Box, where: str) -> None:
     """On the PATH; in ``.local/bin`` (a ``uv tool`` install) with that directory not on the
@@ -1150,14 +1162,27 @@ def test_a_build_that_leaves_no_nx_names_the_generation_layout(box: Box) -> None
     (box.root / "skip-nx").write_text("", encoding="utf-8")
     result = box.run("--cli-only")
     assert result.returncode != 0
-    layout = box.home / ".local" / "share" / "nexus" / "tools" / "current" / "bin"
+    layout = box.home / ".local" / "share" / "nexus" / "tools" / "bin"
     assert str(layout) in result.stderr
+
+
+@needs_pwsh
+def test_a_build_that_installs_into_the_dispatcher_directory_is_found_there(box: Box) -> None:
+    """The bootstrap's build puts nx in ``<tools>/bin`` (nexus-f9bgu.47): neither on the window's PATH,
+    which predates it, nor in ``.local/bin``, and ``current`` is a file, so ``current/bin`` is nothing.
+    The script used to look only in ``current/bin`` and exit 1 after a good build."""
+    box.with_uv()
+    (box.root / "build-into-layout").write_text("", encoding="utf-8")
+    result = box.run("--cli-only")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert BOOTSTRAP in box.calls()
+    assert not (box.home / ".local" / "bin" / f"nx{EXT}").exists()
 
 
 @needs_pwsh
 def test_a_tilde_tools_directory_is_expanded(box: Box) -> None:
     box.with_uv()
-    box._install("nx-standin", box.home / "custom" / "tools" / "current" / "bin", "nx")
+    box._install("nx-standin", box.home / "custom" / "tools" / "bin", "nx")
     box.extra_env["NX_TOOLS_DIR"] = "~/custom/tools"
     result = box.run("--cli-only")
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -1167,7 +1192,7 @@ def test_a_tilde_tools_directory_is_expanded(box: Box) -> None:
 @needs_pwsh
 def test_a_relative_tools_directory_is_refused(box: Box) -> None:
     box.with_uv()
-    box._install("nx-standin", box.root / "rel" / "tools" / "current" / "bin", "nx")
+    box._install("nx-standin", box.root / "rel" / "tools" / "bin", "nx")
     box.extra_env["NX_TOOLS_DIR"] = "rel/tools"
     assert box.run("--cli-only").returncode == 0
     assert BOOTSTRAP in box.calls()

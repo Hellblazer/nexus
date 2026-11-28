@@ -326,7 +326,8 @@ def generation_install_present() -> bool:
         except (OSError, ValueError):
             lines = []
         if len(lines) >= 3 and lines[0].rstrip("\r") == "nx-pointer 1" and not lines[2].strip():
-            return os.path.isdir(lines[1].rstrip("\r"))
+            target = lines[1].rstrip("\r")
+            return os.path.isabs(target) and os.path.isdir(target)
         return current.is_dir()
     except OSError as exc:  # unreadable HOME, permissions, an untrusted junction (448)
         debug(f"generation probe failed: {exc}")

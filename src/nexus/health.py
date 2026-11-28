@@ -345,8 +345,8 @@ def _check_generation_layout() -> list[HealthResult]:
         # an empty tools root is a box that has not installed yet, and
         # hard-failing that would fail every fresh machine (RG-C).
         link = install_layout.current_link(tools=tools)
-        # is_link, not is_symlink: on Windows ``current`` is a junction, which
-        # pathlib reads as a plain directory (RDR-224, nexus-f9bgu.47).
+        # is_link, not is_symlink: on Windows ``current`` is a pointer file (a junction before
+        # nexus-f9bgu.47), which pathlib reads as a plain file or directory.
         if not install_layout.is_link(link) and not link.exists():
             generations = install_layout.list_generations(tools=tools)
             if not generations:
@@ -536,7 +536,7 @@ def _check_smart_app_control(
 
 
 def _check_windows_user_path(tools, *, store=None, environ=None) -> list[HealthResult]:
-    """The Windows shim row: the user PATH must carry ``<tools>\\current\\bin``
+    """The Windows shim row: the user PATH must carry ``<tools>\\bin``
     ahead of every other directory that provides ``nx.exe``, and that directory
     must hold ``nx.exe``.
 

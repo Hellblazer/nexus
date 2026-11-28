@@ -229,7 +229,10 @@ def write_pointer(path: Path | str, target: Path | str) -> None:
         raise LayoutError(f"a pointer target must be one line, got {text!r}")
     if not (PureWindowsPath(text).is_absolute() or PurePosixPath(text).is_absolute()):
         raise LayoutError(f"a pointer target must be an absolute path, got {text!r}")
-    Path(path).write_text(f"{POINTER_MAGIC}\n{text}\n", encoding="utf-8")
+    with open(path, "w", encoding="utf-8", newline="") as handle:  # newline="": LF on every host
+        handle.write(f"{POINTER_MAGIC}\n{text}\n")
+        handle.flush()
+        os.fsync(handle.fileno())  # a replace of a file not yet on disk can leave an empty one after a crash
 
 
 def read_pointer(path: Path | str) -> str | None:
@@ -482,7 +485,7 @@ def reclaimed_from_owned(
     """Which of the *owned* shim names at *bin_dir* are symlinks (uv's).
 
     POSIX only. On Windows there is nothing to reclaim: nexus writes no files
-    into uv's bin dir (the shims are a PATH entry, ``<tools>\\current\\bin``,
+    into uv's bin dir (the shims are a PATH entry, ``<tools>\\bin``,
     ahead of it), so uv rewriting its own launchers there is harmless.
     """
     if _is_nt(platform):
@@ -1256,9 +1259,9 @@ def list_generations(*, tools: Path | None = None) -> list[Path]:
         return []
     candidates = [
         entry for entry in root.iterdir()
-        if entry.is_dir()
-        and entry.name.startswith(GENERATION_PREFIX)
-        and (entry / RECEIPT_NAME).is_file()
+        if entry.name.startswith(GENERATION_PREFIX)
+        and os.path.isdir(entry)  # not entry.is_dir(): OSError 448 on a junction RedirectionGuard refuses
+        and os.path.isfile(entry / RECEIPT_NAME)
     ]
     return sorted(candidates, key=lambda p: p.name)
 

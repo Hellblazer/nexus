@@ -68,9 +68,13 @@ def read_pointer(path):
 
 def resolve(name, tools):
     """``(program, problem)``: the generation's launcher for *name*, or why not."""
-    generation = read_pointer(os.path.join(tools, "current"))
+    pointer = os.path.join(tools, "current")
+    generation = read_pointer(pointer)
     if not generation:
-        return None, "no generation is installed (%s is not a pointer); run `nx self install`" % os.path.join(tools, "current")
+        return None, (
+            "no generation is installed: %s is missing, empty or damaged. `nx` cannot repair it from here; "
+            "rebuild it with `uv tool run --from conexus nx self install --bootstrap`" % pointer
+        )
     program = os.path.join(generation, "Scripts", name + ".exe")
     if not os.path.isfile(program):
         return None, "%s is not in the current generation (%s)" % (name, generation)
@@ -82,24 +86,33 @@ def tools_dir(executable):
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(executable))))
 
 
-def main(argv=None, executable=None):
-    """Run the current generation's launcher of the same name, and exit with its status."""
+def main(argv=None, executable=None, popen=None):
+    """Run the current generation's launcher of the same name, and return its status.
+
+    *popen* is the test seam for ``subprocess.Popen``."""
     argv = list(sys.argv if argv is None else argv)
     name = os.path.splitext(os.path.basename(argv[0]))[0]
     program, problem = resolve(name, tools_dir(sys.executable if executable is None else executable))
     if program is None:
         sys.stderr.write("nexus: %s\n" % problem)
         return EXIT_NOT_FOUND
-    import subprocess
-
     try:
-        return subprocess.call([program] + argv[1:])
-    except KeyboardInterrupt:
-        # The child shares the console and has seen the same Ctrl-C; its status is the answer.
-        return 130
+        if popen is None:
+            import subprocess
+
+            child = subprocess.Popen([program] + argv[1:])
+        else:
+            child = popen([program] + argv[1:])
     except OSError as exc:
         sys.stderr.write("nexus: could not run %s: %s\n" % (program, exc))
         return EXIT_NOT_FOUND
+    while True:
+        try:
+            return child.wait()
+        except KeyboardInterrupt:
+            # The child shares the console and got the same Ctrl-C: let it run its own handler and answer
+            # with its status. (subprocess.call would kill it 0.25 s later, so no command could shut down cleanly.)
+            continue
 
 
 def console_main():

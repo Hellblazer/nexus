@@ -5168,8 +5168,9 @@ per command that reads `current` and runs that generation's own launcher, so an
 upgrade only replaces the `current` file. A running launcher exe cannot be
 replaced on Windows, and the fixed launchers never are. An install from before
 this change has junctions; `nx self install` converts them on its next run,
-and rollback to a junction `previous` still works. Terminals and sessions started before the one-time PATH change
-keep the old `nx` until restarted. A legacy `uv tool install` tree is migrated
+and rollback to a junction `previous` still works. Terminals and MCP hosts started before the one-time PATH change
+have a PATH that no longer reaches `nx` (`current\bin` is gone and `<tools>\bin` is not on theirs): open a new
+terminal and restart the host. A legacy `uv tool install` tree is migrated
 on the first run and its old launchers are removed by `nx self gc` once
 nothing runs them. The installer runs in Python there, never through `bash`.
 

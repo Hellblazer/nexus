@@ -31,7 +31,11 @@ if [ "$1" = tool ] && [ "$2" = run ]; then
         exit 1
     fi
     printf 'UV_TORCH_BACKEND=%s\\n' "${{UV_TORCH_BACKEND-<unset>}}" >> "{root}/uv-env.log"
-    if [ ! -e "{root}/skip-nx" ]; then
+    if [ -e "{root}/build-into-layout" ]; then
+        mkdir -p "$HOME/.local/share/nexus/tools/bin"
+        cp "{root}/nx-standin" "$HOME/.local/share/nexus/tools/bin/nx"
+        chmod +x "$HOME/.local/share/nexus/tools/bin/nx"
+    elif [ ! -e "{root}/skip-nx" ]; then
         mkdir -p "$HOME/.local/bin"
         cp "{root}/nx-standin" "$HOME/.local/bin/nx"
         chmod +x "$HOME/.local/bin/nx"

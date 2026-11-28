@@ -213,7 +213,8 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
         }
         $toolsDir = Resolve-Setting $env:NX_TOOLS_DIR (Join-Path (Join-Path (Join-Path (Join-Path $homeDir '.local') 'share') 'nexus') 'tools')
         $binDir = Resolve-Setting $env:NX_BIN_DIR (Join-Path (Join-Path $homeDir '.local') 'bin')
-        $layoutBin = Join-Path (Join-Path $toolsDir 'current') 'bin'
+        $layoutBin = Join-Path $toolsDir 'bin' # the dispatchers (nexus-f9bgu.47); installs before it put nx in current\bin
+        $oldLayoutBin = Join-Path (Join-Path $toolsDir 'current') 'bin'
 
         function Find-In([string]$Dir, [string]$Base) {
             foreach ($ext in '.exe', '.cmd', '') {
@@ -289,7 +290,7 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
             return ([string]($out | Select-Object -First 1)) -like 'nx, version *'
         }
         function Find-Cli { # the generation layout first, then the bin directory, then PATH
-            $candidates = @((Find-In $layoutBin 'nx'), (Find-In $binDir 'nx'))
+            $candidates = @((Find-In $layoutBin 'nx'), (Find-In $oldLayoutBin 'nx'), (Find-In $binDir 'nx'))
             foreach ($found in @(Get-Command nx -All -CommandType Application -ErrorAction SilentlyContinue)) { $candidates += $found.Source }
             foreach ($candidate in $candidates) {
                 if (Test-OurNx $candidate) { $state.Nx = $candidate; return $true }

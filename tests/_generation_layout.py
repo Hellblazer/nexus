@@ -22,17 +22,15 @@ from nexus import install_layout
 def point_current(link: Path, target: Path) -> None:
     """Make *link* point at *target* the way the product does on this OS.
 
-    On Windows the product's pointer is a directory junction
-    (``generation_core.LinkOps``), which needs no privilege; ``symlink_to``
-    needs SeCreateSymbolicLinkPrivilege and fails with WinError 1314 on the CI
-    runner's account. Elsewhere it is a symlink. *target* must exist when the
-    pointer is made (``CreateJunction`` refuses a missing one); to leave a
-    dangling pointer, remove the target afterwards.
+    On Windows the product's pointer is a pointer FILE (``layout_core.write_pointer``; nexus-f9bgu.47:
+    a junction a non-elevated process made is refused on traversal by RedirectionGuard, and a symlink
+    needs Developer Mode). Elsewhere it is a symlink. To leave a dangling pointer, remove the target
+    afterwards.
     """
     if os.name == "nt":
-        import _winapi  # noqa: PLC0415 -- exists only on Windows
+        from nexus._install import layout_core  # noqa: PLC0415
 
-        _winapi.CreateJunction(str(target), str(link))
+        layout_core.write_pointer(link, target)
     else:
         link.symlink_to(target)
 

@@ -153,20 +153,36 @@ class TestRealWindows:
         assert a.is_dir() and b.is_dir() and c.is_dir(), "no generation was emptied through a junction"
         assert sorted(p.name for p in tools.iterdir() if p.name.startswith(".")) == [], "no litter"
 
-    def test_repair_turns_the_junctions_of_an_old_install_into_files(self, tmp_path: Path) -> None:
+    def test_repair_turns_the_junctions_of_an_old_install_into_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Real junctions (current, previous and the legacy ledger) become pointer files. The dispatcher and
+        launcher builds are stubbed (``TestRealDispatchers`` and the generation build tests run them for
+        real); everything else, the conversion included, is the product's."""
         tools = tmp_path / "tools"
         tools.mkdir()
-        gen = tools / "gen-A"
+        old_gen, gen = tools / "gen-A", tools / "gen-B"
+        old_gen.mkdir()
         gen.mkdir()
+        (tmp_path / "uv" / "Scripts").mkdir(parents=True)
+        legacy = tmp_path / "uv"
+        gen_core.flip_current(old_gen, tools, ops=JunctionOps())
         gen_core.flip_current(gen, tools, ops=JunctionOps())
-        assert os.path.isjunction(tools / "current")
+        JunctionOps().create(str(legacy), tools / "gen-legacy-uv-tool")
+        for name in ("current", "previous", "gen-legacy-uv-tool"):
+            assert os.path.isjunction(tools / name), name
+        monkeypatch.setattr(gen_core, "populate_launchers", lambda *a, **k: [])
+        monkeypatch.setattr(gen_core, "ensure_dispatchers", lambda *a, **k: [])
+        monkeypatch.setattr(lc, "uv_conexus_venv", lambda **k: legacy)
         store = gen_core.FileUserPath(tmp_path / "userpath.txt")
         store.write("C:\\Windows", 2)
-        # No receipt and no python: the dispatchers cannot be built here (they are built and
-        # run for real in TestRealDispatchers); the pointer conversion is what this proves.
-        with pytest.raises(gen_core.GenerationError):
-            gen_core.repair_layout(tools, store=store, uv_bin="C:\\uvbin", environ={})
-        assert os.path.isjunction(tools / "current"), "a repair that could not finish leaves the old pointer intact"
+        lines = gen_core.repair_layout(tools, store=store, uv_bin="C:\\uvbin", environ={"PATH": ""})
+        assert sum("into a pointer file" in line for line in lines) == 3, lines
+        for name, target in (("current", gen), ("previous", old_gen), ("gen-legacy-uv-tool", legacy)):
+            pointer = tools / name
+            assert pointer.is_file() and not os.path.isjunction(pointer), name
+            assert lc.compare_key(lc.read_link(pointer)) == lc.compare_key(str(target)), name
+        assert gen.is_dir() and old_gen.is_dir() and legacy.is_dir(), "no tree was emptied through a junction"
 
     def test_the_real_user_path_registry_value_is_readable_and_left_untouched(self) -> None:
         """Read-only: the store seam reads HKCU\\Environment without writing."""
@@ -335,13 +351,23 @@ def _build_demo_wheel(directory: Path) -> Path:
     return wheel
 
 
+def _need_uv() -> None:
+    """``uv`` is what builds the dispatchers, so a run without it proved nothing. On a developer box
+    that is a skip; on CI it is a FAILURE (a skip there passes with no evidence, and the workflow's
+    ``--require-passed`` list is not ours to edit)."""
+    if shutil.which("uv") is not None:
+        return
+    if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+        pytest.fail("uv is not on PATH on CI: the dispatcher tests would pass having proved nothing")
+    pytest.skip("uv is not on PATH, so no real venv can be built here")
+
+
 class TestRealDispatchers:
     """The dispatchers on the user PATH, built by a real ``uv`` and run through a real launcher:
     ``<tools>\\bin\\nxdemo.exe`` runs the CURRENT generation's ``nxdemo.exe`` and reports that
     generation as ``sys.prefix``; a flip changes what it runs without replacing it, even while
-    one is running; a rollback changes it back. Needs ``uv`` (present on the runner); skips with
-    that reason where it is not, and is not in the floor's ``--require-passed`` set for that
-    reason."""
+    one is running; a rollback changes it back; a refresh of the dispatcher itself renames a
+    RUNNING one aside. Needs ``uv``: skipped without it off CI, a failure on CI (:func:`_need_uv`)."""
 
     @staticmethod
     def _generation(tmp_path: Path, tools: Path, stamp: str, wheel: Path) -> Path:
@@ -366,8 +392,7 @@ class TestRealDispatchers:
     def test_a_dispatcher_runs_the_current_generation_across_a_flip_a_running_process_and_a_rollback(
         self, tmp_path: Path,
     ) -> None:
-        if shutil.which("uv") is None:
-            pytest.skip("uv is not on PATH, so no real venv can be built here")
+        _need_uv()
         tools = tmp_path / "tools"
         tools.mkdir()
         wheel = _build_demo_wheel(tmp_path)
@@ -403,9 +428,42 @@ class TestRealDispatchers:
         assert dispatcher.read_bytes() == before
 
     @pytest.mark.skipif(not ON_WINDOWS, reason="needs the Windows launcher")
+    def test_a_refresh_renames_a_running_real_dispatcher_aside_and_the_next_run_is_the_new_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The one place a dispatcher IS replaced (a ``DISPATCH_VERSION`` bump, a rebuilt environment).
+        A real generation launcher cannot be renamed while it runs (WinError 32); this proves the
+        dispatcher can, with a real uv-built one that is executing, so the first bump does not fail
+        an upgrade made while ``nx-mcp`` runs."""
+        _need_uv()
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        gen = self._generation(tmp_path, tools, "A", _build_demo_wheel(tmp_path))
+        gen_core.ensure_dispatchers(tools, gen, dist="nxdemo")
+        gen_core.flip_current(gen, tools)
+        dispatcher = gen_core.current_launcher_dir(tools) / "nxdemo.exe"
+        before = dispatcher.read_bytes()
+        ready = tmp_path / "ready"
+        child = subprocess.Popen([str(dispatcher), "sleep", str(ready)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            settle(lambda: not ready.exists(), deadline=120.0, what="the demo launcher started")
+            monkeypatch.setattr(gen_core, "DISPATCH_VERSION", "2")  # a new version: every dispatcher is refreshed
+            lines = gen_core.ensure_dispatchers(tools, gen, dist="nxdemo")
+            assert any("dispatchers for nxdemo" in line for line in lines), lines
+            assert child.poll() is None, "the running dispatcher kept running"
+            asides = [p.name for p in dispatcher.parent.iterdir() if ".old." in p.name]
+            assert len(asides) == 1, f"the running file is renamed aside, not replaced: {asides}"
+            assert dispatcher.read_bytes() != before, "the new dispatcher is in place (its wheel says version 2)"
+            assert lc.compare_key(self._run(dispatcher)) == lc.compare_key(str(gen)), "and it works"
+        finally:
+            child.kill()
+            child.wait()
+        gen_core.ensure_dispatchers(tools, gen, dist="nxdemo")
+        assert not [p for p in dispatcher.parent.iterdir() if ".old." in p.name], "the aside is swept once it is not running"
+
+    @pytest.mark.skipif(not ON_WINDOWS, reason="needs the Windows launcher")
     def test_the_dispatcher_passes_arguments_stdin_and_the_exit_status(self, tmp_path: Path) -> None:
-        if shutil.which("uv") is None:
-            pytest.skip("uv is not on PATH, so no real venv can be built here")
+        _need_uv()
         tools = tmp_path / "tools"
         tools.mkdir()
         gen = self._generation(tmp_path, tools, "A", _build_demo_wheel(tmp_path))
@@ -421,8 +479,7 @@ class TestRealDispatchers:
 
     @pytest.mark.skipif(not ON_WINDOWS, reason="needs the Windows launcher")
     def test_the_dispatcher_without_a_pointer_says_so_and_exits_127(self, tmp_path: Path) -> None:
-        if shutil.which("uv") is None:
-            pytest.skip("uv is not on PATH, so no real venv can be built here")
+        _need_uv()
         tools = tmp_path / "tools"
         tools.mkdir()
         gen = self._generation(tmp_path, tools, "A", _build_demo_wheel(tmp_path))

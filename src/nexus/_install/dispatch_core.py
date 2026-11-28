@@ -102,3 +102,37 @@ def sweep_litter(directory: Path) -> None:
             litter.unlink()
         except OSError:
             pass
+
+
+#: A pointer file is a line and a path; anything bigger at a pointer name is somebody's file.
+TORN_MAX_BYTES = 4096
+
+
+def is_torn_pointer(path: Path) -> bool:
+    """Whether *path* is a small regular file where a pointer should be but is not a valid one.
+
+    ``write_pointer`` fsyncs before the replace, but a restored backup, an antivirus rewrite or a
+    crash on a disk that lies can still leave an empty or headerless ``current``. Nothing there is
+    worth keeping, and refusing to replace it left no way back (``nx`` itself cannot run). A
+    directory, a link and a file bigger than a pointer are never torn. The caller has already
+    asked ``is_link``, so a valid pointer does not reach here.
+    """
+    try:
+        if path.is_symlink() or os.path.isjunction(path) or not path.is_file():
+            return False
+        return path.stat().st_size <= TORN_MAX_BYTES
+    except OSError:
+        return False
+
+
+def sweep_staging(root: Path, older_than_s: float = 3600.0) -> None:
+    """Remove ``.dispatch-wheels.<pid>`` directories a crashed install left in *root*."""
+    import time  # noqa: PLC0415 -- the one use
+
+    for staging in root.glob(".dispatch-wheels.*"):
+        try:
+            if time.time() - staging.stat().st_mtime > older_than_s:
+                shutil.rmtree(staging, ignore_errors=True)
+        except OSError:
+            pass
+

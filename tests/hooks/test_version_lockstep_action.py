@@ -1295,6 +1295,28 @@ class TestGenerationLayout:
         gen.rmdir()
         assert mod.generation_install_present() is False, "a pointer at a reaped generation is not an install"
 
+    @pytest.mark.parametrize(
+        "body",
+        [b"", b"nx-pointer 1\n", b"nx-pointer 1\ngen-relative\n", b"nx-pointer 2\n/abs\n", b"\xff\xfe\x00"],
+        ids=["empty", "header-only", "relative-target", "wrong-version", "binary"],
+    )
+    def test_a_damaged_or_relative_pointer_file_is_not_a_managed_install(
+        self, mod, tmp_path, monkeypatch, body: bytes,
+    ) -> None:
+        tools = tmp_path / "tools"
+        (tools / "gen-relative").mkdir(parents=True)
+        (tools / "current").write_bytes(body)
+        monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+        monkeypatch.chdir(tools)  # a relative target would resolve to gen-relative, which exists
+        assert mod.generation_install_present() is False
+
+    def test_the_pointer_header_is_the_one_layout_core_writes(self, mod) -> None:
+        """This script cannot import nexus (it runs under a bare interpreter), so it restates the header."""
+        from nexus._install import layout_core
+
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        assert f'"{layout_core.POINTER_MAGIC}"' in source
+
     def test_a_dangling_current_is_not_a_managed_install(self, mod, tmp_path, monkeypatch) -> None:
         """Fail-safe, matching uv_receipt_present's own posture: every edge
         case resolves to False rather than proceeding on a broken layout."""

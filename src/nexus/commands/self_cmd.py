@@ -830,7 +830,7 @@ def restore_current_generation(generation: Path, *, previous: str | None) -> Non
     link = install_layout.previous_link(tools=tools)
     keep_previous = previous is not None and Path(previous).is_dir()
     if _is_windows():
-        _windows_flip_and_path(generation, tools=tools)
+        _windows_flip_and_path(generation, tools=tools, restoring=True)
         if keep_previous:
             try:
                 _generation().swap_link(str(previous), link)
@@ -1735,7 +1735,7 @@ def _require_readable_receipt(generation: Path) -> None:
 def _echo_path_result(result) -> None:
     """Tell the operator when the user PATH changed: the one-time step whose
     effect reaches only programs started AFTER it."""
-    if result.changed:
+    if result is not None and result.changed:  # None: a restore whose launcher top-up failed (said already)
         click.echo(_generation().restart_notice(result.entry))
 
 
@@ -1768,16 +1768,15 @@ def _windows_build_flip_shims(
     return generation
 
 
-def _windows_flip_and_path(generation: Path, *, tools: Path, bootstrap: bool = False) -> None:
-    """Flip ``current`` (a pointer file) to *generation*, put ``<tools>\\bin`` on the user
-    PATH, and repoint the logon task. On the bootstrap path the failure names
-    the same ``--bootstrap`` command, because the plain one has no ``nx`` to
-    run there."""
+def _windows_flip_and_path(
+    generation: Path, *, tools: Path, bootstrap: bool = False, restoring: bool = False,
+) -> None:
+    """Make *generation* current (``activate_generation``; *restoring* flips first) and repoint the
+    logon task. On the bootstrap path the failure names the same ``--bootstrap`` command, because
+    the plain one has no ``nx`` to run there."""
     core = _generation()
     try:
-        core.ensure_dispatchers(tools, generation, platform=_plat())  # first: no dispatcher, no flip
-        core.flip_current(generation, tools, platform=_plat())
-        _echo_path_result(core.ensure_launcher_path(tools))
+        _echo_path_result(core.activate_generation(tools, generation, platform=_plat(), restoring=restoring))
     except core.GenerationError as exc:
         rerun = (
             "re-run the same `--bootstrap` command to finish the install"

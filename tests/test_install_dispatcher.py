@@ -193,7 +193,7 @@ class TestEnsureDispatchers:
         venv = next(c for c in uv.calls if c[:2] == ["uv", "venv"])
         assert "--clear" in venv
         assert "--reinstall" not in uv.shim_installs[0], "a cleared environment has nothing to reinstall"
-        assert any("is gone; rebuilding" in line for line in lines)
+        assert any("is gone or its Python is; rebuilding" in line for line in lines)
         assert sorted(p.name for p in _bin(tools).iterdir()) == ["nx-mcp.exe", "nx.exe"]
 
     def test_litter_of_an_earlier_refresh_is_swept(self, tools: Path, generation: Path) -> None:
@@ -403,3 +403,68 @@ def test_the_new_install_cores_import_nothing_from_nexus(module: str) -> None:
         elif isinstance(node, ast.ImportFrom):
             roots.add((node.module or "").split(".")[0])
     assert "nexus" not in roots, roots
+
+
+class _FakeChild:
+    """What ``Popen`` hands back; ``wait`` raises the scripted exceptions, then answers."""
+
+    def __init__(self, script: list) -> None:
+        self.script = list(script)
+        self.killed = False
+
+    def wait(self):
+        step = self.script.pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        return step
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+class TestCtrlC:
+    """``subprocess.call`` kills the child 0.25 s after a KeyboardInterrupt, so every command run
+    through a dispatcher was hard-killed on Ctrl-C instead of running its own handler."""
+
+    def test_the_child_is_left_to_handle_its_own_ctrl_c_and_its_status_is_the_answer(self, tools: Path) -> None:
+        gen = tools / "gen-X"
+        (gen / "Scripts").mkdir(parents=True)
+        (gen / "Scripts" / "nx.exe").write_bytes(b"x")
+        lc.write_pointer(tools / "current", str(gen))
+        child = _FakeChild([KeyboardInterrupt(), KeyboardInterrupt(), 130])
+        started: list[list[str]] = []
+
+        def popen(argv):
+            started.append(argv)
+            return child
+
+        rc = dispatch.main(["nx.exe", "--version"], executable=str(tools / "shim" / "Scripts" / "python.exe"), popen=popen)
+        assert rc == 130 and not child.killed
+        assert started == [[str(gen / "Scripts" / "nx.exe"), "--version"]]
+
+    def test_a_program_that_cannot_start_is_said_in_words(self, tools: Path, capfd: pytest.CaptureFixture[str]) -> None:
+        gen = tools / "gen-X"
+        (gen / "Scripts").mkdir(parents=True)
+        (gen / "Scripts" / "nx.exe").write_bytes(b"x")
+        lc.write_pointer(tools / "current", str(gen))
+
+        def popen(_argv):
+            raise OSError("not a valid Win32 application")
+
+        assert dispatch.main(["nx.exe"], executable=str(tools / "shim" / "Scripts" / "python.exe"), popen=popen) == 127
+        assert "could not run" in capfd.readouterr().err
+
+
+#: sha256 of ``_nx_dispatch.py`` by ``DISPATCH_VERSION``. An installed dispatcher carries a COPY of the
+#: source, so a changed source with an unchanged version leaves every installed dispatcher stale
+#: for ever: edit the source, bump ``DISPATCH_VERSION``, add the new hash here.
+_DISPATCH_SOURCE_HASHES = {"1": "f6751ee27b58b6b95a3966551608a573c90121204ed6f32e19e5434a0db12c51"}
+
+
+def test_the_dispatch_version_names_this_exact_source() -> None:
+    import hashlib
+
+    digest = hashlib.sha256(Path(dispatch.__file__).read_bytes()).hexdigest()
+    assert _DISPATCH_SOURCE_HASHES.get(gen_core.DISPATCH_VERSION) == digest, (
+        f"_nx_dispatch.py changed (sha256 {digest}): bump generation_core.DISPATCH_VERSION and add it here"
+    )

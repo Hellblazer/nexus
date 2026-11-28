@@ -140,6 +140,8 @@ on:
       # tests/test_install_generation_real_windows.py.
       - src/nexus/_install/generation_core.py
       - src/nexus/_install/_nx_dispatch.py
+      - src/nexus/_install/dispatch_core.py
+      - src/nexus/_install/userpath_core.py
       - src/nexus/_install/layout_core.py
       - src/nexus/_install/gc_core.py
       # The generation lease: ctypes CreateFileW, the share-delete hold and the reap's link-safe walk

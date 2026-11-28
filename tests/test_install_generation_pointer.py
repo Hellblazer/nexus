@@ -139,11 +139,12 @@ class TestFilePointers:
         _flip(a, tools)
         assert [n for n in _names(tools) if n.startswith(".")] == []
 
-    def test_a_real_file_named_current_is_never_replaced(self, tools: Path) -> None:
-        (tools / "current").write_text("not a pointer", encoding="utf-8")
+    def test_a_real_directory_named_current_is_never_replaced(self, tools: Path) -> None:
+        (tools / "current").mkdir()
+        (tools / "current" / "keep").write_text("keep", encoding="utf-8")
         with pytest.raises(gen_core.GenerationError, match="not a link"):
             _flip(_gen(tools, "gen-A"), tools)
-        assert (tools / "current").read_text(encoding="utf-8") == "not a pointer"
+        assert (tools / "current" / "keep").read_text(encoding="utf-8") == "keep"
 
     def test_register_legacy_writes_a_file_pointer_idempotently(self, tools: Path, tmp_path: Path) -> None:
         legacy = tmp_path / "uv" / "conexus"
