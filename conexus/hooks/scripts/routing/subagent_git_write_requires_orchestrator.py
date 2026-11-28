@@ -4072,21 +4072,24 @@ def _in_linked_worktree(cwd: str) -> bool | None:
         if git is None:
             return None
         # git prints paths as UTF-8 on every platform; the locale's cp1252 would
-        # garble a non-ASCII checkout path (nexus-ikoqj).
-        git_dir = subprocess.run(
-            [git, "rev-parse", "--git-dir"],
-            cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
-        )
-        common = subprocess.run(
-            [git, "rev-parse", "--git-common-dir"],
+        # garble a non-ASCII checkout path (nexus-ikoqj). One process answers both
+        # questions, a line each: this runs on every subagent Bash call, and a
+        # process start costs tens of milliseconds on native Windows.
+        out = subprocess.run(
+            [git, "rev-parse", "--git-dir", "--git-common-dir"],
             cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
     except Exception:  # noqa: BLE001 — undeterminable: None, which the caller fails CLOSED on
         return None
-    if git_dir.returncode != 0 or common.returncode != 0:
+    if out.returncode != 0:
         return None
-    gd = os.path.realpath(os.path.join(cwd, git_dir.stdout.strip()))
-    cd = os.path.realpath(os.path.join(cwd, common.stdout.strip()))
+    # Exactly two lines, or undeterminable: a path holding a newline cannot be
+    # told apart from the two answers, and that fails CLOSED like any other doubt.
+    lines = out.stdout.removesuffix("\n").split("\n")
+    if len(lines) != 2:
+        return None
+    gd = os.path.realpath(os.path.join(cwd, lines[0].strip()))
+    cd = os.path.realpath(os.path.join(cwd, lines[1].strip()))
     return gd != cd
 
 

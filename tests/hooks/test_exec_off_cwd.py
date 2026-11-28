@@ -309,7 +309,10 @@ def test_the_git_write_gate_asks_path_git_about_the_worktree(
     )
     seen = _record(mod, monkeypatch)
     mod._in_linked_worktree(str(tmp_path))
-    assert len(seen) == 2
+    # One git process answers both questions: the guard runs on every subagent Bash call, and a
+    # process start costs tens of milliseconds on native Windows.
+    assert len(seen) == 1
+    assert seen[0][1:] == ["rev-parse", "--git-dir", "--git-common-dir"]
     _argv0_is(seen, windows_box["git.exe"])
 
 

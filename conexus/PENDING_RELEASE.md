@@ -56,6 +56,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/compact_checkpoint.py`: a docstring only; it names the one-line placeholder the continuation's in-progress-beads subsection now carries where it used to say "bd unavailable or no results", GH #1689.
 - `prose-edit/skills/prose-edit/SKILL.md`: the rejections row says `--remove N` prints the renumbered list that is left and is run once, a stdin run takes "Yes, apply." as no pick, and the apply-question exception names a bare apply, nexus-scmcs.
 - `prose-edit/skills/prose-edit/markup-route.md`: a bare "Yes, apply." after a held query counts as No on the query, applies in the same turn (even when every edit is held), and leaves the voice-card question to step 13, nexus-scmcs.
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`: the linked-worktree probe asks git for its git dir and common dir in one `rev-parse` instead of two, one process fewer per subagent Bash call that reaches it; a reply that is not exactly two lines fails closed as a failed call does (no bead; found diagnosing the Windows test set timeout, 2026-11-27).
 
 
 ## Deferred to the next client release
