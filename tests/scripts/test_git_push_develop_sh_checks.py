@@ -311,30 +311,62 @@ def test_file_size_ratchet_refuses_a_test_file_over_its_cap_with_its_reproductio
     assert [c[:2] for c in _calls(fake_nx[1])] == [["ci", "check-hold"]], "refused before the lock and the record"
 
 
-def test_replay_wire_ledger_a_both_halves_commit_with_no_ledger_line_is_refused(armed, fake_nx) -> None:
-    """4402201ede's class: a commit touching the engine tree and a client http_* module together, undeclared."""
+def test_replay_wire_ledger_a_both_halves_commit_with_no_ledger_line_is_reported_not_refused(armed, fake_nx) -> None:
+    """4402201ede's class: a commit touching the engine tree and a client http_* module together, undeclared. On develop
+    it is a report (RDR-258 Phase 2): the push lands, the red names the commit and how to reproduce it."""
     origin, work = armed
-    before = _git("rev-parse", "refs/heads/develop", cwd=origin)
     sha = _commit_paths(work, "both halves", {"service/src/main/java/A.java": "class A {}\n", "src/nexus/db/http_x_client.py": "X = 1\n"})
     proc = _push(work, fake_nx, sha)
-    assert proc.returncode == 14, proc.stdout + proc.stderr
-    assert "PUSH_REFUSED_WIRE_LEDGER" in proc.stdout and sha[:12] in proc.stdout.replace(sha, sha[:12])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "PUSH_CHECK_REPORT wire-ledger is red at the tip's tree" in proc.stdout and "PUSH_REFUSED_WIRE_LEDGER" not in proc.stdout
+    assert sha in proc.stdout, "the report names the undeclared commit"
+    assert "not refused" in proc.stdout and "release PR into main" in proc.stdout and "engine release" in proc.stdout
     assert "reproduce: uv run python scripts/check_wire_contract_pairing.py" in proc.stdout
-    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == before
+    passed = [ln for ln in proc.stderr.splitlines() if ln.startswith("PUSH_CHECKS_PASSED")]
+    assert len(passed) == 1 and "reported=wire-ledger" in passed[0], proc.stderr
+    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == sha
 
 
-def test_replay_wire_ledger_a_declared_pair_pushes_and_a_dirty_tree_declaration_does_not_count(armed, fake_nx) -> None:
+def test_replay_wire_ledger_a_declared_pair_pushes_clean_and_a_dirty_tree_declaration_does_not_count(armed, fake_nx) -> None:
     origin, work = armed
     pair = _commit_paths(work, "both halves", {"service/src/main/java/A.java": "class A {}\n", "src/nexus/db/http_x_client.py": "X = 1\n"})
     entry = f"## Unshipped\n\n- `{pair}` -- bead nexus-x -- engine tag `engine-service-v9.9.9` -- the pair [additive]\n\n## Shipped\n"
     (work / "docs" / "wire-contract-pending.md").write_text(entry)           # declared in the working tree only
-    refused = _push(work, fake_nx, pair)
-    assert refused.returncode == 14 and "PUSH_REFUSED_WIRE_LEDGER" in refused.stdout, refused.stdout + refused.stderr
+    reported = _push(work, fake_nx, pair)
+    assert reported.returncode == 0 and "PUSH_CHECK_REPORT wire-ledger" in reported.stdout, reported.stdout + reported.stderr
     declared = _commit_paths(work, "declare it", {"docs/wire-contract-pending.md": entry})
     docs = _proof_file(work.parent / "docs.json", tree=_tip_tree(work, declared), command=DOCS_COMMAND, summary="1600 passed in 99s")
-    ok = _push(work, fake_nx, "--proof", str(docs), pair, declared)
+    ok = _push(work, fake_nx, "--proof", str(docs), declared)
     assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "PUSH_CHECK_REPORT" not in ok.stdout and "reported=none" in ok.stderr, "a declared pair is clean, not reported"
     assert _git("rev-parse", "refs/heads/develop", cwd=origin) == declared
+
+
+def test_a_wire_check_that_cannot_verify_is_still_refused_only_a_finding_is_reported(armed, fake_nx) -> None:
+    """The check's exit 1 is a finding (undeclared or stale); its exit 2 is 'could not read the history', never 'fine'. A ledger
+    entry whose sha the history cannot resolve makes the staleness check unanswerable, which the script reports as exit 2."""
+    origin, work = armed
+    before = _git("rev-parse", "refs/heads/develop", cwd=origin)
+    entry = "## Unshipped\n\n- `" + "1" * 40 + "` -- bead nexus-x -- engine tag `engine-service-v9.9.9` -- no such commit [additive]\n\n## Shipped\n"
+    sha = _commit_paths(work, "an unresolvable entry", {"docs/wire-contract-pending.md": entry})
+    proc = _push(work, fake_nx, sha)
+    assert proc.returncode == 14 and "PUSH_REFUSED_WIRE_LEDGER" in proc.stdout, proc.stdout + proc.stderr
+    assert "PUSH_CHECK_REPORT" not in proc.stdout and "could not verify" in proc.stdout
+    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == before
+
+
+def test_a_stale_ledger_entry_is_reported_like_an_undeclared_commit(armed, fake_nx) -> None:
+    """An Unshipped entry whose commit is already an ancestor of the newest v* tag (the arming commit, tagged v1.0.0) is the
+    check's other exit-1 finding."""
+    origin, work = armed
+    shipped = _git("rev-parse", "v1.0.0", cwd=work)
+    entry = f"## Unshipped\n\n- `{shipped}` -- bead nexus-x -- engine tag `engine-service-v9.9.9` -- already shipped [additive]\n\n## Shipped\n"
+    sha = _commit_paths(work, "a stale entry", {"docs/wire-contract-pending.md": entry})
+    docs = _proof_file(work.parent / "docs.json", tree=_tip_tree(work, sha), command=DOCS_COMMAND, summary="1600 passed in 99s")
+    proc = _push(work, fake_nx, "--proof", str(docs), sha)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "PUSH_CHECK_REPORT wire-ledger" in proc.stdout and "STALE (1)" in proc.stdout
+    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == sha
 
 
 def test_replay_cloud_leg_an_unmapped_ledger_route_is_refused(armed, fake_nx) -> None:
@@ -485,10 +517,9 @@ def test_a_skip_overrides_one_check_and_its_reason_is_in_the_summary_and_the_rec
 
 def test_a_skip_does_not_cover_another_red_check(armed, fake_nx) -> None:
     _origin, work = armed
-    sha = _commit_paths(work, "both", {"tests/test_big.py": "x = 1\n" * 1001, "service/src/main/java/A.java": "class A {}\n",
-                                       "src/nexus/db/http_x_client.py": "X = 1\n"})
+    sha = _commit_paths(work, "both", {"tests/test_big.py": "x = 1\n" * 1001, "scripts/changelog_fold.py": "import sys\nsys.exit(0)\n"})
     proc = _push(work, fake_nx, "--skip-file-size", "why", sha)
-    assert proc.returncode == 14 and "PUSH_REFUSED_WIRE_LEDGER" in proc.stdout and "PUSH_REFUSED_FILE_SIZE" not in proc.stdout
+    assert proc.returncode == 14 and "PUSH_REFUSED_CHANGELOG" in proc.stdout and "PUSH_REFUSED_FILE_SIZE" not in proc.stdout
 
 
 def test_a_skip_of_a_check_nothing_selected_is_not_written_into_the_record(armed, fake_nx) -> None:
