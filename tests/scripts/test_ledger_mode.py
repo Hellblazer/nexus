@@ -387,3 +387,16 @@ def test_the_release_preflight_pins_block_on_its_pin_tests() -> None:
     line = next(ln for ln in (REPO / "tests" / "e2e" / "release-preflight.sh").read_text().splitlines()
                 if ln.startswith('check "pin-tests"'))
     assert "NX_LEDGER_MODE=block" in line, "a variable left exported by another session must not demote a release gate"
+
+
+def test_the_dev_preflight_pins_block_on_the_changelog_check_and_the_plugin_ledger_test() -> None:
+    lua = (REPO / ".nexus" / "procedures" / "preflight.lua").read_text()
+    assert '"NX_LEDGER_MODE=block uv run python scripts/changelog_fold.py check"' in lua
+    assert 'gated("NX_LEDGER_MODE=block " .. PYTEST .. " tests/test_plugin_release_drift_ledger.py' in lua
+
+
+@pytest.mark.parametrize("reason", ["", "   "])
+def test_the_gate_refuses_a_blank_ledger_report_reason(reason: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        gate.main(["--repo", ".", "--base", "x", "--tip", "y", "--ledger-report", reason])
+    assert exc.value.code == 2

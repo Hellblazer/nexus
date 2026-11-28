@@ -444,7 +444,7 @@ local CLASSES = {
       if any(files, "^changelog/unreleased/") or any(files, "^CHANGELOG%.md$")
         or any(files, "^conexus/CHANGELOG%.md$") then
         table.insert(out, step("the changelog fragments are well formed and no [Unreleased] holds a hand entry",
-          "uv run python scripts/changelog_fold.py check", false))
+          "NX_LEDGER_MODE=block uv run python scripts/changelog_fold.py check", false))
       end
       return out
     end,
@@ -504,7 +504,7 @@ local function standing(select_all)
       .. " trees against the pinned tag, so an uncommitted run reports on the previous commit."
       .. " tests/test_plugin_ledger.py is parser coverage, not an entry check: run it when"
       .. " scripts/plugin_ledger.py changed",
-      gated(PYTEST .. " tests/test_plugin_release_drift_ledger.py tests/daemon/test_lifecycle_gate.py"),
+      gated("NX_LEDGER_MODE=block " .. PYTEST .. " tests/test_plugin_release_drift_ledger.py tests/daemon/test_lifecycle_gate.py"),
       false),
     step("tests that mint a tenant, at +0 or below",
       "uv run scripts/tenant_delta.py --strict --base=" .. quote(base), false),

@@ -435,6 +435,29 @@ def test_the_pasteable_step_two_carries_red_fix(repos, fake_nx) -> None:
     assert "--red-fix because" in proc.stdout
 
 
+def test_the_pasteable_step_two_carries_ledger_report(repos, fake_nx) -> None:
+    """--ledger-report changes what the push runs and what the record says, so step two of the two-step push keeps it."""
+    _origin, work = repos
+    nx_dir, log = fake_nx
+    a = _commit(work, "a")
+    env = _env(work, nx_dir, log)
+    env.pop("NX_PUSH_SKIP_SCOPE_AUDIT")
+    proc = subprocess.run([str(_rec.SCRIPT), "--ledger-report", "rebuilding the ledger", "--allowed-paths-from-range", a], cwd=work,
+                          env=env, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 7, proc.stdout + proc.stderr
+    assert "--ledger-report 'rebuilding the ledger'" in proc.stdout or "--ledger-report rebuilding" in proc.stdout
+
+
+@pytest.mark.parametrize("reason", ["", "   ", "\t \n"])
+def test_ledger_report_with_a_blank_reason_is_a_usage_error(repos, fake_nx, reason: str) -> None:
+    origin, work = repos
+    nx_dir, log = fake_nx
+    before = _origin_develop(origin)
+    proc = _run(work, _commit(work, "a"), "--ledger-report", reason, nx_dir=nx_dir, log=log)
+    assert proc.returncode == 64 and "PUSH_REFUSED_USAGE" in proc.stdout
+    assert _origin_develop(origin) == before
+
+
 def test_a_hung_record_command_is_stopped_and_the_push_stands(repos, fake_nx) -> None:
     origin, work = repos
     nx_dir, log = fake_nx

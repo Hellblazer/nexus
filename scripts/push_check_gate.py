@@ -897,7 +897,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tip", required=True, help="the commit to push; its tree is what the checks read")
     parser.add_argument("--proof", action="append", default=[], type=Path, help="a watched_pytest.py --status file (repeatable)")
     parser.add_argument("--skip", action="append", default=[], type=parse_skip, help="NAME=REASON (repeatable)")
-    parser.add_argument("--ledger-report", default="", metavar="REASON",
+    parser.add_argument("--ledger-report", default=None, metavar="REASON",
                         help="run the changelog, cloud-leg and plugin-ledger checks in report mode (a finding is listed, not "
                              "refused), on the record; NX_LEDGER_MODE in the environment changes nothing here")
     parser.add_argument("--repush-prefix", default="", help="the push command up to its shas, for the re-push line of a refusal")
@@ -905,6 +905,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workdir", type=Path, default=None, help="a directory for the tip's tree (default: a temp dir)")
     parser.add_argument("--python", default=sys.executable, help="the interpreter the checks run under")
     args = parser.parse_args(argv)
+    if args.ledger_report is not None and not args.ledger_report.strip():
+        parser.error("--ledger-report needs a reason, not blank space: it goes on the push record")
 
     def _term(_signum: int, _frame: object) -> None:
         kill_children()                       # the checks first, so the worktree they read can be removed
@@ -918,7 +920,7 @@ def main(argv: list[str] | None = None) -> int:
             raise GateError(f"the work directory {workdir} does not exist")
         try:
             return run_gate(args.repo, args.base, args.tip, args.proof, dict(args.skip), workdir, args.python,
-                            repush=(args.repush_prefix, args.repush_suffix), ledger_report=" ".join(args.ledger_report.split()))
+                            repush=(args.repush_prefix, args.repush_suffix), ledger_report=" ".join((args.ledger_report or "").split()))
         finally:
             if own_workdir:
                 shutil.rmtree(workdir, ignore_errors=True)

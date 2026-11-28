@@ -138,7 +138,7 @@ def test_a_python_change_gets_ruff_its_tests_and_the_standing_checks(
         "scripts/build-gate-jar.sh",
         UNTRACKED,
         "lab-remote -- bash -c 'scripts/build-gate-jar.sh && uv run pytest -q -rf -p no:randomly --color=no -m lint -n auto'",
-        "uv run pytest -q -rf -p no:randomly --color=no tests/test_plugin_release_drift_ledger.py tests/daemon/test_lifecycle_gate.py",
+        "NX_LEDGER_MODE=block uv run pytest -q -rf -p no:randomly --color=no tests/test_plugin_release_drift_ledger.py tests/daemon/test_lifecycle_gate.py",
         "uv run scripts/tenant_delta.py --strict --base=base",
         "uv run scripts/windows_hand_test.py --check",
         "f=$(set -o pipefail; git diff --no-renames --name-only base...HEAD | uv run python "

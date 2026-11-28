@@ -512,7 +512,9 @@ while [[ $# -gt 0 ]]; do
       _skip_key="$(printf '%s' "${_skip_key//-/_}" | tr '[:lower:]' '[:upper:]')"
       printf -v "_CHECK_SKIP_${_skip_key}" '%s' "$_val"
       ;;
-    --ledger-report) _CHECK_LEDGER_REPORT="$_val" ;;
+    --ledger-report)
+      [[ -n "${_val//[[:space:]]/}" ]] || _usage_refuse "--ledger-report needs a reason, not blank space: it goes on the push record"
+      _CHECK_LEDGER_REPORT="$_val"; _echo_flags+=("$_name" "$_val") ;;
     --batch-minutes) NX_PUSH_BATCH_MINUTES="$_val" ;;
     --tenant-check)
       [[ "$_val" == "0" || "$_val" == "1" ]] || _usage_refuse "--tenant-check takes 0 or 1, got '$_val'"
