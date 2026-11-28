@@ -78,6 +78,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+import ledger_mode
+
 EXIT_OK = 0
 EXIT_REFUSED = 14
 EXIT_GATE_ERROR = 15
@@ -139,6 +141,7 @@ CLUSTER_CONTENT = r"pg_data_tempdir\(|integration_pg_conf\(|apply_reloadable_thr
 CONTEXT_PLUGINS = ("conexus", "sn", "prose-edit", "tool-spill")
 CONTEXT_CEILINGS = "tests/fixtures/context-budgets.txt"
 CONTEXT_SCRIPT = "scripts/context_budgets.py"
+LEDGER_MODE_SCRIPT = "scripts/ledger_mode.py"
 MAX_REPORT_LINES = 40
 MAX_REPORT_CHARS = 3500
 
@@ -160,6 +163,8 @@ class Spec:
     report_header: str = ""         # a regex (multiline): an exit 1 whose output has a line matching it is a finding the push
                                     # reports (PUSH_CHECK_REPORT); any other exit 1, a crash's traceback among them, refuses
     report_note: str = ""           # the sentence a report carries after its heading: what still blocks the finding, and where
+    ledger: str = ""                # a class-A ledger check: it runs under NX_LEDGER_MODE (scripts/ledger_mode.py)
+    default_mode: str = "block"     # a ledger check's mode when NX_LEDGER_MODE is unset ("report" is RDR-258 Phase 4 step 2)
 
 
 SPECS: dict[str, Spec] = {s.name: s for s in (
@@ -168,10 +173,11 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
          "split the file, or lower the ceiling with `scripts/file_size_ratchet.py update-exceptions` (a raise needs "
          "--allow-raise and the reason in the commit message)",
          marker=r"file_size_ratchet: 0 errors"),
-    Spec("changelog", "PUSH_REFUSED_CHANGELOG", "run", ("scripts/changelog_fold.py",),
+    Spec("changelog", "PUSH_REFUSED_CHANGELOG", "run", ("scripts/changelog_fold.py", LEDGER_MODE_SCRIPT),
          "uv run python scripts/changelog_fold.py check",
          "fix the fragment under changelog/unreleased/ the report names (one fragment per bead, never CHANGELOG.md)",
-         marker=r"changelog_fold check: ok"),
+         # In report mode a finding exits 0 with the summary line instead of "ok" (a run that examined nothing still exits 10).
+         marker=r"changelog_fold check: ok|LEDGER-REPORT changelog:", ledger="changelog"),
     Spec("context-budget", "PUSH_REFUSED_CONTEXT_BUDGET", "run", (CONTEXT_SCRIPT,),
          "uv run python scripts/context_budgets.py check",
          "cut the file or move detail into a file loaded on demand, or record a raise in tests/fixtures/context-budgets.txt with "
@@ -184,17 +190,17 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
          marker=r"wire-contract ledger clean", report_header=r"^(UNDECLARED|STALE) \(\d+\)",
          report_note="Reported, not refused: develop reports a both-halves wire change; the release PR into main and the engine "
                      "release still block it (RDR-258 Phase 2)."),
-    Spec("cloud-leg", "PUSH_REFUSED_CLOUD_LEG", "run", ("tests/scripts/test_cloud_leg.py",),
+    Spec("cloud-leg", "PUSH_REFUSED_CLOUD_LEG", "run", ("tests/scripts/test_cloud_leg.py", LEDGER_MODE_SCRIPT),
          "uv run pytest -o addopts= -m 'not integration and not slow' tests/scripts/test_cloud_leg.py",
          f"map every route of {LEDGER_PATH} in tests/e2e/lib/cloud_leg.py (the failing test names the unmapped one)",
          # Collected 2026-11-22: 102 tests, 101 pass and 1 is the opt-in real run (NX_CLOUDLEG_REAL_RUN), the one skip allowed.
-         min_passed=80, skip_ok="NX_CLOUDLEG_REAL_RUN"),
-    Spec("plugin-ledger", "PUSH_REFUSED_PLUGIN_LEDGER", "run", ("tests/test_plugin_release_drift_ledger.py",),
+         min_passed=80, skip_ok="NX_CLOUDLEG_REAL_RUN", ledger="cloud-leg-routes"),
+    Spec("plugin-ledger", "PUSH_REFUSED_PLUGIN_LEDGER", "run", ("tests/test_plugin_release_drift_ledger.py", LEDGER_MODE_SCRIPT),
          "uv run pytest -o addopts= -m 'not integration and not slow' tests/test_plugin_release_drift_ledger.py",
          "add every changed plugin file to conexus/PENDING_RELEASE.md (one path per bullet), or drop a shipped entry",
          # Collected 2026-11-22: 30 tests, all pass, none skips. NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 turns the tagless-checkout skip
          # (9 tests) into a failure, so a pass cannot be a tagless one.
-         min_passed=20, env=(("NX_REQUIRE_PLUGIN_DRIFT_CHECK", "1"),)),
+         min_passed=20, env=(("NX_REQUIRE_PLUGIN_DRIFT_CHECK", "1"),), ledger="plugin-ledger"),
     # Collected 2026-11-22: 67 files, 2790 tests (1061 on 2026-10-05, when ci.yml's floor of 600 was set).
     Spec("pg-cluster", "PUSH_REFUSED_PG_CLUSTER", "run", (CLUSTER_CENSUS,),
          "uv run pytest -o addopts= -m 'not slow' tests/test_integration_pg_cluster.py",
@@ -467,6 +473,8 @@ def _run_child(command: list[str], cwd: Path, env: dict[str, str], timeout: int 
     return child.returncode, out or ""
 
 
+#: What report mode prints (scripts/ledger_mode.py): a passing ledger check's findings and summary, which the gate relays.
+_LEDGER_LINE = re.compile(r"^((?:LEDGER-FINDING|LEDGER-REPORT|LEDGER-VACUOUS) .*)$", re.M)
 _SKIPPED_LINE = re.compile(r"^SKIPPED \[(\d+)\] (.*)$", re.M)
 
 
@@ -496,6 +504,13 @@ def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str]) 
     env["PYTHONPATH"] = os.pathsep.join(p for p in (str(tree / "src"), env.get("PYTHONPATH", "")) if p)
     env["NX_TEST_T2_SUBSTRATE"] = "none"
     env.update(dict(spec.env))
+    if spec.ledger:
+        # One switch for the class-A ledgers: block (default) refuses a finding, report lists it. Pinned into the child so the
+        # check reads the mode this gate judged, and a bad value refuses here, not as a quiet default.
+        try:
+            env[ledger_mode.ENV] = ledger_mode.mode(os.environ) if os.environ.get(ledger_mode.ENV, "").strip() else spec.default_mode
+        except ledger_mode.LedgerModeError as exc:
+            return Outcome(spec.name, False, str(exc), time.monotonic() - started)
     try:
         returncode, out = _run_child(command_for(spec.name, python, pytest_cmd), tree, env)
     except subprocess.TimeoutExpired as exc:
@@ -519,7 +534,8 @@ def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str]) 
                            f"{_excerpt(out)}", seconds)
         if (problem := skip_problem(spec.name, out)) is not None:
             return Outcome(spec.name, False, f"exit 0 but {problem}. Last lines:\n{_excerpt(out)}", seconds)
-    return Outcome(spec.name, True, "", seconds)
+    lines = _LEDGER_LINE.findall(out) if spec.ledger else []
+    return Outcome(spec.name, True, "", seconds, lines)
 
 
 # ── proofs ──────────────────────────────────────────────────────────────────
@@ -772,6 +788,8 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
                 continue
             if outcome.ok:
                 ran.append(f"{name}({outcome.seconds:.1f}s)")
+                for line in outcome.lines:
+                    print(f"PUSH_CHECK_REPORT {name}: {line}", file=err)
                 continue
             refusals.append(name)
             print(f"{spec.token} {name} is red at the tip's tree ({tip[:12]}); selected by {selected[name]}.", file=out)

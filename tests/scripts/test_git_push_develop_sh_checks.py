@@ -48,7 +48,7 @@ REPO_ROOT = _rec.REPO_ROOT
 _git, _env, _calls, _records, _opt = _rec._git, _rec._env, _rec._calls, _rec._records, _rec._opt
 
 REAL_SCRIPTS = ("file_size_ratchet.py", "changelog_fold.py", "check_wire_contract_pairing.py", "select_docs_reader_tests.py",
-                "context_budgets.py")
+                "context_budgets.py", "ledger_mode.py")
 NEXUS_SKILL = "conexus/skills/nexus/SKILL.md"
 SCRIPT = REPO_ROOT / "scripts" / "git-push-develop.sh"
 EMPTY_LEDGER = "## Unshipped\n\n(none)\n\n## Shipped\n"

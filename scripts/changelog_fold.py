@@ -24,11 +24,14 @@ editor swap files) are ignored and a subdirectory is refused.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+import ledger_mode
 
 SECTIONS: tuple[str, ...] = (
     "Added",
@@ -122,7 +125,14 @@ def unreleased_body(text: str) -> tuple[int, int]:
 
 
 def check(root: Path) -> list[str]:
+    return examine(root)[0]
+
+
+def examine(root: Path) -> tuple[list[str], int]:
+    """``check``'s errors and how many items it examined: each fragment file and each changelog it read (report mode
+    refuses a run that examined none)."""
     errors: list[str] = []
+    examined = 0
     for frag_dir, changelog in TARGETS:
         d = root / frag_dir
         if not (d / DIR_README).is_file():
@@ -136,11 +146,13 @@ def check(root: Path) -> list[str]:
                 if p.is_dir()
             )
         for p in fragment_paths(root, frag_dir):
+            examined += 1
             errors.extend(parse_fragment(p)[1])
         cl = root / changelog
         if not cl.is_file():
             errors.append(f"{changelog}: missing")
             continue
+        examined += 1
         text = cl.read_text(encoding="utf-8")
         try:
             s, e = unreleased_body(text)
@@ -155,7 +167,7 @@ def check(root: Path) -> list[str]:
                 f"put the entry in {frag_dir}/<bead-id>.md instead, as '### Added' (or Changed, "
                 f"Fixed, ...), a blank line, then '- **...**' (first: {hand[0][:60]!r})"
             )
-    return errors
+    return errors, examined
 
 
 def _first_added(root: Path, path: Path) -> int | None:
@@ -250,13 +262,40 @@ def fold(root: Path) -> list[str]:
     return []
 
 
+def _report(root: Path) -> int:
+    """``check`` in report mode: list every error as a finding, exit 0, and still fail a run that examined nothing.
+
+    The check sees a fragment's format and a hand-written [Unreleased] line; it cannot see a MISSING fragment, so a
+    report lists only what ``check`` would have refused."""
+    errors, examined = examine(root)
+    env = {**os.environ, ledger_mode.ENV: ledger_mode.REPORT}
+    passed = ledger_mode.settle("changelog", errors, examined, environ=env)
+    if passed and not errors:
+        sys.stdout.write("changelog_fold check: ok\n")
+    return EXIT_OK if passed else EXIT_BAD
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     ap.add_argument("cmd", choices=("check", "fold"))
+    ap.add_argument(
+        "--mode",
+        choices=ledger_mode.MODES,
+        default=None,
+        help=f"check only; overrides ${ledger_mode.ENV} (default block: an error exits {EXIT_BAD})",
+    )
     args = ap.parse_args(argv)
+    if args.cmd == "check":
+        try:
+            report = (args.mode or ledger_mode.mode()) == ledger_mode.REPORT
+        except ledger_mode.LedgerModeError as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return EXIT_BAD
+        if report:
+            return _report(args.root)
     errors = check(args.root) if args.cmd == "check" else fold(args.root)
     for e in errors:
         sys.stderr.write(f"error: {e}\n")

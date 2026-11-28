@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._cloud_leg_ledger import check_routes
+from tests._ledger_terminal import ledger_terminal  # noqa: F401  (a fixture, used by name)
 from tests._module_seam import setattr_in
 from tests._tmp_root import child_env_with_tmpdir
 
@@ -222,23 +224,18 @@ def test_a_ledger_that_is_not_a_file_is_an_error(tmp_path: Path) -> None:
         cl.build_plan("r0123456abc", None, None)
 
 
-# In the lint bucket: an additive wire entry naming a route ROUTE_MAP lacks turned develop red
-# twice on 2026-11-20 because this ran only in the default suite, which the pre-push `-m lint` run does not reach.
-# So the default `uv run pytest` loop no longer runs it: run it with `-m lint` (or `-m ""`). CI runs it in the lint
-# leg on a code push and in the docs-readers lane on a docs-only push (select_docs_reader_tests.py picks this file).
+# In the lint bucket: an additive wire entry naming a route ROUTE_MAP lacks turned develop red twice on 2026-11-20 because this
+# ran only in the default suite. Run it with `-m lint` (or `-m ""`); CI runs it in the lint leg and, on a docs-only push, in the
+# docs-readers lane. NX_LEDGER_MODE=report lists an unmapped route instead of failing (tests/_cloud_leg_ledger.py).
 @pytest.mark.lint
-def test_every_route_in_the_live_ledger_maps_and_emptying_the_map_turns_it_red(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_every_route_in_the_live_ledger_maps_and_emptying_the_map_turns_it_red(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ledger_terminal: None) -> None:
     live = REPO_ROOT / "docs" / "wire-contract-pending.md"
     entries = cl.ledger_entries(live)
-    source = live
     if not cl.entry_routes(entries):  # a ledger with no Unshipped routes proves nothing: use the fixture's
-        source = tmp_path / "wire.md"
-        source.write_text(_FIXTURE_LEDGER.replace("POST /v1/widgets/frob", "GET /v1/catalog/docs/by-meta"))
-        entries = cl.ledger_entries(source)
-    assert cl.entry_routes(entries), "no routes to examine: the check would be vacuous"
-    steps, _skipped, unmapped = cl.release_steps(entries)
-    assert not unmapped, f"map these in ROUTE_MAP (or the release passes --accept-skip): {unmapped}"
-    assert steps
+        live = tmp_path / "wire.md"
+        live.write_text(_FIXTURE_LEDGER.replace("POST /v1/widgets/frob", "GET /v1/catalog/docs/by-meta"))
+        entries = cl.ledger_entries(live)
+    check_routes(cl, entries)
     monkeypatch.setattr(cl, "ROUTE_MAP", {})
     _steps, _skipped, unmapped_now = cl.release_steps(entries)
     assert unmapped_now, "emptying ROUTE_MAP must leave every route unmapped"

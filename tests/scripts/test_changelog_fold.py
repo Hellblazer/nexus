@@ -11,7 +11,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import ledger_mode
 import pytest
+
+from tests._ledger_terminal import ledger_terminal  # noqa: F401  (a fixture, used by name)
 
 _REPO = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
@@ -230,16 +233,21 @@ def test_fold_refuses_and_writes_nothing_on_a_bad_fragment(repo: Path) -> None:
 
 
 def test_main_exit_codes(repo: Path) -> None:
-    assert cf.main(["--root", str(repo), "check"]) == cf.EXIT_OK
+    # `--mode block` pins what block mode exits, whatever NX_LEDGER_MODE the run carries (the report mode is in test_ledger_mode.py).
+    assert cf.main(["--root", str(repo), "check", "--mode", "block"]) == cf.EXIT_OK
     _frag(repo, "bad.md", "x\n")
-    assert cf.main(["--root", str(repo), "check"]) == cf.EXIT_BAD
+    assert cf.main(["--root", str(repo), "check", "--mode", "block"]) == cf.EXIT_BAD
 
 
 @pytest.mark.lint
-def test_repo_fragments_and_unreleased_are_clean() -> None:
+def test_repo_fragments_and_unreleased_are_clean(ledger_terminal: None) -> None:
+    errors, examined = cf.examine(_REPO)
+    if ledger_mode.is_report():  # NX_LEDGER_MODE=report lists the errors and passes unless nothing was examined
+        assert ledger_mode.settle("changelog", errors, examined)
+        return
     for frag_dir, changelog in cf.TARGETS:
         assert (_REPO / frag_dir / cf.DIR_README).is_file(), frag_dir
         assert cf.UNRELEASED in (_REPO / changelog).read_text(encoding="utf-8"), (
             changelog
         )
-    assert cf.check(_REPO) == []
+    assert errors == []

@@ -39,7 +39,12 @@ import re
 import subprocess
 import sys
 
+import ledger_mode
 import pytest
+
+from tests._ledger_terminal import ledger_terminal  # noqa: F401  (a fixture, used through pytestmark)
+
+pytestmark = pytest.mark.usefixtures("ledger_terminal")
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 LEDGER = REPO_ROOT / "conexus" / "PENDING_RELEASE.md"
@@ -439,13 +444,28 @@ def test_every_drifted_file_is_declared_in_the_ledger() -> None:
     its own ref over its own surface (.14's scoping). DEFERRED entries
     are the one exception (nexus-2x3qy): the pin advance does NOT ship
     them (the cut holds their paths back), so they stay declared.
+
+    NX_LEDGER_MODE=report (RDR-258 Phase 4) lists each finding and passes
+    unless nothing was examined; block (the default) fails as always.
     """
     _require_or_skip()
+    report = ledger_mode.is_report()
+    findings: list[str] = []
     drifted: set[str] = set()
+    pins = _pinned_refs()
+    examined = len(pins)
     deferred = _deferred_declared_paths()
-    for plugin, ref in _pinned_refs().items():
+    for plugin, ref in pins.items():
         if plugin_in_release_window(plugin, ref):
-            assert not (_declared_paths_for(plugin) - deferred), (
+            leftover = _declared_paths_for(plugin) - deferred
+            examined += len(leftover)
+            if report and leftover:
+                findings += [
+                    f"{plugin} is in its release window (ref {ref}) but the ledger still lists {p}"
+                    for p in sorted(leftover)
+                ]
+                continue
+            assert not leftover, (
                 f"{plugin} is in its release window (ref {ref!r} is the tag "
                 f"this branch cuts) but the PENDING_RELEASE ledger still "
                 f"lists its files — the pin advance ships them, so its "
@@ -455,11 +475,21 @@ def test_every_drifted_file_is_declared_in_the_ledger() -> None:
             )
             continue
         drifted |= set(_drifted_paths(plugin, ref))
+    examined += len(drifted)
     if not drifted:
+        if report:
+            assert ledger_mode.settle("plugin-ledger", findings, examined)
         return
     declared = _declared_paths()
 
     undeclared = sorted(drifted - declared)
+    if report:
+        findings += [
+            f"undeclared drift: {p} differs from its pinned tag and is not in conexus/PENDING_RELEASE.md"
+            for p in undeclared
+        ]
+        assert ledger_mode.settle("plugin-ledger", findings, examined)
+        return
     assert not undeclared, (
         "These plugin files differ from the pinned release tag but are NOT "
         "declared in conexus/PENDING_RELEASE.md:\n"
@@ -478,14 +508,29 @@ def test_the_ledger_has_no_stale_entries() -> None:
     Uses the SAME parsed set as the check above. The first cut used a lenient
     substring test one way and a stricter bullet parse the other, so an entry
     could count as declared while never being checked for staleness.
+
+    NX_LEDGER_MODE=report lists each stale entry and passes unless nothing was
+    examined; block (the default) fails as always.
     """
     _require_or_skip()
+    report = ledger_mode.is_report()
+    findings: list[str] = []
     declared: set[str] = set()
     drifted: set[str] = set()
+    pins = _pinned_refs()
+    examined = len(pins)
     deferred = _deferred_declared_paths()
-    for plugin, ref in _pinned_refs().items():
+    for plugin, ref in pins.items():
         if plugin_in_release_window(plugin, ref):
-            assert not (_declared_paths_for(plugin) - deferred), (
+            leftover = _declared_paths_for(plugin) - deferred
+            examined += len(leftover)
+            if report and leftover:
+                findings += [
+                    f"{plugin} is in its release window: the ledger entry {p} must be emptied"
+                    for p in sorted(leftover)
+                ]
+                continue
+            assert not leftover, (
                 f"{plugin} is in its release window: its ledger entries must "
                 f"be EMPTY, deferred entries aside (see "
                 f"test_every_drifted_file_is_declared_in_the_ledger)."
@@ -495,6 +540,13 @@ def test_the_ledger_has_no_stale_entries() -> None:
         drifted |= set(_drifted_paths(plugin, ref))
 
     stale = sorted(declared - drifted)
+    if report:
+        findings += [
+            f"stale entry: {p} is in conexus/PENDING_RELEASE.md but no longer differs from its pinned tag"
+            for p in stale
+        ]
+        assert ledger_mode.settle("plugin-ledger", findings, examined + len(declared) + len(drifted))
+        return
     assert not stale, (
         "conexus/PENDING_RELEASE.md lists files that NO LONGER differ from the "
         "pinned tag -- they have shipped:\n"
@@ -844,6 +896,7 @@ class TestPerPluginDriftScoping:
         undeclared sn change would sail through.
         """
         self._cut_world(tmp_path, monkeypatch, sn_drift=True)
+        monkeypatch.setenv(ledger_mode.ENV, "block")  # this pins what BLOCK mode refuses, whatever the run's mode
         with pytest.raises(AssertionError, match=re.escape(self.SN_PROBE)):
             test_every_drifted_file_is_declared_in_the_ledger()
 
@@ -931,6 +984,7 @@ class TestDeferralExemptsTheReleaseWindow:
         heading, must still be caught -- the exemption is section-scoped,
         not a blanket pass for any entry naming this path."""
         self._world(tmp_path, monkeypatch, deferred=False)
+        monkeypatch.setenv(ledger_mode.ENV, "block")  # this pins what BLOCK mode refuses, whatever the run's mode
         with pytest.raises(AssertionError, match="release window"):
             test_every_drifted_file_is_declared_in_the_ledger()
         with pytest.raises(AssertionError, match="release window"):
