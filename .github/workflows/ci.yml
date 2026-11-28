@@ -1242,6 +1242,11 @@ jobs:
       # tests/conftest.py, which returns before ever calling
       # `t2_service_env`, bypassing the jar check entirely.
       NX_TEST_T2_SUBSTRATE: "none"
+      # RDR-258 Phase 2 (nexus-2jomg.3): the wire-pairing lint blocks on a pull request into main (the release PR,
+      # the boundary release-ledger-gate uses) and reports everywhere else, develop pushes and develop-bound PRs
+      # included. The engine release blocks through its own step. Unset blocks, so only this expression's `report`
+      # branch turns it off.
+      NX_WIRE_PAIRING_MODE: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' && 'block' || 'report' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:

@@ -39,12 +39,18 @@ markers CI uses, no option that narrows the run, exactly one ``-m``), the state 
 tests passing and none failed, erroring or (for the write-seam, whose prerequisite skip is how it goes vacuous) skipped. An
 accepted proof is printed (tree, start, duration, host) and its particulars go into the push record.
 
+wire-ledger REPORTS and does not refuse (RDR-258 Phase 2, nexus-2jomg.3): its exit 1 (an undeclared both-halves commit, or a stale
+ledger entry) prints ``PUSH_CHECK_REPORT wire-ledger ...`` with the script's output and the push goes on, ``PUSH_CHECKS_PASSED`` carrying
+``reported=wire-ledger``. The release PR into main (the lint bucket's pairing test, ``NX_WIRE_PAIRING_MODE``) and the engine release
+(``scripts/check_engine_release_pairing.py``) still block it. Only the script's exit 1 is a finding: its exit 2 ("could not read git"),
+a missing script, a timeout and a pass without its marker are refusals, as for every other check.
+
 A selected check whose script is missing from the tip, or whose run passes without the marker a real run prints (a
 vacuous pass), or a pytest check that skips any test (except the one named opt-in skip of the cloud-leg file), is a refusal,
 never a skip. ``--skip NAME=REASON`` overrides one check, on the record: the reason is
 printed as ``PUSH_CHECK_SKIPPED NAME reason=...`` (the push script hands those lines to ``nx ci record-push``).
 
-Exit codes: 0 every selected check passed (or was skipped by name), 14 a refusal (``PUSH_REFUSED_<CHECK>`` lines on standard
+Exit codes: 0 every selected check passed (or was skipped by name, or reported), 14 a refusal (``PUSH_REFUSED_<CHECK>`` lines on standard
 output, each with the command to reproduce it), 15 the gate could not run (``PUSH_REFUSED_CHECK_GATE_ERROR``). Nothing
 here passes silently on a fault. A checkout whose remote branch has no ``scripts/file_size_ratchet.py`` is not armed:
 one ``PUSH_CHECKS_SKIPPED`` line on stderr and exit 0 (the base decides, so a push cannot disarm the gate by deleting it).
@@ -150,6 +156,8 @@ class Spec:
     min_passed: int = 0             # pytest checks: at least this many tests must pass
     skip_ok: str = ""               # pytest checks: the one skip reason (a substring) that is known and legitimate
     env: tuple[tuple[str, str], ...] = ()   # extra environment the check runs with
+    report: bool = False            # the check's exit 1 is a finding the push reports (PUSH_CHECK_REPORT), not a refusal
+    report_note: str = ""           # the sentence a report carries after its heading: what still blocks the finding, and where
 
 
 SPECS: dict[str, Spec] = {s.name: s for s in (
@@ -170,7 +178,9 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
     Spec("wire-ledger", "PUSH_REFUSED_WIRE_LEDGER", "run", ("scripts/check_wire_contract_pairing.py", LEDGER_PATH),
          "uv run python scripts/check_wire_contract_pairing.py",
          f"declare each flagged commit under `## Unshipped` in {LEDGER_PATH} (or move a shipped entry to `## Shipped`)",
-         marker=r"wire-contract ledger clean"),
+         marker=r"wire-contract ledger clean", report=True,
+         report_note="Reported, not refused: develop reports a both-halves wire change; the release PR into main and the engine "
+                     "release still block it (RDR-258 Phase 2)."),
     Spec("cloud-leg", "PUSH_REFUSED_CLOUD_LEG", "run", ("tests/scripts/test_cloud_leg.py",),
          "uv run pytest -o addopts= -m 'not integration and not slow' tests/scripts/test_cloud_leg.py",
          f"map every route of {LEDGER_PATH} in tests/e2e/lib/cloud_leg.py (the failing test names the unmapped one)",
@@ -193,6 +203,7 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
          "", "", min_passed=1500),
     Spec("write-seam", "PUSH_REFUSED_WRITE_SEAM", "proof", (), "", "", min_passed=8),
 )}
+REPORT_TOKEN = "PUSH_CHECK_REPORT"
 GATE_ERROR_TOKEN = "PUSH_REFUSED_CHECK_GATE_ERROR"
 _GATE_ERROR_ESCAPE = "  override, on the record: --skip-check-gate '<reason>'"
 ORDER = ("file-size", "changelog", "wire-ledger", "context-budget", "cloud-leg", "plugin-ledger", "pg-cluster", "docs-readers", "write-seam")
@@ -360,6 +371,7 @@ class Outcome:
     detail: str = ""                # why it is red: the excerpt of its output, or the vacuity reason
     seconds: float = 0.0
     lines: list[str] = field(default_factory=list)
+    reported: bool = False          # ok, but the check exited 1 and its Spec.report says to print that, not refuse
 
 
 _NOISE = re.compile(r"^(nexus test tmp:|tenant pool:|-+ posix_spawn census|\d+ spawns:|NOTE: nexus-)")
@@ -489,6 +501,8 @@ def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str]) 
     except OSError as exc:
         return Outcome(spec.name, False, f"could not start: {exc}", time.monotonic() - started)
     seconds = time.monotonic() - started
+    if returncode == 1 and spec.report:
+        return Outcome(spec.name, True, _excerpt(out), seconds, reported=True)
     if returncode != 0:
         return Outcome(spec.name, False, _excerpt(out), seconds)
     if spec.marker and not re.search(spec.marker, out):
@@ -713,6 +727,7 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
     tree_sha = _git(repo, "rev-parse", f"{tip}^{{tree}}").strip()
     refusals: list[str] = []
     skipped: list[str] = []
+    reported: list[str] = []
     ran: list[str] = []
     missing_proofs: list[str] = []
     with Tree(repo, tip, workdir) as tree:
@@ -741,10 +756,20 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
                 print(f"PUSH_CHECK_SKIPPED {name} reason={skips[name]}", file=out)
                 continue
             outcome = outcomes[name]
+            spec = SPECS[name]
+            if outcome.reported:
+                reported.append(name)
+                ran.append(f"{name}({outcome.seconds:.1f}s)")
+                print(f"{REPORT_TOKEN} {name} is red at the tip's tree ({tip[:12]}); selected by {selected[name]}. {spec.report_note}",
+                      file=out)
+                print(outcome.detail, file=out)
+                print(f"  reproduce: {spec.reproduce}   ({_reproduce_note(tip)})", file=out)
+                if spec.fix:
+                    print(f"  fix: {spec.fix}", file=out)
+                continue
             if outcome.ok:
                 ran.append(f"{name}({outcome.seconds:.1f}s)")
                 continue
-            spec = SPECS[name]
             refusals.append(name)
             print(f"{spec.token} {name} is red at the tip's tree ({tip[:12]}); selected by {selected[name]}.", file=out)
             print(outcome.detail, file=out)
@@ -793,7 +818,7 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
         print(f"PUSH_CHECKS_REFUSED refused={','.join(refusals)} ran={','.join(ran) or 'none'} in {elapsed:.1f}s", file=err)
         return EXIT_REFUSED
     print(f"PUSH_CHECKS_PASSED tree={tree_sha[:12]} ran={','.join(ran) or 'none'} skipped={','.join(skipped) or 'none'} "
-          f"in {elapsed:.1f}s", file=err)
+          f"reported={','.join(reported) or 'none'} in {elapsed:.1f}s", file=err)
     return EXIT_OK
 
 

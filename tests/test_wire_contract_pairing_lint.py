@@ -16,14 +16,27 @@ THIS LINT is the production gate: it runs
 and fails if a both-halves commit lands undeclared, or a declared entry goes
 stale without being cleared. The remaining tests are the non-vacuity
 scaffolding proving the detector actually detects, and kill-controls.
+
+WHERE IT BLOCKS (RDR-258 Phase 2, nexus-2jomg.3). ``NX_WIRE_PAIRING_MODE=report``
+turns the check's exit 1 (undeclared or stale) into a pytest warning and a
+job-summary entry instead of a failure; develop CI sets it (``ci.yml``'s
+``test-lint`` job, for everything but a pull request into main). Unset or any
+other value blocks, so the release PR into main, a hand run and every other
+caller keep the failing behaviour. Only exit 1 is demoted: exit 2 ("could not
+read git") fails in every mode. The engine release blocks through
+``scripts/check_engine_release_pairing.py``.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import pathlib
 import subprocess
+import warnings
 
 import pytest
+import yaml
 
 import check_wire_contract_pairing as wctp
 
@@ -31,6 +44,32 @@ pytestmark = pytest.mark.lint
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent
 _LEDGER = wctp.DEFAULT_LEDGER_PATH
+_CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
+
+#: ``report`` makes the live gate report an undeclared or stale finding instead of failing.
+_MODE_ENV = "NX_WIRE_PAIRING_MODE"
+
+
+def _assert_pairing_clean(repo_root: pathlib.Path, ledger_path: pathlib.Path | None = None) -> None:
+    """Run the pairing check; fail on any finding, except that ``NX_WIRE_PAIRING_MODE=report`` reports an exit-1 finding
+    (a warning, plus the job summary when ``GITHUB_STEP_SUMMARY`` names a file) and passes. Exit 2 always fails."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = wctp.check(ledger_path=ledger_path, repo_root=repo_root)
+    report = err.getvalue().strip()
+    if code == 1 and os.environ.get(_MODE_ENV) == "report":
+        warnings.warn(f"wire pairing, reported and not failed on develop:\n{report}", UserWarning, stacklevel=2)
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with contextlib.suppress(OSError), open(summary, "a", encoding="utf-8") as fh:
+                fh.write("### Wire pairing: reported, not failed\n\nDevelop reports an undeclared both-halves change or a stale "
+                         "ledger entry. The release PR into main and the engine release block on it.\n\n"
+                         f"```\n{report}\n```\n")
+        return
+    assert code == 0, (
+        f"the wire-contract ledger and the repo state disagree (exit {code}):\n{report}\n"
+        f"run `uv run python scripts/check_wire_contract_pairing.py` and update {_LEDGER if ledger_path is None else ledger_path}"
+    )
 
 #: The three known both-halves commits from the RDR-191 GATE-2 incident
 #: (T2 [22490] Q3b census). Fixed, permanent identifiers.
@@ -88,11 +127,9 @@ def test_the_live_ledger_is_well_formed() -> None:
 
 def test_live_repo_ledger_is_clean() -> None:
     """The actual gate: a both-halves commit landing without a ledger entry, or an entry going
-    stale without being cleared, fails HERE (nexus-1vogq)."""
-    assert wctp.check(repo_root=_REPO_ROOT) == 0, (
-        "the wire-contract ledger and the live repo state disagree; run "
-        f"`uv run python scripts/check_wire_contract_pairing.py` and update {_LEDGER}"
-    )
+    stale without being cleared, fails HERE (nexus-1vogq), except where develop CI sets
+    ``NX_WIRE_PAIRING_MODE=report`` (nexus-2jomg.3)."""
+    _assert_pairing_clean(_REPO_ROOT)
 
 
 def test_the_detector_finds_the_known_historical_members() -> None:
@@ -453,3 +490,112 @@ def test_release_tree_cli_mode(tmp_path: pathlib.Path) -> None:
     repo, _first, second = _release_repo(tmp_path, tags=("v0.0.1",), version="0.0.2")
     ledger = _write_unshipped(tmp_path, (second, "nexus-cli"))
     assert wctp.main(["--release-tree", "--ledger", str(ledger), "--repo-root", str(repo)]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Where the live gate blocks (RDR-258 Phase 2, nexus-2jomg.3): a real repo with
+# an undeclared both-halves commit after a client tag, in each mode.
+# ---------------------------------------------------------------------------
+
+_EMPTY_LEDGER = "## Unshipped\n\n(none)\n\n## Shipped\n"
+
+
+def _undeclared_pair_repo(tmp_path: pathlib.Path, *, tag: bool = True) -> tuple[pathlib.Path, pathlib.Path, str]:
+    """(repo, empty ledger, sha): one commit per half, tag v1.0.0 on the second, then an undeclared both-halves commit."""
+    repo = tmp_path / "repo"
+    (repo / "service").mkdir(parents=True)
+    (repo / "src" / "nexus" / "db").mkdir(parents=True)
+    _git_in(repo, "init", "-q", "-b", "main")
+    (repo / _ENGINE_FILE).write_text("class E {}\n")
+    _git_in(repo, "add", _ENGINE_FILE)
+    _git_in(repo, "commit", "-q", "-m", "base: engine")
+    (repo / _CLIENT_FILE).write_text("X = 0\n")
+    _git_in(repo, "add", _CLIENT_FILE)
+    _git_in(repo, "commit", "-q", "-m", "base: client")
+    if tag:
+        _git_in(repo, "tag", "-a", "-m", "v1.0.0", "v1.0.0")
+    (repo / _ENGINE_FILE).write_text("class E { int v; }\n")
+    (repo / _CLIENT_FILE).write_text("X = 1\n")
+    _git_in(repo, "add", _ENGINE_FILE, _CLIENT_FILE)
+    _git_in(repo, "commit", "-q", "-m", "undeclared both halves")
+    ledger = tmp_path / "ledger.md"
+    ledger.write_text(_EMPTY_LEDGER)
+    return repo, ledger, _git_in(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("mode", [None, "block", "", "anything-else"])
+def test_an_undeclared_both_halves_commit_fails_the_live_gate_unless_the_mode_is_report(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, mode: str | None,
+) -> None:
+    """Unset blocks, so the release PR into main, a hand run and every other caller keep the failing behaviour."""
+    repo, ledger, sha = _undeclared_pair_repo(tmp_path)
+    assert [c.sha for c in wctp.flagged_commits("v1.0.0..HEAD", repo_root=repo)] == [sha], "non-vacuity: the detector flags it"
+    if mode is None:
+        monkeypatch.delenv(_MODE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(_MODE_ENV, mode)
+    with pytest.raises(AssertionError, match=f"(?s)UNDECLARED.*{sha}"):
+        _assert_pairing_clean(repo, ledger)
+
+
+def test_the_report_mode_reports_an_undeclared_commit_and_passes_with_it_in_the_job_summary(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, ledger, sha = _undeclared_pair_repo(tmp_path)
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv(_MODE_ENV, "report")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    with pytest.warns(UserWarning, match=f"(?s)reported and not failed on develop.*UNDECLARED.*{sha}"):
+        _assert_pairing_clean(repo, ledger)
+    text = summary.read_text()
+    assert "Wire pairing: reported, not failed" in text and sha in text and "release PR into main" in text
+
+
+def test_the_report_mode_reports_a_stale_entry_too(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, ledger, sha = _undeclared_pair_repo(tmp_path)
+    base = _git_in(repo, "rev-parse", "v1.0.0")
+    ledger.write_text(
+        f"## Unshipped\n\n- `{sha}` -- bead nexus-x -- engine tag `engine-service-v9.9.9` -- the pair [additive]\n"
+        f"- `{base}` -- bead nexus-y -- engine tag `engine-service-v9.9.8` -- shipped already [additive]\n\n## Shipped\n"
+    )
+    monkeypatch.setenv(_MODE_ENV, "report")
+    with pytest.warns(UserWarning, match="STALE"):
+        _assert_pairing_clean(repo, ledger)
+    monkeypatch.delenv(_MODE_ENV)
+    with pytest.raises(AssertionError, match="STALE"):
+        _assert_pairing_clean(repo, ledger)
+
+
+def test_the_report_mode_never_demotes_a_check_that_could_not_verify(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exit 2 (here: no v* tag visible) fails in every mode: 'could not verify' is never 'must be fine'."""
+    repo, ledger, _sha = _undeclared_pair_repo(tmp_path, tag=False)
+    monkeypatch.setenv(_MODE_ENV, "report")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(AssertionError, match="exit 2"):
+            _assert_pairing_clean(repo, ledger)
+
+
+def test_the_report_mode_is_quiet_when_the_ledger_is_clean(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, ledger, sha = _undeclared_pair_repo(tmp_path)
+    ledger.write_text(f"## Unshipped\n\n- `{sha}` -- bead nexus-x -- engine tag `engine-service-v9.9.9` -- the pair [additive]\n\n## Shipped\n")
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv(_MODE_ENV, "report")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _assert_pairing_clean(repo, ledger)
+    assert not summary.exists()
+
+
+def test_develop_ci_reports_and_only_a_pull_request_into_main_blocks() -> None:
+    """ci.yml's test-lint job sets the mode: `block` exactly for a pull request into main (the release PR), `report` for every
+    other event. No other job sets it, so no other path changes."""
+    jobs = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    expected = "${{ github.event_name == 'pull_request' && github.base_ref == 'main' && 'block' || 'report' }}"
+    assert jobs["test-lint"]["env"][_MODE_ENV] == expected
+    assert [n for n, j in jobs.items() if _MODE_ENV in (j.get("env") or {})] == ["test-lint"]
+    # The boundary it names is the one release-ledger-gate already uses.
+    assert jobs["release-ledger-gate"]["if"] == "github.event_name == 'pull_request' && github.base_ref == 'main'"
+    # pytest-gate still needs test-lint, and fails on it unless skipped on a docs-only diff.
+    assert "test-lint" in jobs["pytest-gate"]["needs"]
