@@ -402,7 +402,11 @@ def _offenders() -> tuple[list[str], set[tuple[str, str]]]:
     return found, used
 
 
+# Class A, report mode (RDR-258 Phase 1 step 4, nexus-2jomg.2): the two repo-state scans below (the offender list and its
+# non-vacuity sweep) are reported by the advisory `test-class-a-report` job as path:line: target and never fail develop; the
+# review fixes the offenders. The parametrized self-tests of the scan keep blocking: they pin the lint's own code, not the repo.
 @pytest.mark.lint
+@pytest.mark.class_a
 def test_no_test_patches_a_stdlib_module_process_wide() -> None:
     """Every ``<module>.subprocess`` (``.os``, ``.time``, ...) is the one stdlib
     module, so these forms fake it for every thread and every fixture teardown in
@@ -474,6 +478,7 @@ def test_the_lint_passes_local_forms(sample: str) -> None:
 
 
 @pytest.mark.lint
+@pytest.mark.class_a
 def test_the_lint_has_sites_to_check() -> None:
     """Non-vacuity over the tree: the sweep parses every test file and finds the
     allowlisted global sites, so an empty offender list means something."""

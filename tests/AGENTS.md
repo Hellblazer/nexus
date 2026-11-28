@@ -478,8 +478,11 @@ sees the fake while it is live (a fake `time.sleep` hung a substrate teardown's
 `start()`), `setattr_in(monkeypatch, mod, "os.kill", f)`, `module_proxy` /
 `module_time` / `patch_time`. Name every module the code under test reaches
 the function through, as a tuple. A module that does `from subprocess import
-run` is patched as `mod.run`. `tests/test_module_seam.py` (`-m lint`) rejects
-the global forms; a site that must stay process-wide goes in its `ALLOWED`
+run` is patched as `mod.run`. `tests/test_module_seam.py` (`-m lint`) finds
+the global forms; it is a class-A check in report mode (RDR-258 Phase 1), so the
+advisory `test-class-a-report` job lists each as `path:line: target` and develop
+stays green, and the review fixes the offenders (the parametrized self-tests of the
+scan still block). A site that must stay process-wide goes in its `ALLOWED`
 with the reason.
 
 ## Lint guard

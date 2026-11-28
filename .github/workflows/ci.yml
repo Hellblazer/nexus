@@ -1538,6 +1538,7 @@ jobs:
           uv run python scripts/class_a_report.py \
             --require tests/test_docs_reference_rot=5 \
             --name "class-A lint checks" \
+            --require tests/test_module_seam=2 \
             --min-tests 1 \
             --items-out class-a-items.json \
             -- uv run pytest -m class_a -q -p no:cacheprovider
