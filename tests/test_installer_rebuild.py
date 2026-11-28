@@ -602,13 +602,14 @@ def test_on_windows_the_rollback_goes_through_the_junction_helpers_and_retargets
             calls.append(("flip", generation, where))
 
         @staticmethod
-        def current_launcher_dir(where):
-            return where / "current" / "bin"
+        def ensure_dispatchers(where, generation, *, platform):
+            calls.append(("dispatchers", generation))
+            return []
 
         @staticmethod
-        def ensure_user_path(entry):
-            calls.append(("path", entry))
-            return type("R", (), {"changed": False, "entry": entry})()
+        def ensure_launcher_path(where):
+            calls.append(("path", where / "bin"))
+            return type("R", (), {"changed": False, "entry": where / "bin"})()
 
         @staticmethod
         def swap_link(target, link):
@@ -620,8 +621,8 @@ def test_on_windows_the_rollback_goes_through_the_junction_helpers_and_retargets
     monkeypatch.setattr(self_cmd, "_retarget_autostart_task", lambda generation: calls.append(("task", generation)))
     monkeypatch.setattr(self_cmd, "_sh", lambda *a, **k: pytest.fail("a bash helper ran on Windows"))
     self_cmd.restore_current_generation(original, previous=str(older))
-    assert [c[0] for c in calls] == ["flip", "path", "task", "previous"]
-    assert calls[0][1] == original and calls[3][1] == str(older)
+    assert [c[0] for c in calls] == ["dispatchers", "flip", "path", "task", "previous"]
+    assert calls[0][1] == original and calls[1][1] == original and calls[4][1] == str(older)
 
 
 def test_a_generation_that_is_gone_is_never_flipped_to(monkeypatch, tmp_path) -> None:

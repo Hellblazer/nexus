@@ -1629,7 +1629,7 @@ def migrate_legacy(
     )
     if verify is not None:
         verify(gen)
-    ensure_dispatchers(root, gen, run=run, platform=platform)
+    ensure_dispatchers(root, gen, run=run, platform=platform, progress=progress)
     flip_current(gen, root, ops=ops, platform=platform)
     result = ensure_launcher_path(root, uv_bin=uv_bin, store=store, environ=environ, run=run)
     if on_path is not None:

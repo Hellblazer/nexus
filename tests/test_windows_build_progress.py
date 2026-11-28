@@ -440,7 +440,8 @@ def test_migrate_legacy_hands_progress_to_the_build(spy_run, tmp_path: Path) -> 
         store=store, uv_bin="C:\\uvbin", environ={}, progress=True,
     )
     calls = _builds(spy_run)
-    assert len(calls) == 3 and all(p is True for _a, p in calls), calls
+    # The build's three, then the dispatcher environment's venv and its wheel install (nexus-f9bgu.47).
+    assert len(calls) == 5 and all(p is True for _a, p in calls), calls
 
 
 # ── the callers a person waits on ask for it ─────────────────────────────────
