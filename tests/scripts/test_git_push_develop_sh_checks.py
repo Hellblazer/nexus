@@ -551,6 +551,7 @@ def test_ledger_report_is_a_flag_on_the_record_and_the_environment_cannot_stand_
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "PUSH_CHECK_LEDGER_MODE changelog mode=report source=flag reason=the fragments are being rewritten, nexus-xyz" in proc.stdout
     assert "PUSH_CHECK_REPORT changelog: LEDGER-FINDING changelog:" in proc.stderr
+    assert "reported=changelog" in proc.stderr, "one report path: a ledger finding is named on PUSH_CHECKS_PASSED like the wire-ledger's"
     (record,) = _records(fake_nx[1])
     assert _opt(record, "--skip") == ["changelog-report=the fragments are being rewritten, nexus-xyz"]
     assert _git("rev-parse", "refs/heads/develop", cwd=origin) == sha

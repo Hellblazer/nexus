@@ -56,7 +56,8 @@ The changelog, cloud-leg and plugin-ledger checks also take a MODE (RDR-258 Phas
 spec's ``default_mode`` (block) or, with ``--ledger-report REASON``, report on the record: each selected ledger check prints
 ``PUSH_CHECK_LEDGER_MODE NAME mode=... source=default|flag [reason=...]`` and the push script records a ``source=flag`` one as
 ``NAME-report=REASON``. ``NX_LEDGER_MODE`` in the environment is ignored (``PUSH_CHECK_NOTE`` says so): a variable left exported
-demotes nothing.
+demotes nothing. A check that reports, by either route above, is named on ``PUSH_CHECKS_PASSED`` as ``reported=NAME`` (one path,
+``_print_report``).
 
 Exit codes: 0 every selected check passed (or was skipped by name, or reported), 14 a refusal (``PUSH_REFUSED_<CHECK>`` lines on standard
 output, each with the command to reproduce it), 15 the gate could not run (``PUSH_REFUSED_CHECK_GATE_ERROR``). Nothing
@@ -389,7 +390,9 @@ class Outcome:
     detail: str = ""                # why it is red: the excerpt of its output, or the vacuity reason
     seconds: float = 0.0
     lines: list[str] = field(default_factory=list)
-    reported: bool = False          # ok, but the check exited 1 with the finding header its Spec.report_header names: print it, not refuse
+    reported: bool = False          # ok, and the check found something the push reports (PUSH_CHECK_REPORT) instead of refusing: its own
+                                    # exit 1 with the finding header Spec.report_header names (detail holds that output), or a
+                                    # report-mode ledger's LEDGER-FINDING lines (lines)
 
 
 _NOISE = re.compile(r"^(nexus test tmp:|tenant pool:|-+ posix_spawn census|\d+ spawns:|NOTE: nexus-)")
@@ -548,7 +551,7 @@ def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str], 
         if (problem := skip_problem(spec.name, out)) is not None:
             return Outcome(spec.name, False, f"exit 0 but {problem}. Last lines:\n{_excerpt(out)}", seconds)
     lines = _LEDGER_LINE.findall(out) if spec.ledger else []
-    return Outcome(spec.name, True, "", seconds, lines)
+    return Outcome(spec.name, True, "", seconds, lines, reported=any(ln.startswith("LEDGER-FINDING") for ln in lines))
 
 
 # ── proofs ──────────────────────────────────────────────────────────────────
@@ -746,6 +749,27 @@ def _reproduce_note(tip: str) -> str:
     return (f"to reproduce at the tip: git worktree add --detach ../pc-{tip[:12]} {tip} && cd ../pc-{tip[:12]} && uv sync")
 
 
+def _print_report(name: str, spec: Spec, outcome: Outcome, tip: str, selected_by: str, out, err) -> None:
+    """The one place a passing check's findings are printed (``PUSH_CHECK_REPORT``), whichever way the check reported them: the
+    wire-ledger's own exit 1 (``Outcome.detail`` holds its output; Phase 2) or a class-A ledger's report-mode lines
+    (``Outcome.lines``; Phase 4, at most MAX_REPORT_FINDINGS findings and then a ``+N more`` line). A check that reported nothing
+    prints nothing."""
+    if outcome.detail:
+        print(f"{REPORT_TOKEN} {name} is red at the tip's tree ({tip[:12]}); selected by {selected_by}. {spec.report_note}", file=out)
+        print(outcome.detail, file=out)
+        print(f"  reproduce: {spec.reproduce}   ({_reproduce_note(tip)})", file=out)
+        if spec.fix:
+            print(f"  fix: {spec.fix}", file=out)
+    findings = [ln for ln in outcome.lines if ln.startswith("LEDGER-FINDING")]
+    for line in findings[:MAX_REPORT_FINDINGS]:
+        print(f"{REPORT_TOKEN} {name}: {line}", file=err)
+    if len(findings) > MAX_REPORT_FINDINGS:
+        print(f"{REPORT_TOKEN} {name}: +{len(findings) - MAX_REPORT_FINDINGS} more finding(s); reproduce: {spec.reproduce}", file=err)
+    for line in outcome.lines:
+        if not line.startswith("LEDGER-FINDING"):
+            print(f"{REPORT_TOKEN} {name}: {line}", file=err)
+
+
 def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[str, str], workdir: Path, python: str,
              out=sys.stdout, err=sys.stderr, repush: tuple[str, str] = ("", ""), ledger_report: str = "") -> int:
     if "check-gate" in skips:
@@ -799,27 +823,11 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
                 continue
             outcome = outcomes[name]
             spec = SPECS[name]
-            if outcome.reported:
-                reported.append(name)
-                ran.append(f"{name}({outcome.seconds:.1f}s)")
-                print(f"{REPORT_TOKEN} {name} is red at the tip's tree ({tip[:12]}); selected by {selected[name]}. {spec.report_note}",
-                      file=out)
-                print(outcome.detail, file=out)
-                print(f"  reproduce: {spec.reproduce}   ({_reproduce_note(tip)})", file=out)
-                if spec.fix:
-                    print(f"  fix: {spec.fix}", file=out)
-                continue
             if outcome.ok:
                 ran.append(f"{name}({outcome.seconds:.1f}s)")
-                findings = [ln for ln in outcome.lines if ln.startswith("LEDGER-FINDING")]
-                for line in findings[:MAX_REPORT_FINDINGS]:
-                    print(f"PUSH_CHECK_REPORT {name}: {line}", file=err)
-                if len(findings) > MAX_REPORT_FINDINGS:
-                    print(f"PUSH_CHECK_REPORT {name}: +{len(findings) - MAX_REPORT_FINDINGS} more finding(s); "
-                          f"reproduce: {SPECS[name].reproduce}", file=err)
-                for line in outcome.lines:
-                    if not line.startswith("LEDGER-FINDING"):
-                        print(f"PUSH_CHECK_REPORT {name}: {line}", file=err)
+                if outcome.reported:
+                    reported.append(name)
+                _print_report(name, spec, outcome, tip, selected[name], out, err)
                 continue
             refusals.append(name)
             print(f"{spec.token} {name} is red at the tip's tree ({tip[:12]}); selected by {selected[name]}.", file=out)
