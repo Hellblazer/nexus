@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The retire-keys routes have no automatic trigger (nexus-6pfgb.43): a census of every file that names them.
 
-Moved out of ``tests/test_retire_keys.py`` (its size ceiling) when the scan learned to read only what a commit could
-carry."""
+Moved out of ``tests/test_retire_keys.py`` (its size ceiling) when the scan learned to read only git-tracked files."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -91,7 +90,9 @@ class TestNoAutomaticTrigger:
     def _files(cls, root: Path) -> list[Path]:
         """The files git tracks, and no others. A run's own output (a --status file such as ``aff.json`` in the repo
         root, or one under the gitignored ``output/``) names the verb in its argv and is not the repository, whether or
-        not an ignore rule covers it. Without git (no work tree), the walk with SKIP_DIRS."""
+        not an ignore rule covers it. An untracked, unstaged new file is deliberately not checked here: it is caught
+        once staged, by the push gate's tip worktree, or by CI. Without git (no work tree, or git failing) the
+        fallback walk with SKIP_DIRS still reads untracked files."""
         import os  # noqa: PLC0415 — only this scan walks the tree
         import subprocess  # noqa: PLC0415 — only this scan lists the tree
 

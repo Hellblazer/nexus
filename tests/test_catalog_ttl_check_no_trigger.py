@@ -59,8 +59,10 @@ SERVICE_MAIN = ROOT / "service" / "src" / "main" / "java" / "dev" / "nexus" / "s
 
 def _files(root: Path) -> list[Path]:
     """The files to scan: only what git tracks, so a run's own output (the selector's list, or a --status file such as
-    ``aff.json`` that a lab run writes into the repo root, ignored or not) is never read; without git, the walk with
-    SKIP_DIRS. The same listing as the chunk routes' no-trigger scan."""
+    ``aff.json`` that a lab run writes into the repo root, ignored or not) is not read. An untracked, unstaged new file
+    is deliberately not checked here: it is caught once staged, by the push gate's tip worktree, or by CI. Without git
+    (no work tree, or git failing) the fallback walk with SKIP_DIRS still reads untracked files. The same listing as
+    the chunk routes' no-trigger scan."""
     try:
         listed = subprocess.run(
             ["git", "-C", str(root), "ls-files", "-z", "--cached"],

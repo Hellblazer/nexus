@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -57,34 +58,72 @@ NAMES = (
     "catalog_document_chunks_chunk_index_position", "catalog_document_chunks_labels_written",
 )
 #: Not scanned: version control, environments and build output, and prose that only describes the routes.
+#: RDR-258 red-run report data (nexus-2jomg.1): a plain-text CI-log extract committed there would quote route names without calling them.
 SKIP_DIRS = {".git", ".venv", "node_modules", "target", "__pycache__", "docs", "web", ".mypy_cache", ".ruff_cache",
-             ".pytest_cache", ".beads", ".claude", "build", "dist"}
+             ".pytest_cache", ".beads", ".claude", "build", "dist", "red-run-data"}
 #: Directories the brief names; each that exists must have been scanned (a gate that scanned none is vacuous).
 NAMED_ROOTS = ("src", "scripts", "conexus", ".github", "deploy")
 SERVICE_MAIN = ROOT / "service" / "src" / "main" / "java" / "dev" / "nexus" / "service"
 
 
-def _scan() -> tuple[dict[str, set[str]], dict[str, int]]:
+def _files(root: Path) -> list[Path]:
+    """The files to scan: only what git tracks, so a run's own output (a --status file such as ``aff.json`` that a lab
+    run writes into the repo root, ignored or not) is not read. An untracked, unstaged new file is deliberately not
+    checked here: it is caught once staged, by the push gate's tip worktree, or by CI. Without git (no work tree, or
+    git failing) the fallback walk with SKIP_DIRS still reads untracked files. The same listing as the chunk routes'
+    and the catalog TTL step's no-trigger scans."""
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--cached"],
+            capture_output=True, check=True, timeout=60,
+        ).stdout.decode("utf-8", "surrogateescape")
+    except (OSError, subprocess.SubprocessError):
+        out: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            out.extend(Path(dirpath) / f for f in filenames)
+        return out
+    return [
+        root / rel for rel in listed.split("\0")
+        if rel and not set(Path(rel).parts[:-1]) & SKIP_DIRS and (root / rel).is_file()
+    ]
+
+
+def _scan(root: Path = ROOT) -> tuple[dict[str, set[str]], dict[str, int]]:
     seen: dict[str, set[str]] = {}
     scanned: dict[str, int] = {}
-    for dirpath, dirnames, filenames in os.walk(ROOT):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        for fname in filenames:
-            path = Path(dirpath) / fname
-            if path.suffix == ".md":
+    for path in _files(root):
+        if path.suffix == ".md":
+            continue
+        try:
+            if path.stat().st_size > 3_000_000:
                 continue
-            try:
-                if path.stat().st_size > 3_000_000:
-                    continue
-                text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            rel = path.relative_to(ROOT).as_posix()
-            scanned[rel.split("/", 1)[0]] = scanned.get(rel.split("/", 1)[0], 0) + 1
-            hits = {n for n in NAMES if n in text}
-            if hits:
-                seen[rel] = hits
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        rel = path.relative_to(root).as_posix()
+        scanned[rel.split("/", 1)[0]] = scanned.get(rel.split("/", 1)[0], 0) + 1
+        hits = {n for n in NAMES if n in text}
+        if hits:
+            seen[rel] = hits
     return seen, scanned
+
+
+def test_the_scan_lists_tracked_files_only_never_untracked_or_ignored_ones(tmp_path: Path) -> None:
+    """A staged file is scanned. An untracked file that names the route is not, whether or not an ignore rule covers
+    it: a lab run's --status file (``aff.json``) or selector list is a run's output, not the repository."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=60)
+    (tmp_path / ".gitignore").write_text("output/\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "tracked.py").write_text("ROUTE = 'manifest-labels-" + "check'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", ".gitignore", "src/tracked.py"], check=True, timeout=60)
+    (tmp_path / "aff.json").write_text('{"route": "manifest-labels-' + 'check"}\n', encoding="utf-8")  # untracked, not ignored
+    (tmp_path / "output").mkdir()
+    (tmp_path / "output" / "affected.txt").write_text("manifest-labels-" + "check\n", encoding="utf-8")  # ignored
+    rels = {p.relative_to(tmp_path).as_posix() for p in _files(tmp_path)}
+    assert rels == {".gitignore", "src/tracked.py"}
+    seen, _ = _scan(tmp_path)
+    assert seen == {"src/tracked.py": {"manifest-labels-check"}}
 
 
 def test_nothing_in_the_repository_names_the_routes_but_the_engine_classes_and_their_tests() -> None:
