@@ -105,6 +105,7 @@ from nexus.catalog.write_outcome import (
     client_side_refusals,
     judge,
 )
+from nexus.collection_errors import ChunkMetadataKeyRefusedError, find_chunk_key_refusal
 from nexus.db.limits import QUOTAS
 from nexus.errors import BatchWriteFailedError, CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
 from nexus.ttl import refuse_ttl_over_cap
@@ -461,7 +462,7 @@ def is_anticipated_failure(exc: BaseException) -> bool:
     production fault stays diagnosable."""
     known = (
         httpx.HTTPError, CombinedWriteEmbedTimeoutError, BatchWriteFailedError, IndexRunVerifyRefused,
-        StampRefusedError, LandedUnconfirmedError, *client_side_refusals(),
+        StampRefusedError, LandedUnconfirmedError, ChunkMetadataKeyRefusedError, *client_side_refusals(),
     )
     seen: set[int] = set()
     pending: list[BaseException] = [exc]
@@ -606,6 +607,9 @@ class PutNoteOutcome:
     stamp_refused: bool = False
     stamp_detail: str = ""
     refusal: str = ""
+    #: Set on a :data:`NOT_LANDED` outcome whose cause chain holds the engine's ``chunk_metadata_key_refused`` 422
+    #: (nexus-6pfgb.66): a retry is refused the same way, so the wording differs from every other engine refusal.
+    key_refused: bool = False
     unstamped: bool = False
     #: Set on a :data:`STORED` outcome whose completion stamp has not been sent yet: the producer
     #: fires its chains and then calls :func:`stamp_note` (nexus-z0o2p.34). ``content_hash`` is what
@@ -856,6 +860,7 @@ def put_note(
         return out
     except NoteWriteError as exc:
         out.status, out.reason, out.refusal = NOT_LANDED, exc.reason, exc.refusal
+        out.key_refused = find_chunk_key_refusal(exc) is not None
         # No exc_info: a definitive refusal is a normal outcome the caller words itself (the CLI
         # prints this line to the operator's terminal), and the reason names what was refused. The
         # cause chain keeps what the traceback carried for a reader of the log.
@@ -1024,6 +1029,12 @@ def _warn_if_sweep_skipped(out: PutNoteOutcome, write: NoteWriteResult) -> None:
 # ── the words and the firing every producer shares ───────────────────────────
 
 
+def _clause(text: str) -> str:
+    """*text* without its closing full stop, for a reason a sentence of ours adds its own stop to: a reason
+    that already ends in one used to print as ``..``."""
+    return text.rstrip().rstrip(".")
+
+
 def _sentence(text: str) -> str:
     """*text* ended with a full stop, so a reason that does not end in one still reads as a sentence."""
     text = text.rstrip()
@@ -1063,6 +1074,11 @@ def failure_message(outcome: PutNoteOutcome, *, subject: str, check: str = "") -
                                           index-state sentence); retry once it is running
     NOT_LANDED, refused by the engine     could not store; not stored, no chunk left behind, earlier
                                           version unchanged, metadata-refresh qualifier, retry is safe
+    NOT_LANDED, engine refused the        could not store; the keys refused, each with where its value
+    chunk keys (``key_refused``)          lives instead; the engine reported the request refused, a retry
+                                          is refused the same way, upgrade nx or report it. No "retry is
+                                          safe" and no claim about what the request left behind (the
+                                          engine has not shown that yet)
     UNCERTAIN, in flight                  could not confirm it landed; nothing rolled back; may already
                                           have succeeded; check before retrying
     UNCERTAIN, stamp refused              wrote it and the engine accepted it but refused to stamp it
@@ -1082,7 +1098,7 @@ def failure_message(outcome: PutNoteOutcome, *, subject: str, check: str = "") -
     col, doc_id, reason = outcome.collection, outcome.doc_id, outcome.reason
     if outcome.status == NO_CATALOG:
         return (
-            f"could not catalog {subject} in {col}: {reason}. Nothing was written: a note is written "
+            f"could not catalog {subject} in {col}: {_clause(reason)}. Nothing was written: a note is written "
             "together with its catalog entry, never without one.")
     if outcome.status == NOT_LANDED:
         if outcome.refusal == REFUSED_BY_CLIENT:
@@ -1091,11 +1107,16 @@ def failure_message(outcome: PutNoteOutcome, *, subject: str, check: str = "") -
                 f"unchanged; run the command again once that is fixed.{_FAILED_STATE}")
         if outcome.refusal == REFUSED_UNREACHABLE:
             return (
-                f"could not store {subject} in {col}: {reason}. The engine could not be reached, so "
+                f"could not store {subject} in {col}: {_clause(reason)}. The engine could not be reached, so "
                 f"the note was not written and its chunks and manifest are unchanged; retry once it is "
                 f"running.{_FAILED_STATE}")
+        if outcome.key_refused:
+            # The engine refused the chunk keys (nexus-6pfgb.66). The reason already says what was refused, that
+            # the same write is refused again and what to do; no "retry is safe", and no claim about what the
+            # request left behind: the engine has not shown that yet, so this says only that it reported refusal.
+            return f"could not store {subject} in {col}: {_clause(reason)}.{_FAILED_STATE}"
         return (
-            f"could not store {subject} in {col}: {reason}. The note was not stored: its chunks and "
+            f"could not store {subject} in {col}: {_clause(reason)}. The note was not stored: its chunks and "
             "its catalog entry go in one request, so no chunk was left behind and any earlier version "
             "of the note is unchanged (chunks whose text was already stored may have had their "
             "metadata refreshed); retry is safe.")
@@ -1111,7 +1132,7 @@ def failure_message(outcome: PutNoteOutcome, *, subject: str, check: str = "") -
                 "The document stays 'indexing'. Nothing was rolled back; a retry is an idempotent re-write.")
         look = f"check with {check}" if check else "look for the note in the store"
         return (
-            f"could not confirm that {subject} landed in {col}: {reason}. Nothing was rolled back: the "
+            f"could not confirm that {subject} landed in {col}: {_clause(reason)}. Nothing was rolled back: the "
             f"write may already have succeeded; {look} before retrying (a retry is an idempotent "
             "re-write either way).")
     return (

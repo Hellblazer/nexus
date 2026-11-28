@@ -402,3 +402,24 @@ def test_the_mcp_tool_error_is_one_message_naming_the_keys() -> None:
     for entry in _REFUSED:
         assert entry["key"] in text
         assert entry["home"] in text
+
+
+# ── the message a person reads (fix round 1) ─────────────────────────────────
+
+
+def test_the_message_lists_at_most_ten_keys_then_says_how_many_more() -> None:
+    many = [{"key": f"k{i:02d}", "class": "UNKNOWN", "home": "nowhere"} for i in range(15)]
+    text = str(chunk_key_refused_error_from_body(422, _engine_body(refused=many)))
+    assert all(f"'k{i:02d}'" in text for i in range(10))
+    assert "'k10'" not in text
+    assert "and 5 more" in text
+
+
+def test_the_message_tells_the_reader_what_to_do_and_claims_nothing_about_what_was_written() -> None:
+    text = str(chunk_key_refused_error_from_body(422, _engine_body()))
+    assert "retrying will not help" in text
+    assert "Upgrade nx if it is older than the engine; otherwise report this message" in text
+    assert "The engine reported this request refused" in text
+    lowered = text.lower()
+    for claim in ("nothing was written", "no chunk was left", "zero chunks landed", "rolled back"):
+        assert claim not in lowered

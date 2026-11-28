@@ -35,6 +35,7 @@ from nexus._locking import lock_file, unlock_file
 from nexus.bounded_subprocess import run_bounded
 from nexus.catalog.indexed_meta import document_register_meta, fill_only_meta
 from nexus.catalog.reconcile_run import DELIBERATE_SKIP_CAUSES as _DELIBERATE_SKIP
+from nexus.collection_errors import chunk_key_refusal_stats
 from nexus.config import DEFAULT_EXTRACTOR
 from nexus.catalog.rows.legacy_names import is_conformant_collection_name
 from nexus.db.limits import QUOTAS
@@ -6166,6 +6167,9 @@ def _run_index(
     _batch_throttled: dict[str, str] = {}
     _batch_throttle_retry_after: float | None = None
     _batch_throttle_breaker_open = False
+    # nexus-6pfgb.66: the subset the ENGINE refused for chunk metadata keys (a 422 chunk_metadata_key_refused), as
+    # the typed errors. Also in _batch_failures; reported apart because a re-run is refused the same way.
+    _batch_refused: dict = {}
     if isinstance(db, HttpVectorClient):
         from nexus.chunk_batcher import ChunkBatcher  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -7067,10 +7071,12 @@ def _run_index(
             )
         _batch_failures = _batcher.failed_files
         _batch_throttled = dict(_batcher.throttled_files)
+        _refused_now = getattr(_batcher, "refused_files", None)
+        _batch_refused = dict(_refused_now) if isinstance(_refused_now, dict) else {}
         _batch_throttle_retry_after = _batcher.throttle_retry_after
         _batch_throttle_breaker_open = bool(_batcher.throttle_breaker_open)
         # Rejected = failed and not throttled; the throttled ones get their own line below.
-        _rejected = {p: e for p, e in _batch_failures.items() if p not in _batch_throttled}
+        _rejected = {p: e for p, e in _batch_failures.items() if p not in _batch_throttled and p not in _batch_refused}
         if _rejected:
             _log.error(
                 "index_batch_upload_failures",
@@ -7083,6 +7089,15 @@ def _run_index(
                     f"upload (see logs); their vectors are absent or partial: "
                     + ", ".join(sorted(_rejected)[:5])
                     + ("…" if len(_rejected) > 5 else "")
+                )
+        if _batch_refused:
+            _log.error("index_batch_upload_key_refused", count=len(_batch_refused), files=sorted(_batch_refused)[:20])
+            if on_phase is not None:
+                on_phase(
+                    f"WARNING: {len(_batch_refused)} file(s) REFUSED by the engine for chunk metadata keys "
+                    f"(a re-run is refused the same way): "
+                    + ", ".join(sorted(_batch_refused)[:5])
+                    + ("…" if len(_batch_refused) > 5 else "")
                 )
         if _batch_throttled:
             _log.error(
@@ -7576,6 +7591,9 @@ def _run_index(
         # remedy, not looking at the file. index_repo_cmd names them, shows
         # the Retry-After, and exits non-zero.
         "chunk_flush_throttled_files": len(_batch_throttled),
+        # nexus-6pfgb.66: of the failed files, the ones the engine refused for chunk metadata keys (count, paths and
+        # the distinct keys with their homes). index_repo_cmd names the keys once and does not promise a retry.
+        **chunk_key_refusal_stats(_batch_refused),
         "chunk_flush_throttled_paths": sorted(_batch_throttled),
         # Longest Retry-After (seconds) any throttled flush carried, or None.
         "chunk_flush_throttle_retry_after": _batch_throttle_retry_after,

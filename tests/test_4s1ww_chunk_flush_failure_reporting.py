@@ -42,6 +42,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.collection_errors import chunk_key_refused_error_from_body
 from tests._fake_credentials import SAVED_FAKE_CREDENTIALS, fake_credential
 
 # ── indexer._run_index wiring ────────────────────────────────────────────────
@@ -139,9 +140,12 @@ class _FakeBatcherWithFailures:
     from "does ChunkBatcher compute it correctly" (the latter is
     tests/test_chunk_batcher.py's job)."""
 
-    def __init__(self, *, flush, failed=None, throttled=None, retry_after=None, breaker_open=False, **_kw):
+    def __init__(self, *, flush, failed=None, throttled=None, refused=None, retry_after=None, breaker_open=False, **_kw):
         self._flush = flush
         self._failed = dict(failed or {})
+        # nexus-6pfgb.66: the engine's chunk-key refusals are part of failed_files too, as on the real batcher
+        self._refused = dict(refused or {})
+        self._failed.update({p: str(e) for p, e in self._refused.items()})
         # nexus-eoido: the throttled subset is part of failed_files, as on the real batcher
         self._throttled = dict(throttled or {})
         self._failed.update(self._throttled)
@@ -165,6 +169,10 @@ class _FakeBatcherWithFailures:
     @property
     def throttled_files(self) -> dict:
         return dict(self._throttled)
+
+    @property
+    def refused_files(self) -> dict:
+        return dict(self._refused)
 
     @property
     def throttle_retry_after(self):
@@ -275,6 +283,37 @@ def test_run_index_batcher_none_reports_zero_chunk_flush_failures(tmp_path, monk
         stats = _run_index(repo, reg)
 
     assert stats["chunk_flush_failed_files"] == 0
+
+
+def _refusal(*keys: str):
+    return chunk_key_refused_error_from_body(422, {
+        "reason": "chunk_metadata_key_refused", "error": "chunk metadata names keys a chunk row does not carry",
+        "refused": [{"key": k, "class": "DOCUMENT", "home": f"home of {k}"} for k in keys],
+    })
+
+
+def test_run_index_reports_the_engines_key_refusals_with_their_keys(tmp_path, monkeypatch):
+    """nexus-6pfgb.66: a refused file is counted apart (and stays in the failed count, which holds the
+    --since-head base back), with its path and the keys and homes the engine named, once each."""
+    stats = _run_index_with_fake_batcher(
+        tmp_path, monkeypatch,
+        failed_files={"bad.py": "boom"},
+        refused={"r2.py": _refusal("title", "line_start"), "r1.py": _refusal("title")},
+    )
+    assert stats["chunk_flush_failed_files"] == 3
+    assert stats["chunk_flush_refused_files"] == 2
+    assert stats["chunk_flush_refused_paths"] == ["r1.py", "r2.py"]
+    assert stats["chunk_flush_refused_keys"] == [
+        {"key": "line_start", "class": "DOCUMENT", "home": "home of line_start"},
+        {"key": "title", "class": "DOCUMENT", "home": "home of title"},
+    ]
+
+
+def test_run_index_with_no_refusal_reports_zero_refused_files(tmp_path, monkeypatch):
+    stats = _run_index_with_fake_batcher(tmp_path, monkeypatch, failed_files={"bad.py": "boom"})
+    assert stats["chunk_flush_refused_files"] == 0
+    assert stats["chunk_flush_refused_paths"] == []
+    assert stats["chunk_flush_refused_keys"] == []
 
 
 # ── nx index repo CLI wiring ─────────────────────────────────────────────────
@@ -645,3 +684,4 @@ def test_run_index_reports_transient_upsert_deferred_files_in_stats(tmp_path, mo
         stats = _run_index(repo, _reg())
     assert stats["transient_upsert_deferred_files"] == 0
     assert stats["transient_upsert_deferred_paths"] == []
+

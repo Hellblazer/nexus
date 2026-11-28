@@ -129,3 +129,26 @@ def test_a_refusal_wrapped_in_another_error_is_still_recognised() -> None:
     batcher.drain()
     assert sent == [3]
     assert sorted(batcher.refused_files) == ["f0.py", "f1.py", "f2.py"]
+
+
+# ── the chain a run follows: real batcher -> run stats -> the summary text ───
+
+
+def test_a_real_refused_run_names_the_keys_once_in_the_summary_and_promises_no_retry() -> None:
+    from nexus.collection_errors import chunk_key_refusal_report, chunk_key_refusal_stats  # noqa: PLC0415 — test-local import
+
+    engine = _Engine(httpx.Response(422, json=_BODY))
+    batcher, _ = _run(engine, files=4)
+    stats = chunk_key_refusal_stats(batcher.refused_files)
+    assert stats["chunk_flush_refused_files"] == 4
+    assert stats["chunk_flush_refused_paths"] == [f"f{i}.py" for i in range(4)]
+    assert stats["chunk_flush_refused_keys"] == [{"key": "title", "class": "DOCUMENT", "home": "the catalog document"}]
+    warning, error = chunk_key_refusal_report(stats, 9)
+    assert "4/9 file(s) refused by the engine" in warning
+    assert warning.count("'title'") == 1, "four files refused for one key name it once"
+    assert "the catalog document" in warning
+    assert "refused the same way" in warning
+    assert "Upgrade nx if it is older than the engine; otherwise report this message" in warning
+    for bad in ("retried automatically", "zero chunks landed", "nothing was indexed", "WARNING line", "Nothing was written"):
+        assert bad not in warning and bad not in error
+    assert "refused the same way" in error

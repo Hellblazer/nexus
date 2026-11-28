@@ -18,6 +18,7 @@ from nexus.catalog.engine_writes.hints import (  # RDR-254: move hints, printed 
     prints_hints as _prints_hints,
     repo_hints as _repo_hints,
 )
+from nexus.collection_errors import chunk_key_refusal_report
 from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import EXTRACTOR_CHOICES
@@ -2136,8 +2137,17 @@ def index_repo_cmd(
             if _breaker_open:
                 # The run was cut short: that is the headline, ahead of any per-file failure below.
                 _run_failure = _run_failure or _throttle_failure
-        chunk_flush_failed_files = (stats or {}).get("chunk_flush_failed_files", 0)
-        if chunk_flush_failed_files:
+        # nexus-6pfgb.66: files the ENGINE refused for chunk metadata keys. They are inside
+        # chunk_flush_failed_files (that count holds the --since-head base back), so they are named here, once,
+        # with the keys and where each value lives, and taken out of the generic failed-flush block below,
+        # whose "retried automatically" and "see the WARNING above" would be wrong for them.
+        _refused_report = chunk_key_refusal_report(stats or {}, n)
+        _refused_files = (stats or {}).get("chunk_flush_refused_files", 0) if _refused_report else 0
+        if _refused_report is not None:
+            click.echo(_refused_report[0])
+            _run_failure = _run_failure or click.ClickException(_refused_report[1])
+        chunk_flush_failed_files = (stats or {}).get("chunk_flush_failed_files", 0) - _refused_files
+        if chunk_flush_failed_files > 0:
             click.echo(
                 f"Warning: {chunk_flush_failed_files}/{n} file(s) failed to "
                 f"flush chunk uploads (zero chunks landed for the affected "

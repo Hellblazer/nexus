@@ -7,6 +7,7 @@ importing the corpus module on every invocation.
 from __future__ import annotations
 
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -126,6 +127,10 @@ def label_reserved_error_from_body(
     return LabelReservedError(label, user_chooses_label=user_chooses_label) if isinstance(label, str) and label else None
 
 
+#: How many refused keys the typed error's message lists before it says "and N more".
+MAX_LISTED_KEYS: int = 10
+
+
 @dataclass(frozen=True)
 class RefusedChunkKey:
     """One entry of the engine's ``refused`` list: a metadata ``key``, its ``cls`` (DOCUMENT, POSITION, LEGACY or
@@ -167,19 +172,39 @@ class ChunkMetadataKeyRefusedError(RuntimeError):
         self.refused_chunks = refused_chunks
         self.requested_count = requested_count
         self.engine_message = engine_message
-        where = " on ".join(part for part in (
-            f"collection {collection!r}" if collection else "", route or "") if part)
-        head = "the engine refused a chunk write: its metadata names keys a chunk row does not carry"
+        where = ", ".join(part for part in (
+            f"collection {collection}" if collection else "", f"route {route}" if route else "") if part)
+        head = "the engine refused this write: its chunk metadata names keys a chunk row does not carry"
         if where:
             head += f" ({where})"
         if refused:
-            keys = "\n".join(f"  {k.render()}" for k in refused)
-            body = f"{head}:\n{keys}"
+            shown = refused[:MAX_LISTED_KEYS]
+            lines = [f"  {k.render()}" for k in shown]
+            if len(refused) > len(shown):
+                lines.append(f"  ... and {len(refused) - len(shown)} more")
+            body = f"{head}:\n" + "\n".join(lines)
         else:
             body = f"{head}. {engine_message}" if engine_message else f"{head}."
         if refused_chunks is not None and requested_count is not None:
-            body += f"\n{refused_chunks} of {requested_count} chunks carried one."
-        super().__init__(body + "\nThe writer must stop sending these keys; the same write is refused again, so it is not retried.")
+            body += f"\n{refused_chunks} of {requested_count} chunks in the request carried one."
+        super().__init__(
+            body + "\nThe engine reported this request refused. Repeating it is refused the same way, so retrying will not help. "
+            "Upgrade nx if it is older than the engine; otherwise report this message.")
+
+
+def find_chunk_key_refusal(exc: BaseException) -> ChunkMetadataKeyRefusedError | None:
+    """The :class:`ChunkMetadataKeyRefusedError` in *exc*'s cause chain (or *exc* itself), else None.
+
+    A writer may wrap the typed error in its own failure type; the chain is walked so a producer or the
+    chunk batcher can still tell this refusal from any other."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        if isinstance(cur, ChunkMetadataKeyRefusedError):
+            return cur
+        seen.add(id(cur))
+        cur = cur.__cause__ or cur.__context__
+    return None
 
 
 def _opt_int(value: Any) -> int | None:
@@ -213,3 +238,57 @@ def chunk_key_refused_error_from_body(status: int | None, body: Any) -> ChunkMet
         collection_id=_opt_int(body.get("collection_id")), refused_chunks=_opt_int(body.get("refused_chunks")),
         requested_count=_opt_int(body.get("requested_count")), engine_message=_opt_str(body.get("error")),
     )
+
+
+def chunk_key_refusal_stats(refused: Mapping[str, ChunkMetadataKeyRefusedError]) -> dict[str, Any]:
+    """The run-stats entries for the files whose batch the engine refused for chunk metadata keys.
+
+    ``chunk_flush_refused_files`` (a count), ``chunk_flush_refused_paths`` (sorted) and
+    ``chunk_flush_refused_keys``: every distinct refused ``{key, class, home}`` over all the files, sorted by
+    key, so a run that refused 400 files for one key names it once. The files are also in the run's failed-file
+    count (that is what holds the ``--since-head`` base back); these entries say which of them the engine refused."""
+    distinct: dict[tuple[str, str, str], None] = {}
+    for err in refused.values():
+        for k in err.refused:
+            distinct[(k.key, k.cls, k.home)] = None
+    return {
+        "chunk_flush_refused_files": len(refused),
+        "chunk_flush_refused_paths": sorted(refused),
+        "chunk_flush_refused_keys": [
+            {"key": key, "class": cls, "home": home} for key, cls, home in sorted(distinct)
+        ],
+    }
+
+
+def chunk_key_refusal_report(stats: Mapping[str, Any], total_files: int) -> tuple[str, str] | None:
+    """``(warning, error)`` for ``nx index repo``'s summary when the engine refused files' chunk keys, else None.
+
+    The warning names the refused keys and where each value lives instead (at most :data:`MAX_LISTED_KEYS`, then
+    "and N more"), says a re-run is refused the same way, and says what to do. It does not say what the refused requests left behind: the engine has not shown that. The
+    error is the one line the command exits with."""
+    count = int(stats.get("chunk_flush_refused_files") or 0)
+    if count <= 0:
+        return None
+    paths = list(stats.get("chunk_flush_refused_paths") or [])
+    shown_paths = paths[:10]
+    more_paths = len(paths) - len(shown_paths)
+    keys = [
+        RefusedChunkKey(key=str(k.get("key", "")), cls=str(k.get("class", "")), home=str(k.get("home", "")))
+        for k in (stats.get("chunk_flush_refused_keys") or []) if isinstance(k, Mapping) and k.get("key")
+    ]
+    lines = [f"  {k.render()}" for k in keys[:MAX_LISTED_KEYS]]
+    if len(keys) > MAX_LISTED_KEYS:
+        lines.append(f"  ... and {len(keys) - MAX_LISTED_KEYS} more")
+    named = (", ".join(shown_paths) if shown_paths else "paths not recorded") + (f" and {more_paths} more" if more_paths > 0 else "")
+    warning = (
+        f"Warning: {count}/{total_files} file(s) refused by the engine: their chunk metadata names keys a chunk row "
+        f"does not carry: {named}.\n"
+        + ("The refused keys:\n" + "\n".join(lines) + "\n" if lines else "")
+        + "The engine reported these requests refused. A re-run is refused the same way, so it "
+        "does not fix these files. Upgrade nx if it is older than the engine; otherwise report this message."
+    )
+    error = (
+        f"{count} file(s) refused by the engine for their chunk metadata keys; a re-run is refused the same way. "
+        "Upgrade nx if it is older than the engine; otherwise report the Warning above."
+    )
+    return warning, error

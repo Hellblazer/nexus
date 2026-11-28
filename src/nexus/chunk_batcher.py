@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 
 import structlog
 
-from nexus.collection_errors import ChunkMetadataKeyRefusedError
+from nexus.collection_errors import ChunkMetadataKeyRefusedError, find_chunk_key_refusal
 
 _log = structlog.get_logger(__name__)
 
@@ -82,22 +82,6 @@ class _ThrottleSignal:
 
 class _ThrottleBreakerOpen(Exception):
     """Raised inside ``_flush_batch`` instead of issuing a flush once the breaker is open."""
-
-
-def _chunk_key_refusal(exc: BaseException) -> ChunkMetadataKeyRefusedError | None:
-    """The engine's ``chunk_metadata_key_refused`` refusal in *exc*'s cause chain, or ``None``.
-
-    The flush callback may wrap the typed error, so the chain is walked, not only the top. Not
-    bisected (:meth:`ChunkBatcher._flush_batch`): the refusal is about the writer's metadata keys,
-    which every half of a batch carries, so halving only multiplies refused requests."""
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        if isinstance(cur, ChunkMetadataKeyRefusedError):
-            return cur
-        seen.add(id(cur))
-        cur = cur.__cause__ or cur.__context__
-    return None
 
 
 def _throttle_signal(exc: BaseException) -> _ThrottleSignal | None:
@@ -646,7 +630,7 @@ class ChunkBatcher:
                 get_brake().trip(throttle.retry_after, source="chunk_batcher")
             # nexus-6pfgb.66: a chunk-key refusal is not bisected either. Every half carries the same
             # writer keys, so halving a batch of F files sends up to 2F-1 requests the engine refuses.
-            refusal = _chunk_key_refusal(exc)
+            refusal = find_chunk_key_refusal(exc)
             bisect = refusal is None and len(pend.file_counts) >= 2 and (
                 throttle is None or (throttle.deadline_abort and not bisected)
             )
