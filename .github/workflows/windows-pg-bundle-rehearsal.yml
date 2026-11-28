@@ -135,10 +135,11 @@ on:
       - src/nexus/util/process_group.py
       - src/nexus/_winsec.py
       - src/nexus/_install/winproc_core.py
-      # The Windows generation installer (RDR-224, nexus-f9bgu.47): junction pointers,
-      # launcher directories, the user-PATH shim and the Windows-aware reap, run natively by
+      # The Windows generation installer (RDR-224, nexus-f9bgu.47): pointer files, the
+      # dispatchers on the user PATH, the user-PATH entry and the Windows-aware reap, run natively by
       # tests/test_install_generation_real_windows.py.
       - src/nexus/_install/generation_core.py
+      - src/nexus/_install/_nx_dispatch.py
       - src/nexus/_install/layout_core.py
       - src/nexus/_install/gc_core.py
       # The generation lease: ctypes CreateFileW, the share-delete hold and the reap's link-safe walk

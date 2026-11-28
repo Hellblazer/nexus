@@ -23,7 +23,7 @@ Check that the host will find the commands:
 command -v nx-mcp nx-mcp-catalog          # Windows: Get-Command nx-mcp
 ```
 
-On Windows `nx self install` puts `tools\current\bin` first on your user `PATH`; a host that was already open keeps the old `PATH`, so quit it fully and reopen it. A host launched from a desktop icon often does not inherit your shell's `PATH` either. If it reports the server as failed or connection closed, replace `nx-mcp` in the snippets with the absolute path that command printed (for example `/Users/you/.local/bin/nx-mcp`; on Windows the full path to `nx-mcp.exe`, with backslashes doubled inside JSON).
+On Windows `nx self install` puts `tools\bin` first on your user `PATH`; a host that was already open keeps the old `PATH`, so quit it fully and reopen it. A host launched from a desktop icon often does not inherit your shell's `PATH` either. If it reports the server as failed or connection closed, replace `nx-mcp` in the snippets with the absolute path that command printed (for example `/Users/you/.local/bin/nx-mcp`; on Windows the full path to `nx-mcp.exe`, with backslashes doubled inside JSON).
 
 ## The two servers
 

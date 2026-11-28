@@ -94,7 +94,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 #: Override the generation root. Absolute paths only; see ``_resolve_dir``.
@@ -213,38 +213,105 @@ def venv_python(venv: Path, *, platform: str | None = None) -> Path:
     return venv_script(venv, "python", platform=platform)
 
 
+#: The first line of a pointer FILE, and what tells one from any other file.
+#: Windows RedirectionGuard refuses to traverse a directory junction a
+#: non-elevated process made (WinError 448), and an account without Developer
+#: Mode cannot make a symlink (WinError 1314), so on Windows the generation
+#: pointers (``current``, ``previous``, the legacy ledger entry) are plain files
+#: that hold the target's path. Nothing is traversed, so nothing can be
+#: untrusted (nexus-f9bgu.47).
+POINTER_MAGIC = "nx-pointer 1"
+
+#: The most of a pointer file that is read. A path is far shorter.
+_POINTER_READ_BYTES = 4096
+
+
+def write_pointer(path: Path | str, target: Path | str) -> None:
+    """Write the pointer file *path* naming the absolute path *target*.
+
+    Plain write, no rename: a caller that must replace a live pointer writes a
+    sibling and ``os.replace``s it (``generation_core.swap_link``). A relative
+    target and one with a line break are refused, since the reader would
+    misread both.
+    """
+    text = str(target)
+    if "\n" in text or "\r" in text:
+        raise LayoutError(f"a pointer target must be one line, got {text!r}")
+    if not (PureWindowsPath(text).is_absolute() or PurePosixPath(text).is_absolute()):
+        raise LayoutError(f"a pointer target must be an absolute path, got {text!r}")
+    Path(path).write_text(f"{POINTER_MAGIC}\n{text}\n", encoding="utf-8")
+
+
+def read_pointer(path: Path | str) -> str | None:
+    """The target a pointer FILE names, or ``None`` when *path* is not one.
+
+    Never raises: a missing path, a directory, a junction RedirectionGuard
+    will not open (``OSError`` 448) and a file with another first line are all
+    "not a pointer". A junction is opened with ``open``, which traverses; one
+    is told apart first by ``os.path.isjunction`` and ``is_symlink``, which do
+    not.
+    """
+    candidate = Path(path)
+    try:
+        if candidate.is_symlink() or os.path.isjunction(candidate) or candidate.is_dir():
+            return None
+        with open(candidate, "rb") as handle:
+            raw = handle.read(_POINTER_READ_BYTES)
+        text = raw.decode("utf-8")
+    except (OSError, ValueError):
+        return None
+    lines = text.split("\n")
+    if len(lines) < 3 or lines[0].rstrip("\r") != POINTER_MAGIC or lines[2].strip():
+        return None
+    target = lines[1].rstrip("\r")
+    return target or None
+
+
 def is_link(
     path: Path | str, *, platform: str | None = None, isjunction=None,
 ) -> bool:
-    """True when *path* is a symlink, or on Windows a directory junction.
+    """True when *path* is a symlink, or on Windows a directory junction or a
+    pointer file (:data:`POINTER_MAGIC`).
 
     A junction is NOT a symlink to ``Path.is_symlink`` (measured on Windows,
     Python 3.13: ``is_symlink()`` False, ``os.path.isjunction()`` True), so
     every "is this a pointer" test that was written against symlinks reads a
     junction as an ordinary directory -- and the first thing done to an
-    ordinary directory here is ``rmtree``. *isjunction* is the test seam.
+    ordinary directory here is ``rmtree``. *isjunction* is the test seam. A
+    probe that raises (RedirectionGuard answers ``OSError`` 448 where a probe
+    would have said no) means "not a link".
     """
     candidate = Path(path)
-    if candidate.is_symlink():
-        return True
+    try:
+        if candidate.is_symlink():
+            return True
+    except OSError:
+        return False
     if not _is_nt(platform):
         return False
     probe = isjunction if isjunction is not None else getattr(os.path, "isjunction", None)
-    if probe is None:
-        return False
-    try:
-        return bool(probe(candidate))
-    except OSError:
-        return False
+    if probe is not None:
+        try:
+            if probe(candidate):
+                return True
+        except OSError:
+            return False
+    return read_pointer(candidate) is not None
 
 
 def read_link(path: Path | str, *, platform: str | None = None, readlink=None) -> str:
     """The target of the link at *path*, as written.
 
-    Unchanged from ``os.readlink`` on POSIX. On Windows the extended-length
-    prefix a junction target carries is stripped (:func:`strip_extended_prefix`).
-    *readlink* is the test seam.
+    Unchanged from ``os.readlink`` on POSIX. On Windows a pointer file's target
+    is read from the file; anything else is ``os.readlink`` (a junction's, which
+    does not traverse it, so a junction-era install stays readable under
+    RedirectionGuard) with the extended-length prefix stripped
+    (:func:`strip_extended_prefix`). *readlink* is the test seam.
     """
+    if _is_nt(platform) and readlink is None:
+        pointed = read_pointer(path)
+        if pointed is not None:
+            return pointed
     raw = (readlink if readlink is not None else os.readlink)(path)
     raw = str(raw)
     return strip_extended_prefix(raw) if _is_nt(platform) else raw
@@ -278,11 +345,14 @@ def remove_link(path: Path | str) -> None:
 
     A symlink is unlinked; a Windows junction is ``os.rmdir``'d, which removes
     the reparse point and nothing under it (``shutil.rmtree`` on a junction is
-    how a retained generation gets emptied). Refuses a path that is not a link
-    at all, so a caller that mis-identified a real directory deletes nothing.
+    how a retained generation gets emptied); a pointer file is unlinked.
+    Refuses a path that is not a link at all, so a caller that mis-identified
+    a real directory or file deletes nothing.
     """
     candidate = Path(path)
     if candidate.is_symlink():
+        candidate.unlink()
+    elif read_pointer(candidate) is not None:
         candidate.unlink()
     elif is_link(candidate, platform="win32"):
         os.rmdir(candidate)

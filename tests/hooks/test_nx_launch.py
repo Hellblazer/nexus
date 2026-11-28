@@ -77,12 +77,11 @@ def _install_fake(bindir: Path, name: str, marker: str) -> Path:
 
 
 def _point_current(tools: Path, generation: Path) -> None:
-    """``<tools>/current`` -> *generation*: a symlink, or a junction on Windows."""
+    """``<tools>/current`` -> *generation*: a symlink, or on Windows the pointer FILE the installer
+    writes (a junction made by a non-elevated process is refused by RedirectionGuard, nexus-f9bgu.47)."""
     link = tools / "current"
     if IS_WINDOWS:
-        import _winapi  # noqa: PLC0415 -- Windows only
-
-        _winapi.CreateJunction(str(generation), str(link))
+        link.write_text(f"nx-pointer 1\n{generation}\n", encoding="utf-8")
     else:
         os.symlink(generation, link)
 
@@ -189,6 +188,27 @@ def test_path_is_used_when_there_is_no_layout_at_all(tmp_path: Path) -> None:
     _install_fake(tmp_path / "bin", "nx-hook", "path")
     r = _run(["nx-hook", "preflight"], tools=tmp_path / "no-tools", path=tmp_path / "bin", payload=b"{}")
     assert _report(r)["marker"] == "path"
+
+
+def test_a_pointer_file_names_the_generation_on_every_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Windows pointer is a file (nexus-f9bgu.47). The lookup reads it wherever it runs, and the
+    junction-era pointer (a link, read with ``readlink``) still works."""
+    import importlib
+
+    sys.path.insert(0, str(_LAUNCH.parent.parent / "hooks" / "scripts"))
+    try:
+        lookup = importlib.import_module("_cli_lookup")
+    finally:
+        sys.path.pop(0)
+    from nexus._install import layout_core
+
+    assert lookup.POINTER_MAGIC == layout_core.POINTER_MAGIC
+    tools = tmp_path / "tools"
+    gen = tools / "gen-20260101T000000Z"
+    (gen / "bin").mkdir(parents=True)
+    layout_core.write_pointer(tools / "current", str(gen))
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+    assert lookup.current_generation() == str(gen)
 
 
 def test_the_current_directory_is_never_searched(tmp_path: Path) -> None:

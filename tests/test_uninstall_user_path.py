@@ -2,7 +2,7 @@
 """``nx uninstall`` takes back the Windows user PATH entry (RDR-224, nexus-7xzc1).
 
 Measured on nx-clean-win11 (T2 ``nexus_rdr/224-windows-self-install``):
-``nx self install`` put ``<tools>\\current\\bin`` first on ``HKCU\\Environment``
+``nx self install`` put ``<tools>\\current\\bin`` (``<tools>\\bin`` since nexus-f9bgu.47) first on ``HKCU\\Environment``
 ``Path`` and ``nx uninstall --yes --remove-data`` left it there. The platform
 is injected and a file stands in for the registry (``NX_USER_PATH_STORE``), so
 these run on every host and never touch a real registry.
@@ -26,7 +26,7 @@ def path_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, s
     store = tmp_path / "userpath.txt"
     monkeypatch.setenv(gen_core.USER_PATH_STORE_ENV, str(store))
     entry = str(gen_core.current_launcher_dir())
-    assert entry == str(tools / "current" / "bin")
+    assert entry == str(tools / "bin")
     return store, entry
 
 
@@ -38,6 +38,15 @@ class TestTeardownUserPath:
         assert warnings == []
         assert len(lines) == 1 and f"removed {entry}" in lines[0]
         assert store.read_text().strip() == "C:\\Windows;%USERPROFILE%\\bin"
+
+    def test_confirm_also_removes_the_entry_of_installs_before_the_dispatchers(self, path_store, tmp_path: Path) -> None:
+        store, entry = path_store
+        retired = str(tmp_path / "tools" / "current" / "bin")
+        store.write_text(f"{retired};{entry};C:\\Windows\n")
+        lines, warnings = uninstall_mod._teardown_user_path(confirm=True, platform="win32")
+        assert warnings == [] and len(lines) == 2
+        assert f"removed {entry}" in lines[0] and f"removed {retired}" in lines[1]
+        assert store.read_text().strip() == "C:\\Windows"
 
     def test_dry_run_previews_and_writes_nothing(self, path_store) -> None:
         store, entry = path_store

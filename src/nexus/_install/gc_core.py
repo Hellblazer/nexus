@@ -179,6 +179,26 @@ def _protected_targets(root: Path, platform: str | None = None) -> list[str]:
     return out
 
 
+def _is_entry(entry: Path, prefix: str, platform: str | None) -> bool:
+    """Whether *entry* is something the sweep judges: a ``gen-*`` directory, or a
+    pointer (the legacy ledger entry: a symlink, a junction, or on Windows since
+    nexus-f9bgu.47 a pointer FILE).
+
+    Never ``Path.is_dir``: on a junction RedirectionGuard refuses to traverse it
+    raises OSError 448 where ``os.path.isdir`` answers False, and a pointer file
+    is not a directory at all.
+    """
+    return entry.name.startswith(prefix) and (
+        _layout().is_link(entry, platform=platform) or os.path.isdir(entry)
+    )
+
+
+def _has_receipt(entry: Path, receipt: str) -> bool:
+    """Whether the generation *entry* holds its receipt. ``os.path.isfile`` swallows what
+    ``Path.is_file`` raises for a path through an untrusted junction (OSError 448)."""
+    return os.path.isfile(os.path.join(entry, receipt))
+
+
 def _recently_written(tree: Path, minutes: int) -> bool:
     """True when anything at or under *tree* was written within *minutes*.
 
@@ -448,11 +468,11 @@ def plan(
         protected.append(key(self_generation))
 
     entries = [e for e in sorted(root.iterdir(), key=lambda p: p.name)
-               if e.name.startswith(prefix) and e.is_dir()]
+               if _is_entry(e, prefix, platform)]
 
     # Complete generations, counted first. Stamps sort chronologically by .2's
     # construction, so lexical order IS creation order.
-    total_complete = sum(1 for e in entries if (e / receipt).is_file())
+    total_complete = sum(1 for e in entries if _has_receipt(e, receipt))
 
     # ONE census for the whole pass, for the same reason .5 takes one snapshot:
     # a per-generation re-read could reap against a state that never existed at
@@ -473,7 +493,7 @@ def plan(
     out: list[tuple[str, Path, str]] = []
     index = 0
     for entry in entries:
-        if (entry / receipt).is_file():
+        if _has_receipt(entry, receipt):
             index += 1
             if total_complete - index < keep:
                 out.append(("skip", entry, "inside the keep window"))
@@ -498,7 +518,7 @@ def plan(
             out.append(("skip", entry, "protected pointer"))
             continue
 
-        if census_failed and ((entry / receipt).is_file() or layout.is_link(entry, platform=platform)):
+        if census_failed and (_has_receipt(entry, receipt) or layout.is_link(entry, platform=platform)):
             out.append(("keep", entry, "process census unavailable (no process table, or one without gc's own pid); not reaped"))
             continue
 
@@ -861,7 +881,7 @@ def gc_generations(
     ancestry = _ancestry() if record is not None else []
     receipt = _layout().RECEIPT_NAME
     prefix = _layout().GENERATION_PREFIX
-    entries = sorted(e for e in resolved.iterdir() if e.name.startswith(prefix) and e.is_dir())
+    entries = sorted(e for e in resolved.iterdir() if _is_entry(e, prefix, platform))
     holders = {}
     if ok:
         for entry in entries:
@@ -905,7 +925,7 @@ def gc_generations(
             lines.append(f"would reap {entry}")
             continue
         # Read before the delete: the receipt goes with the tree.
-        complete = (entry / receipt).is_file() or _layout().is_link(entry, platform=platform)
+        complete = _has_receipt(entry, receipt) or _layout().is_link(entry, platform=platform)
         reason = (
             f"outside the keep window ({keep}), not current, previous or the running installer, "
             "and no live holder in the process census or lease"

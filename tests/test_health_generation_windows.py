@@ -2,7 +2,7 @@
 """The doctor's Windows shim row (RDR-224, nexus-f9bgu.47).
 
 Windows nexus writes no launcher into uv's bin dir, so the shim IS a user-PATH
-entry: ``<tools>\\current\\bin`` must be on the persisted user PATH ahead of any
+entry: ``<tools>\\bin`` (the dispatchers; nexus-f9bgu.47) must be on the persisted user PATH ahead of any
 other directory that provides ``nx.exe``, and must hold ``nx.exe``. The Windows
 reading is moved with ``health._win``; a file stands in for HKCU through the
 store seam.
@@ -29,7 +29,10 @@ def _bed(tmp_path: Path, *, with_nx: bool = True) -> tuple[Path, Path]:
     if with_nx:
         (gen / "bin" / "nx.exe").write_bytes(b"nx")
     (tools / "current").symlink_to(gen)
-    return tools, tools / "current" / "bin"
+    (tools / "bin").mkdir()
+    if with_nx:
+        (tools / "bin" / "nx.exe").write_bytes(b"dispatcher")
+    return tools, tools / "bin"
 
 
 def _store(tmp_path: Path, value: str) -> gc.FileUserPath:
@@ -38,7 +41,7 @@ def _store(tmp_path: Path, value: str) -> gc.FileUserPath:
     return store
 
 
-def test_a_user_path_with_current_bin_first_passes(windows, tmp_path: Path) -> None:
+def test_a_user_path_with_the_dispatcher_dir_first_passes(windows, tmp_path: Path) -> None:
     tools, entry = _bed(tmp_path)
     [row] = health._check_windows_user_path(tools, store=_store(tmp_path, f"{entry};C:\\Windows"), environ={})
     assert row.ok and row.label == "User PATH"

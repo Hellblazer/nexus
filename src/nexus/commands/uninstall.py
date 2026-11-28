@@ -198,7 +198,7 @@ def _teardown_user_path(
     *, confirm: bool, platform: str | None = None, store: object | None = None,
     environ: dict[str, str] | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Take ``<tools>\\current\\bin`` off the Windows user PATH (RDR-224,
+    """Take ``<tools>\\bin`` (and the retired ``<tools>\\current\\bin``) off the Windows user PATH (RDR-224,
     nexus-7xzc1). Returns (lines, warnings).
 
     ``nx self install`` puts that one directory first on ``HKCU\\Environment``
@@ -214,21 +214,26 @@ def _teardown_user_path(
         return [], []
     from nexus._install import generation_core  # noqa: PLC0415 — Windows branch only
 
-    entry = generation_core.current_launcher_dir()
-    try:
-        result = generation_core.remove_user_path(
-            entry, store=store, environ=environ, dry_run=not confirm,  # type: ignore[arg-type]
-        )
-    except generation_core.GenerationError as exc:
-        return [], [f"{exc}; remove {entry} from your user PATH yourself"]
-    if not result.removed:
-        return [], []
-    if not confirm:
-        return [f"User PATH: would remove {entry} (added by `nx self install`)."], []
-    return [
-        f"User PATH: removed {entry}. Terminals opened from now on no longer find nx; "
-        "`nx self install` puts it back."
-    ], []
+    lines: list[str] = []
+    # <tools>\\bin is the entry now; <tools>\\current\\bin is the one installs before
+    # nexus-f9bgu.47 put there, and a box that never upgraded since still has it.
+    for entry in (generation_core.current_launcher_dir(), generation_core.retired_launcher_dir()):
+        try:
+            result = generation_core.remove_user_path(
+                entry, store=store, environ=environ, dry_run=not confirm,  # type: ignore[arg-type]
+            )
+        except generation_core.GenerationError as exc:
+            return [], [f"{exc}; remove {entry} from your user PATH yourself"]
+        if not result.removed:
+            continue
+        if not confirm:
+            lines.append(f"User PATH: would remove {entry} (added by `nx self install`).")
+        else:
+            lines.append(
+                f"User PATH: removed {entry}. Terminals opened from now on no longer find nx; "
+                "`nx self install` puts it back."
+            )
+    return lines, []
 
 
 @click.command("uninstall")

@@ -16,6 +16,7 @@ import io
 import os
 import stat
 import subprocess
+import zipfile
 from pathlib import Path
 
 import click
@@ -24,6 +25,7 @@ import pytest
 from nexus import install_layout
 from nexus._install import gc_core
 from nexus._install import generation_core as gen_core
+from nexus._install import layout_core
 from nexus.commands import self_cmd
 from tests._module_seam import setattr_in
 
@@ -53,7 +55,18 @@ class FakeUvAndSpy:
         if argv[1] == "venv":
             gen = Path(argv[-1])
             (gen / "Scripts").mkdir(parents=True, exist_ok=True)
+            if gen.name == "shim":  # the dispatcher venv (nexus-f9bgu.47)
+                (gen / "Scripts" / "python.exe").write_bytes(b"python")
+                return subprocess.CompletedProcess(argv, 0, "", "")
             (gen / "pyvenv.cfg").write_text("home = C:\\py\\cpython-3.12\nversion = 3.12.8\n")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[1:3] == ["pip", "install"] and any(a.endswith(".whl") for a in argv):
+            scripts = Path(argv[argv.index("--python") + 1]).parent
+            for wheel in (a for a in argv if a.endswith(".whl")):
+                with zipfile.ZipFile(wheel) as z:
+                    entry = next(n for n in z.namelist() if n.endswith("entry_points.txt"))
+                    name = z.read(entry).decode().splitlines()[1].split("=")[0].strip()
+                (scripts / f"{name}.exe").write_bytes(f"dispatcher:{name}".encode())
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[1:3] == ["pip", "install"]:
             if self.fail_pip is not None:
@@ -100,10 +113,6 @@ def win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # reaps nothing: give the reap a table that names no generation.
     monkeypatch.setattr(gc_core._census(), "ps_snapshot", lambda **_k: f"{os.getpid()} python gc_core.py\n999 C:/Windows/notepad.exe\n")
     setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s, **_kw: s)
-    monkeypatch.setattr(
-        gen_core.LinkOps, "create",
-        lambda self, target, link: os.symlink(target, link, target_is_directory=True),
-    )
     uv_bin = tmp_path / "uvbin"
     uv_bin.mkdir()
     store = tmp_path / "userpath.txt"
@@ -149,20 +158,20 @@ class TestGenerationSite:
     ) -> None:
         tools, uv_bin, spy = win
         host = _generation(tools, "20260101T000000Z", extras=["local"])
-        os.symlink(str(host), tools / "current")
+        layout_core.write_pointer(tools / "current", str(host))
         _host(monkeypatch, host)
         new = self_cmd.perform_self_install(keep=3, add_extras=("voyage",))
         assert new is not None and new != host and new.parent == tools
         receipt = install_layout.read_receipt(new)
         assert receipt.extras == ["local", "voyage"]  # the receipt's extras MERGE with the request
-        assert os.readlink(tools / "current") == str(new)
-        assert os.readlink(tools / "previous") == str(host)
+        assert layout_core.read_link(tools / "current", platform="win32") == str(new)
+        assert layout_core.read_link(tools / "previous", platform="win32") == str(host)
         # The shim is a PATH entry: the new generation's own launchers, and the
         # user PATH naming <tools>\current\bin. Nothing is written into uv's bin dir.
         assert sorted(p.name for p in (new / "bin").iterdir()) == ["nx-mcp.exe", "nx.exe"]
         user_path = (tmp_path / "userpath.txt").read_text().strip().split(";")
-        assert user_path[0] == str(tools / "current" / "bin")
-        assert os.environ["PATH"].split(";")[0] == str(tools / "current" / "bin")
+        assert user_path[0] == str(tools / "bin")
+        assert os.environ["PATH"].split(";")[0] == str(tools / "bin")
         assert list(uv_bin.iterdir()) == []
         out = capsys.readouterr().out
         assert "added" in out and "restart" in out.lower() and "Claude Code" in out
@@ -173,7 +182,7 @@ class TestGenerationSite:
     ) -> None:
         tools, _uv_bin, _spy = win
         host = _generation(tools, "20260101T000000Z")
-        os.symlink(str(host), tools / "current")
+        layout_core.write_pointer(tools / "current", str(host))
         _host(monkeypatch, host)
         self_cmd.perform_self_install(keep=3)
         capsys.readouterr()
@@ -278,11 +287,11 @@ class TestLegacySite:
         # mineru dropped; pdf carried (nexus-2k66t.4.2: a legacy uv tree is an existing install, which keeps
         # PDF support, so `nx self install` on it is ONE command, nexus-2k66t.4.9)
         assert install_layout.read_receipt(generation).extras == ["local", "pdf"]
-        assert os.readlink(tools / "current") == str(generation)
+        assert layout_core.read_link(tools / "current", platform="win32") == str(generation)
         assert (generation / "bin" / "nx.exe").read_bytes().endswith(b"launcher:nx")
-        entry = str(tools / "current" / "bin")
+        entry = str(tools / "bin")
         assert (tmp_path / "userpath.txt").read_text().strip().split(";")[0] == entry
-        assert os.readlink(tools / "gen-legacy-uv-tool") == str(legacy)
+        assert layout_core.read_link(tools / "gen-legacy-uv-tool", platform="win32") == str(legacy)
         assert (legacy / "Scripts" / "nx.exe").read_bytes() == b"uv's launcher"
         assert list(uv_bin.iterdir()) == [], "nothing is written into uv's bin dir"
         out = capsys.readouterr().out
@@ -324,15 +333,15 @@ class TestLegacySite:
         python = host / "Scripts" / "python.exe"
         python.write_text("#!/bin/sh\nprintf '%s\\n' nx nx-mcp\n")
         python.chmod(0o755)
-        os.symlink(str(host), tools / "current")
+        layout_core.write_pointer(tools / "current", str(host))
         gens_before = sorted(p.name for p in tools.iterdir())
 
         assert self_cmd.perform_self_install() is None
         out = capsys.readouterr().out
         assert "restart" in out.lower()
         assert (host / "bin" / "nx.exe").is_file()
-        assert (tmp_path / "userpath.txt").read_text().strip().split(";")[0] == str(tools / "current" / "bin")
-        assert os.readlink(tools / "gen-legacy-uv-tool") == str(legacy)
+        assert (tmp_path / "userpath.txt").read_text().strip().split(";")[0] == str(tools / "bin")
+        assert layout_core.read_link(tools / "gen-legacy-uv-tool", platform="win32") == str(legacy)
         assert [c for c in spy.calls if c[0] == "uv" and "pip" in c] == [], "no other generation was built"
         assert set(sorted(p.name for p in tools.iterdir())) - set(gens_before) == {"gen-legacy-uv-tool"}
 
@@ -344,7 +353,7 @@ class TestLegacySite:
         tools, _uv_bin, _spy = win
         assert self_cmd.repair_uv_takeover() == []  # no layout: nothing to repair
         host = _generation(tools, "20260101T000000Z")
-        os.symlink(str(host), tools / "current")
+        layout_core.write_pointer(tools / "current", str(host))
         lines = self_cmd.repair_uv_takeover(dry_run=True)
         assert any("user PATH" in line for line in lines)
 
@@ -360,7 +369,7 @@ class TestRegisterAndGc:
         (root / "conexus" / "Scripts").mkdir(parents=True)
         monkeypatch.setenv("UV_TOOL_DIR", str(root))
         self_cmd.perform_self_install(keep=3)
-        assert os.readlink(tools / "gen-legacy-uv-tool") == str(root / "conexus")
+        assert layout_core.read_link(tools / "gen-legacy-uv-tool", platform="win32") == str(root / "conexus")
         assert (root / "conexus").is_dir(), "registered this pass, reaped by a later one"
 
     def test_no_legacy_tree_registers_nothing(self, win, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -374,7 +383,7 @@ class TestRegisterAndGc:
     ) -> None:
         tools, _bin, spy = win
         gens = [_generation(tools, f"2026010{n}T000000Z") for n in range(1, 6)]
-        os.symlink(str(gens[-1]), tools / "current")
+        layout_core.write_pointer(tools / "current", str(gens[-1]))
         _host(monkeypatch, gens[-1])
         lines = self_cmd.perform_self_gc(keep=2)
         assert lines is not None
@@ -385,7 +394,7 @@ class TestRegisterAndGc:
     def _gc_bed(self, win, monkeypatch, tmp_path):
         tools, uv_bin, spy = win
         gens = [_generation(tools, f"2026010{n}T000000Z") for n in range(1, 3)]
-        os.symlink(str(gens[-1]), tools / "current")
+        layout_core.write_pointer(tools / "current", str(gens[-1]))
         (gens[-1] / "bin").mkdir()
         (gens[-1] / "bin" / "nx.exe").write_bytes(b"new")
         python = gens[-1] / "Scripts" / "python.exe"  # answers "what do you declare"
@@ -416,7 +425,7 @@ class TestRegisterAndGc:
         (legacy / "uv-receipt.toml").write_text(
             'entrypoints = [\n  { name = "nx-hook", install-path = "x", from = "conexus" },\n]\n'
         )
-        os.symlink(str(legacy), tools / "gen-legacy-uv-tool")
+        layout_core.write_pointer(tools / "gen-legacy-uv-tool", str(legacy))
         (uv_bin / "nx-hook.exe").write_bytes(b"uv's")
         (gens[-1] / "bin" / "nx-hook.exe").write_bytes(b"new")
         lines = self_cmd.perform_self_gc(keep=3)
@@ -475,7 +484,7 @@ class TestAutostartTaskFollowsTheFlip:
     ) -> None:
         tools, _bin, _spy = win
         host = _generation(tools, "20260101T000000Z")
-        os.symlink(str(host), tools / "current")
+        layout_core.write_pointer(tools / "current", str(host))
         _host(monkeypatch, host)
         new = self_cmd.perform_self_install(keep=3)
         assert new is not None and len(spy) == 1

@@ -22,22 +22,35 @@ legacy ``uv tool install`` tree is registered as the ledger pointer
 ``gen-legacy-uv-tool`` and reaped by a LATER pass, never by the one that
 discovered it.
 
-WHAT DIFFERS ON WINDOWS, ALL MEASURED (Python 3.13, 2026-10-06)
+WHAT DIFFERS ON WINDOWS, ALL MEASURED (Python 3.13)
 
-* A pointer is a directory JUNCTION (``_winapi.CreateJunction``), not a
-  symlink: creating a symlink needs a privilege a normal account lacks.
-  ``is_symlink()`` is False for a junction, ``os.path.isjunction()`` is True,
-  and ``os.readlink`` returns ``\\\\?\\C:\\...``; ``layout_core.is_link`` and
-  ``read_link`` carry that.
-* A junction is swapped like the POSIX symlink: create ``X.new``, rename ``X``
-  aside, rename ``X.new`` to ``X``, ``os.rmdir`` the old one. Unlike POSIX there
-  is no single atomic rename-over, so ``X`` is absent for the span of two
-  renames, and a spawn through ``<tools>\\current\\bin`` (the user PATH entry)
-  inside that span does not resolve. A crash there leaves the old pointer as
-  ``.<link>.old.<pid>``, which the next swap RESTORES. The swap works while a
-  process runs THROUGH the junction.
-* A junction is removed with ``os.rmdir``, never ``shutil.rmtree``, which would
-  empty the generation it names.
+* A pointer is a plain FILE (``layout_core.write_pointer``: a magic line, then
+  the generation's absolute path), never a directory link. MEASURED 2026-11-28
+  on Windows 11 build 26300 with RedirectionGuard enforced, as a non-elevated
+  user: a junction (``_winapi.CreateJunction``, what this module used through
+  2026-11) is created and then refused on traversal with WinError 448 by
+  ``os.stat``, ``os.listdir``, ``Path.exists`` and a spawn through it, and
+  stays refused; a directory symlink is refused at creation (WinError 1314)
+  without Developer Mode. A file is traversed by nothing. ``layout_core.is_link``
+  and ``read_link`` read a pointer file, a junction and a symlink alike.
+* The user PATH therefore cannot name ``<tools>\\current\\bin`` (a path through a
+  pointer). It names ``<tools>\\bin``, a real directory of fixed DISPATCHER
+  launchers that read the pointer and start ``<generation>\\Scripts\\<name>.exe``
+  (:func:`ensure_dispatchers`). The dispatchers never change, so a flip replaces
+  no running file: replacing a launcher in place is not an option, because a
+  running generation launcher cannot be renamed, replaced or deleted (WinError
+  32 / 5, measured with ``nx-mcp.exe`` and ``nx.exe``, in a copy and in a hard
+  link alike; the cause was not isolated, a dispatcher that imports nothing
+  beyond ``os``, ``sys`` and ``subprocess`` WAS renamed while it ran).
+* A pointer file is swapped with ONE ``os.replace`` of a sibling, atomic, so
+  unlike the directory pointers there is no instant where ``current`` is absent.
+  A crash leaves the old pointer, and an unfinished sibling that the next swap
+  sweeps. The swap works while a process runs through the dispatchers.
+* An install whose pointers are still junctions (every box that installed
+  before this) is read with ``readlink``, which does not traverse, and migrates
+  on its next flip: the junction is renamed aside, the file put in its place,
+  and the junction ``rmdir``'d (never ``rmtree``, which would empty the
+  generation it names).
 * The venv's executables are in ``Scripts\\`` with ``.exe`` suffixes.
 
 Renaming a venv directory SUCCEEDS while its ``python.exe`` runs, so a rename is
@@ -59,6 +72,11 @@ from pathlib import Path, PureWindowsPath
 #: The attempts at claiming a stamp: the bare stamp, then ``a`` .. ``h``. The
 #: shell half's own list.
 _STAMP_SUFFIXES = ("", "a", "b", "c", "d", "e", "f", "g", "h")
+
+#: A reader of a pointer file holds it open for microseconds; a replace that meets
+#: one is retried this many times, this far apart.
+_REPLACE_RETRIES = 40
+_REPLACE_PAUSE_S = 0.025
 
 _LAYOUT: object | None = None
 _GC: object | None = None
@@ -137,21 +155,39 @@ class GenerationError(Exception):
 
 
 class LinkOps:
-    """Directory-pointer operations. The default is a Windows junction.
+    """Directory-pointer operations. The default pointer is a FILE.
 
-    A seam, not an abstraction for its own sake: ``_winapi.CreateJunction``
-    exists only on Windows, so the swap, flip and register logic is tested on
-    other hosts with a subclass whose ``create`` makes a symlink, and on a real
-    Windows host with this class (``TestRealWindows``).
+    A seam, not an abstraction for its own sake: tests subclass it to make the
+    pointers of the era before RedirectionGuard (a symlink stands in for the
+    junction) and to fake the pid probe, and ``TestRealWindows`` runs the
+    default on a real Windows host.
     """
 
     def __init__(self, platform: str | None = None) -> None:
         self.platform = platform
 
     def create(self, target: str, link: Path) -> None:
-        import _winapi  # noqa: PLC0415 -- exists only on Windows
+        _layout().write_pointer(link, target)
 
-        _winapi.CreateJunction(target, str(link))
+    def replace_in_place(self, new: Path, link: Path) -> bool:
+        """Put *new* where *link* is in ONE atomic ``os.replace``, when both are
+        pointer files; ``False`` when *link* is a directory link of an older era
+        (the caller renames it aside). A reader holding the file open for a
+        moment makes the replace fail with a sharing violation: retried briefly,
+        then raised."""
+        layout = _layout()
+        if layout.read_pointer(link) is None or layout.read_pointer(new) is None:
+            return False
+        last: OSError | None = None
+        for _ in range(_REPLACE_RETRIES):
+            try:
+                os.replace(new, link)
+                return True
+            except PermissionError as exc:  # a reader's open handle, on Windows
+                last = exc
+                time.sleep(_REPLACE_PAUSE_S)
+        assert last is not None
+        raise last
 
     def is_link(self, path: Path) -> bool:
         return _layout().is_link(path, platform=self.platform)
@@ -222,12 +258,16 @@ def _sweep_swap_litter(link: Path, ops: LinkOps) -> None:
 
 
 def swap_link(target: str, link: Path | str, ops: LinkOps | None = None) -> None:
-    """Point the directory link *link* at *target*, replacing what it pointed at.
+    """Point the pointer *link* at *target*, replacing what it pointed at.
 
-    Create ``.<link>.new.<pid>``, rename *link* aside, rename the new one into
-    place, ``rmdir`` the old one. A failure after the first rename puts the
-    original back. A *link* that exists and is NOT a link is refused rather than
-    replaced: the one thing this must never do is delete a real directory.
+    Create ``.<link>.new.<pid>``, then replace *link* with it: one atomic
+    ``os.replace`` when both are pointer files. When *link* is a directory link
+    of the era before RedirectionGuard (the migration), rename it aside, rename
+    the new one into place and remove the old one (``rmdir`` for a junction), so
+    *link* is absent for the span of two renames; a failure after the first
+    rename puts the original back. A *link* that exists and is NOT a link is
+    refused rather than replaced: the one thing this must never do is delete a
+    real directory or file.
     """
     ops = ops or LinkOps()
     link = Path(link)
@@ -246,6 +286,8 @@ def swap_link(target: str, link: Path | str, ops: LinkOps | None = None) -> None
     except OSError as exc:
         raise GenerationError(f"could not create a pointer to {target} beside {link}: {exc}") from exc
     try:
+        if present and ops.replace_in_place(new, link):
+            return  # a file replaced a file in one step: *link* was never absent
         if present:
             os.rename(link, aside)
         try:
@@ -301,7 +343,7 @@ def flip_current(
         # target anyway. An existing ``previous`` is left as it is.
         if (
             outgoing
-            and Path(outgoing).is_dir()
+            and os.path.isdir(outgoing)
             and _key(outgoing, platform) != _key(str(gen), platform)
         ):
             swap_link(outgoing, previous, ops)
@@ -320,7 +362,7 @@ def rollback_current(
     if not ops.is_link(previous):
         raise GenerationError("no previous generation recorded; nothing to roll back to")
     target = ops.read(previous)
-    if not target or not Path(target).is_dir():
+    if not target or not os.path.isdir(target):
         raise GenerationError(
             f"previous generation is gone, refusing to roll back to: {target}"
         )
@@ -805,21 +847,28 @@ def _emit(lines: list[str]) -> None:
 # Launchers and the user PATH
 #
 # DECISION OF RECORD (Sam, 2026-10-06; T2 nexus_rdr/224-f9bgu47-windows-shims-
-# decision, which supersedes the "copy launchers into ~\.local\bin" design).
-# MEASURED on native Windows: a RUNNING launcher exe cannot be renamed
-# (WinError 32), replaced (WinError 5) or deleted, so a shim written into the
-# shared bin dir fails exactly when `nx self install` runs from that shim. The
-# Windows shim is therefore a PATH ENTRY, never a file nexus writes there:
+# decision, which supersedes the "copy launchers into ~\.local\bin" design),
+# AMENDED 2026-11-28 (nexus-f9bgu.47, RedirectionGuard). MEASURED on native
+# Windows: a RUNNING launcher exe cannot be renamed (WinError 32), replaced
+# (WinError 5) or deleted, so a shim written into the shared bin dir fails
+# exactly when `nx self install` runs from that shim. The Windows shim is
+# therefore a PATH ENTRY, never a file nexus replaces per upgrade:
 #
-#   <tools>\gen-<stamp>\bin\<name>.exe   copies of the generation's own
-#                                        Scripts\<name>.exe launchers. Each
-#                                        embeds that generation's absolute
-#                                        python path, so a process started
-#                                        through <tools>\current\bin\nx.exe has
-#                                        sys.prefix = the real generation.
-#   HKCU\Environment Path                <tools>\current\bin, ahead of uv's bin
+#   <tools>\gen-<stamp>\bin\<name>.exe  copies of the generation's own
+#                                        Scripts\<name>.exe launchers, which the
+#                                        plugin's hook launcher runs directly.
+#   <tools>\bin\<name>.exe              a fixed DISPATCHER per launcher name
+#                                        (_nx_dispatch.py): reads the pointer
+#                                        file <tools>\current and runs
+#                                        <gen>\Scripts\<name>.exe. Never replaced
+#                                        by a flip.
+#   HKCU\Environment Path                <tools>\bin, ahead of uv's bin
 #
-# An upgrade only flips the ``current`` junction; no launcher is replaced.
+# The 2026-10-06 design put <tools>\current\bin, a path THROUGH a directory
+# junction, on the PATH. RedirectionGuard (enforced system-wide on Windows 11
+# 26H2) refuses to traverse a junction a non-elevated process made (WinError
+# 448), so every launcher failed after an upgrade and a rollback through
+# `previous` failed too. An upgrade now flips a pointer FILE.
 # ---------------------------------------------------------------------------
 
 #: ``<gen>\bin``, the directory ``<tools>\current\bin`` resolves to.
@@ -839,9 +888,57 @@ def launcher_dir(generation: Path | str) -> Path:
     return Path(generation) / LAUNCHER_DIR_NAME
 
 
+#: ``<tools>\\shim``: the venv the dispatchers' launcher executables come from.
+SHIM_VENV_NAME = "shim"
+
+#: Bumped when ``_nx_dispatch.py`` changes in a way an installed dispatcher must
+#: pick up; recorded in ``<tools>\\shim\\.nx-dispatch-version``.
+DISPATCH_VERSION = "1"
+_DISPATCH_VERSION_FILE = ".nx-dispatch-version"
+_DISPATCH_SOURCE = "_nx_dispatch.py"
+
+
 def current_launcher_dir(tools: Path | None = None) -> Path:
-    """``<tools>\\current\\bin``: the one directory the user PATH names."""
+    """``<tools>\\bin``: the one directory the user PATH names.
+
+    A real directory of fixed dispatchers (:func:`ensure_dispatchers`). It was
+    ``<tools>\\current\\bin`` until nexus-f9bgu.47: a path through a directory
+    junction, which RedirectionGuard refuses to traverse (WinError 448).
+    """
+    return _layout()._root(tools) / LAUNCHER_DIR_NAME
+
+
+def retired_launcher_dir(tools: Path | None = None) -> Path:
+    """``<tools>\\current\\bin``, the user PATH entry of installs before
+    nexus-f9bgu.47. Never probed with ``Path.exists`` (it raises 448 on a
+    junction); :func:`ensure_launcher_path` takes it off the PATH."""
     return _layout().current_link(tools=tools) / LAUNCHER_DIR_NAME
+
+
+def _launcher_names(generation: Path, dist: str, platform: str | None) -> tuple[list[str], list[str]]:
+    """``(names, refusal lines)``: the launchers *generation* owns.
+
+    The set is exactly what the POSIX shims cover, derived the same way: the
+    distribution's declared console scripts plus ``DEPENDENCY_SCRIPTS`` that
+    exist, minus ``NEVER_SHIM`` (``layout_core.owned_from_declared``). Raises
+    :class:`GenerationError` when the generation cannot say what it declares: a
+    partial set is worse than none.
+    """
+    layout = _layout()
+    try:
+        declared, refused = layout.declared_console_scripts_detail(generation, dist, platform=platform)
+    except Exception as exc:  # noqa: BLE001 -- LayoutError, OSError: all one refusal
+        raise GenerationError(
+            f"could not read console scripts from distribution '{dist}' in {generation} "
+            f"-- refusing to write a partial launcher set: {exc}"
+        ) from exc
+    owned = layout.owned_from_declared(declared, generation, platform=platform)
+    lines = [
+        f"nexus: refused console script {name!r} from distribution '{dist}' "
+        "-- its name is not a valid launcher command, so none was written"
+        for name in refused
+    ]
+    return sorted(owned), lines
 
 
 def populate_launchers(
@@ -849,35 +946,22 @@ def populate_launchers(
 ) -> list[str]:
     """Fill ``<generation>\\bin`` with copies of its own owned launchers.
 
-    The set is exactly what the POSIX shims cover, derived the same way: the
-    distribution's declared console scripts plus ``DEPENDENCY_SCRIPTS`` that
-    exist, minus ``NEVER_SHIM`` (``layout_core.owned_from_declared``). Raises
+    The plugin's hook launcher runs these directly (``conexus/hooks/scripts/
+    _cli_lookup.py``), resolving the pointer first. Raises
     :class:`GenerationError` before copying anything when the generation cannot
-    say what it declares: a partial set is worse than none. An existing copy
-    with identical bytes is left alone, so this is safe on a generation whose
-    launchers are running. Returns diagnostics for the caller to show.
+    say what it declares. An existing copy with identical bytes is left alone,
+    so this is safe on a generation whose launchers are running. Returns
+    diagnostics for the caller to show.
     """
     layout = _layout()
     gen = Path(generation)
-    try:
-        declared, refused = layout.declared_console_scripts_detail(gen, dist, platform=platform)
-    except Exception as exc:  # noqa: BLE001 -- LayoutError, OSError: all one refusal
-        raise GenerationError(
-            f"could not read console scripts from distribution '{dist}' in {gen} "
-            f"-- refusing to write a partial launcher set: {exc}"
-        ) from exc
-    owned = layout.owned_from_declared(declared, gen, platform=platform)
+    names, lines = _launcher_names(gen, dist, platform)
     dest = launcher_dir(gen)
     try:
         dest.mkdir(exist_ok=True)
     except OSError as exc:
         raise GenerationError(f"could not create the launcher directory {dest}: {exc}") from exc
-    lines = [
-        f"nexus: refused console script {name!r} from distribution '{dist}' "
-        "-- its name is not a valid launcher command, so none was written"
-        for name in refused
-    ]
-    for name in sorted(owned):
+    for name in names:
         src = layout.venv_script(gen, name, platform=platform)
         dst = dest / layout.exe_name(name, platform=platform)
         try:
@@ -886,6 +970,171 @@ def populate_launchers(
             shutil.copyfile(src, dst)
         except OSError as exc:
             raise GenerationError(f"could not copy the launcher {src} to {dst}: {exc}") from exc
+    return lines
+
+
+def dispatch_source() -> str:
+    """The text of ``_nx_dispatch.py``, beside this file."""
+    return (Path(__file__).resolve().parent / _DISPATCH_SOURCE).read_text(encoding="utf-8")
+
+
+def dispatch_wheel(directory: Path, name: str) -> Path:
+    """Write a wheel in *directory* that installs the console script *name* as a dispatcher.
+
+    One distribution per name, each carrying its own copy of the dispatcher
+    module, so a later release that adds a launcher installs one new wheel and
+    touches no existing executable. Built with ``zipfile`` and fixed timestamps,
+    so the same inputs make the same bytes.
+    """
+    import base64  # noqa: PLC0415 -- the build path only
+    import hashlib  # noqa: PLC0415
+    import zipfile  # noqa: PLC0415
+
+    ident = re.sub(r"[^A-Za-z0-9]+", "_", name)
+    module = f"nxdispatch_{ident}"
+    dist = f"{module}-{DISPATCH_VERSION}"
+    files = {
+        f"{module}.py": dispatch_source(),
+        f"{dist}.dist-info/METADATA": f"Metadata-Version: 2.1\nName: {module}\nVersion: {DISPATCH_VERSION}\n",
+        f"{dist}.dist-info/WHEEL": (
+            "Wheel-Version: 1.0\nGenerator: nexus\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+        ),
+        f"{dist}.dist-info/entry_points.txt": f"[console_scripts]\n{name} = {module}:console_main\n",
+    }
+    record = []
+    for path, text in files.items():
+        data = text.encode("utf-8")
+        digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii")
+        record.append(f"{path},sha256={digest},{len(data)}")
+    record.append(f"{dist}.dist-info/RECORD,,")
+    files[f"{dist}.dist-info/RECORD"] = "\n".join(record) + "\n"
+    wheel = directory / f"{dist}-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path, text in files.items():
+            info = zipfile.ZipInfo(path, date_time=(2026, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, text)
+    return wheel
+
+
+def _shim_python_request(generation: Path) -> str:
+    """The interpreter the dispatcher venv is made with: the generation's own
+    base interpreter (``pyvenv.cfg`` ``home``), else a version request."""
+    try:
+        home = _pyvenv_value((generation / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace"), "home")
+    except OSError:
+        home = ""
+    candidate = Path(home) / "python.exe" if home else None
+    if candidate is not None and candidate.is_file():
+        return str(candidate)
+    return "3.12"
+
+
+def _put_dispatcher(source: Path, destination: Path) -> None:
+    """Copy the dispatcher *source* to *destination* without ever writing a running file.
+
+    The copy goes to a sibling, then ``os.replace`` puts it in place. When
+    *destination* is running (only a refresh of an existing dispatcher can meet
+    that) the replace is refused, and the running file is renamed aside and the
+    sibling renamed in; a dispatcher, unlike a generation launcher, can be (measured
+    2026-11-28). The aside is swept by the next call when it is no longer running.
+    """
+    tag = os.getpid()
+    new = destination.with_name(f".{destination.name}.new.{tag}")
+    shutil.copyfile(source, new)
+    try:
+        try:
+            os.replace(new, destination)
+            return
+        except PermissionError:
+            if not os.path.lexists(destination):
+                raise
+        aside = destination.with_name(f".{destination.name}.old.{tag}")
+        os.rename(destination, aside)
+        os.rename(new, destination)
+    finally:
+        if os.path.lexists(new):
+            try:
+                os.unlink(new)
+            except OSError:
+                pass
+
+
+def _sweep_dispatcher_litter(directory: Path) -> None:
+    for litter in directory.glob(".*.old.*"):
+        try:
+            litter.unlink()
+        except OSError:
+            pass  # still running; the next call retries
+
+
+def ensure_dispatchers(
+    tools: Path | None, generation: Path | str, dist: str = "conexus", *,
+    run=None, platform: str | None = None, progress: bool = False,
+) -> list[str]:
+    """Make ``<tools>\\bin`` hold a dispatcher for every launcher *generation* owns.
+
+    The dispatcher venv ``<tools>\\shim`` is built once, from the same base
+    interpreter as the generation, and gets one tiny distribution per missing
+    name (:func:`dispatch_wheel`); each name's launcher executable is then
+    copied to ``<tools>\\bin``. Idempotent and additive: an existing dispatcher
+    is left alone (it never needs to follow a generation), a release that adds a
+    launcher gets that one new file, and nothing is written for a name that is
+    already there. A change of :data:`DISPATCH_VERSION` re-installs every
+    distribution and refreshes every file, renaming a running one aside.
+
+    Called BEFORE ``current`` moves: a generation whose launchers cannot be
+    dispatched to is never made current. Raises :class:`GenerationError`.
+    Returns diagnostics for the caller to show.
+    """
+    layout = _layout()
+    root = layout._root(tools)
+    gen = Path(generation)
+    names, lines = _launcher_names(gen, dist, platform)
+    bin_dir = current_launcher_dir(root)
+    venv = root / SHIM_VENV_NAME
+    python = layout.venv_python(venv, platform=platform)
+    scripts = layout.venv_bin(venv, platform=platform)
+    marker = venv / _DISPATCH_VERSION_FILE
+    try:
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        _sweep_dispatcher_litter(bin_dir)
+        recorded = marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
+    except OSError as exc:
+        raise GenerationError(f"could not prepare the dispatcher directory {bin_dir}: {exc}") from exc
+    refresh = bool(recorded) and recorded != DISPATCH_VERSION
+    todo = [
+        n for n in names
+        if refresh or not (bin_dir / layout.exe_name(n, platform=platform)).is_file()
+    ]
+    if not todo:
+        return lines
+    if not python.is_file():
+        _run(
+            ["uv", "venv", "--allow-existing", "--python", _shim_python_request(gen), str(venv)],
+            run, "uv venv (dispatchers)", progress=progress,
+        )
+    staging = root / f".dispatch-wheels.{os.getpid()}"
+    try:
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir()
+        wheels = [str(dispatch_wheel(staging, name)) for name in todo]
+        install = ["uv", "pip", "install", "--python", str(python), "--no-deps"]
+        if refresh:
+            install.append("--reinstall")
+        _run([*install, *wheels], run, "uv pip install (dispatchers)", progress=progress)
+        for name in todo:
+            exe = layout.exe_name(name, platform=platform)
+            built = scripts / exe
+            if not built.is_file():
+                raise GenerationError(f"uv did not make the dispatcher {built}")
+            _put_dispatcher(built, bin_dir / exe)
+        marker.write_text(DISPATCH_VERSION + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise GenerationError(f"could not write the dispatchers into {bin_dir}: {exc}") from exc
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    lines.append(f"dispatchers for {', '.join(todo)} are in {bin_dir}")
     return lines
 
 
@@ -1001,7 +1250,10 @@ def _path_key(entry: str, environ) -> str:
 
 def _provides(entry: str, environ, name: str = "nx.exe") -> bool:
     text = _expand_percent(entry.strip().strip('"'), environ)
-    return bool(text) and (Path(text) / name).is_file()
+    # os.path.isfile, not Path.is_file: a PATH entry may run through a junction
+    # RedirectionGuard will not traverse, where Path.is_file raises OSError 448
+    # and os.path.isfile answers False (nexus-f9bgu.47).
+    return bool(text) and os.path.isfile(os.path.join(text, name))
 
 
 def _promote(entries: list[str], entry: str, uv_key: str, environ) -> list[str] | None:
@@ -1078,6 +1330,29 @@ def ensure_user_path(
     return PathResult(entry, changed, process_new is not None, chosen.kind)
 
 
+def ensure_launcher_path(
+    tools: Path | None = None, *, uv_bin: Path | str | None = None,
+    store: UserPathStore | None = None, environ=None, run=None,
+) -> PathResult:
+    """Put ``<tools>\\bin`` first on the user PATH and take the retired entry off.
+
+    The retired entry is ``<tools>\\current\\bin`` (:func:`retired_launcher_dir`),
+    which every install before nexus-f9bgu.47 put there: a path through a pointer
+    that is a file now, so it names nothing, and left on the PATH it makes every
+    probe of the PATH walk a dead directory. ``changed`` is True when either edit
+    rewrote the persistent PATH.
+    """
+    env = os.environ if environ is None else environ
+    chosen = store if store is not None else default_user_path_store(env)
+    result = ensure_user_path(
+        current_launcher_dir(tools), uv_bin=uv_bin, store=chosen, environ=env, run=run,
+    )
+    retired = remove_user_path(retired_launcher_dir(tools), store=chosen, environ=env)
+    return PathResult(
+        result.entry, result.changed or retired.removed > 0, result.process_changed, result.store,
+    )
+
+
 @dataclass(frozen=True)
 class PathRemoval:
     entry: str
@@ -1136,7 +1411,7 @@ def inspect_user_path(
     entry = str(entry)
     chosen = store if store is not None else default_user_path_store(env)
     problems: list[str] = []
-    if not (Path(entry) / "nx.exe").is_file():
+    if not os.path.isfile(os.path.join(entry, "nx.exe")):
         problems.append(f"{Path(entry) / 'nx.exe'} does not exist")
     try:
         value, _ = chosen.read()
@@ -1151,6 +1426,12 @@ def inspect_user_path(
     for i in range(keys.index(ekey)):
         if keys[i] != ekey and _provides(entries[i], env):
             problems.append(f"{entries[i]} is ahead of it on the user PATH and provides nx.exe")
+    retired = _path_key(str(Path(entry).parent / "current" / LAUNCHER_DIR_NAME), env)
+    if Path(entry).name == LAUNCHER_DIR_NAME and retired in keys:
+        problems.append(
+            f"{Path(entry).parent / 'current' / LAUNCHER_DIR_NAME} is still on the user PATH "
+            "(the entry of installs before nexus-f9bgu.47); it names nothing now"
+        )
     return problems
 
 
@@ -1244,10 +1525,23 @@ def repair_layout(
         lines.append(f"building the launcher directory {launcher_dir(current)}")
         if not dry_run:
             lines.extend(populate_launchers(current, platform=platform))
+    # A box from before nexus-f9bgu.47 has junction pointers and no dispatchers: the
+    # dispatchers are made, then the next flip (or this repair, below) turns the
+    # pointers into files.
+    if not (entry / layout.exe_name("nx", platform=platform)).is_file():
+        lines.append(f"building the dispatchers in {entry}")
+        if not dry_run:
+            lines.extend(ensure_dispatchers(root, current, run=run, platform=platform))
+    for name in (layout.CURRENT_LINK_NAME, layout.PREVIOUS_LINK_NAME):
+        pointer = root / name
+        if ops.is_link(pointer) and layout.read_pointer(pointer) is None:
+            lines.append(f"turning the directory link {pointer} into a pointer file")
+            if not dry_run:
+                swap_link(ops.read(pointer), pointer, ops)
     problems = inspect_user_path(entry, store=store, environ=environ)
     if problems and not dry_run:
-        # The launcher was just built; anything still reported is the PATH.
-        result = ensure_user_path(entry, uv_bin=uv_bin, store=store, environ=environ, run=run)
+        # The dispatchers were just built; anything still reported is the PATH.
+        result = ensure_launcher_path(root, uv_bin=uv_bin, store=store, environ=environ, run=run)
         problems = inspect_user_path(entry, store=store, environ=environ)
         lines.append(f"user PATH repaired: {entry} first")
         if result.changed:
@@ -1321,10 +1615,9 @@ def migrate_legacy(
     )
     if verify is not None:
         verify(gen)
+    ensure_dispatchers(root, gen, run=run, platform=platform)
     flip_current(gen, root, ops=ops, platform=platform)
-    result = ensure_user_path(
-        current_launcher_dir(root), uv_bin=uv_bin, store=store, environ=environ, run=run,
-    )
+    result = ensure_launcher_path(root, uv_bin=uv_bin, store=store, environ=environ, run=run)
     if on_path is not None:
         on_path(result)
     register_legacy(legacy, root, ops=ops, platform=platform)

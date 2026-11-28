@@ -722,7 +722,7 @@ class TestAnInstallThatDiedAfterTheFlip:
 
 
 class TestWhatCompleteMeansOnWindows:
-    """The Windows reading, on any host: ``current\\bin\\nx.exe`` exists and its
+    """The Windows reading, on any host: ``<tools>\\bin\\nx.exe`` exists and its
     directory is on the user PATH (the sandbox store stands in for the registry)."""
 
     @pytest.fixture
@@ -734,23 +734,24 @@ class TestWhatCompleteMeansOnWindows:
         generation = _receipted_generation(world)
         os.symlink(generation, world.tools / "current")
         (generation / "bin").mkdir()
+        (world.tools / "bin").mkdir()
         return world
 
     def _complete(self, world: World) -> bool:
         return self_cmd._existing_install(world.tools, world.bin) is not None
 
     def test_the_launcher_and_the_path_entry_make_it_complete(self, windows: World) -> None:
-        (windows.tools / "current" / "bin" / "nx.exe").write_bytes(b"MZ")
-        windows.path_store.write_text(str(windows.tools / "current" / "bin") + "\n", encoding="utf-8")
+        (windows.tools / "bin" / "nx.exe").write_bytes(b"MZ")
+        windows.path_store.write_text(str(windows.tools / "bin") + "\n", encoding="utf-8")
         assert self._complete(windows)
 
     def test_a_launcher_with_no_path_entry_is_unfinished(self, windows: World) -> None:
-        (windows.tools / "current" / "bin" / "nx.exe").write_bytes(b"MZ")
+        (windows.tools / "bin" / "nx.exe").write_bytes(b"MZ")
         windows.path_store.write_text("C:\\other\n", encoding="utf-8")
         assert not self._complete(windows)
 
     def test_a_path_entry_with_no_launcher_is_unfinished(self, windows: World) -> None:
-        windows.path_store.write_text(str(windows.tools / "current" / "bin") + "\n", encoding="utf-8")
+        windows.path_store.write_text(str(windows.tools / "bin") + "\n", encoding="utf-8")
         assert not self._complete(windows)
 
 
@@ -1475,6 +1476,7 @@ class TestTheWindowsTwin:
             base_interpreter="/py", created_at="2026-10-24T00:00:00Z", extras=[],
         ).to_json())
         monkeypatch.setattr(core, "build_generation", lambda *a, **k: generation)
+        monkeypatch.setattr(core, "ensure_dispatchers", lambda *a, **k: [])  # these tests fail the FLIP
         monkeypatch.setattr(self_cmd, "_plat", lambda: "win32")
         monkeypatch.setattr(self_cmd, "_retarget_autostart_task", lambda *_: None)
         return core

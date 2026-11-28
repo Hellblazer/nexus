@@ -105,6 +105,24 @@ def clean(world: SimpleNamespace) -> SimpleNamespace:
     return world
 
 
+_HOOK_PROGRAMS = ("nx-hook", "nx-hook.exe", "nx-session-end-launcher", "nx-session-end-launcher.exe")
+
+
+def _holds_a_hook_program(entry: str) -> bool:
+    """Whether the PATH directory *entry* holds a Nexus hook program.
+
+    A PATH entry can run through a directory junction RedirectionGuard will not traverse
+    (the entry a pre-nexus-f9bgu.47 install put on the user PATH, ``<tools>\\current\\bin``):
+    ``Path.exists`` then RAISES ``OSError`` 448 where it was meant to answer no, which
+    failed this module's setup on a machine whose PATH carried the entry. An entry that
+    cannot be read holds nothing the launcher could find either, so it is kept off the
+    filter's reasoning: ``False``."""
+    try:
+        return any((Path(entry) / name).exists() for name in _HOOK_PROGRAMS)
+    except OSError:
+        return False
+
+
 def _run(
     world: SimpleNamespace, args: list[str], plugin: str, payload: dict | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -136,16 +154,36 @@ def _run(
         env["NX_TOOLS_DIR"] = str(world.state / "no-tools")
         env["PATH"] = os.pathsep.join(
             entry for entry in env.get("PATH", "").split(os.pathsep)
-            if entry and not any(
-                (Path(entry) / name).exists()
-                for name in ("nx-hook", "nx-hook.exe", "nx-session-end-launcher", "nx-session-end-launcher.exe")
-            )
+            if entry and not _holds_a_hook_program(entry)
         )
     argv = [uv, *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(root)) for a in args)]
     return subprocess.run(
         argv, input=json.dumps({**body, "cwd": str(world.project)}), capture_output=True, text=True,
         encoding="utf-8", timeout=180, env=env, cwd=str(world.project),
     )
+
+
+class TestPathFilterSurvivesAnUntrustedEntry:
+    """Runs on every host: the Windows-only class below cannot prove the filter on a box
+    where nothing is untrusted."""
+
+    def test_an_entry_that_raises_448_is_not_an_exception_and_holds_no_hook_program(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        real_exists = Path.exists
+
+        def refuse(self: Path, *a, **k):
+            if "untrusted" in str(self):
+                raise OSError(448, "The path cannot be traversed because it contains an untrusted mount point")
+            return real_exists(self, *a, **k)
+
+        monkeypatch.setattr(Path, "exists", refuse)
+        assert _holds_a_hook_program(str(tmp_path / "untrusted" / "bin")) is False
+        holder = tmp_path / "holder"
+        holder.mkdir()
+        (holder / "nx-hook").write_bytes(b"x")
+        assert _holds_a_hook_program(str(holder)) is True
+        assert _holds_a_hook_program(str(tmp_path / "empty")) is False
 
 
 @pytest.mark.skipif(not ON_WINDOWS, reason="needs a real Windows venv layout and uv's Windows interpreter discovery")

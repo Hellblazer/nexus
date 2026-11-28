@@ -1283,6 +1283,18 @@ class TestGenerationLayout:
 
         assert mod.generation_install_present() is True
 
+    def test_a_pointer_file_current_is_detected_as_managed(self, mod, tmp_path, monkeypatch) -> None:
+        """Windows since nexus-f9bgu.47: ``current`` is a file naming the generation, because
+        RedirectionGuard refuses a junction a non-elevated process made."""
+        tools = tmp_path / "tools"
+        gen = tools / "gen-20261128T010000Z"
+        gen.mkdir(parents=True)
+        (tools / "current").write_text(f"nx-pointer 1\n{gen}\n", encoding="utf-8")
+        monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+        assert mod.generation_install_present() is True
+        gen.rmdir()
+        assert mod.generation_install_present() is False, "a pointer at a reaped generation is not an install"
+
     def test_a_dangling_current_is_not_a_managed_install(self, mod, tmp_path, monkeypatch) -> None:
         """Fail-safe, matching uv_receipt_present's own posture: every edge
         case resolves to False rather than proceeding on a broken layout."""

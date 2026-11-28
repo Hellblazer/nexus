@@ -37,8 +37,9 @@ caller. It now distinguishes three sites rather than two:
 
 NATIVE WINDOWS (RDR-224, nexus-f9bgu.47). ``bash`` on Windows is the WSL
 launcher, so every ``_sh``/``bash`` call here has a Windows twin that calls
-``nexus._install.generation_core`` directly: build with uv, flip junctions,
-put ``<tools>\\current\\bin`` first on the user PATH (the Windows shim: nexus
+``nexus._install.generation_core`` directly: build with uv, flip a pointer
+FILE (not a junction: RedirectionGuard refuses one), put ``<tools>\\bin`` (fixed
+dispatchers that read the pointer) first on the user PATH (the Windows shim: nexus
 writes no launcher into uv's bin dir, because a running one cannot be
 replaced), reap with Windows-aware rules, migrate a legacy uv tree. Each branch
 asks ``_is_windows()``; the POSIX path below it is unchanged. Out of scope on
@@ -429,7 +430,7 @@ def _shims_are_in_place(tools: Path, bin_dir: Path) -> bool:
 
     POSIX: ``<bin>/nx`` exists and is a shim this install wrote
     (``shims_core._is_ours``) or a symlink into the ``uv tool`` conexus tree.
-    Windows: ``<tools>\\current\\bin\\nx.exe`` exists and that directory is on the
+    Windows: ``<tools>\\bin\\nx.exe`` exists and that directory is on the
     user PATH store (``inspect_user_path`` also reports a directory ahead of it
     that provides ``nx.exe``; the shim step repairs that too, so it is unfinished)."""
     from nexus import install_layout  # noqa: PLC0415 — deferred import
@@ -810,7 +811,7 @@ def restore_current_generation(generation: Path, *, previous: str | None) -> Non
     (nexus-ff366).
 
     The flip helpers do the moving, so a POSIX symlink swap stays atomic and a
-    Windows junction goes through ``generation_core`` (and the logon task is
+    Windows pointer file goes through ``generation_core`` (and the logon task is
     retargeted with it). Order: ``current`` first, onto a generation that still
     exists; the flip then records the one it leaves as ``previous``, which is put
     right afterwards. Neither pointer ever names a directory that is not there:
@@ -1769,14 +1770,17 @@ def _windows_build_flip_shims(
 
 
 def _windows_flip_and_path(generation: Path, *, tools: Path, bootstrap: bool = False) -> None:
-    """Flip ``current`` to *generation*, put its launcher directory on the user
-    PATH, and repoint the logon task. On the bootstrap path the failure names
+    """Make the dispatchers, flip ``current`` (a pointer file) to *generation*, put
+    ``<tools>\\bin`` on the user PATH, and repoint the logon task. On the bootstrap path the failure names
     the same ``--bootstrap`` command, because the plain one has no ``nx`` to
     run there."""
     core = _generation()
     try:
+        # The dispatchers first: a generation they cannot reach is never made current.
+        for line in core.ensure_dispatchers(tools, generation, platform=_plat()):
+            click.echo(line, err=True)
         core.flip_current(generation, tools, platform=_plat())
-        _echo_path_result(core.ensure_user_path(core.current_launcher_dir(tools)))
+        _echo_path_result(core.ensure_launcher_path(tools))
     except core.GenerationError as exc:
         rerun = (
             "re-run the same `--bootstrap` command to finish the install"
@@ -1811,7 +1815,7 @@ def _generation_layout_present(tools: Path) -> bool:
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
     try:
-        install_layout.current_generation(tools=tools)
+        install_layout.current_generation(tools=tools, platform=_plat())
     except Exception:  # noqa: BLE001 — no pointer, dangling pointer, unreadable root: no layout
         return False
     return True
@@ -1878,7 +1882,7 @@ def repair_uv_takeover(*, dry_run: bool = False) -> list[str]:
     a takeover; ``nx self install`` converges it) or nothing is wrong.
     """
     if _is_windows():
-        # uv rewriting its own launchers is harmless on Windows (current\\bin is
+        # uv rewriting its own launchers is harmless on Windows (<tools>\\bin is
         # ahead of them on the PATH), so the repair is to re-ensure the PATH
         # entry, the launcher directory and the legacy ledger. The same call
         # finishes a migration that stopped after the flip.
@@ -2292,11 +2296,11 @@ def _windows_reap(
     """The Windows reap: ``generation_core.reap``, then uv's old launchers.
 
     Once the legacy uv tree is gone (reaped just now, or long ago), uv's
-    conexus launchers in uv's bin dir are dead weight that ``current\\bin``
+    conexus launchers in uv's bin dir are dead weight that ``<tools>\\bin``
     already precedes; they are removed best-effort, a locked one is ``kept (in
     use)`` for the next run. The names come from the legacy ``uv-receipt.toml``,
     read BEFORE the reap deletes it, else the distribution's declared console
-    scripts. Never anything else, and never when ``current\\bin`` has no
+    scripts. Never anything else, and never when ``<tools>\\bin`` has no
     replacement.
 
     *remove_launchers* False skips that second half. The bootstrap passes False:

@@ -15,6 +15,7 @@ import os
 import shutil
 import stat
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,13 @@ class SymlinkOps(gen_core.LinkOps):
 
     def pid_alive(self, pid: int) -> bool:
         """Litter pids in these tests belong to processes that are gone."""
+        return False
+
+
+class PointerOps(gen_core.LinkOps):
+    """The product's default pointer (a file); only the pid probe is faked."""
+
+    def pid_alive(self, pid: int) -> bool:
         return False
 
 
@@ -62,9 +70,37 @@ class FakeUv:
         # Fail ONLY the install that carries --constraints (the second step of a
         # pinned build); the --no-deps fetch before it succeeds.
         self.fail_constrained = fail_constrained
+        # The dispatcher venv (nexus-f9bgu.47): the wheels uv was asked to install.
+        self.shim_installs: list[list[str]] = []
+        self.fail_shim: str | None = None
+
+    def _shim(self, argv):
+        """``uv venv <tools>/shim`` and ``uv pip install --no-deps <wheel>...`` for the
+        dispatchers: the launcher a real uv writes for each wheel's console script."""
+        if argv[:2] == ["uv", "venv"]:
+            scripts = Path(argv[-1]) / "Scripts"
+            scripts.mkdir(parents=True, exist_ok=True)
+            (scripts / "python.exe").write_bytes(b"python")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        self.shim_installs.append(list(argv))
+        if self.fail_shim:
+            return subprocess.CompletedProcess(argv, 1, "", self.fail_shim)
+        scripts = Path(argv[argv.index("--python") + 1]).parent
+        for wheel in (a for a in argv if a.endswith(".whl")):
+            with zipfile.ZipFile(wheel) as z:
+                entry = next(n for n in z.namelist() if n.endswith("entry_points.txt"))
+                name = z.read(entry).decode().splitlines()[1].split("=")[0].strip()
+            (scripts / f"{name}.exe").write_bytes(f"dispatcher:{name}:{Path(wheel).name}".encode())
+        return subprocess.CompletedProcess(argv, 0, "", "")
 
     def __call__(self, argv, **_kw):
         self.calls.append(list(argv))
+        is_shim_venv = argv[:2] == ["uv", "venv"] and Path(argv[-1]).name == "shim"
+        is_shim_install = (
+            argv[:3] == ["uv", "pip", "install"] and "--no-deps" in argv and any(a.endswith(".whl") for a in argv)
+        )
+        if is_shim_venv or is_shim_install:
+            return self._shim(argv)
         if argv[:4] == ["uv", "tool", "dir", "--bin"]:
             if self.uv_bin is None:
                 return subprocess.CompletedProcess(argv, 1, "", "no uv bin dir in this fake")
@@ -239,7 +275,7 @@ class TestBuildGeneration:
             copy = bin_dir / f"{name}.exe"
             assert copy.read_bytes() == source.read_bytes()
             assert f"#!{gen / 'Scripts' / 'python.exe'}".encode() in copy.read_bytes()
-        assert gen_core.current_launcher_dir(tools) == tools / "current" / "bin"
+        assert gen_core.current_launcher_dir(tools) == tools / "bin"
 
     def test_never_shimmed_names_get_no_launcher(self, tools: Path) -> None:
         gen = _build(tools, FakeUv(scripts=("nx", "pip", "uvx")))
@@ -963,8 +999,9 @@ class TestMigrateLegacy:
         assert gen is not None and lc.read_receipt(gen).extras == ["local", "pdf"]
         assert os.readlink(tools / "current") == str(gen)
         assert sorted(p.name for p in gen_core.launcher_dir(gen).iterdir()) == ["nx-mcp.exe", "nx.exe"]
-        entry = str(tools / "current" / "bin")
+        entry = str(tools / "bin")
         assert store.read()[0] == f"{entry};C:\\Windows;C:\\uvbin"
+        assert sorted(p.name for p in (tools / "bin").iterdir()) == ["nx-mcp.exe", "nx.exe"], "the dispatchers"
         assert len(paths) == 1 and paths[0].changed
         assert os.readlink(tools / "gen-legacy-uv-tool") == str(legacy)
         # Never uninstalled, never reaped, and no file written into uv's bin dir.
@@ -1049,8 +1086,9 @@ class TestRepairLayout:
         return gen, legacy, store
 
     def _repair(self, tools: Path, store, **kw):
+        kw.setdefault("run", FakeUv())
         return gen_core.repair_layout(
-            tools, ops=SymlinkOps(), platform=WIN, store=store, uv_bin="C:\\uvbin", environ={}, **kw,
+            tools, ops=PointerOps(WIN), platform=WIN, store=store, uv_bin="C:\\uvbin", environ={}, **kw,
         )
 
     def test_finishes_the_job_instead_of_refusing_or_building_another_layout(
@@ -1062,12 +1100,14 @@ class TestRepairLayout:
         lines = self._repair(tools, store)
         assert any("building the launcher directory" in line for line in lines), lines
         assert (gen_core.launcher_dir(gen) / "nx.exe").is_file()
-        assert store.read()[0].split(";")[0] == str(tools / "current" / "bin")
+        assert store.read()[0].split(";")[0] == str(tools / "bin")
+        assert (tools / "bin" / "nx.exe").is_file(), "the dispatcher the PATH entry names"
         assert any("restart" in line.lower() for line in lines)
-        assert os.readlink(tools / "gen-legacy-uv-tool") == str(legacy)
+        assert lc.read_link(tools / "gen-legacy-uv-tool", platform=WIN) == str(legacy)
         after = sorted(p.name for p in tools.iterdir())
-        assert set(after) - set(before) == {"gen-legacy-uv-tool"}, "no other generation was built"
-        assert os.readlink(tools / "current") == str(gen)
+        assert set(after) - set(before) == {"gen-legacy-uv-tool", "bin", "shim"}, "no other generation was built"
+        assert lc.read_link(tools / "current", platform=WIN) == str(gen)
+        assert (tools / "current").is_file(), "the directory pointer became a pointer file"
 
     def test_it_is_idempotent(self, tools: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _gen_, legacy, store = self._half_migrated(tools, tmp_path)
@@ -1081,6 +1121,7 @@ class TestRepairLayout:
         lines = self._repair(tools, store, dry_run=True)
         assert lines
         assert not gen_core.launcher_dir(gen).exists()
+        assert not (tools / "bin").exists() and not (tools / "shim").exists()
         assert store.read()[0] == "C:\\Windows;C:\\uvbin"
         assert not os.path.lexists(tools / "gen-legacy-uv-tool")
 

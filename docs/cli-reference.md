@@ -5159,12 +5159,16 @@ swapped underneath a running process — a live holder keeps executing its own
 generation byte-identically and converges at its next spawn, so no session has
 to be closed and there is nothing to force.
 
-**On native Windows (nexus-f9bgu.47)** `current` and `previous` are directory
-junctions, and there are no shim files: each generation carries `<gen>\bin`
-with copies of its own launchers, and the user PATH gets `<tools>\current\bin`
-ahead of uv's bin dir, so an upgrade only flips the junction. A running
-launcher exe cannot be replaced on Windows, so nothing is written into
-`~\.local\bin`. Terminals and sessions started before the one-time PATH change
+**On native Windows (nexus-f9bgu.47)** `current` and `previous` are plain
+files that name a generation (a directory junction made without administrator
+rights is refused by Windows 11's RedirectionGuard, WinError 448, and a symlink
+needs Developer Mode). There are no shim files in `~\.local\bin`: the user PATH
+gets `<tools>\bin`, ahead of uv's bin dir, which holds one small fixed launcher
+per command that reads `current` and runs that generation's own launcher, so an
+upgrade only replaces the `current` file. A running launcher exe cannot be
+replaced on Windows, and the fixed launchers never are. An install from before
+this change has junctions; `nx self install` converts them on its next run,
+and rollback to a junction `previous` still works. Terminals and sessions started before the one-time PATH change
 keep the old `nx` until restarted. A legacy `uv tool install` tree is migrated
 on the first run and its old launchers are removed by `nx self gc` once
 nothing runs them. The installer runs in Python there, never through `bash`.
@@ -5247,7 +5251,7 @@ because nothing is reaped. With a complete install already present it refuses in
 names the plain `nx self install` (with `--extras` named, `nx self install --extras <the same>`, which adds them) and changes nothing. Complete means `current`
 pointing at a generation with a receipt **and** the shim step's output in place
 (POSIX: `<bin>/nx` is a nexus shim or a symlink into the `uv tool` tree;
-Windows: `current\bin\nx.exe` exists and that directory is on the user PATH), or
+Windows: `<tools>\bin\nx.exe` exists and that directory is on the user PATH), or
 a `uv tool install conexus` tree. `--dry-run`
 prints the build and stops (and refuses the same way when an install exists).
 There is no fallback to `uv tool install` followed by `nx self install`:
@@ -5703,7 +5707,8 @@ and handling BOTH install shapes — each branch is a no-op when its target is a
   started it (`nx mineru stop`). Each recorded pid is signalled only while its
   live command line is still that worker; MCP servers belong to Claude sessions
   and are never stopped.
-- **Windows user PATH**: removes the `<tools>\current\bin` entry that
+- **Windows user PATH**: removes the `<tools>\bin` entry (and the `<tools>\current\bin` one that
+  earlier installs added) that
   `nx self install` added to `HKCU\Environment` `Path`, keeping every other
   entry (unexpanded `%VAR%` entries included) and the value's registry type, and
   broadcasts the change as the install did. Unconditional, like the two steps

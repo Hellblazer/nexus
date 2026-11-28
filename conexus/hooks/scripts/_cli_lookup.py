@@ -72,19 +72,44 @@ def tools_dir() -> str | None:
     return raw if os.path.isabs(raw) else None
 
 
+#: ``layout_core.POINTER_MAGIC``: the first line of a pointer FILE. On Windows ``<tools>\\current`` is a
+#: file that names the generation (nexus-f9bgu.47): RedirectionGuard refuses to traverse a junction a
+#: non-elevated process made, and a symlink needs Developer Mode. ``tests/hooks/test_nx_launch.py`` pins
+#: the two statements equal.
+POINTER_MAGIC = "nx-pointer 1"
+
+
+def _read_pointer_file(path: str) -> str | None:
+    """The generation a pointer file names, or ``None`` when *path* is not one."""
+    try:
+        with open(path, "rb") as handle:
+            lines = handle.read(4096).decode("utf-8").split("\n")
+    except (OSError, ValueError):
+        return None
+    if len(lines) < 3 or lines[0].rstrip("\r") != POINTER_MAGIC or lines[2].strip():
+        return None
+    return lines[1].rstrip("\r") or None
+
+
 def current_generation() -> str | None:
     """The directory ``<tools>/current`` points at, or ``None``.
 
-    One ``readlink``. A junction's target on Windows carries an extended-length
-    prefix, which is stripped. A relative target is not followed.
+    A pointer file (Windows since nexus-f9bgu.47) is read; anything else is one
+    ``readlink``, which does not traverse a junction (an install from before that,
+    still read under RedirectionGuard) or a symlink. A junction's target on Windows
+    carries an extended-length prefix, which is stripped. A relative target is not
+    followed.
     """
     root = tools_dir()
     if root is None:
         return None
-    try:
-        target = os.readlink(os.path.join(root, "current"))
-    except (OSError, ValueError):
-        return None
+    link = os.path.join(root, "current")
+    target = _read_pointer_file(link)
+    if target is None:
+        try:
+            target = os.readlink(link)
+        except (OSError, ValueError):
+            return None
     for prefix in ("\\\\?\\UNC\\", "\\\\?\\", "\\??\\"):
         if target.startswith(prefix):
             target = ("\\\\" if "UNC" in prefix else "") + target[len(prefix):]

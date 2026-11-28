@@ -318,8 +318,17 @@ def generation_install_present() -> bool:
     """
     try:
         current = default_tools_dir() / "current"
+        # Windows (nexus-f9bgu.47): the pointer is a FILE naming the generation, since a junction
+        # a non-elevated process made is refused by RedirectionGuard (OSError 448 on traversal).
+        try:
+            with open(current, "rb") as handle:
+                lines = handle.read(4096).decode("utf-8").split("\n")
+        except (OSError, ValueError):
+            lines = []
+        if len(lines) >= 3 and lines[0].rstrip("\r") == "nx-pointer 1" and not lines[2].strip():
+            return os.path.isdir(lines[1].rstrip("\r"))
         return current.is_dir()
-    except OSError as exc:  # unreadable HOME, permissions
+    except OSError as exc:  # unreadable HOME, permissions, an untrusted junction (448)
         debug(f"generation probe failed: {exc}")
         return False
 

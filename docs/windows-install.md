@@ -168,8 +168,10 @@ came out as described. The earlier walks used `--python 3.13` and also worked;
 
 `nx self install` moves the install to the layout Nexus manages: each version
 in its own folder under `%USERPROFILE%\.local\share\nexus\tools`, a `current`
-junction naming the one in use, and `tools\current\bin` added to the front of
-your user PATH (it prints a line saying so). Upgrades then build the new version
+file naming the one in use (a file, not a junction: Windows 11's
+RedirectionGuard refuses a junction made without administrator rights), and
+`tools\bin`, a folder of small fixed launchers that run whatever `current` names,
+added to the front of your user PATH (it prints a line saying so). Upgrades then build the new version
 next to the running one and never replace a file a running process uses. The
 uv copy it replaces stays until nothing runs from it; the next `nx self install`,
 `nx self gc`, or the start of a Claude Code session with the plugin removes it,
@@ -179,7 +181,7 @@ shows one ⚠ row, "Orphan uv install", which is expected.
 Measured on the clean machine on 2026-10-07 with a test build of the branch
 that carried the Windows layout (it has since shipped): `nx self install` took
 35 s and downloaded nothing new, the new window resolved `nx` to
-`tools\current\bin\nx.exe`, `nx init` registered the logon task against the new
+`tools\bin\nx.exe`, `nx init` registered the logon task against the new
 layout, `nx doctor` ended "All checks passed" (with the ⚠ row above), store and
 search worked, and `nx self gc` then removed the uv copy and its launchers.
 
@@ -340,7 +342,7 @@ Remove-Item -Force "$HOME\.local\bin\nx.exe", "$HOME\.local\bin\nx-mcp.exe", "$H
 the background workers nexus started (the aspect worker that `nx store put` and
 the plugin start, a topic labeling run after `nx index`, and MinerU), removes
 the `NexusStorageService` task and `%LOCALAPPDATA%\nexus`, takes
-`tools\current\bin`, which `nx self install` added, off your user PATH, and
+`tools\bin` (and `tools\current\bin`, which installs from before the pointer file added), which `nx self install` added, off your user PATH, and
 deletes `%USERPROFILE%\.config\nexus`, which holds the database, notes, plans
 and catalog, and `%USERPROFILE%\.cache\nexus`, which holds the search models
 (about 500 MB; in releases after 7.74.0 the engine's tokenizer library lives under
@@ -367,7 +369,7 @@ session with the plugin. If none of those has run since step 3, the uv copy is
 still there and the command removes it, printing "Uninstalled 5 executables"
 (measured on the 7.74.0 candidate walk). If one has, the copy is gone and the
 command prints "`conexus` is not installed". Both are fine; either way the
-`nx` you were running comes from `tools\current\bin`, which the
+`nx` you were running comes from `tools\bin`, which the
 `Remove-Item -Recurse` line on `.local\share\nexus` removes. On an install made
 only with `uv tool install`, `uv tool uninstall conexus` already removes the five
 `.exe` files and `.local\share\nexus` never exists; the `Remove-Item` lines skip
@@ -383,7 +385,7 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.Co
 Remove-Item -Recurse -Force "$HOME\.config\nexus", "$HOME\.cache\nexus", "$HOME\.local\share\nexus", "$env:LOCALAPPDATA\nexus" -ErrorAction SilentlyContinue
 $k = Get-Item 'HKCU:\Environment'
 $kind = $k.GetValueKind('Path')
-$path = ($k.GetValue('Path', '', 'DoNotExpandEnvironmentNames') -split ';' | Where-Object { $_ -and $_ -notlike '*\.local\share\nexus\tools\current\bin' }) -join ';'
+$path = ($k.GetValue('Path', '', 'DoNotExpandEnvironmentNames') -split ';' | Where-Object { $_ -and $_ -notlike '*\.local\share\nexus\tools\bin' -and $_ -notlike '*\.local\share\nexus\tools\current\bin' }) -join ';'
 Set-ItemProperty 'HKCU:\Environment' -Name Path -Value $path -Type $kind
 ```
 
@@ -406,7 +408,7 @@ an install converted by `nx self install`, with the stack running and an aspect
 worker started by `nx store put`: `nx uninstall --yes --remove-data` took 9 s
 and left no `nx`, PostgreSQL, `nexus-service`, `pythonw` or aspect-worker
 process, no task, nothing under `.config\nexus`, `.cache\nexus` or
-`%LOCALAPPDATA%\nexus`, and no `tools\current\bin` on the user PATH; a
+`%LOCALAPPDATA%\nexus`, and no `tools\bin` on the user PATH; a
 `%USERPROFILE%` entry and the value's `REG_SZ` type were kept. The `Remove-Item`
 lines then took 16 s and left nothing under `.local\share\nexus` and no `nx`
 launcher in `.local\bin`, and a new window found no `nx`. With conexus 7.72.1

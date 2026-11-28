@@ -1,8 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """What no injected seam can prove about the Windows generation installer
-(RDR-224, nexus-f9bgu.47): real directory junctions, a swap while a process runs
-through one, a running launcher replaced by rename-aside, a generation held by
-an open file kept by GC.
+(RDR-224, nexus-f9bgu.47): the real pointer FILES the installer flips, a flip while
+a process runs, the dispatchers on the user PATH run through a real launcher, an
+install from before RedirectionGuard (real directory junctions) migrated and rolled
+back, a generation held by an open file kept by GC.
+
+RedirectionGuard (nexus-f9bgu.47). Windows 11 can refuse to traverse a directory
+junction a non-elevated process made (WinError 448), and a user without Developer
+Mode cannot make a symlink (WinError 1314), so the installer's pointers are plain
+files. These tests hold on a host that enforces the mitigation and on one that does
+not: nothing here traverses a pointer, and the junction-era tests read one only with
+``readlink``, which does not traverse.
 
 Windows-only, and in the rehearsal's Windows test set. No symlinks (the runner's
 account holds no symlink privilege) and no POSIX stubs. The class never
@@ -30,6 +38,16 @@ from tests._child_encoding import PYTHON_CHILD_ENCODING
 ON_WINDOWS = os.name == "nt"
 
 
+class JunctionOps(gen_core.LinkOps):
+    """The pointer of the era before nexus-f9bgu.47: a directory junction, which is what an
+    install made before it has on disk. Used only to stand such an install up."""
+
+    def create(self, target: str, link: Path) -> None:
+        import _winapi  # noqa: PLC0415 -- exists only on Windows
+
+        _winapi.CreateJunction(target, str(link))
+
+
 def _copy_of_cmd(destination: Path) -> Path:
     """A self-contained, runnable exe to stand in for a running launcher."""
     shutil.copyfile(Path(os.environ["COMSPEC"]), destination)
@@ -43,37 +61,31 @@ def _sleeper(exe: Path) -> subprocess.Popen:
 
 @pytest.mark.skipif(not ON_WINDOWS, reason="needs the Windows kernel's junctions and file locking")
 class TestRealWindows:
-    def test_a_real_junction_is_created_read_and_swapped(self, tmp_path: Path) -> None:
+    def test_a_real_pointer_file_is_created_read_and_swapped_in_one_step(self, tmp_path: Path) -> None:
         one, two = tmp_path / "gen-1", tmp_path / "gen-2"
         one.mkdir()
         two.mkdir()
-        (one / "who").write_text("one", encoding="utf-8")
-        (two / "who").write_text("two", encoding="utf-8")
         link = tmp_path / "current"
         ops = gen_core.LinkOps()
 
         gen_core.swap_link(str(one), link, ops)
         assert lc.is_link(link)
-        assert not link.is_symlink(), "a junction is not a symlink to pathlib; that is the whole point"
-        assert os.path.isjunction(link)
-        read = lc.read_link(link)
-        assert not read.startswith("\\\\?\\")
-        assert lc.compare_key(read) == lc.compare_key(str(one))
-        assert (link / "who").read_text(encoding="utf-8") == "one"
+        assert link.is_file() and not link.is_symlink() and not os.path.isjunction(link)
+        assert lc.compare_key(lc.read_link(link)) == lc.compare_key(str(one))
 
         gen_core.swap_link(str(two), link, ops)
-        assert (link / "who").read_text(encoding="utf-8") == "two"
-        assert one.is_dir() and (one / "who").read_text(encoding="utf-8") == "one", "the old target must survive the swap"
+        assert lc.compare_key(lc.read_link(link)) == lc.compare_key(str(two))
+        assert one.is_dir() and two.is_dir(), "a pointer swap touches no generation"
         assert sorted(p.name for p in tmp_path.iterdir()) == ["current", "gen-1", "gen-2"]
 
-    def test_a_swap_works_while_a_process_runs_through_the_junction(self, tmp_path: Path) -> None:
+    def test_a_swap_works_while_a_process_runs_from_the_old_generation(self, tmp_path: Path) -> None:
         one, two = tmp_path / "gen-1", tmp_path / "gen-2"
         one.mkdir()
         two.mkdir()
         _copy_of_cmd(one / "nx.exe")
         link = tmp_path / "current"
         gen_core.swap_link(str(one), link, gen_core.LinkOps())
-        child = _sleeper(link / "nx.exe")  # executing through the junction, as a spawn does
+        child = _sleeper(one / "nx.exe")  # a launcher of the generation current names
         try:
             time.sleep(0.5)
             assert child.poll() is None
@@ -84,7 +96,22 @@ class TestRealWindows:
             child.kill()
             child.wait()
 
-    def test_flip_and_rollback_on_real_junctions(self, tmp_path: Path) -> None:
+    def test_a_pointer_is_replaced_while_another_process_has_it_open(self, tmp_path: Path) -> None:
+        """A reader holds the pointer open for a moment (a dispatcher, a hook). The replace
+        waits it out rather than failing the flip."""
+        one, two = tmp_path / "gen-1", tmp_path / "gen-2"
+        one.mkdir()
+        two.mkdir()
+        link = tmp_path / "current"
+        gen_core.swap_link(str(one), link, gen_core.LinkOps())
+        with open(link, "rb") as reader:  # Python opens without FILE_SHARE_DELETE
+            import threading  # noqa: PLC0415
+
+            threading.Timer(0.3, reader.close).start()
+            gen_core.swap_link(str(two), link, gen_core.LinkOps())
+        assert lc.compare_key(lc.read_link(link)) == lc.compare_key(str(two))
+
+    def test_flip_and_rollback_on_real_pointer_files(self, tmp_path: Path) -> None:
         tools = tmp_path / "tools"
         tools.mkdir()
         a, b = tools / "gen-A", tools / "gen-B"
@@ -92,10 +119,53 @@ class TestRealWindows:
         b.mkdir()
         gen_core.flip_current(a, tools)
         gen_core.flip_current(b, tools)
+        assert (tools / "current").is_file() and (tools / "previous").is_file()
         assert lc.current_generation(tools=tools).name == "gen-B"
         assert lc.compare_key(lc.read_link(tools / "previous")) == lc.compare_key(str(a))
         gen_core.rollback_current(tools)
         assert lc.current_generation(tools=tools).name == "gen-A"
+
+    def test_an_install_from_before_redirectionguard_migrates_and_rolls_back(self, tmp_path: Path) -> None:
+        """Real junction pointers, as every box that installed before nexus-f9bgu.47 has. On a
+        host that enforces RedirectionGuard each is refused on traversal (WinError 448) and
+        the installer must never traverse one: ``readlink`` does not, ``rmdir`` does not."""
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        a, b, c = (tools / f"gen-{n}" for n in "ABC")
+        for gen in (a, b, c):
+            gen.mkdir()
+        old = JunctionOps()
+        gen_core.flip_current(a, tools, ops=old)
+        gen_core.flip_current(b, tools, ops=old)
+        assert os.path.isjunction(tools / "current") and os.path.isjunction(tools / "previous")
+        assert lc.current_generation(tools=tools).name == "gen-B", "a junction is read without traversing it"
+        assert lc.compare_key(lc.read_link(tools / "previous")) == lc.compare_key(str(a))
+
+        # Rollback to a junction-era previous, then the next flip: both end as files.
+        gen_core.rollback_current(tools)
+        assert lc.current_generation(tools=tools).name == "gen-A"
+        gen_core.flip_current(c, tools)
+        for name, target in (("current", c), ("previous", a)):
+            pointer = tools / name
+            assert pointer.is_file() and not os.path.isjunction(pointer), name
+            assert lc.compare_key(lc.read_link(pointer)) == lc.compare_key(str(target)), name
+        assert a.is_dir() and b.is_dir() and c.is_dir(), "no generation was emptied through a junction"
+        assert sorted(p.name for p in tools.iterdir() if p.name.startswith(".")) == [], "no litter"
+
+    def test_repair_turns_the_junctions_of_an_old_install_into_files(self, tmp_path: Path) -> None:
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        gen = tools / "gen-A"
+        gen.mkdir()
+        gen_core.flip_current(gen, tools, ops=JunctionOps())
+        assert os.path.isjunction(tools / "current")
+        store = gen_core.FileUserPath(tmp_path / "userpath.txt")
+        store.write("C:\\Windows", 2)
+        # No receipt and no python: the dispatchers cannot be built here (they are built and
+        # run for real in TestRealDispatchers); the pointer conversion is what this proves.
+        with pytest.raises(gen_core.GenerationError):
+            gen_core.repair_layout(tools, store=store, uv_bin="C:\\uvbin", environ={})
+        assert os.path.isjunction(tools / "current"), "a repair that could not finish leaves the old pointer intact"
 
     def test_the_real_user_path_registry_value_is_readable_and_left_untouched(self) -> None:
         """Read-only: the store seam reads HKCU\\Environment without writing."""
@@ -103,7 +173,7 @@ class TestRealWindows:
         assert isinstance(value, str)
         assert reg_type in (1, 2), reg_type  # REG_SZ or REG_EXPAND_SZ
 
-    def test_gc_plan_protects_real_junction_current_and_previous(self, tmp_path: Path) -> None:
+    def test_gc_plan_protects_real_pointer_file_current_and_previous(self, tmp_path: Path) -> None:
         tools = tmp_path / "tools"
         tools.mkdir()
         gens = {}
@@ -113,7 +183,7 @@ class TestRealWindows:
             (gen / "nexus-install.json").write_text("{}\n", encoding="utf-8")
             gens[name] = gen
         gen_core.flip_current(gens["B"], tools)
-        gen_core.flip_current(gens["C"], tools)  # current -> C, previous -> B, both junctions
+        gen_core.flip_current(gens["C"], tools)  # current -> C, previous -> B, both pointer files
         assert lc.is_link(tools / "current") and lc.is_link(tools / "previous")
         plan = {entry.name: (action, detail) for action, entry, detail in gc_core.plan(
             tools, keep=1, snapshot="999 C:/Windows/notepad.exe\n",  # a table that names none of them
@@ -243,7 +313,15 @@ def _build_demo_wheel(directory: Path) -> Path:
     wheel = directory / "nxdemo-1.0-py3-none-any.whl"
     info = "nxdemo-1.0.dist-info"
     files = {
-        "nxdemo.py": "import sys\n\n\ndef main():\n    print(sys.prefix)\n",
+        "nxdemo.py": (
+            "import sys\nimport time\n\n\ndef main():\n"
+            "    if sys.argv[1:2] == ['sleep']:\n        time.sleep(30)\n        return\n"
+            "    if sys.argv[1:2] == ['echo']:\n"
+            "        print('args=%r' % (sys.argv[1:],))\n"
+            "        print('stdin=' + sys.stdin.readline().strip())\n"
+            "        raise SystemExit(3)\n"
+            "    print(sys.prefix)\n"
+        ),
         f"{info}/METADATA": "Metadata-Version: 2.1\nName: nxdemo\nVersion: 1.0\n",
         f"{info}/WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
         f"{info}/entry_points.txt": "[console_scripts]\nnxdemo = nxdemo:main\n",
@@ -256,35 +334,99 @@ def _build_demo_wheel(directory: Path) -> Path:
     return wheel
 
 
-class TestRealLauncherThroughJunction:
-    """A launcher copied into ``<gen>\\bin`` and run through ``current`` reports
-    the REAL generation as ``sys.prefix``, not the junction: the property the
-    whole PATH-entry design depends on. Needs ``uv`` (present on the runner);
-    skips with that reason where it is not, and is not in the floor's
-    ``--require-passed`` set for that reason."""
+class TestRealDispatchers:
+    """The dispatchers on the user PATH, built by a real ``uv`` and run through a real launcher:
+    ``<tools>\\bin\\nxdemo.exe`` runs the CURRENT generation's ``nxdemo.exe`` and reports that
+    generation as ``sys.prefix``; a flip changes what it runs without replacing it, even while
+    one is running; a rollback changes it back. Needs ``uv`` (present on the runner); skips with
+    that reason where it is not, and is not in the floor's ``--require-passed`` set for that
+    reason."""
 
-    @pytest.mark.skipif(not ON_WINDOWS, reason="needs the Windows launcher and junctions")
-    def test_sys_prefix_through_current_bin_is_the_real_generation(self, tmp_path: Path) -> None:
+    @staticmethod
+    def _generation(tmp_path: Path, tools: Path, stamp: str, wheel: Path) -> Path:
         uv = shutil.which("uv")
-        if uv is None:
-            pytest.skip("uv is not on PATH, so no real venv can be built here")
-        gen = tmp_path / "tools" / "gen-A"
-        gen.parent.mkdir()
-        wheel = _build_demo_wheel(tmp_path)
+        gen = tools / f"gen-{stamp}"
         subprocess.run([uv, "venv", "--python", sys.executable, str(gen)], check=True, capture_output=True)
         subprocess.run(
             [uv, "pip", "install", "--offline", "--no-deps", "--python", str(gen / "Scripts" / "python.exe"), str(wheel)],
             check=True, capture_output=True,
         )
         assert (gen / "Scripts" / "nxdemo.exe").is_file(), "the install made no launcher"
-        gen_core.populate_launchers(gen, dist="nxdemo")
-        assert (gen / "bin" / "nxdemo.exe").is_file()
-        current = gen.parent / "current"
-        gen_core.swap_link(str(gen), current, gen_core.LinkOps())
+        return gen
+
+    @staticmethod
+    def _run(exe: Path, *args: str) -> str:
         done = subprocess.run(
-            [str(current / "bin" / "nxdemo.exe")], check=True, capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING,
+            [str(exe), *args], check=True, capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING,
         )
-        printed = done.stdout.strip()
-        assert printed, "the launcher printed nothing"
-        assert lc.compare_key(printed) == lc.compare_key(str(gen)), printed
-        assert "current" not in Path(printed).parts, "sys.prefix leaked the junction"
+        return done.stdout.strip()
+
+    @pytest.mark.skipif(not ON_WINDOWS, reason="needs the Windows launcher")
+    def test_a_dispatcher_runs_the_current_generation_across_a_flip_a_running_process_and_a_rollback(
+        self, tmp_path: Path,
+    ) -> None:
+        if shutil.which("uv") is None:
+            pytest.skip("uv is not on PATH, so no real venv can be built here")
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        wheel = _build_demo_wheel(tmp_path)
+        one = self._generation(tmp_path, tools, "A", wheel)
+        two = self._generation(tmp_path, tools, "B", wheel)
+
+        for generation in (one,):
+            lines = gen_core.ensure_dispatchers(tools, generation, dist="nxdemo")
+            assert any("dispatchers for nxdemo" in line for line in lines), lines
+        dispatcher = gen_core.current_launcher_dir(tools) / "nxdemo.exe"
+        assert dispatcher.is_file()
+        before = dispatcher.read_bytes()
+        gen_core.flip_current(one, tools)
+        assert lc.compare_key(self._run(dispatcher)) == lc.compare_key(str(one)), "the dispatcher ran generation A"
+
+        # A process is running THROUGH the dispatcher while the flip happens.
+        child = subprocess.Popen([str(dispatcher), "sleep"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            time.sleep(2.0)
+            assert child.poll() is None, "the demo launcher should be sleeping"
+            assert gen_core.ensure_dispatchers(tools, two, dist="nxdemo") == [], "nothing new to write"
+            gen_core.flip_current(two, tools)
+            assert dispatcher.read_bytes() == before, "a flip replaced no launcher"
+            assert child.poll() is None
+            assert lc.compare_key(self._run(dispatcher)) == lc.compare_key(str(two)), "the next run is generation B"
+        finally:
+            child.kill()
+            child.wait()
+
+        gen_core.rollback_current(tools)
+        assert lc.compare_key(self._run(dispatcher)) == lc.compare_key(str(one)), "a rollback runs generation A again"
+        assert dispatcher.read_bytes() == before
+
+    @pytest.mark.skipif(not ON_WINDOWS, reason="needs the Windows launcher")
+    def test_the_dispatcher_passes_arguments_stdin_and_the_exit_status(self, tmp_path: Path) -> None:
+        if shutil.which("uv") is None:
+            pytest.skip("uv is not on PATH, so no real venv can be built here")
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        gen = self._generation(tmp_path, tools, "A", _build_demo_wheel(tmp_path))
+        gen_core.ensure_dispatchers(tools, gen, dist="nxdemo")
+        gen_core.flip_current(gen, tools)
+        dispatcher = gen_core.current_launcher_dir(tools) / "nxdemo.exe"
+        done = subprocess.run(
+            [str(dispatcher), "echo", "a b", "c"], capture_output=True, text=True, encoding=PYTHON_CHILD_ENCODING,
+            input="from stdin\n",
+        )
+        assert done.returncode == 3, done
+        assert done.stdout.splitlines() == ["args=['echo', 'a b', 'c']", "stdin=from stdin"]
+
+    @pytest.mark.skipif(not ON_WINDOWS, reason="needs the Windows launcher")
+    def test_the_dispatcher_without_a_pointer_says_so_and_exits_127(self, tmp_path: Path) -> None:
+        if shutil.which("uv") is None:
+            pytest.skip("uv is not on PATH, so no real venv can be built here")
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        gen = self._generation(tmp_path, tools, "A", _build_demo_wheel(tmp_path))
+        gen_core.ensure_dispatchers(tools, gen, dist="nxdemo")
+        done = subprocess.run(
+            [str(gen_core.current_launcher_dir(tools) / "nxdemo.exe")], capture_output=True, text=True,
+            encoding=PYTHON_CHILD_ENCODING,
+        )
+        assert done.returncode == 127 and "no generation is installed" in done.stderr, done
