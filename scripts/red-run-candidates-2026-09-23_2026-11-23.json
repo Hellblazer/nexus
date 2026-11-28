@@ -1,0 +1,4463 @@
+{
+ "candidates": [
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "ChashVectorConcurrencyTest::concurrentChashAndVectorUpserts_noServerErrors",
+   "red_runs": 2,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    39193706997,
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-09-30",
+   "kind": "java",
+   "last_red": "2026-09-30",
+   "nodeid": "HybridSearchFunctionParityIntegrationTest::hybridSearch_denseRegime_gateContainment",
+   "red_runs": 1,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    36757457264
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-03",
+   "kind": "java",
+   "last_red": "2026-11-03",
+   "nodeid": "ManifestSearchShortPageIntegrationTest::aFanOutArmWhoseRerunRunsIntoItsBound_isMarkedTimedOut_notServedAShortPage",
+   "red_runs": 1,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    41660277027
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-07",
+   "kind": "java",
+   "last_red": "2026-10-07",
+   "nodeid": "PgVectorCardinalityRouterIntegrationTest::zeroNeverRoutesExact",
+   "red_runs": 1,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    37672745041
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-31",
+   "kind": "test",
+   "last_red": "2026-10-31",
+   "nodeid": "test_a_dry_run_never_touches_the_row_of_a_real_run_of_the_same_bytes",
+   "red_runs": 3,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    41204403666,
+    41207500291,
+    41215485510
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-19",
+   "kind": "test",
+   "last_red": "2026-11-19",
+   "nodeid": "tests/hooks/test_heredoc_pipe_budget.py::test_no_heredoc_body_exceeds_degraded_pipe_capacity",
+   "red_runs": 5,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    44527938433,
+    44530176289,
+    44531708407,
+    44532853919,
+    44535136220
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-06",
+   "kind": "test",
+   "last_red": "2026-11-06",
+   "nodeid": "tests/hooks/test_mailbox_drain_hook.py::TestAskAnswerPeerFallback::test_a_get_slower_than_the_cap_gives_up_and_is_answer_not_checked",
+   "red_runs": 1,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    42261999506
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "test",
+   "last_red": "2026-10-20",
+   "nodeid": "tests/test_aspect_worker.py::TestWorkerDrain::test_worker_uncaught_exception_marks_failed",
+   "red_runs": 1,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    39410389570
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-16",
+   "kind": "test",
+   "last_red": "2026-11-16",
+   "nodeid": "tests/test_llm_anthropic_backend.py::TestTransport::test_backoff_without_retry_after_is_seeded_jitter",
+   "red_runs": 1,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    43874382209
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-26",
+   "kind": "test",
+   "last_red": "2026-10-26",
+   "nodeid": "tests/test_nx_answer.py::TestContinuationGoLiveMidPrefixFailure::test_deadline_exhausted_mid_prefix_never_hands_off",
+   "red_runs": 1,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    40313538664
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-21",
+   "kind": "test",
+   "last_red": "2026-11-21",
+   "nodeid": "tests/test_rdr250_pool_filter_log.py::test_a_refused_unparsed_or_timed_out_call_names_its_cause_in_the_log_and_the_reason[exc2-timeout-filter_timeout]",
+   "red_runs": 1,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    44870180538
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-20",
+   "kind": "test",
+   "last_red": "2026-11-20",
+   "nodeid": "tests/test_session_end_launcher.py::test_hooks_json_session_end_timeout_covers_service_summary",
+   "red_runs": 3,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    44747725195,
+    44749638180,
+    44754799740
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-18",
+   "kind": "test",
+   "last_red": "2026-11-18",
+   "nodeid": "tests/test_t2_concurrency.py::test_memory_get_under_concurrent_write_load",
+   "red_runs": 1,
+   "rule": "flake:timing-message",
+   "run_ids": [
+    44337073652
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  }
+ ],
+ "header": {
+  "archive_sha256": "520722bfbf0a9e75b566093f5ab19078ef3e3c41f39af4a356714d07b7f8a968",
+  "candidate_tests": 13,
+  "extraction": "red-run-extraction-2026-09-23_2026-11-23.jsonl.gz",
+  "extraction_sha256": "5410db597b7552794dfb54e3ee7b731bd5dc8cf4526e01487ac47905c356fffc",
+  "red_runs": 788,
+  "script_commit": "36a2bea1ab2d0e90c5a007a8d801aaec80f9c9f7",
+  "snapshot_final": true,
+  "unattributed_tests": 298,
+  "window": [
+   "2026-09-23",
+   "2026-11-23"
+  ]
+ },
+ "unattributed": [
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "ArbiterCompletenessTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "AspectHandlerEnqueueErrorTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "BootstrapTokenRotationTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "Catalog034TumblerGrammarTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-02",
+   "kind": "java",
+   "last_red": "2026-10-02",
+   "nodeid": "Catalog036EmbeddingProfileSchemaLiquibaseTest::embeddingModels_isInstallScopedWithNoTenantColumnAndNoRls",
+   "red_runs": 3,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    37007854659,
+    37015014407,
+    37021909710
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogHandlerCollectionUpsertProfileModelTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogHandlerCollectionUpsertProfileSeedTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogHandlerEmbeddingProfileTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogHandlerGhostSweepTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogHandlerImportEmptyBodyTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogHandlerListPaginationTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogHandlerOwnerDeactivateTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogHandlerPurgeTrashTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogHandlerSweepAndChashesManyTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogHandlerTumblerGrammarTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogHandlerUpdateManyDeleteManyTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogLinksDanglingEndpointHttpTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CatalogRestoreTrashTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "ChunkLastWrittenAtIntegrationTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "CombinedQueryRetentionTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-17",
+   "kind": "java",
+   "last_red": "2026-11-17",
+   "nodeid": "DataMoveWorkerIntegrationTest::bloat_vacuumMidMoveReclaimsChunksAlreadyCommitted_andTheCoordinatorHoldsNoSnapshotAcrossChunks",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44021463117
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "DenseGateScanBudgetIntegrationTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "ERROR at setup of TestReposIdentity.test_collections_by_owner",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "ERROR at setup of TestReposIdentity.test_get_owner_by_prefix_found",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "ERROR at setup of TestReposIdentity.test_list_owners_by_type_repo_only",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "ERROR at setup of TestScoringChunkCounts.test_chunk_counts_exact_values",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-30",
+   "kind": "java",
+   "last_red": "2026-10-30",
+   "nodeid": "EngineOwnedPredicateIntegrationTest::noJavaMainSourceNamesTheTagKeys",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41009108965,
+    41029165685
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "ForeignKeyConstraintTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "GcQuarantineOrphansFloorRouteTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "GcRestoreRereferencedBoundedTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "HnswScanBudgetOnEverySearchPathIntegrationTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "Hygiene002CollectionAttributesWalkTest::walkPopulatesEveryBranchAcrossTwoTenants_constraintsReject_reapplyIsNoOp",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39449370461
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "Hygiene004OwnerGrammarUnderscoreTest::refilesOnlyTheUnderscoredOwnerRowsHygiene002MisclassifiedAsDisputed",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39449370461
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "IndexRunFenceTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "ListCollectionsRegistryReadIntegrationTest::listCollections_isASemiJoinOnTheRegistry_notAnAggregateOverEveryChunk",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849,
+    39362276061
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "ManifestCollectionStampTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "ManifestFunctionsTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "MemoryRepositoryTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "MemoryRepositoryWritePathQuarantineTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "MemorySchemaLiquibaseTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-02",
+   "kind": "java",
+   "last_red": "2026-10-02",
+   "nodeid": "MemorySummariesRlsTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    37021909710
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "NexusServiceTupleSweepIsolationTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-18",
+   "kind": "java",
+   "last_red": "2026-10-18",
+   "nodeid": "OrtNativeDirTest::concurrentStartersOnABrokenDirectoryNeverFailAndNeverLeaveItBroken",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39150193379
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "OwnerlessWriteDeadlockRetryTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-17",
+   "kind": "java",
+   "last_red": "2026-11-17",
+   "nodeid": "PciBuilderTerminationIntegrationTest::migrate_terminatesAnInFlightBuilder_freesItsLock_andThePassStartsNoLaterBuild",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44057631973,
+    44057695891
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-17",
+   "kind": "java",
+   "last_red": "2026-11-17",
+   "nodeid": "PciBuilderTerminationIntegrationTest::migrate_withARealChangesetPending_endsAnInFlightBuilder",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44057631973,
+    44057695891
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-17",
+   "kind": "java",
+   "last_red": "2026-11-17",
+   "nodeid": "PciBuilderTerminationIntegrationTest::migrate_withASelfRetryingAndARealChangesetPending_endsTheBuilder_countingOnlyTheRealOne",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44057631973,
+    44057695891
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-17",
+   "kind": "java",
+   "last_red": "2026-11-17",
+   "nodeid": "PciBuilderTerminationIntegrationTest::migrate_withOnlyRunAlwaysPending_butAccessDriftToRepair_endsTheBuilderBeforeTheRepair",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44057631973,
+    44057695891
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "PciCatalogIntegrationTest::aReadBlockedByALock_failsAtTheStatementBound_whileTheLockIsStillHeld",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39504356947
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-17",
+   "kind": "java",
+   "last_red": "2026-11-17",
+   "nodeid": "PciReconcilerIntegrationTest::aRealMigrationWalkWithASchemaChangeset_terminatesARealBuild_theBuildIsNotCharged_andTheWalkCompletes",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44057631973,
+    44057695891
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "PgVectorCombinedQueryContractTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "PgVectorRepositoryContractTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-09",
+   "kind": "java",
+   "last_red": "2026-10-09",
+   "nodeid": "PgVectorRepositoryRawSqlPlanShapeTest::searchMetadataScoped_shape_usesFullHnswIndex_1024",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    37902636678
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "PgVectorSearchPerCollectionExactFallbackIntegrationTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "PgVectorSearchPerCollectionIntegrationTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "PgVectorServingContractTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "PlainSearchTextGatedSearchExplainTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "PlanRepositoryTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "Rdr71gw2CollectionNotNullTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39449370461
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "SchemaMigratorIntegrationTest::agedBoxWithMissingChashConstraint_migrationDoesNotCrashLoop",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39449370461
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "SchemaMigratorIntegrationTest::agedBoxWithMissingChashIndexConstraint_migrationDoesNotCrashLoop",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39449370461
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "SchemaMigratorIntegrationTest::agedBoxWithMissingFk002CollectionFk_migrationDoesNotCrashLoop",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39449370461
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "SchemaMigratorIntegrationTest::bareValidateWithoutRemediation_againstDanglingPopulation_throws",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39449370461
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "SchemaMigratorIntegrationTest::chunksCollectionFk_bareValidateWithoutReconcile_againstUnregisteredCollection_throws",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39449370461
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "SchemaMigratorIntegrationTest::presentButViolatingChashIndexConstraint_migrationFailsCleanNotCrashLoop",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39449370461
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "ScratchSchemaLiquibaseTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "SessionTokenHandlerTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyCentroidHandlerTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyHandlerAssignFkTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyHandlerAssignFromChashesTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyHandlerImportRlsTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyHandlerTopicsByIdsTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::getAssignmentDetails_isTenantScopedAndEmptyForUnknownDocs",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::getDocCountDrift_namesOnlyTopicsWhoseDocCountDisagrees",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::importBatch_topic_docCount999_landsWithRealCountAfterAssignmentsBatchImports",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::importTopicsBatch_refusesRootLabelConflictAtDifferentId",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::linkDrift_countIsExactWhileRowsAreCapped",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::linkDrift_mirrorsRefreshProjectionLinksPredicate",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::persistDiscoveredTopics_concurrentSameCollection_oneWinsOtherSkips",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::persistDiscoveredTopics_inBatchDuplicateLabelReusesTopicId",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::persistRebuildTopics_inBatchDuplicateLabelReusesTopicId",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::recountDocCount_applies_correctsAndIsRepeatable",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::recountDocCount_dryRun_previewsWithoutWriting",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::refreshProjectionLinks_mergesIntoExistingLinkTypes_preservingBothTypes",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyRepositoryTest::stopAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "TaxonomyUnassignedChashesRepositoryTest::scale_50kChunks_fewUnassignedScattered_correctAndIndexBacked",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39365428198,
+    39397728276
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TaxonomyUnassignedChashesRepositoryTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TelemetryHandlerNxAnswerRunsLimitClampTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TelemetrySchemaLiquibaseTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-03",
+   "kind": "test",
+   "last_red": "2026-11-03",
+   "nodeid": "TestETLFidelity.test_rename_collection",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41697241326
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "TestGraphScopeFilter.test_a_malformed_predicate_is_a_400_from_the_engine",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "TestManifestRowLimit.test_a_non_positive_limit_is_a_400",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-31",
+   "kind": "test",
+   "last_red": "2026-10-31",
+   "nodeid": "TestQueueMVV.test_claim_batch_client_roundtrip_real_service",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41155017528
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "TestT3GcTombstoneSafety.test_docs_for_chashes_excludes_tombstoned_doc",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TokenAdminHandlerTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TokenStoreDataTokenSweepTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "TupleSizeLimitsTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "VectorHandlerCombinedQueryModelGuardTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "java",
+   "last_red": "2026-10-19",
+   "nodeid": "VectorStatsCatalogJoinTest::startAll",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39196809849
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "java",
+   "last_red": "2026-10-20",
+   "nodeid": "VectorsRepointFunctionsIntegrationTest::gcWriters_actuallyExecuteRetargetedStatements_postStateAsserted",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39449370461
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-02",
+   "kind": "java",
+   "last_red": "2026-10-02",
+   "nodeid": "VectorsUnifyCentroidsIntegrationTest::degenerateSingleRow_migratesCleanly",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    37021909710
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_changed_file_fills_needs_fence_and_an_unchanged_one_does_not",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_changed_header_restamps_and_an_unchanged_one_is_not_rewritten",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_changed_rdr_is_handed_to_the_dependency_generator_as_if_new",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_chunk_missing_from_the_middle_is_not_appended_at_the_tail",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_chunk_owned_only_by_a_trashed_document_is_linked[content_hash]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_chunk_owned_only_by_a_trashed_document_is_linked[title]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_chunk_shared_by_two_legacy_notes_is_left_alone",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_cold_run_stages_one_page_and_commits_once",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_complete_walk_counts_a_missing_file_and_a_kept_one_is_not_counted",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-12",
+   "kind": "test",
+   "last_red": "2026-11-05",
+   "nodeid": "test_a_dry_run_never_touches_the_row_of_a_real_run_of_the_same_bytes",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    38194840872,
+    42124679784
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_failed_reap_leaves_a_multi_chunk_document_whole[delete_document]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_failed_reap_leaves_a_multi_chunk_document_whole[write_manifest]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_failed_t3_fetch_is_reported_not_marked",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_file_matching_a_sensitive_glob_is_born_flagged_and_confirmed",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_gap_in_the_targets_positions_is_never_overwritten[content_hash]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_gap_in_the_targets_positions_is_never_overwritten[title]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_gapped_document_whose_fence_is_indexing_is_skipped",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_genuinely_lapsed_note_is_retired_with_its_own_rows_read",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_ghost_of_the_same_title_is_reused_and_takes_the_source_uri",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_ghost_titled_document_is_reaped_too",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_head_bump_alone_fills_no_needs_fence_and_relinks_no_rdr",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_head_bump_is_one_commit_and_still_no_single_write",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_lapsed_note_whose_rows_cannot_be_read_is_not_retired",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_lost_document_whose_fence_is_indexing_is_skipped",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_lost_manifestless_document_is_marked_for_re_index",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_manifestless_document_rebuilt_short_is_written_and_marked",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_manifestless_document_whose_fence_is_indexing_is_skipped",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_marked_document_stays_listed_until_something_re_indexes_it",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_name_this_process_never_cached_keeps_its_422",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_never_chunked_document_is_not_marked",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_non_rdr_document_is_not_stamped",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-26",
+   "kind": "test",
+   "last_red": "2026-10-26",
+   "nodeid": "test_a_note_stored_with_no_keys_never_exports_a_departed_co_owners_keys",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40360499854,
+    40375684768
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_note_whose_ttl_was_retracted_survives_a_stale_lapsed_row",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_partial_walk_touches_no_row_it_did_not_visit",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_refused_row_has_no_tumbler_and_the_rest_of_the_run_is_committed",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_registration_that_predates_the_stamp_is_filled_once_in_one_batch",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_renamed_note_keeps_one_identity_under_the_new_name",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_reput_updates_the_entry_and_a_permanent_reput_clears_the_ttl",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-22",
+   "kind": "test",
+   "last_red": "2026-10-22",
+   "nodeid": "test_a_retired_name_holding_chunks_is_not_routed_to",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39706139643
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_run_that_began_since_the_snapshot_is_not_failed",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_run_that_re_indexed_the_document_since_the_snapshot_is_not_failed",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_same_title_reput_reconciles_onto_its_own_note",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_second_pass_over_a_rebuilt_short_document_does_not_list_it_again",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_sensitive_titled_put_is_born_flagged",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_a_shared_chunk_prints_the_engine_named_owners_path_and_lines",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_an_aspect_row_is_keyed_by_the_tumbler_string_the_resolver_passes",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_an_rdr_emptied_to_zero_bytes_loses_its_stale_id_on_the_repo_path",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_cli_second_title_registers_a_second_document",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_cli_store_delete_reclaims_single_owner_chunk_same_call",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_confirmation_prompt_counts_only_what_the_reap_touches",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_delete_title_of_an_unshared_note_still_deletes_its_chunk",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_deleted_relpaths_are_trashed_by_the_commit_with_no_single_delete",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_dry_run_reports_a_document_with_rows_and_changes_nothing",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_dry_run_reports_a_lost_document_as_to_be_marked_and_fails_no_fence",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_dry_run_reports_a_short_manifestless_document_and_changes_nothing",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_each_note_shows_its_own_tags_and_expiry_when_the_other_wrote_last",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_each_owner_expires_on_its_own_ttl_and_clock",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_engine_run_end_to_end_reproduces_and_merges_twins",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_enrich_auto_links_two_enriched_papers_that_cite_each_other",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-02",
+   "kind": "test",
+   "last_red": "2026-11-02",
+   "nodeid": "test_full_run_equals_one_combined_write_of_the_file[code]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41510876317
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-02",
+   "kind": "test",
+   "last_red": "2026-11-02",
+   "nodeid": "test_full_run_equals_one_combined_write_of_the_file[prose]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41510876317
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-02",
+   "kind": "test",
+   "last_red": "2026-11-02",
+   "nodeid": "test_full_run_equals_one_combined_write_of_the_file[rdr]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41510876317
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_ghost_ranked_past_the_first_page_is_reconciled",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_graph_hop_visible_through_link",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_identical_content_under_a_second_title_is_still_a_second_document",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_import_into_a_two_segment_name_lands_where_other_verbs_read",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_import_into_bare_subject_lands_where_other_verbs_read",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_link_existing_appends_only_the_manifest_less_row[content_hash]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_link_existing_appends_only_the_manifest_less_row[title]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_manifest_rewrite_keeps_combined_query_visibility",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_mcp_second_title_registers_a_second_document_and_both_resolve",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_mcp_store_delete_reclaims_single_owner_chunk_same_call",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_metadata_scoped_visible_after_public_api_write",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_migration_moves_prose_from_code_to_docs",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_new_files_fill_new_tumblers_content_types_and_needs_fence",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-09-27",
+   "kind": "test",
+   "last_red": "2026-09-27",
+   "nodeid": "test_nul_bytes_sanitized_server_side",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    36325805323,
+    36327178280
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-09-27",
+   "kind": "test",
+   "last_red": "2026-09-27",
+   "nodeid": "test_on_conflict_idempotency",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    36325805323,
+    36327178280
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-07",
+   "kind": "test",
+   "last_red": "2026-11-07",
+   "nodeid": "test_per_chunk_metadata_is_what_the_old_write_path_stored",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42330862385
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_pin2_an_import_that_makes_a_note_permanent_is_not_retired",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-12",
+   "kind": "test",
+   "last_red": "2026-10-12",
+   "nodeid": "test_pin_sha_is_the_commit_of_the_tag_it_claims",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    38281862848
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_reconcile_is_the_remedy_the_warning_actually_names",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_reconcile_lists_a_lost_document_and_says_it_was_marked",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_reconcile_names_the_real_route_and_dry_run_changes_nothing",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_reconcile_says_why_a_lost_document_was_not_marked",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_registration_records_the_frontmatter_id_on_the_document",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_reput_under_the_same_title_still_reconciles",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_same_collection_chash_dedup_still_reconciles_and_stamps_source_uri",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-03",
+   "kind": "test",
+   "last_red": "2026-10-03",
+   "nodeid": "test_simultaneous_starts_over_a_dead_holder_never_both_hold_the_lock",
+   "red_runs": 3,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    37142987993,
+    37144542437,
+    37146244958
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_split_note_reput_into_a_new_collection_creates_a_new_document",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_engine_returns_the_writers_catalog_doc_id_on_vectors_get",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_hook_registers_with_the_author_when_no_pre_flight_did",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_kept_chunk_message_names_only_this_collections_holders",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_markdown_hook_alone_registers_the_absolute_path",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_next_index_run_fills_the_id_onto_an_unstamped_registration",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-30",
+   "kind": "test",
+   "last_red": "2026-10-30",
+   "nodeid": "test_the_next_index_run_re_indexes_a_marked_document",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41101290795
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_pdf_hook_records_on_a_fresh_registration_and_a_resolved_one",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_repo_catalog_pass_stamps_each_document_with_its_own_values",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_repo_pass_fills_an_empty_tags_and_category[absent]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_repo_pass_fills_an_empty_tags_and_category[empty-list]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_repo_pass_fills_an_empty_tags_and_category[empty-string]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_repo_pass_fills_an_empty_tags_and_category[none]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_repo_pass_fills_the_empty_key_and_keeps_the_held_one",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_repo_pass_keeps_a_curated_tags_and_category_across_a_re_index",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_repo_pass_still_overwrites_source_format",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_the_stamp_costs_no_request_of_its_own_and_a_warm_run_writes_nothing",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_two_notes_with_identical_text_each_catalog_entry_keeps_its_own_keys",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "test_unsplit_note_reput_into_a_new_collection_creates_a_new_document",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    45016256739
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-01",
+   "kind": "test",
+   "last_red": "2026-11-01",
+   "nodeid": "tests/catalog/test_manifest_write_many.py::TestWriteManifestManyReachesGatewayRetryFloor::test_combined_write_504_floors_and_reaches_the_prefixed_path",
+   "red_runs": 4,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41270326076,
+    41272298126,
+    41272353117,
+    41272553121
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-06",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "tests/daemon/test_aspect_worker_orphan_exit.py::test_uninstall_still_drops_a_recycled_pids_lease",
+   "red_runs": 3,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42159628774,
+    43175822729,
+    45026104164
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-09",
+   "kind": "test",
+   "last_red": "2026-11-09",
+   "nodeid": "tests/daemon/test_service_registry_election_bound.py::test_supervisor_tick_logs_and_skips_a_busy_election",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42615789506,
+    42618341033
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-08",
+   "kind": "test",
+   "last_red": "2026-11-08",
+   "nodeid": "tests/daemon/test_storage_stop_invisible.py::test_a_legacy_lease_naming_someone_elses_pid_does_not_signal_its_group",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42482720978
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-01",
+   "kind": "test",
+   "last_red": "2026-11-01",
+   "nodeid": "tests/db/test_bug_cluster_http.py::TestIdempotentOptOut::test_default_still_retries_gateway",
+   "red_runs": 4,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41270326076,
+    41272298126,
+    41272353117,
+    41272553121
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-02",
+   "kind": "test",
+   "last_red": "2026-11-19",
+   "nodeid": "tests/db/test_http_t2_store_parity.py::test_every_http_method_is_accounted_for[memory]",
+   "red_runs": 6,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41521754199,
+    41523082881,
+    41526078140,
+    44486467808,
+    44488134876,
+    44489734618
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-09-26",
+   "kind": "test",
+   "last_red": "2026-09-26",
+   "nodeid": "tests/db/test_http_t2_store_parity.py::test_every_http_method_is_accounted_for[taxonomy]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    36217585815
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-06",
+   "kind": "test",
+   "last_red": "2026-10-06",
+   "nodeid": "tests/db/test_ou4tb_vector_client_fail_loud.py::TestCallerLoopsIsolatePerItem::test_catalog_verify_never_reports_all_good_over_unread_collections",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    37392538966
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-06",
+   "kind": "test",
+   "last_red": "2026-10-06",
+   "nodeid": "tests/db/test_ou4tb_vector_client_fail_loud.py::TestCallerLoopsIsolatePerItem::test_doc_indexer_registers_unconditionally_at_small_doc_tail",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    37392538966
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-06",
+   "kind": "test",
+   "last_red": "2026-10-06",
+   "nodeid": "tests/db/test_ou4tb_vector_client_fail_loud.py::TestCallerLoopsIsolatePerItem::test_site_still_isolates_and_reports[src/nexus/commands/catalog_cmds/integrity.py-catalog_verify_collection_unreadable]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    37392538966
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-06",
+   "kind": "test",
+   "last_red": "2026-10-06",
+   "nodeid": "tests/db/test_ou4tb_vector_client_fail_loud.py::TestCallerLoopsIsolatePerItem::test_site_still_isolates_and_reports[src/nexus/exporter.py-skip_existing_probe_failed_importing_batch]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    37392538966
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-06",
+   "kind": "test",
+   "last_red": "2026-10-06",
+   "nodeid": "tests/db/test_ou4tb_vector_client_fail_loud.py::TestCallerLoopsIsolatePerItem::test_site_still_isolates_and_reports[src/nexus/indexer.py-frecency_staleness_lookup_failed_skipping_file]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    37392538966
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-06",
+   "kind": "test",
+   "last_red": "2026-10-06",
+   "nodeid": "tests/db/test_ou4tb_vector_client_fail_loud.py::TestCallerLoopsIsolatePerItem::test_verify_json_stdout_shape_pins_the_ci_contract",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    37392538966
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-06",
+   "kind": "test",
+   "last_red": "2026-10-06",
+   "nodeid": "tests/db/test_ou4tb_vector_client_fail_loud.py::TestTheContractIsUniformAcrossTheClass::test_no_method_swallows_a_service_error_to_an_empty_result",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    37392538966
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-12",
+   "kind": "test",
+   "last_red": "2026-11-12",
+   "nodeid": "tests/db/test_pg_auth_unit.py::test_the_jvm_env_allowlist_does_not_carry_the_superuser_password",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    43175822729
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-27",
+   "kind": "test",
+   "last_red": "2026-10-27",
+   "nodeid": "tests/db/test_refreshable_client.py::TestSharedClient::test_pool_exhaustion_beyond_production_limit_is_caught_not_crashed",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40580256132
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-26",
+   "kind": "test",
+   "last_red": "2026-11-08",
+   "nodeid": "tests/db/test_t1_cli_dedicated_session.py::TestBranch0RefreshTask::test_refresh_loop_remints_before_ttl_expiry",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40317982025,
+    42441615190
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-09",
+   "kind": "test",
+   "last_red": "2026-11-09",
+   "nodeid": "tests/hooks/test_hook_failure_ring.py::test_the_pre_scrub_cut_bounds_any_payload_shape[wide-number-tree]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42658938495
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-02",
+   "kind": "test",
+   "last_red": "2026-11-02",
+   "nodeid": "tests/hooks/test_nx_launch.py::test_a_session_with_no_cli_says_one_thing_and_writes_nothing",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41391432439
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-17",
+   "kind": "test",
+   "last_red": "2026-10-17",
+   "nodeid": "tests/hooks/test_nx_setup_credentials_page.py::test_the_status_of_a_run_killed_before_acceptance_is_unchanged",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39071331718
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-20",
+   "kind": "test",
+   "last_red": "2026-11-20",
+   "nodeid": "tests/identity/test_identity_engine_journeys.py::test_the_engine_backed_identity_journeys",
+   "red_runs": 6,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44659989781,
+    44747725195,
+    44749638180,
+    44810398475,
+    44810590900,
+    44811023147
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-16",
+   "kind": "test",
+   "last_red": "2026-11-16",
+   "nodeid": "tests/lua_runtime/test_runtime_origin.py::test_no_function_under_src_takes_script_source_except_the_workers_chain",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    43808092442,
+    43808159643
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-31",
+   "kind": "test",
+   "last_red": "2026-10-31",
+   "nodeid": "tests/test_4vx0a_pipeline_sigterm_row_handback.py::test_sigterm_mid_extraction_releases_the_row_for_an_immediate_retry",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41152247167
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-01",
+   "kind": "test",
+   "last_red": "2026-11-01",
+   "nodeid": "tests/test_4vx0a_pipeline_sigterm_row_handback.py::test_sigterm_mid_extraction_releases_the_row_for_an_immediate_retry[SIGTERM]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41298836805
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-30",
+   "kind": "test",
+   "last_red": "2026-10-30",
+   "nodeid": "tests/test_aspect_worker_tuples.py::test_each_verdict_reaches_the_engine_as_its_own_queue_state",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41065990510
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-29",
+   "kind": "test",
+   "last_red": "2026-10-29",
+   "nodeid": "tests/test_bc7ps_routing_uses_live_listing.py::test_routing_modules_never_call_the_bare_listing[mcp/core.py]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40797130644
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-17",
+   "kind": "test",
+   "last_red": "2026-10-17",
+   "nodeid": "tests/test_build_lease_root_parity.py::test_reader_sees_a_lease_the_shell_writes",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39049227585
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-18",
+   "kind": "test",
+   "last_red": "2026-10-19",
+   "nodeid": "tests/test_collection_routing_listing.py::TestTheProcessCache::test_the_default_bare_prefix_fanout_is_one_stats_request_on_a_cold_cache",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39170918015,
+    39187407930
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-18",
+   "kind": "test",
+   "last_red": "2026-10-18",
+   "nodeid": "tests/test_daemon_stable_cwd.py::test_the_hook_verbs_session_end_grandchild_leaves_the_launch_directory",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39085739372
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-06",
+   "kind": "test",
+   "last_red": "2026-11-06",
+   "nodeid": "tests/test_doctor_chunks_isolation_row.py::test_the_default_sweep_runs_the_row_from_the_one_status_fetch",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42249038002,
+    42252908624
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-06",
+   "kind": "test",
+   "last_red": "2026-11-06",
+   "nodeid": "tests/test_doctor_chunks_leaf_bloat_row.py::test_the_default_sweep_makes_one_status_request_and_prints_the_row",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42249038002,
+    42252908624
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-06",
+   "kind": "test",
+   "last_red": "2026-11-06",
+   "nodeid": "tests/test_doctor_cmd.py::TestCheckEngineActivity::test_promoted_into_the_default_sweep",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42249038002,
+    42252908624
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-19",
+   "kind": "test",
+   "last_red": "2026-10-19",
+   "nodeid": "tests/test_doctor_cmd.py::TestJsonMainSweep::test_stdout_is_json_only_no_human_prose_mixed_in",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39191894315
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-21",
+   "kind": "test",
+   "last_red": "2026-11-21",
+   "nodeid": "tests/test_doctor_cmd.py::test_doctor_local_mode_shows_collection_count",
+   "red_runs": 3,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44843227733,
+    44843946619,
+    44845587761
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-21",
+   "kind": "test",
+   "last_red": "2026-11-21",
+   "nodeid": "tests/test_doctor_cmd.py::test_doctor_local_mode_shows_local_checks",
+   "red_runs": 3,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44843227733,
+    44843946619,
+    44845587761
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-22",
+   "kind": "test",
+   "last_red": "2026-10-22",
+   "nodeid": "tests/test_doctor_cmd.py::test_doctor_renders_the_embedding_profile_row",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39711717036
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-30",
+   "kind": "test",
+   "last_red": "2026-10-30",
+   "nodeid": "tests/test_doctor_cmd.py::test_fanout_floor_census_redacts_credentials",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41075234337
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-06",
+   "kind": "test",
+   "last_red": "2026-11-06",
+   "nodeid": "tests/test_doctor_engine_reaper_row.py::test_the_default_sweep_makes_one_status_request_for_every_row_that_reads_it",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42249038002,
+    42252908624
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-06",
+   "kind": "test",
+   "last_red": "2026-11-06",
+   "nodeid": "tests/test_doctor_ownerless_writes_row.py::test_the_default_sweep_makes_one_status_request_for_row_and_activity_block",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42249038002,
+    42252908624
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-06",
+   "kind": "test",
+   "last_red": "2026-11-06",
+   "nodeid": "tests/test_doctor_reranker_row.py::test_the_default_sweep_makes_one_status_request_and_prints_the_row",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42249038002,
+    42252908624
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-01",
+   "kind": "test",
+   "last_red": "2026-11-01",
+   "nodeid": "tests/test_engine_substrate_owner_lock.py::TestSidecarClusterOwnerLock::test_a_freed_lock_still_checks_the_legs_before_reaping",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41309813766
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-21",
+   "kind": "test",
+   "last_red": "2026-11-21",
+   "nodeid": "tests/test_import_sensitive_external_embedder.py::test_a_collection_override_into_voyage_is_refused_the_same_way",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44870180538
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-09-26",
+   "kind": "test",
+   "last_red": "2026-09-26",
+   "nodeid": "tests/test_index_cmd_shared_client_fanout.py::test_real_index_repo_command_shares_one_t2_httpx_client",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    36203715158
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-03",
+   "kind": "test",
+   "last_red": "2026-11-03",
+   "nodeid": "tests/test_ldf2s_backfill_throttle.py::test_the_first_ctrl_c_finishes_the_round_and_stops_and_the_second_aborts_it",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41720594468
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-04",
+   "kind": "test",
+   "last_red": "2026-11-04",
+   "nodeid": "tests/test_ldf2s_request_gate.py::test_a_stale_connection_replay_is_a_second_request_and_passes_the_gate",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41755738575
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-02",
+   "kind": "test",
+   "last_red": "2026-11-02",
+   "nodeid": "tests/test_llm_backend.py::TestProbeSites::test_doctor_and_index_use_the_delegating_probes",
+   "red_runs": 3,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41523082881,
+    41526078140,
+    41529044039
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-21",
+   "kind": "test",
+   "last_red": "2026-10-21",
+   "nodeid": "tests/test_mcp_server.py::test_fanout_floor_keeps_single_tiny_collection_under_prefix",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39660220826
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-22",
+   "kind": "test",
+   "last_red": "2026-10-22",
+   "nodeid": "tests/test_mcp_service_starting.py::test_names_readers_raise_not_ready[502-get_collection_counts]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39868539851
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-07",
+   "kind": "test",
+   "last_red": "2026-11-07",
+   "nodeid": "tests/test_mcp_wire_snapshot.py::test_a_planted_schema_drift_is_detected",
+   "red_runs": 4,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42337905834,
+    42339992712,
+    42340131295,
+    42342276629
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "tests/test_mineru_child_dll_dirs.py::test_the_real_parse_skip_line_is_short",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44988349619,
+    44989575104
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "tests/test_mineru_child_dll_dirs.py::test_the_real_parse_skip_line_prints_a_noninteractive_command_that_works_on_every_platform[linux]",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44988349619,
+    44989575104
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "tests/test_mineru_child_dll_dirs.py::test_the_real_parse_skip_line_prints_a_noninteractive_command_that_works_on_every_platform[win32]",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44988349619,
+    44989575104
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-22",
+   "kind": "test",
+   "last_red": "2026-11-22",
+   "nodeid": "tests/test_mineru_child_dll_dirs.py::test_the_skip_line_downloads_from_modelscope_and_says_that_source_is_not_searched",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44988349619,
+    44989575104
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-20",
+   "kind": "test",
+   "last_red": "2026-10-20",
+   "nodeid": "tests/test_mineru_server_recovery.py::test_a_recycled_pid_is_never_signalled_and_a_real_innocent_process_survives",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39463838819
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-19",
+   "kind": "test",
+   "last_red": "2026-11-19",
+   "nodeid": "tests/test_native_smoke_script_paths.py::test_bounded_ends_a_hung_command_and_lets_ctrl_c_through[native-boot-shapes-smoke.sh]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44535136220
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-18",
+   "kind": "test",
+   "last_red": "2026-11-18",
+   "nodeid": "tests/test_native_smoke_script_paths.py::test_each_check_fails_on_an_engine_that_breaks_it_and_nothing_else_does[truncated-skips-extraction-fails20]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44400504933
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-10",
+   "kind": "test",
+   "last_red": "2026-11-10",
+   "nodeid": "tests/test_nx_backup.py::test_a_kill_or_a_closed_terminal_cleans_up_like_ctrl_c[TERM]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42823046479
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-29",
+   "kind": "test",
+   "last_red": "2026-10-29",
+   "nodeid": "tests/test_pdf_indexer_doc_id.py::test_pdf_indexer_registers_catalog_and_writes_manifest",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40956174575
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-29",
+   "kind": "test",
+   "last_red": "2026-10-29",
+   "nodeid": "tests/test_pdf_subsystem.py::TestIndexPdfFileGitMetadata::test_git_fields_populated",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40956000973,
+    40956174575
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-01",
+   "kind": "test",
+   "last_red": "2026-11-01",
+   "nodeid": "tests/test_pipeline_stages.py::TestServiceModeStreaming::test_service_mode_no_voyage_completes_and_server_embeds",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41344380471
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-19",
+   "kind": "test",
+   "last_red": "2026-11-19",
+   "nodeid": "tests/test_rdr147_resolution_repair.py::test_a_malformed_entity_config_is_not_entered_and_never_escapes_the_boundary",
+   "red_runs": 3,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44538386801,
+    44539013818,
+    44541478772
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-25",
+   "kind": "test",
+   "last_red": "2026-10-25",
+   "nodeid": "tests/test_rdr210_p43_harness.py::TestCorpusAndQueries::test_chunks_respect_the_cap_and_hash_is_stable",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40220953976,
+    40221329649
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-25",
+   "kind": "test",
+   "last_red": "2026-10-25",
+   "nodeid": "tests/test_rdr210_p43_harness.py::TestCorpusAndQueries::test_no_query_copies_a_sentence_of_its_target",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40220953976,
+    40221329649
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-25",
+   "kind": "test",
+   "last_red": "2026-10-25",
+   "nodeid": "tests/test_rdr210_p43_harness.py::TestCorpusAndQueries::test_pinned_lists_have_the_stated_sizes_and_exist",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40220953976,
+    40221329649
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-25",
+   "kind": "test",
+   "last_red": "2026-10-25",
+   "nodeid": "tests/test_rdr210_p43_harness.py::TestCorpusAndQueries::test_selection_is_deterministic_and_the_pin_still_resolves",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40220953976,
+    40221329649
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-25",
+   "kind": "test",
+   "last_red": "2026-10-25",
+   "nodeid": "tests/test_rdr210_p43_harness.py::TestCorpusAndQueries::test_the_fixed_query_set_validates_against_the_corpora",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40220953976,
+    40221329649
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-25",
+   "kind": "test",
+   "last_red": "2026-10-25",
+   "nodeid": "tests/test_rdr210_p43_harness.py::TestCorpusAndQueries::test_validate_rejects_a_missing_target",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40220953976,
+    40221329649
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-25",
+   "kind": "test",
+   "last_red": "2026-10-25",
+   "nodeid": "tests/test_rdr210_p43_harness.py::TestPlan::test_a_plan_over_the_cap_is_refused",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40220953976,
+    40221329649
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-25",
+   "kind": "test",
+   "last_red": "2026-10-25",
+   "nodeid": "tests/test_rdr210_p43_harness.py::TestPlan::test_full_plan_is_within_the_default_cap",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40220953976,
+    40221329649
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-25",
+   "kind": "test",
+   "last_red": "2026-10-25",
+   "nodeid": "tests/test_rdr210_p43_harness.py::TestPlan::test_keyless_plan_spends_nothing_and_names_bge_collections_only",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40220953976,
+    40221329649
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-25",
+   "kind": "test",
+   "last_red": "2026-10-25",
+   "nodeid": "tests/test_rdr210_p43_harness.py::TestPlan::test_plan_mode_refuses_with_a_nonzero_exit_and_calls_nothing",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40220953976,
+    40221329649
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-25",
+   "kind": "test",
+   "last_red": "2026-10-25",
+   "nodeid": "tests/test_rdr210_p43_harness.py::TestPlan::test_the_cap_can_be_raised",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40220953976,
+    40221329649
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-21",
+   "kind": "test",
+   "last_red": "2026-11-21",
+   "nodeid": "tests/test_rdr229_p25_quarantine_from_row_sites.py::test_import_falls_back_to_the_label_when_the_row_lookup_fails[plain]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44870180538
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-21",
+   "kind": "test",
+   "last_red": "2026-11-21",
+   "nodeid": "tests/test_rdr229_p25_quarantine_from_row_sites.py::test_import_falls_back_to_the_label_when_the_row_lookup_fails[prefixed]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44870180538
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-08",
+   "kind": "test",
+   "last_red": "2026-11-08",
+   "nodeid": "tests/test_rdr232_coverage_concurrent.py::test_queued_calls_draw_their_timeout_from_what_is_left_of_the_stage_when_they_start",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42476956300
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-30",
+   "kind": "test",
+   "last_red": "2026-10-30",
+   "nodeid": "tests/test_rdr232_golden_fixture.py::test_rdr084_fixture_containment_and_baseline_emission",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41075234337
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-18",
+   "kind": "test",
+   "last_red": "2026-11-18",
+   "nodeid": "tests/test_rdr232_request_coverage.py::test_the_format_constraint_pattern_is_not_quadratic",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44267242112
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-31",
+   "kind": "test",
+   "last_red": "2026-11-11",
+   "nodeid": "tests/test_rdr235_mvv_aspect_queue_tuples.py::test_mvv_journey_on_the_tuple_queue",
+   "red_runs": 5,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41238587813,
+    41740807811,
+    42679801241,
+    42783414481,
+    42969300188
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-17",
+   "kind": "test",
+   "last_red": "2026-11-17",
+   "nodeid": "tests/test_retire_keys.py::TestNoAutomaticTrigger::test_the_engines_main_sources_name_the_classes_only_where_they_are_built_and_bound",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44006724740
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-21",
+   "kind": "test",
+   "last_red": "2026-11-21",
+   "nodeid": "tests/test_sensitive_catalog_flag_gates.py::test_the_refused_reput_puts_the_identity_stamp_back",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    44870180538
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-22",
+   "kind": "test",
+   "last_red": "2026-10-22",
+   "nodeid": "tests/test_service_url_userinfo.py::test_data_commands_refuse_a_saved_userinfo_url_cleanly[argv2]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39806730455
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-22",
+   "kind": "test",
+   "last_red": "2026-10-22",
+   "nodeid": "tests/test_service_url_userinfo.py::test_data_commands_refuse_an_env_userinfo_url_cleanly[argv2]",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    39806730455
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-08",
+   "kind": "test",
+   "last_red": "2026-11-08",
+   "nodeid": "tests/test_signal_fence_xzorj.py::test_a_group_is_judged_by_its_leader_and_a_group_of_ours_is_ours",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42515683210
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-09-28",
+   "kind": "test",
+   "last_red": "2026-09-28",
+   "nodeid": "tests/test_sis0m4_cli_polish.py::test_session_summary_since_takes_iso_8601_as_well_as_hours",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    36482100033
+   ],
+   "venues": [
+    "hosted"
+   ]
+  },
+  {
+   "first_red": "2026-10-29",
+   "kind": "test",
+   "last_red": "2026-10-29",
+   "nodeid": "tests/test_tuple_shakeout_semantics.py::test_tuple_out_nonce_description_names_every_keys_nonce_template_and_is_its_own_parameter",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    40847604178
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-03",
+   "kind": "test",
+   "last_red": "2026-11-03",
+   "nodeid": "tests/test_upgrade_cmd.py::TestUpgradeBackfillsInstallModeRecord::test_malformed_config_yml_does_not_fail_the_upgrade",
+   "red_runs": 3,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41706819681,
+    41707941173,
+    41709300978
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-03",
+   "kind": "test",
+   "last_red": "2026-11-03",
+   "nodeid": "tests/test_upgrade_cmd.py::TestUpgradeBackfillsInstallModeRecord::test_successful_upgrade_stamps_the_record",
+   "red_runs": 3,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    41706819681,
+    41707941173,
+    41709300978
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-10",
+   "kind": "test",
+   "last_red": "2026-11-10",
+   "nodeid": "tests/test_upgrade_rehearsal_gate.py::test_cmdline_of_reads_a_live_process_through_the_real_path",
+   "red_runs": 2,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    42887036927,
+    42892433329
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  },
+  {
+   "first_red": "2026-11-16",
+   "kind": "test",
+   "last_red": "2026-11-16",
+   "nodeid": "tests/test_upgrade_rehearsal_seed_cache_wiring.py::test_a_start_seeded_once_is_restored_the_next_time_and_judged_the_same",
+   "red_runs": 1,
+   "rule": "unattributed:resolved-without-test-fix",
+   "run_ids": [
+    43909791102
+   ],
+   "venues": [
+    "self-hosted"
+   ]
+  }
+ ]
+}
