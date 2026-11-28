@@ -23,6 +23,10 @@ name: Flake quarantine (nightly)
 # (lab-16c16g, Docker probe). Repo variable NX_CI_POOL=off sends both to ubuntu-latest. No pull_request trigger,
 # so no fork clause. The first and last jobs are light and hosted.
 #
+# LOAD: each pytest pass runs `-n 4` on the pool, the shards' worker count, so the selection meets the contention
+# the flakes were seen under. 3 of the first 13 candidates failed only on hosted runners and will rarely reproduce
+# on the pool: their passes here say little.
+#
 # PASSES: 5 a night. The selection is the 13 first candidates: about 9 pytest tests, ~2 minutes a pass with the
 # engine substrate, and 4 java classes, ~4 minutes a pass with the jOOQ codegen. About 10 and 20 minutes, inside the
 # 60-minute job caps (estimates, to be replaced by the first runs' times), and a test that flakes 1 run in 5 shows
@@ -247,16 +251,21 @@ jobs:
         run: uv sync --group dev
 
       - name: Run the quarantined pytest tests, NX_QUARANTINE_PASSES times
-        # Each pass is its own pytest process over the registry's nodeids, with the marker as a selection check
-        # (a marker that did not apply selects nothing, exit 5, red) and NX_QUARANTINE_STRICT=1 (every entry
-        # must collect). `classify` decides per pass: exit 0 is fine; exit 1 is fine only with a failed or
-        # errored testcase in that pass's junit (a quarantined test failing is the expected state); anything
-        # else is red. The report job reads the junit for the per-test results.
+        # Each pass is its own pytest process over the registry's nodeids, `-n 4` on the pool (the shards' worker
+        # count), with the marker as a selection check (a marker that did not apply selects nothing, exit 5, red).
+        # A nodeid no test has makes pytest itself exit 4 ("not found"), which is red. `classify` decides per
+        # pass: exit 0 is fine; exit 1 is fine only with a failed or errored testcase in that pass's junit (a
+        # quarantined test failing is the expected state); anything else is red. NX_ALLOW_PROD_WRITE is what the
+        # integration jobs of ci.yml set, so an entry under tests/integration can run: it needs the same engine
+        # substrate as every other test here, and no VOYAGE key unless a future entry says so (a pool job is
+        # not handed a secret for a candidate that does not need one).
+        # The report job reads the junit for the per-test results.
         shell: bash
         env:
           UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
           # With the shared venv uv must not sync. '0', never '': uv rejects an empty boolean.
           UV_NO_SYNC: ${{ steps.sharedvenv.outputs.used == 'true' && '1' || '0' }}
+          NX_ALLOW_PROD_WRITE: "quarantine nightly: self-provisioned throwaway engine substrate on the CI runner (nexus-2jomg.6)"
         run: |
           if [ "${{ runner.environment }}" = "self-hosted" ]; then
             export TMPDIR="$RUNNER_TEMP/tmp"
@@ -270,8 +279,8 @@ jobs:
           for i in $(seq 1 "$NX_QUARANTINE_PASSES"); do
             junit="quarantine-results/pytest-$i.xml"
             rc=0
-            NX_QUARANTINE_STRICT=1 uv run pytest -o addopts="" -m quarantine -q --color=no -p no:cacheprovider \
-              --junitxml="$junit" "${ids[@]}" || rc=$?
+            uv run pytest -o addopts="" -m quarantine -q --color=no -p no:cacheprovider \
+              ${{ runner.environment == 'self-hosted' && '-n 4' || '' }} --junitxml="$junit" "${ids[@]}" || rc=$?
             uv run --no-project python scripts/quarantine_report.py classify --rc "$rc" --junit "$junit" || bad=1
           done
           exit "$bad"
@@ -302,6 +311,7 @@ jobs:
     timeout-minutes: 60
     env:
       NX_JOOQ_CACHE: "off"
+      NX_TEST_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-java-quarantine
       NX_ONNX_INTRA_OP_THREADS: ${{ vars.NX_CI_POOL == 'off' && '' || '4' }}
     steps:
       - name: Host binaries present (labrun-owz)
@@ -377,9 +387,10 @@ jobs:
           persistent-home: ${{ runner.environment == 'self-hosted' }}
 
       - name: Run the quarantined java tests, NX_QUARANTINE_PASSES times
-        # Surefire with the group exclusion cleared (an integration-tagged class runs) and `-Dtest=Class#method`;
-        # a name surefire cannot find fails the build (no specified tests), which `classify` reads as red.
-        # Exit 1 is fine only with a failed or errored testcase in the pass's reports; a build error has none.
+        # Surefire with the group exclusion cleared (an integration-tagged class runs) and `-Dtest=Class#method`.
+        # A class surefire cannot find fails the build: exit 1 with no failed testcase, which `classify` reads as
+        # red. A method it cannot find in a class that exists exits 0 with no testcase, which the report job's
+        # `--expect-all` catches (exit 3). Exit 1 is fine only with a failed or errored testcase in the pass's reports.
         shell: bash
         run: |
           selector="$(uv run --no-project python scripts/quarantine_report.py select --kind java --format surefire)"

@@ -132,7 +132,8 @@ def test_every_pytest_pass_goes_through_classify_and_nothing_masks_its_exit(doc:
     step = _step(doc, "pytest", "uv run pytest")
     run = step["run"]
     assert "-m quarantine" in run and '-o addopts=""' in run
-    assert "NX_QUARANTINE_STRICT=1" in run
+    assert "NX_QUARANTINE_STRICT" not in run
+    assert "-n 4" in run and "self-hosted" in run  # the shards' worker count, on the pool
     assert "--junitxml" in run and "|| rc=$?" in run
     assert 'classify --rc "$rc"' in run and "|| bad=1" in run and 'exit "$bad"' in run
     assert "|| true" not in run and "set +e" not in run
@@ -173,6 +174,17 @@ def test_the_passes_upload_their_junit_for_the_report(doc: dict) -> None:
 
 def test_the_pytest_job_arms_the_engine_substrate(doc: dict) -> None:
     assert doc["jobs"]["pytest"]["env"]["NX_T2_SUBSTRATE_EXPECTED"] == "1"  # a missing jar fails loudly, never skips
+
+
+def test_an_entry_under_tests_integration_can_run_on_the_pytest_pass(doc: dict) -> None:
+    """The pass clears addopts (so `integration` is not deselected) and sets the write opt-in ci.yml's integration jobs set."""
+    step = _step(doc, "pytest", "uv run pytest")
+    assert '-o addopts=""' in step["run"]
+    assert step["env"]["NX_ALLOW_PROD_WRITE"].strip()
+
+
+def test_the_java_job_names_its_run_like_service_ci(doc: dict) -> None:
+    assert "github.run_id" in doc["jobs"]["java"]["env"]["NX_TEST_RUN_ID"]
 
 
 def test_the_workflow_never_changes_the_repo() -> None:
