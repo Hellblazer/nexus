@@ -18,9 +18,8 @@ stale without being cleared. The remaining tests are the non-vacuity
 scaffolding proving the detector actually detects, and kill-controls.
 
 WHERE IT BLOCKS (RDR-258 Phase 2, nexus-2jomg.3). ``NX_WIRE_PAIRING_MODE=report``
-turns the check's exit 1 (undeclared or stale) into a pytest warning, a
-job-summary entry and, when ``GITHUB_ACTIONS`` is set, a ``::warning::``
-annotation instead of a failure; develop CI sets it (``ci.yml``'s
+turns the check's exit 1 (undeclared or stale) into a pytest warning and a
+job-summary entry instead of a failure; develop CI sets it (``ci.yml``'s
 ``test-lint`` job, for everything but a pull request into main). Unset or any
 other value blocks, so the release PR into main, a hand run and every other
 caller keep the failing behaviour. Only exit 1 is demoted: exit 2 ("could not
@@ -57,8 +56,7 @@ _FINDING_HEADER = re.compile(r"^(UNDECLARED|STALE) \(\d+\)", re.MULTILINE)
 
 def _assert_pairing_clean(repo_root: pathlib.Path, ledger_path: pathlib.Path | None = None) -> None:
     """Run the pairing check; fail on any finding, except that ``NX_WIRE_PAIRING_MODE=report`` reports an exit-1 finding
-    (a warning, plus the job summary when ``GITHUB_STEP_SUMMARY`` names a file, plus a ``::warning::`` annotation when
-    ``GITHUB_ACTIONS`` is set) and passes. Exit 2 always fails. A finding is an exit 1 whose report starts with the check's own
+    (a pytest warning, plus the job summary when ``GITHUB_STEP_SUMMARY`` names a file) and passes. Exit 2 always fails. A finding is an exit 1 whose report starts with the check's own
     header (``UNDECLARED (n)`` or ``STALE (n)``), the rule the push gate applies to the same script; an exception in the check
     propagates and fails the test."""
     out, err = io.StringIO(), io.StringIO()
@@ -67,12 +65,6 @@ def _assert_pairing_clean(repo_root: pathlib.Path, ledger_path: pathlib.Path | N
     report = err.getvalue().strip()
     if code == 1 and os.environ.get(_MODE_ENV) == "report" and _FINDING_HEADER.search(report):
         warnings.warn(f"wire pairing, reported and not failed on develop:\n{report}", UserWarning, stacklevel=2)
-        if os.environ.get("GITHUB_ACTIONS") == "true":
-            # Workflow commands are read from the step's output streams. An xdist worker's stdout is its channel to the
-            # controller, its stderr is inherited, so the annotation goes to stderr. Data escapes per the runner's rules.
-            data = report.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-            sys.__stderr__.write(f"::warning title=Wire pairing (reported, not failed on develop)::{data}\n")
-            sys.__stderr__.flush()
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:
             with contextlib.suppress(OSError), open(summary, "a", encoding="utf-8") as fh:
@@ -589,25 +581,6 @@ def test_the_report_mode_never_demotes_a_check_that_could_not_verify(tmp_path: p
         warnings.simplefilter("error")
         with pytest.raises(AssertionError, match="exit 2"):
             _assert_pairing_clean(repo, ledger)
-
-
-def test_the_report_mode_prints_an_actions_annotation_only_where_actions_runs(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str],
-) -> None:
-    repo, ledger, sha = _undeclared_pair_repo(tmp_path)
-    monkeypatch.setenv(_MODE_ENV, "report")
-    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
-    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-    with pytest.warns(UserWarning):
-        _assert_pairing_clean(repo, ledger)
-    assert "::warning" not in capfd.readouterr().err
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
-    with pytest.warns(UserWarning):
-        _assert_pairing_clean(repo, ledger)
-    lines = [ln for ln in capfd.readouterr().err.splitlines() if ln.startswith("::warning")]
-    assert len(lines) == 1, "one annotation, newlines escaped so the runner reads it as one command"
-    assert lines[0].startswith("::warning title=Wire pairing") and "UNDECLARED (1)" in lines[0] and sha in lines[0]
-    assert "%0A" in lines[0]
 
 
 def test_the_report_mode_does_not_demote_an_exit_one_that_is_not_a_finding(
