@@ -82,6 +82,9 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import red_run_inventory as inventory_module
+from red_run_inventory import Inventory
+
 Row = dict[str, Any]
 
 EXIT_OK: int = 0
@@ -1247,68 +1250,6 @@ def _test_rows(an: Mapping[str, Any], category: str) -> list[Row]:
              "run_ids": sorted(v["runs"])} for k, v in sorted(rows.items())]
 
 
-class Inventory:
-    """The tests that exist at one rev of ``repo``, for checking that a candidate row still names one.
-
-    Python: the file is at the rev and has ``def <name>`` and, when the node id names them,
-    ``class <Class>``; a parametrize id is stripped first. A bare name (no path) is looked up in the
-    Python files that define it anywhere. Java: some ``<Class>.java`` has the method name as a word
-    followed by ``(``. Renames are not followed: a renamed test is absent under its old name.
-    """
-
-    def __init__(self, repo: Path, rev: str = "HEAD") -> None:
-        self.repo = repo
-        self.rev = _git(repo, "rev-parse", "--verify", f"{rev}^{{commit}}").strip()
-        listing = _git(repo, "ls-tree", "-r", "-z", "--name-only", self.rev)
-        self.files = frozenset(f for f in listing.split("\0") if f)
-        if not self.files:
-            raise RuntimeError(f"no files at {self.rev[:12]} in {repo}")
-        self._src: dict[str, str] = {}
-        self._java: dict[str, list[str]] = {}
-        for f in sorted(self.files):
-            if f.endswith(".java"):
-                self._java.setdefault(f.rsplit("/", 1)[-1][:-5], []).append(f)
-
-    def _source(self, path: str) -> str:
-        if path not in self._src:
-            r = subprocess.run(["git", "-C", str(self.repo), "show", f"{self.rev}:{path}"],
-                               capture_output=True, check=False)
-            self._src[path] = r.stdout.decode("utf-8", "replace") if r.returncode == 0 else ""
-        return self._src[path]
-
-    def _py_has(self, path: str, classes: Sequence[str], name: str) -> bool:
-        src = self._source(path)
-        return (re.search(rf"^\s*(?:async\s+)?def {re.escape(name)}\(", src, re.M) is not None
-                and all(re.search(rf"^\s*class {re.escape(c)}\b", src, re.M) for c in classes))
-
-    def _py_files_defining(self, name: str) -> list[str]:
-        pattern = rf"^[[:space:]]*(async[[:space:]]+)?def {re.escape(name)}\("
-        r = subprocess.run(["git", "-C", str(self.repo), "grep", "-l", "-z", "-E", "-e", pattern,
-                            self.rev, "--", "*.py"], capture_output=True, check=False)
-        if r.returncode not in (0, 1):                  # 1 is "no match"
-            raise RuntimeError(f"git grep failed in {self.repo}: {r.stderr.decode()[:200]}")
-        return [f.split(":", 1)[1] for f in r.stdout.decode("utf-8", "replace").split("\0") if f]
-
-    def absent_reason(self, row: Row) -> str | None:
-        """``None`` when the row's test exists at the rev, else ``"file gone"`` or ``"test gone"``."""
-        base = str(row["nodeid"]).partition("[")[0]
-        if row["kind"] == "java":
-            cls, _, method = base.partition("::")
-            paths = self._java.get(cls, [])
-            if not paths:
-                return "file gone"
-            word = re.compile(rf"\b{re.escape(method)}\s*\(")
-            return None if any(word.search(self._source(p)) for p in paths) else "test gone"
-        parts = base.split("::")
-        if len(parts) > 1 and parts[0].endswith(".py"):
-            if parts[0] not in self.files:
-                return "file gone"
-            return None if self._py_has(parts[0], parts[1:-1], parts[-1]) else "test gone"
-        *classes, name = base.split(".")
-        found = any(self._py_has(p, classes, name) for p in self._py_files_defining(name))
-        return None if found else "test gone"
-
-
 def candidates_report(an: Mapping[str, Any], header: Row, inventory: Inventory | None = None) -> Row:
     """The named tests labelled flake_infra, and those labelled unattributed, as one JSON-able dict.
 
@@ -1319,10 +1260,13 @@ def candidates_report(an: Mapping[str, Any], header: Row, inventory: Inventory |
     or ``none`` (a bare name; no path could be confirmed). A failing step that names no test has no
     row. ``unattributed`` is a separate array so the reader can decide whether it counts.
 
-    With an ``inventory`` every row is checked against the tests at its rev: a present row gets
-    ``present: true`` and stays in its list; an absent one gets ``present: false`` and an
-    ``absent_reason`` and moves to the same list under ``absent``, so a consumer of ``candidates``
-    never sees a test that no longer exists. The header records the rev and the counts.
+    With an ``inventory`` every row is checked against the tests at its rev (``red_run_inventory``).
+    A present row gets ``present: true`` and stays in its list, with ``present_reason`` when only an
+    unresolvable base made it probably present. An absent one gets ``present: false``, an
+    ``absent_reason`` and a non-binding ``same_name_at_rev`` hint, and moves to the same list under
+    ``absent``, so a consumer of ``candidates`` never sees a test that no longer exists. The header
+    records the rev and, under ``inventory``, the present and absent counts of each list;
+    ``candidate_tests`` and ``unattributed_tests`` count the active lists, not the rows found.
     """
     flake, unattributed = _test_rows(an, FLAKE), _test_rows(an, UNATTRIBUTED)
     extra: Row = {}
@@ -1330,9 +1274,11 @@ def candidates_report(an: Mapping[str, Any], header: Row, inventory: Inventory |
         absent: Row = {}
         counts: Row = {}
         for key, rows in (("candidates", flake), ("unattributed", unattributed)):
-            reasons = [inventory.absent_reason(r) for r in rows]
-            absent[key] = [{**r, "present": False, "absent_reason": why} for r, why in zip(rows, reasons) if why]
-            kept = [{**r, "present": True} for r, why in zip(rows, reasons) if not why]
+            verdicts = [inventory.judge(r) for r in rows]
+            absent[key] = [{**r, "present": False, "absent_reason": why, "same_name_at_rev": inventory.same_name_at_rev(r)}
+                           for r, (why, _) in zip(rows, verdicts) if why]
+            kept = [{**r, "present": True, **({"present_reason": note} if note else {})}
+                    for r, (why, note) in zip(rows, verdicts) if not why]
             counts[key] = {"present": len(kept), "absent": len(absent[key])}
             rows[:] = kept
         extra["absent"] = absent
@@ -1368,7 +1314,8 @@ def candidates_header(an: Mapping[str, Any], extraction: Path, archive_sha256: s
     return {"window": meta.get("window"), "snapshot_final": bool(meta.get("final")),
             "archive_sha256": archive_sha256, "extraction": extraction.name,
             "extraction_sha256": hashlib.sha256(extraction.read_bytes()).hexdigest(),
-            "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+            "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "inventory_sha256": hashlib.sha256(Path(inventory_module.__file__).read_bytes()).hexdigest()}
 
 
 # --- cli -----------------------------------------------------------------------------------
@@ -1427,14 +1374,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_OK
     an = analyze(read_extraction(args.extraction))
     if args.cmd == "candidates":
-        inv = Inventory(args.repo, args.rev)
-        report = candidates_report(an, candidates_header(an, args.extraction, args.archive_sha256), inv)
+        try:
+            inv = Inventory(args.repo, args.rev)
+            report = candidates_report(an, candidates_header(an, args.extraction, args.archive_sha256), inv)
+        except RuntimeError as exc:
+            sys.stderr.write(f"candidates: {exc}\n")
+            return EXIT_FAIL
         h = report["header"]
-        if h["candidate_tests"] + h["unattributed_tests"] == 0:
-            sys.stderr.write(f"no row is present at {inv.rev[:12]} in {args.repo}: is --repo the nexus checkout?\n")
+        gone = {k: v["absent"] for k, v in h["inventory"].items()}
+        absent, total = sum(gone.values()), sum(gone.values()) + h["candidate_tests"] + h["unattributed_tests"]
+        if 2 * absent > total:
+            sys.stderr.write(f"candidates: {absent} of {total} rows are absent at {inv.rev[:12]} in {args.repo} "
+                             f"(flake {gone['candidates']}, unattributed {gone['unattributed']}): is --repo the nexus "
+                             f"checkout? Nothing written.\n")
             return EXIT_FAIL
         write_candidates(report, args.out)
-        gone = {k: v["absent"] for k, v in h["inventory"].items()}
         sys.stdout.write(f"wrote {args.out}: {h['candidate_tests']} flake tests, "
                          f"{h['unattributed_tests']} unattributed tests (absent at {inv.rev[:12]}: "
                          f"{gone['candidates']} flake, {gone['unattributed']} unattributed)\n")
