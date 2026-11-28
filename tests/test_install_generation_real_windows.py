@@ -258,7 +258,7 @@ class TestRealWindows:
         monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
         monkeypatch.setattr(
             self_cmd, "_windows_flip_and_path",
-            lambda generation, *, tools, bootstrap=False: gen_core.flip_current(generation, tools, platform="win32"),
+            lambda generation, *, tools, bootstrap=False, restoring=False: gen_core.flip_current(generation, tools, platform="win32"),
         )
         return tools, older, original, rebuilt
 
@@ -442,7 +442,7 @@ class TestRealDispatchers:
         gen_core.ensure_dispatchers(tools, gen, dist="nxdemo")
         gen_core.flip_current(gen, tools)
         dispatcher = gen_core.current_launcher_dir(tools) / "nxdemo.exe"
-        before = dispatcher.read_bytes()
+        before = os.stat(dispatcher).st_ino  # the file's identity: the same bytes come out of a rebuild
         ready = tmp_path / "ready"
         child = subprocess.Popen([str(dispatcher), "sleep", str(ready)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
@@ -453,7 +453,7 @@ class TestRealDispatchers:
             assert child.poll() is None, "the running dispatcher kept running"
             asides = [p.name for p in dispatcher.parent.iterdir() if ".old." in p.name]
             assert len(asides) == 1, f"the running file is renamed aside, not replaced: {asides}"
-            assert dispatcher.read_bytes() != before, "the new dispatcher is in place (its wheel says version 2)"
+            assert os.stat(dispatcher).st_ino != before, "a new file is in place under the old name"
             assert lc.compare_key(self._run(dispatcher)) == lc.compare_key(str(gen)), "and it works"
         finally:
             child.kill()
