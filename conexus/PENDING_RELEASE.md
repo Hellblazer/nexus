@@ -52,6 +52,9 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/_endpoint_resolve.py`: the bearer TLS context sets TLS 1.2 as an explicit floor (`minimum_version`), matching the CLI's `bearer_transport`; behaviour is unchanged (Python's client default is already TLS 1.2), the floor is now stated, nexus-ec37o.
 - `conexus/hooks/scripts/mailbox_drain.py`: the ask-answer frame says "the user" instead of a person's name and fences the relayed words with `user-words` in place of `sam-words`; nonce, record-sourced words and one-option authorization are unchanged (RDR-259 S6, nexus-sby49). The check also reads the relayed words from the answer record's `user_words`, falling back to `sam_words` for a record an older client wrote (the fallback, with the client's dual-write and `--sam-words` alias, is removed in the second client release after the one that first ships `user_words`).
 
+- `conexus/commands/nx-preflight.md`: the summary reads a check printed as SKIP (nx doctor outlasting its bound, nx not installed) as a WARN, GH #1689.
+- `conexus/hooks/scripts/compact_checkpoint.py`: a docstring only; it names the one-line placeholder the continuation's in-progress-beads subsection now carries where it used to say "bd unavailable or no results", GH #1689.
+
 
 ## Deferred to the next client release
 
