@@ -71,10 +71,10 @@
 #     --proof <file>              A scripts/watched_pytest.py --status file proving a heavy check leg green on this tip's
 #                                 tree (see "Check gate" below). Repeatable; each is checked, none is a skip.
 #     --skip-<check> <reason>     Override ONE check of the check gate, on the record. <check> is file-size, changelog,
-#                                 context-budget, wire-ledger, cloud-leg, plugin-ledger, pg-cluster, docs-readers, write-seam, or
+#                                 changelog-coverage, context-budget, wire-ledger, cloud-leg, plugin-ledger, pg-cluster, docs-readers, write-seam, or
 #                                 check-gate (the whole gate, for a gate that cannot start). Flags only, with no
 #                                 environment twin: an exported variable from an earlier session overrides nothing.
-#     --ledger-report <reason>    Run the changelog, cloud-leg and plugin-ledger checks in report mode (RDR-258 Phase 4): a
+#     --ledger-report <reason>    Run the changelog, changelog-coverage, cloud-leg and plugin-ledger checks in report mode (RDR-258 Phase 4): a
 #                                 finding is listed (PUSH_CHECK_REPORT) and not refused, a run that examined nothing still is.
 #                                 On the record like a skip (the push record's skips carry "<check>-report"). A flag only:
 #                                 NX_LEDGER_MODE in the environment is ignored by the gate.
@@ -158,7 +158,8 @@
 # Check gate (nexus-igea9, Sam 2026-11-22). Five develop reds in one day came from a check that was not run, or was run on
 # the working tree instead of the pushed tree. A push to develop now runs the checks its diff reaches against the TIP's
 # tree (a detached worktree of the tip, removed on every exit path; scripts/push_check_gate.py holds the logic, and its
-# docstring the table). ALWAYS: scripts/file_size_ratchet.py check, scripts/changelog_fold.py check and
+# docstring the table). ALWAYS: scripts/file_size_ratchet.py check, scripts/changelog_fold.py check,
+# scripts/changelog_coverage.py over the outbound range (it lists a commit with no changelog fragment and never refuses for one) and
 # scripts/context_budgets.py check (the context-size ceilings of plugin skills, agents, commands and resources: under a
 # second, so a tree already over a ceiling is caught on any push). When the diff reaches them: the wire-pairing check for what
 # that script treats as wire (or the ledger), which REPORTS and does not refuse (RDR-258 Phase 2: an exit 1 whose output has the
@@ -299,7 +300,7 @@
 #                               red's owner nor the pusher of one of its suspects
 #                               (--red-fix '<reason>' pushes past it, on the record)
 #  14  PUSH_REFUSED_<CHECK>    a check the outbound diff selects is red against the tip's tree, or a heavy leg has no
-#                               proof (PUSH_REFUSED_FILE_SIZE, _CHANGELOG, PUSH_REFUSED_CONTEXT_BUDGET, _WIRE_LEDGER,
+#                               proof (PUSH_REFUSED_FILE_SIZE, _CHANGELOG, _CHANGELOG_COVERAGE, PUSH_REFUSED_CONTEXT_BUDGET, _WIRE_LEDGER,
 #                               _CLOUD_LEG, _PLUGIN_LEDGER, _DOCS_READERS, _WRITE_SEAM), each with the command to reproduce it
 #  15  PUSH_REFUSED_CHECK_GATE_ERROR
 #                               the check gate could not run (no usable Python, a temp directory it could not make, a
@@ -444,11 +445,11 @@ _flag_allowed_given=0
 _check_proofs=()        # --proof files, in order
 # The check skips are set by their flags and by nothing else (no NX_PUSH_SKIP_<CHECK> twin: Sam's ruling asked for flags), so a
 # same-named variable inherited from the environment is dropped before the flags are read.
-for _skip_key in FILE_SIZE CHANGELOG CONTEXT_BUDGET WIRE_LEDGER CLOUD_LEG PLUGIN_LEDGER PG_CLUSTER DOCS_READERS WRITE_SEAM CHECK_GATE; do
+for _skip_key in FILE_SIZE CHANGELOG CHANGELOG_COVERAGE CONTEXT_BUDGET WIRE_LEDGER CLOUD_LEG PLUGIN_LEDGER PG_CLUSTER DOCS_READERS WRITE_SEAM CHECK_GATE; do
   unset "_CHECK_SKIP_${_skip_key}"
 done
 # --ledger-report (RDR-258 Phase 4) is a flag and nothing else, for the same reason: a variable inherited from an earlier session
-# must not put the changelog, cloud-leg and plugin-ledger checks in report mode.
+# must not put the changelog, changelog-coverage, cloud-leg and plugin-ledger checks in report mode.
 unset _CHECK_LEDGER_REPORT
 while [[ $# -gt 0 ]]; do
   _arg="$1"
@@ -479,7 +480,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --source | --remote | --branch | --allowed-paths | --allowed-paths-from \
       | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check | --skip-scrub | --red-fix \
-      | --proof | --skip-file-size | --skip-changelog | --skip-context-budget | --skip-wire-ledger | --skip-cloud-leg \
+      | --proof | --skip-file-size | --skip-changelog | --skip-changelog-coverage | --skip-context-budget | --skip-wire-ledger | --skip-cloud-leg \
       | --skip-plugin-ledger | --skip-pg-cluster | --skip-docs-readers | --skip-write-seam | --skip-check-gate \
       | --ledger-report) ;;
     *) _usage_refuse "unknown flag $_name" ;;
@@ -506,7 +507,7 @@ while [[ $# -gt 0 ]]; do
       _check_proofs+=("$_val")
       _echo_flags+=("$_name" "$_val")
       ;;
-    --skip-file-size | --skip-changelog | --skip-context-budget | --skip-wire-ledger | --skip-cloud-leg \
+    --skip-file-size | --skip-changelog | --skip-changelog-coverage | --skip-context-budget | --skip-wire-ledger | --skip-cloud-leg \
       | --skip-plugin-ledger | --skip-pg-cluster | --skip-docs-readers | --skip-write-seam | --skip-check-gate)
       _skip_key="${_name#--skip-}"
       _skip_key="$(printf '%s' "${_skip_key//-/_}" | tr '[:lower:]' '[:upper:]')"
@@ -1000,7 +1001,7 @@ if [[ "$branch" == "develop" ]]; then
     _check_args=(--repo "$_scrub_root" --base "refs/remotes/$remote/$branch" --tip "$tip" --workdir "$_check_workdir" --python "$_check_py")
     for _check_proof in "${_check_proofs[@]+"${_check_proofs[@]}"}"; do _check_args+=(--proof "$_check_proof"); done
     [[ -z "${_CHECK_LEDGER_REPORT:-}" ]] || _check_args+=(--ledger-report "$_CHECK_LEDGER_REPORT")
-    for _check_name in file-size changelog context-budget wire-ledger cloud-leg plugin-ledger pg-cluster docs-readers write-seam; do
+    for _check_name in file-size changelog changelog-coverage context-budget wire-ledger cloud-leg plugin-ledger pg-cluster docs-readers write-seam; do
       _check_var="_CHECK_SKIP_$(printf '%s' "${_check_name//-/_}" | tr '[:lower:]' '[:upper:]')"
       [[ -z "${!_check_var:-}" ]] || _check_args+=(--skip "$_check_name=${!_check_var}")
     done

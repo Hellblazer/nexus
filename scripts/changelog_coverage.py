@@ -49,7 +49,11 @@ no commit at all, or one that examined nothing in block mode, is an error (the c
 
 ``NX_LEDGER_MODE`` (scripts/ledger_mode.py): ``block`` (default) exits 10 on a finding; ``report`` lists each as
 ``LEDGER-FINDING changelog-coverage: <sha> <subject>: <why>``, prints the summary line and exits 0, and still exits 10 when it
-examined no commit (bar the release-prep-only range above). Nothing runs this yet: wiring it is RDR-258 Phase 4 step 2 (Sam).
+examined no commit (bar the release-prep-only range above). It only reports, wherever it runs (Sam, 2026-11-28, RDR-258 Phase 4
+step 2): on the release pull request into main (ci.yml's release-ledger-gate, where the fragment format check, changelog_fold.py check,
+still blocks), in the push gate (the ``changelog-coverage`` spec of scripts/push_check_gate.py, over the outbound range) and in a step of
+ci.yml's ``changes`` job (the push's or the pull request's range); none of them fails on a finding. It moves to block once its findings
+stay clean over a few release pull requests.
 
 Standard library only.
 """

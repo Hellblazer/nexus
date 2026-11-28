@@ -219,9 +219,9 @@ def test_nx_ledger_mode_in_the_environment_demotes_nothing_on_the_gate(tmp_path:
     assert out.ok is False and "nexus-aaa.1.md" in out.detail, "the finding still refuses, whatever the variable says"
 
 
-def test_the_ledger_checks_are_the_three_and_need_the_helper() -> None:
-    assert {n for n, s in gate.SPECS.items() if s.ledger} == {"changelog", "cloud-leg", "plugin-ledger"}
-    assert all(gate.LEDGER_MODE_SCRIPT in gate.SPECS[n].needs for n in ("changelog", "cloud-leg", "plugin-ledger"))
+def test_the_ledger_checks_are_the_four_and_need_the_helper() -> None:
+    assert {n for n, s in gate.SPECS.items() if s.ledger} == {"changelog", "changelog-coverage", "cloud-leg", "plugin-ledger"}
+    assert all(gate.LEDGER_MODE_SCRIPT in gate.SPECS[n].needs for n in ("changelog", "changelog-coverage", "cloud-leg", "plugin-ledger"))
 
 
 def test_the_gate_reads_report_lines_that_pytest_printed_at_the_start_of_a_line() -> None:
@@ -236,13 +236,15 @@ def test_a_spec_default_mode_applies_without_the_flag_and_the_environment_cannot
     import dataclasses  # noqa: PLC0415
 
     modes = {n: s.default_mode for n, s in gate.SPECS.items() if s.ledger}
-    assert modes == {"changelog": "block", "cloud-leg": "block", "plugin-ledger": "block"}, "today's behaviour"
+    assert modes == {"changelog": "block", "changelog-coverage": "report", "cloud-leg": "block", "plugin-ledger": "block"}, \
+        "the three ledgers block; the missing-fragment listing only reports"
     spec = dataclasses.replace(gate.SPECS["changelog"], default_mode="report")
     tree = _gate_tree(tmp_path, bad=True)
     assert _run_changelog(tree, spec=spec).ok is True
     monkeypatch.setenv(ledger_mode.ENV, "block")
     assert _run_changelog(tree, spec=spec).ok is True, "an exported variable does not move the spec's mode either way"
     assert gate.ledger_mode_for(gate.SPECS["changelog"]) == ("block", "default")
+    assert gate.ledger_mode_for(gate.SPECS["changelog-coverage"]) == ("report", "default")
     assert gate.ledger_mode_for(gate.SPECS["changelog"], "why") == ("report", "flag")
 
 
@@ -252,7 +254,7 @@ def _gate_sh_repo(tmp_path: Path) -> tuple[Path, str, str]:
     """A repository whose develop is armed (carries the size ratchet) and whose tip changes a changelog fragment."""
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
-    for name in ("file_size_ratchet.py", "changelog_fold.py", "ledger_mode.py", "context_budgets.py"):
+    for name in ("file_size_ratchet.py", "changelog_fold.py", "changelog_coverage.py", "ledger_mode.py", "context_budgets.py"):
         shutil.copy(REPO / "scripts" / name, repo / "scripts" / name)
     _changelog_root(repo, bad=False)
 
@@ -300,13 +302,23 @@ def test_the_relay_of_a_report_is_capped_with_a_more_line(tmp_path: Path, monkey
     repo, base, tip = _gate_sh_repo(tmp_path)
     many = ["LEDGER-FINDING plugin-ledger: finding %d" % i for i in range(gate.MAX_REPORT_FINDINGS + 5)]
     summary = "LEDGER-REPORT plugin-ledger: %d finding(s), 99 item(s) examined (mode=report)" % len(many)
-    monkeypatch.setattr(gate, "run_check", lambda spec, tree, py, pc, reason="": gate.Outcome(spec.name, True, "", 0.1,
-                        [*many, summary] if spec.ledger else [], reported=bool(spec.ledger)))
+    monkeypatch.setattr(gate, "run_check", lambda spec, tree, py, pc, reason="", base="", tip="": gate.Outcome(
+                        spec.name, True, "", 0.1, [*many, summary] if spec.name == "changelog" else [], reported=spec.name == "changelog"))
     code, out, err = _run_gate(repo, base, tip, tmp_path, ledger_report="r")
     shown = [ln for ln in err.splitlines() if "LEDGER-FINDING plugin-ledger" in ln]
     assert code == 0 and len(shown) == gate.MAX_REPORT_FINDINGS
     assert "PUSH_CHECK_REPORT changelog: +5 more finding(s); reproduce:" in err
     assert f"PUSH_CHECK_REPORT changelog: {summary}" in err, "the summary line always comes through"
+
+
+def test_run_gate_prints_the_examined_nothing_note_of_a_passing_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check that passed by examining nothing (changelog-coverage on a merge-only range) is named loudly on stderr, and the push goes on."""
+    repo, base, tip = _gate_sh_repo(tmp_path)
+    note = "changelog-coverage examined nothing: 2 merge commit(s), no fragment check ran"
+    monkeypatch.setattr(gate, "run_check", lambda spec, tree, py, pc, reason="", base="", tip="": gate.Outcome(
+        spec.name, True, "", 0.1, note=note if spec.name == "changelog-coverage" else ""))
+    code, out, err = _run_gate(repo, base, tip, tmp_path)
+    assert code == 0 and f"PUSH_CHECK_NOTE {note}" in err, err
 
 
 # ── a real pytest run prints a report-mode finding on its own stdout (what the push gate and a CI log read) ──

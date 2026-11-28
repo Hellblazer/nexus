@@ -47,7 +47,7 @@ fake_nx = _rec.fake_nx
 REPO_ROOT = _rec.REPO_ROOT
 _git, _env, _calls, _records, _opt = _rec._git, _rec._env, _rec._calls, _rec._records, _rec._opt
 
-REAL_SCRIPTS = ("file_size_ratchet.py", "changelog_fold.py", "check_wire_contract_pairing.py", "select_docs_reader_tests.py",
+REAL_SCRIPTS = ("file_size_ratchet.py", "changelog_fold.py", "changelog_coverage.py", "check_wire_contract_pairing.py", "select_docs_reader_tests.py",
                 "context_budgets.py", "ledger_mode.py")
 NEXUS_SKILL = "conexus/skills/nexus/SKILL.md"
 SCRIPT = REPO_ROOT / "scripts" / "git-push-develop.sh"
@@ -323,7 +323,12 @@ def test_replay_wire_ledger_a_both_halves_commit_with_no_ledger_line_is_reported
     assert "not refused" in proc.stdout and "release PR into main" in proc.stdout and "engine release" in proc.stdout
     assert "reproduce: uv run python scripts/check_wire_contract_pairing.py" in proc.stdout
     passed = [ln for ln in proc.stderr.splitlines() if ln.startswith("PUSH_CHECKS_PASSED")]
-    assert len(passed) == 1 and "reported=wire-ledger" in passed[0], proc.stderr
+    assert len(passed) == 1, proc.stderr
+    reported = next(w for w in passed[0].split() if w.startswith("reported=")).removeprefix("reported=").split(",")
+    assert "wire-ledger" in reported, passed[0]
+    # The commit names no bead, so the missing-fragment listing reports it too (RDR-258 Phase 4 step 2).
+    assert "changelog-coverage" in reported, passed[0]
+    assert "PUSH_CHECK_REPORT changelog-coverage: LEDGER-FINDING changelog-coverage:" in proc.stderr, proc.stderr
     assert _git("rev-parse", "refs/heads/develop", cwd=origin) == sha
 
 
@@ -553,7 +558,9 @@ def test_ledger_report_is_a_flag_on_the_record_and_the_environment_cannot_stand_
     assert "PUSH_CHECK_REPORT changelog: LEDGER-FINDING changelog:" in proc.stderr
     assert "reported=changelog" in proc.stderr, "one report path: a ledger finding is named on PUSH_CHECKS_PASSED like the wire-ledger's"
     (record,) = _records(fake_nx[1])
-    assert _opt(record, "--skip") == ["changelog-report=the fragments are being rewritten, nexus-xyz"]
+    reason = "the fragments are being rewritten, nexus-xyz"
+    # --ledger-report records every selected ledger check; changelog-coverage is always selected (RDR-258 Phase 4 step 2)
+    assert set(_opt(record, "--skip")) == {f"changelog-report={reason}", f"changelog-coverage-report={reason}"}
     assert _git("rev-parse", "refs/heads/develop", cwd=origin) == sha
 
 

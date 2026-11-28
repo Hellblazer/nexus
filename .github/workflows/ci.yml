@@ -142,6 +142,8 @@ jobs:
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          fetch-depth: 0  # the changelog coverage step reads the PR's commits (RDR-258 Phase 4 step 2)
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
@@ -161,6 +163,16 @@ jobs:
 
       - name: Wire-contract ledger check (pre-tag, tree-static, no network)
         run: uv run python scripts/check_engine_release_floor.py --ledger-only
+
+      - name: Every commit that changes shipped code has a changelog fragment (RDR-258 Phase 4 step 2)
+        # REPORT mode first (Sam, 2026-11-28): it lists each finding (LEDGER-FINDING lines and ::warning:: annotations) and does
+        # not block the release PR; the format check of the fragments (changelog_fold.py check) still blocks
+        # there. Move NX_LEDGER_MODE to block once its findings stay clean over a few release PRs. Measured 2026-11-28 with
+        # this script: v8.5.6..v8.5.7 and v8.5.7..v8.5.8 list nothing, v8.5.8..v8.5.9 lists two commits (81a9789258 and
+        # db111dbee8, both nexus-6pfgb.15), and v8.5.9..develop lists nothing (scripts/changelog_coverage.py has the definitions).
+        env:
+          NX_LEDGER_MODE: report
+        run: python3 scripts/changelog_coverage.py --base "${{ github.event.pull_request.base.sha }}" --head HEAD
 
   changes:
     # nexus-h18n5: computes docs_only DIRECTLY from git diff in this job's own
@@ -472,6 +484,40 @@ jobs:
           else
             echo "integration_any=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: List commits that change shipped code and have no changelog fragment (report only, RDR-258 Phase 4 step 2)
+        # Sam, 2026-11-28: a develop push and a pull request into develop LIST the missing fragments and never fail on one; the
+        # release pull request into main runs the same script in release-ledger-gate. Cheap by design: it rides this job (a full
+        # checkout and python3 are already here), reads git only, and runs in a second or two. continue-on-error keeps a crash of
+        # the script from failing the job every other job needs; the crash still shows as a failed step. The range is the push's
+        # (before..HEAD) or the pull request's (base..HEAD, over the merge commit); a brand-new branch, a force-push that dropped
+        # `before` from this checkout, or any unusable base falls back to the last commit, named in a warning.
+        if: github.event_name == 'push' || github.base_ref == 'develop'
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          NX_LEDGER_MODE: report
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          ZERO_SHA="0000000000000000000000000000000000000000"
+          if [ "$EVENT_NAME" = "pull_request" ]; then BASE="$PR_BASE_SHA"; else BASE="$BEFORE_SHA"; fi
+          if [ -z "$BASE" ] || [ "$BASE" = "$ZERO_SHA" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "::warning::no usable range base ('$BASE'); listing the last commit only"
+            BASE="$(git rev-parse HEAD~1)"
+          fi
+          RC=0
+          OUT="$(python3 scripts/changelog_coverage.py --base "$BASE" --head HEAD 2>&1)" || RC=$?
+          printf '%s\n' "$OUT"
+          # Exit 10 with a LEDGER-VACUOUS line is "examined nothing" (a range of merge commits, as a release back-merge is):
+          # warn and continue. Any other nonzero exit is a crash and fails the step.
+          if [ "$RC" -eq 10 ] && grep -q '^LEDGER-VACUOUS changelog-coverage:' <<< "$OUT"; then
+            echo "::warning::changelog-coverage examined nothing in $BASE..HEAD (merge commits only?); no fragment check ran"
+            exit 0
+          fi
+          exit "$RC"
 
   service-jar:
     # nexus-eqxxh: provision the shaded service JAR for the pytest matrix.

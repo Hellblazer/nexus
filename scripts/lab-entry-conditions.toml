@@ -328,6 +328,13 @@ ci_step = "Does the native-build trip-wire run? (suite audit item 8)"
 reason = "The decision script that gates the native trip-wire job (does the diff reach its inputs). It checks no lane work; its verdict is whether the job runs."
 
 [[excluded]]
+script = "scripts/changelog_coverage.py"
+ci_workflow = "ci.yml"
+ci_job = "release-ledger-gate"
+ci_step = "Every commit that changes shipped code has a changelog fragment (RDR-258 Phase 4 step 2)"
+reason = "A read of the pull request's commit range against changelog/unreleased: no lane work, only a verdict on the release PR."
+
+[[excluded]]
 script = "scripts/plugin_surface.py"
 ci_workflow = "ci.yml"
 ci_job = "changes"

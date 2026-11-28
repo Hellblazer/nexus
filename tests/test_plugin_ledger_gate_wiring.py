@@ -26,6 +26,13 @@ CI = yaml.safe_load(CI_TEXT)
 LEDGER_WF = yaml.safe_load((WORKFLOWS / "plugin-drift-ledger.yml").read_text(encoding="utf-8"))
 
 
+def test_the_release_pr_runs_the_missing_fragment_detector_in_report_mode_first() -> None:
+    steps = CI["jobs"]["release-ledger-gate"]["steps"]
+    step = next(s for s in steps if "changelog fragment" in s.get("name", ""))
+    assert step["env"] == {"NX_LEDGER_MODE": "report"} and "scripts/changelog_coverage.py" in step["run"]
+    assert next(s for s in steps if s.get("uses", "").startswith("actions/checkout"))["with"]["fetch-depth"] == 0
+
+
 def _triggers(wf: dict) -> dict:
     return wf.get("on", wf.get(True))
 
@@ -200,3 +207,82 @@ def test_the_script_writes_the_output_line_the_job_reads(repo: tuple[Path, str],
 def test_the_surface_list_is_distinct_plain_paths() -> None:
     assert len(set(plugin_surface.SURFACE_PATHS)) == len(plugin_surface.SURFACE_PATHS)
     assert all(re.fullmatch(r"[\w.\-/]+(/\*\*)?", p) for p in plugin_surface.SURFACE_PATHS)
+
+
+# ── the develop listing of commits with no changelog fragment (RDR-258 Phase 4 step 2, Sam 2026-11-28) ────────────────
+
+COVERAGE_STEP = next(s for s in CI["jobs"]["changes"]["steps"] if "changelog fragment" in s.get("name", ""))
+
+
+def test_a_develop_push_and_a_pull_request_into_develop_list_missing_fragments_and_never_fail_the_job() -> None:
+    """The step rides the `changes` job (a full checkout is already there) and is report-only: continue-on-error so a crash of the
+    script cannot fail the job every other job needs, a timeout so it cannot hold them, report mode pinned in its env, and a
+    condition that leaves the release PR into main to release-ledger-gate."""
+    assert CI["jobs"]["changes"]["steps"][0]["with"]["fetch-depth"] == 0
+    assert COVERAGE_STEP["env"]["NX_LEDGER_MODE"] == "report"
+    assert COVERAGE_STEP["continue-on-error"] is True and COVERAGE_STEP["timeout-minutes"] <= 5
+    assert COVERAGE_STEP["if"] == "github.event_name == 'push' || github.base_ref == 'develop'"
+    assert "scripts/changelog_coverage.py" in COVERAGE_STEP["run"]
+
+
+def _run_coverage_step(root: Path, *, event: str, before: str, pr_base: str) -> subprocess.CompletedProcess[str]:
+    assert BASH, "bash is on every host that runs this suite (a missing one is a failure, not a skip)"
+    env = {**os.environ, "EVENT_NAME": event, "BEFORE_SHA": before, "PR_BASE_SHA": pr_base, "NX_LEDGER_MODE": "report"}
+    return subprocess.run([BASH, "-c", COVERAGE_STEP["run"]], cwd=root, capture_output=True, text=True, check=False, env=env)
+
+
+@pytest.fixture
+def coverage_repo(tmp_path: Path) -> tuple[Path, str]:
+    """(repo, sha of the first commit). The repository carries the real detector; a commit on top changes shipped code with no
+    fragment, naming ``nexus-t1``."""
+    root = tmp_path / "cov"
+    (root / "scripts").mkdir(parents=True)
+    for name in ("changelog_coverage.py", "ledger_mode.py"):
+        shutil.copy(ROOT / "scripts" / name, root / "scripts" / name)
+    _git(root, "init", "-q")
+    first = _commit(root, README_md="x\n")
+    _commit(root, src__nexus__x_py="X = 1\n")
+    _git(root, "commit", "-q", "--amend", "-m", "feat: add x (nexus-t1)")
+    return root, first
+
+
+def test_the_step_lists_the_pushed_range_and_exits_zero_on_a_finding(coverage_repo: tuple[Path, str]) -> None:
+    root, first = coverage_repo
+    done = _run_coverage_step(root, event="push", before=first, pr_base="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "LEDGER-FINDING changelog-coverage:" in done.stdout and "nexus-t1" in done.stdout, done.stdout
+    assert "LEDGER-REPORT changelog-coverage: 1 finding(s), 1 item(s) examined" in done.stdout, done.stdout
+
+
+def test_the_step_lists_a_pull_requests_range_from_its_base(coverage_repo: tuple[Path, str]) -> None:
+    root, first = coverage_repo
+    done = _run_coverage_step(root, event="pull_request", before="", pr_base=first)
+    assert done.returncode == 0 and "LEDGER-FINDING changelog-coverage:" in done.stdout, done.stdout + done.stderr
+
+
+@pytest.mark.parametrize("bad", ["", "0" * 40, "f" * 40], ids=["empty", "all-zeros", "not-in-checkout"])
+def test_the_step_falls_back_to_the_last_commit_when_the_base_is_unusable(coverage_repo: tuple[Path, str], bad: str) -> None:
+    """A brand-new branch (all zeros) or a force-push that dropped `before` from the checkout: warn, then list the last commit."""
+    root, _first = coverage_repo
+    done = _run_coverage_step(root, event="push", before=bad, pr_base="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "::warning::no usable range base" in done.stdout and "LEDGER-FINDING changelog-coverage:" in done.stdout, done.stdout
+
+
+def test_the_step_warns_and_continues_on_a_range_that_examined_nothing(coverage_repo: tuple[Path, str]) -> None:
+    """A merge-only range (a release back-merge): the script exits 10 with a LEDGER-VACUOUS line; the step warns and exits 0."""
+    root, first = coverage_repo
+    old = _git(root, "rev-parse", "HEAD")
+    merge = _git(root, "commit-tree", f"{old}^{{tree}}", "-p", old, "-p", first, "-m", "Merge back")
+    _git(root, "reset", "-q", "--hard", merge)
+    done = _run_coverage_step(root, event="push", before=old, pr_base="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "LEDGER-VACUOUS changelog-coverage:" in done.stdout and "::warning::changelog-coverage examined nothing" in done.stdout
+
+
+def test_the_step_still_fails_when_the_script_crashes(coverage_repo: tuple[Path, str]) -> None:
+    """Only the examined-nothing exit is tolerated: a missing script is a nonzero exit the step reports (continue-on-error keeps the job)."""
+    root, first = coverage_repo
+    (root / "scripts" / "changelog_coverage.py").unlink()
+    done = _run_coverage_step(root, event="push", before=first, pr_base="")
+    assert done.returncode != 0, done.stdout + done.stderr

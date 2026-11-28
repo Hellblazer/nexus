@@ -40,11 +40,11 @@ def _ctx(path: str) -> bool:
 # ── selection ───────────────────────────────────────────────────────────────
 
 def test_a_diff_that_touches_nothing_selectable_still_selects_the_always_on_checks() -> None:
-    assert list(gate.select({"README.md", "src/nexus/cli.py"}, _wire, _ctx)) == ["file-size", "changelog", "context-budget"]
+    assert list(gate.select({"README.md", "src/nexus/cli.py"}, _wire, _ctx)) == ["file-size", "changelog", "changelog-coverage", "context-budget"]
 
 
 def test_an_empty_diff_selects_the_always_on_checks_too() -> None:
-    assert list(gate.select(set(), _wire, _ctx)) == ["file-size", "changelog", "context-budget"]
+    assert list(gate.select(set(), _wire, _ctx)) == ["file-size", "changelog", "changelog-coverage", "context-budget"]
 
 
 @pytest.mark.parametrize(("path", "extra"), [
@@ -76,7 +76,7 @@ def test_an_empty_diff_selects_the_always_on_checks_too() -> None:
 ])
 def test_each_path_class_selects_its_checks(path: str, extra: list[str]) -> None:
     chosen = gate.select({path}, _wire, _ctx)
-    assert set(chosen) == {"file-size", "changelog", "context-budget", *extra}, chosen
+    assert set(chosen) == {"file-size", "changelog", "changelog-coverage", "context-budget", *extra}, chosen
     assert chosen["file-size"] == "always"
     for name in extra:
         assert chosen[name] == path, "the selecting path is named"
@@ -92,7 +92,7 @@ def test_the_context_budget_is_always_on_and_names_the_path_that_reached_it(path
 def test_selection_follows_the_fixed_order() -> None:
     chosen = gate.select({"conexus/skills/a.md", "docs/a.md", "service/b.java", "pyproject.toml"}, _wire, _ctx)
     chosen = gate.select({"conexus/skills/a.md", "docs/a.md", "service/b.java", "pyproject.toml", "tests/_engine_substrate.py"}, _wire, _ctx)
-    assert list(chosen) == ["file-size", "changelog", "wire-ledger", "context-budget", "cloud-leg", "plugin-ledger", "pg-cluster",
+    assert list(chosen) == ["file-size", "changelog", "changelog-coverage", "wire-ledger", "context-budget", "cloud-leg", "plugin-ledger", "pg-cluster",
                             "docs-readers", "write-seam"]
 
 

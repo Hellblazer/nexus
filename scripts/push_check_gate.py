@@ -14,6 +14,8 @@ check           selected by                                                     
 ==============  ====================================================================  ===========================
 file-size       always                                                                scripts/file_size_ratchet.py check
 changelog       always                                                                scripts/changelog_fold.py check
+changelog-      always (report only)                                                  scripts/changelog_coverage.py over the
+coverage                                                                              outbound range base..tip
 context-budget  always (under a second); a path context_budgets.py covers (.md           scripts/context_budgets.py check
                 under <plugin>/skills|agents|commands|resources of conexus, sn,
                 prose-edit, tool-spill, its ceilings file, the script) is named
@@ -51,9 +53,18 @@ vacuous pass), or a pytest check that skips any test (except the one named opt-i
 never a skip. ``--skip NAME=REASON`` overrides one check, on the record: the reason is
 printed as ``PUSH_CHECK_SKIPPED NAME reason=...`` (the push script hands those lines to ``nx ci record-push``).
 
-The changelog, cloud-leg and plugin-ledger checks also take a MODE (RDR-258 Phase 4, scripts/ledger_mode.py): block, or report
+changelog-coverage lists each outbound commit that changes shipped code and has no changelog fragment naming its bead (Sam, 2026-11-28,
+RDR-258 Phase 4 step 2): its ``default_mode`` is ``report``, so a finding is relayed as ``PUSH_CHECK_REPORT`` lines and the push goes on.
+On the release PR into main the fragment FORMAT check (``changelog_fold.py check``) blocks and the coverage listing reports (ci.yml's
+release-ledger-gate). A crash, its exit 2 ("could not read git"), a missing script, a timeout, a pass without its marker, and an exit 10
+that is not the script's own "examined nothing" (a ``LEDGER-VACUOUS`` line) on a range of merge commits only, all refuse, as for every other
+check. Two ranges that examined nothing pass with a ``PUSH_CHECK_NOTE changelog-coverage examined nothing: ...`` line: a range of merge
+commits only (a release back-merge: the script exits 10 and the gate checks the range itself with git) and a range of release-preparation
+or revert commits only (the script exits 0 and says so in its summary line).
+
+The changelog, changelog-coverage, cloud-leg and plugin-ledger checks also take a MODE (RDR-258 Phase 4, scripts/ledger_mode.py): block, or report
 (a finding is listed as ``PUSH_CHECK_REPORT`` lines, at most eight per check and then a ``+N more`` line, and not refused). The mode is the
-spec's ``default_mode`` (block) or, with ``--ledger-report REASON``, report on the record: each selected ledger check prints
+spec's ``default_mode`` (block, but report for changelog-coverage) or, with ``--ledger-report REASON``, report on the record: each selected ledger check prints
 ``PUSH_CHECK_LEDGER_MODE NAME mode=... source=default|flag [reason=...]`` and the push script records a ``source=flag`` one as
 ``NAME-report=REASON``. ``NX_LEDGER_MODE`` in the environment is ignored (``PUSH_CHECK_NOTE`` says so): a variable left exported
 demotes nothing. A check that reports, by either route above, is named on ``PUSH_CHECKS_PASSED`` as ``reported=NAME`` (one path,
@@ -175,7 +186,10 @@ class Spec:
     report_note: str = ""           # the sentence a report carries after its heading: what still blocks the finding, and where
     report_marker: str = ""         # a regex a ledger check's pass may match INSTEAD of marker, in report mode only
     ledger: str = ""                # a class-A ledger check: it runs in block or report mode (scripts/ledger_mode.py)
-    default_mode: str = "block"     # a ledger check's mode without --ledger-report ("report" is RDR-258 Phase 4 step 2)
+    default_mode: str = "block"     # a ledger check's mode without --ledger-report (a spec sets "report" for a check that only lists)
+    merge_only_ok: bool = False     # a ledger check that may pass having examined nothing, with a loud PUSH_CHECK_NOTE line: its exit 10 with a
+                                    # LEDGER-VACUOUS line on a range git says is merge commits only (a release back-merge), or its report-mode
+                                    # summary naming a range of release-preparation and revert commits only (only changelog-coverage: tests pin it)
 
 
 SPECS: dict[str, Spec] = {s.name: s for s in (
@@ -190,6 +204,14 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
          # In report mode a finding exits 0 with the summary line instead of "ok" (a run that examined nothing still exits 10);
          # in block mode only "ok" is a pass, so a LEDGER-REPORT line cannot stand in for it.
          marker=r"changelog_fold check: ok", report_marker=r"LEDGER-REPORT changelog:", ledger="changelog"),
+    Spec("changelog-coverage", "PUSH_REFUSED_CHANGELOG_COVERAGE", "run", ("scripts/changelog_coverage.py", LEDGER_MODE_SCRIPT),
+         "uv run python scripts/changelog_coverage.py --base <origin/develop> --head <tip> --mode report",
+         "add changelog/unreleased/<bead-id>.md for each commit the report names, or cite the bead in another entry, or add a "
+         "'Changelog: none' trailer if no behaviour changed (the fragment format check blocks on the release PR into main; the coverage listing reports there)",
+         # Block mode prints "changelog_coverage: ok"; report mode prints the LEDGER-REPORT summary (and exits 10, a refusal, for a
+         # range that examined no commit, which merge_only_ok lets pass when the range is merge commits only).
+         marker=r"changelog_coverage: ok", report_marker=r"LEDGER-REPORT changelog-coverage:", ledger="changelog-coverage",
+         default_mode="report", merge_only_ok=True),
     Spec("context-budget", "PUSH_REFUSED_CONTEXT_BUDGET", "run", (CONTEXT_SCRIPT,),
          "uv run python scripts/context_budgets.py check",
          "cut the file or move detail into a file loaded on demand, or record a raise in tests/fixtures/context-budgets.txt with "
@@ -227,7 +249,7 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
 REPORT_TOKEN = "PUSH_CHECK_REPORT"
 GATE_ERROR_TOKEN = "PUSH_REFUSED_CHECK_GATE_ERROR"
 _GATE_ERROR_ESCAPE = "  override, on the record: --skip-check-gate '<reason>'"
-ORDER = ("file-size", "changelog", "wire-ledger", "context-budget", "cloud-leg", "plugin-ledger", "pg-cluster", "docs-readers", "write-seam")
+ORDER = ("file-size", "changelog", "changelog-coverage", "wire-ledger", "context-budget", "cloud-leg", "plugin-ledger", "pg-cluster", "docs-readers", "write-seam")
 SKIPPABLE = (*ORDER, "check-gate")
 
 
@@ -248,7 +270,7 @@ def cluster_path(path: str) -> bool:
 def select(paths: set[str], is_wire: Callable[[str], bool], is_context: Callable[[str], bool],
            is_cluster: Callable[[str], bool] = cluster_path) -> dict[str, str]:
     """The checks the outbound *paths* reach, each with the path that selected it (or ``always``)."""
-    chosen: dict[str, str] = {"file-size": "always", "changelog": "always"}
+    chosen: dict[str, str] = {"file-size": "always", "changelog": "always", "changelog-coverage": "always"}
 
     def first(pred: Callable[[str], bool]) -> str | None:
         return next((p for p in sorted(paths) if pred(p)), None)
@@ -392,6 +414,7 @@ class Outcome:
     detail: str = ""                # why it is red: the excerpt of its output, or the vacuity reason
     seconds: float = 0.0
     lines: list[str] = field(default_factory=list)
+    note: str = ""                  # ok, with one loud line the gate prints (PUSH_CHECK_NOTE): a check that examined nothing and says so
     reported: bool = False          # ok, and the check found something the push reports (PUSH_CHECK_REPORT) instead of refusing: its own
                                     # exit 1 with the finding header Spec.report_header names (detail holds that output), or a
                                     # report-mode ledger's LEDGER-FINDING lines (lines)
@@ -427,7 +450,11 @@ def pytest_python(repo: Path, python: str) -> list[str]:
     return via_uv
 
 
-def command_for(name: str, python: list[str], pytest_cmd: list[str]) -> list[str]:
+def command_for(name: str, python: list[str], pytest_cmd: list[str], base: str = "", tip: str = "") -> list[str]:
+    if name == "changelog-coverage":
+        # The outbound range, as the gate names it: the remote branch the push replaces to the tip (the tip's worktree shares this
+        # repository's refs and objects). --mode is not passed: run_check pins it in the child's environment from the spec.
+        return [*python, "scripts/changelog_coverage.py", "--base", base, "--head", tip]
     if name == "file-size":
         return [*python, "scripts/file_size_ratchet.py", "check"]
     if name == "changelog":
@@ -508,13 +535,31 @@ def skip_problem(name: str, out: str) -> str | None:
             f"(skip reasons: {'; '.join(other)[:300] or 'not printed'})")
 
 
+#: The exit code a ledger script uses for "could not examine" (scripts/changelog_coverage.py EXIT_BAD).
+EXIT_EXAMINED_NOTHING = 10
+
+
+def merge_only_range(repo: Path, base: str, tip: str) -> int:
+    """How many merge commits ``base..tip`` holds when it holds nothing else, else 0 (an empty range, a range with a non-merge commit,
+    or a range git cannot read is not a merge-only range)."""
+    counts = []
+    for flag in ("--merges", "--no-merges"):
+        proc = subprocess.run(["git", "-C", str(repo), "rev-list", "--count", flag, f"{base}..{tip}"], capture_output=True, text=True,
+                              env=_env(), check=False)
+        if proc.returncode != 0 or not proc.stdout.strip().isdigit():
+            return 0
+        counts.append(int(proc.stdout.strip()))
+    return counts[0] if counts[1] == 0 else 0
+
+
 def ledger_mode_for(spec: Spec, ledger_reason: str = "") -> tuple[str, str]:
     """(mode, source) a class-A ledger check runs in: ``report`` with source ``flag`` when ``--ledger-report`` gave a reason,
     else the spec's own ``default_mode`` with source ``default``."""
     return (ledger_mode.REPORT, "flag") if ledger_reason else (spec.default_mode, "default")
 
 
-def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str], ledger_reason: str = "") -> Outcome:
+def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str], ledger_reason: str = "", base: str = "",
+              tip: str = "") -> Outcome:
     started = time.monotonic()
     missing = [n for n in spec.needs if not (tree / n).exists()]
     if missing:
@@ -530,13 +575,17 @@ def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str], 
         # exported by an earlier session demotes nothing.
         env[ledger_mode.ENV] = ledger_mode_for(spec, ledger_reason)[0]
     try:
-        returncode, out = _run_child(command_for(spec.name, python, pytest_cmd), tree, env)
+        returncode, out = _run_child(command_for(spec.name, python, pytest_cmd, base, tip), tree, env)
     except subprocess.TimeoutExpired as exc:
         return Outcome(spec.name, False, f"ran past {exc.timeout:.0f}s and was stopped (only this check was stopped)",
                        time.monotonic() - started)
     except OSError as exc:
         return Outcome(spec.name, False, f"could not start: {exc}", time.monotonic() - started)
     seconds = time.monotonic() - started
+    if returncode == EXIT_EXAMINED_NOTHING and spec.merge_only_ok and spec.ledger and re.search(rf"^{ledger_mode.VACUOUS_PREFIX} ", out, re.M):
+        merges = merge_only_range(tree, base, tip)
+        if merges:
+            return Outcome(spec.name, True, "", seconds, note=f"{spec.name} examined nothing: {merges} merge commit(s), no fragment check ran")
     if returncode == 1 and spec.report_header and re.search(spec.report_header, out, re.MULTILINE):
         return Outcome(spec.name, True, _excerpt(out), seconds, reported=True)
     if returncode != 0:
@@ -571,7 +620,12 @@ def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str], 
                            f"{_excerpt(out)}", seconds)
         if (problem := skip_problem(spec.name, out)) is not None:
             return Outcome(spec.name, False, f"exit 0 but {problem}. Last lines:\n{_excerpt(out)}", seconds)
-    return Outcome(spec.name, True, "", seconds, lines, reported=bool(findings))
+    note = ""
+    if spec.merge_only_ok and (prep := re.search(rf"^{ledger_mode.SUMMARY_PREFIX} {re.escape(spec.ledger)}: 0 finding\(s\), 0 item\(s\) examined "
+                                                  r"\(mode=report\): the range holds only (\d+) release-preparation or revert commit", out, re.M)):
+        # The script's own words for a range it had nothing to check in (exit 0, no finding, so nothing else on this push says so).
+        note = f"{spec.name} examined nothing: {prep.group(1)} release-preparation or revert commit(s), no fragment check ran"
+    return Outcome(spec.name, True, "", seconds, lines, note=note, reported=bool(findings))
 
 
 # ── proofs ──────────────────────────────────────────────────────────────────
@@ -822,7 +876,7 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
         specs = {n: SPECS[n] for n in selected}
 
         def one(name: str) -> Outcome:
-            return run_check(specs[name], tree, [python], pytest_cmd, ledger_report)
+            return run_check(specs[name], tree, [python], pytest_cmd, ledger_report, base, tip)
 
         outcomes: dict[str, Outcome] = {}
         live = [n for n in runnable if n not in skips]
@@ -850,6 +904,8 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
                 ran.append(f"{name}({outcome.seconds:.1f}s)")
                 if outcome.reported:
                     reported.append(name)
+                if outcome.note:
+                    print(f"PUSH_CHECK_NOTE {outcome.note}", file=err)
                 _print_report(name, spec, outcome, tip, selected[name], out, err)
                 continue
             refusals.append(name)
@@ -929,7 +985,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--proof", action="append", default=[], type=Path, help="a watched_pytest.py --status file (repeatable)")
     parser.add_argument("--skip", action="append", default=[], type=parse_skip, help="NAME=REASON (repeatable)")
     parser.add_argument("--ledger-report", default=None, metavar="REASON",
-                        help="run the changelog, cloud-leg and plugin-ledger checks in report mode (a finding is listed, not "
+                        help="run the changelog, changelog-coverage, cloud-leg and plugin-ledger checks in report mode (a finding is listed, not "
                              "refused), on the record; NX_LEDGER_MODE in the environment changes nothing here")
     parser.add_argument("--repush-prefix", default="", help="the push command up to its shas, for the re-push line of a refusal")
     parser.add_argument("--repush-suffix", default="", help="the shas of the push command, for the re-push line of a refusal")
