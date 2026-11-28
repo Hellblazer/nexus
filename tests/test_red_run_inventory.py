@@ -136,6 +136,33 @@ class Unres extends ThirdPartyBase {
     @Test <T extends Number> java.util.List<T> gen() { return null; }
 }
 """
+BINDINGS = {
+    "tests/test_imp.py": (
+        "from helpers import test_imported\nimport helpers as test_modalias\n"
+        "try:\n    from helpers import test_try\nexcept ImportError:\n    pass\n\n\n"
+        "class TestImp:\n    from helpers import test_cls_imp\n"),
+    "tests/test_star.py": "from helpers import *\n\n\nclass TestS:\n    pass\n",
+    "tests/test_fac.py": (
+        "def make():\n    return type('T', (), {})\n\n\nTestFac = make()\nTestFac2: type = make()\n\n\n"
+        "class TestReal:\n    pass\n"),
+    "tests/test_loop.py": (
+        "import sys\n\nfor n in range(3):\n    def test_loop():\n        pass\n\n"
+        "for m in range(3):\n    class TestLoopCls:\n        def test_x(self):\n            pass\n\n"
+        "while False:\n    def test_while():\n        pass\n\n"
+        "match sys.platform:\n    case 'linux':\n        def test_match():\n            pass\n"),
+    "tests/test_plat.py": (
+        "import sys\n\nif sys.platform == 'win32':\n    class TestPlat:\n        def test_win(self):\n            pass\n"
+        "else:\n    class TestPlat:\n        def test_posix(self):\n            pass\n"),
+}
+JIFACE = "interface Iface {\n    default void ifaceDefault() {}\n}\n"
+JIMPL = {
+    "Impl": "class Impl implements Iface {}\n",
+    "Both": "class Both extends AbsBase implements Iface {}\n",
+    "Impl2": "class Impl2 implements ThirdIface {}\n",
+    "Impl3": "import java.io.Serializable;\nclass Impl3 implements Runnable, Serializable {}\n",
+    "SubIface": "interface SubIface extends Iface {}\n",
+    "ViaSub": "class ViaSub implements SubIface {}\n",
+}
 JDIR = "service/src/test/java/dev/"
 
 
@@ -148,6 +175,7 @@ def repo(tmp_path: Path) -> tuple[Path, str]:
         "tests/test_w.py": PY, "tests/base.py": BASES, "tests/test_d.py": DERIVED,
         "tests/sp ace/test_s.py": "def test_s():\n    pass\n",
         "tests/test_new.py": "def test_moved():\n    pass\n",
+        **BINDINGS, JDIR + "Iface.java": JIFACE, **{JDIR + k + ".java": v for k, v in JIMPL.items()},
         "tests/test_cmp.py": "class TestCmp:\n    if True:\n        def test_cond(self):\n            pass\n",
         JDIR + "RouterIT.java": JAVA, JDIR + "AbsBase.java": JAVA_BASE, JDIR + "Mid.java": JAVA_MID,
         JDIR + "Der.java": JAVA_DER, JDIR + "Unres.java": JAVA_UNRES,
@@ -209,6 +237,32 @@ D = "tests/test_d.py::"
     ("Der::missing", "java", "test gone", None),                        # AbsBase resolved, no such method
     ("Unres::gen", "java", None, None),                                 # a generic method
     ("Unres::missing", "java", None, "unresolved base ThirdPartyBase"),
+    ("Impl::ifaceDefault", "java", None, None),                         # a default method of an implemented interface
+    ("Both::inheritedT", "java", None, None),                           # extends and implements are both followed
+    ("Both::ifaceDefault", "java", None, None),
+    ("Impl::missing", "java", "test gone", None),
+    ("Impl2::missing", "java", None, "unresolved base ThirdIface"),
+    ("Impl3::missing", "java", "test gone", None),                      # Runnable and an imported java.io type
+    ("ViaSub::ifaceDefault", "java", None, None),                       # an interface that extends the interface
+    ("tests/test_imp.py::test_imported", "test", None, "unresolved binding import test_imported"),
+    ("tests/test_imp.py::test_modalias", "test", None, "unresolved binding import test_modalias"),
+    ("tests/test_imp.py::test_try", "test", None, "unresolved binding import test_try"),
+    ("tests/test_imp.py::TestImp::test_cls_imp", "test", None, "unresolved binding import test_cls_imp"),
+    ("tests/test_imp.py::test_other", "test", "test gone", None),
+    ("tests/test_star.py::test_anything", "test", None, "unresolved binding star-import test_anything"),
+    ("tests/test_star.py::TestHidden::test_x", "test", None, "unresolved binding star-import TestHidden"),
+    ("tests/test_star.py::TestS::test_x", "test", "test gone", None),     # a class body has no star import
+    ("tests/test_fac.py::TestFac::test_a", "test", None, "unresolved binding assignment TestFac"),
+    ("tests/test_fac.py::TestFac2::test_a", "test", None, "unresolved binding assignment TestFac2"),
+    ("tests/test_fac.py::TestReal::test_a", "test", "test gone", None),
+    ("tests/test_loop.py::test_loop", "test", None, "unresolved binding loop test_loop"),
+    ("tests/test_loop.py::test_while", "test", None, "unresolved binding loop test_while"),
+    ("tests/test_loop.py::test_match", "test", None, "unresolved binding loop test_match"),
+    ("tests/test_loop.py::TestLoopCls::test_x", "test", None, "unresolved binding loop TestLoopCls"),
+    ("tests/test_loop.py::test_nowhere", "test", "test gone", None),
+    ("tests/test_plat.py::TestPlat::test_win", "test", None, None),     # every definition of the class is checked
+    ("tests/test_plat.py::TestPlat::test_posix", "test", None, None),
+    ("tests/test_plat.py::TestPlat::test_neither", "test", "test gone", None),
 ])
 def test_a_row_is_judged_by_following_the_definition_chain_at_the_rev(
         repo: tuple[Path, str], nodeid: str, kind: str, absent: str | None, present_reason: str | None) -> None:
@@ -241,6 +295,8 @@ def test_a_bare_name_is_followed_the_same_way_and_scoped_to_its_class(repo: tupl
     assert inv.judge(_row("TestUnresolved.test_q", path_source="none")) == (None, "unresolved base Thing")
     assert inv.judge(_row("test_removed", path_source="none")) == ("test gone", None)
     assert inv.judge(_row("TestGone.test_drain", path_source="none")) == ("test gone", None)
+    assert inv.judge(_row("TestFac.test_a", path_source="none")) == (None, "unresolved binding assignment TestFac")
+    assert inv.judge(_row("TestPlat.test_posix", path_source="none")) == (None, None)
 
 
 def test_the_rev_is_resolved_to_a_full_sha_and_decides_what_exists(repo: tuple[Path, str]) -> None:
@@ -387,15 +443,50 @@ def test_cli_candidates_refuses_a_wrong_repo_and_a_bad_rev_without_a_traceback(
     assert "Traceback" not in capsys.readouterr().err
 
 
-def test_cli_candidates_writes_an_empty_file_for_an_extraction_with_no_rows(
-        snapshot: Path, history: tuple[Path, dict[str, str]], tmp_path: Path, inventory_repo: Path) -> None:
+def test_cli_candidates_refuses_an_extraction_with_no_rows_and_writes_nothing(
+        snapshot: Path, history: tuple[Path, dict[str, str]], tmp_path: Path, inventory_repo: Path,
+        capsys: pytest.CaptureFixture[str]) -> None:
     records = [r for r in _extract(snapshot, history[0]) if r.get("t") != "item"]
     assert records
     extraction_file, out = tmp_path / "x.jsonl.gz", tmp_path / "c.json"
     rrr.write_extraction(records, extraction_file)
     assert rrr.main(["candidates", "--extraction", str(extraction_file), "--out", str(out),
-                     "--repo", str(inventory_repo)]) == rrr.EXIT_OK
-    got = json.loads(out.read_text())
-    assert got["candidates"] == [] and got["unattributed"] == [] and got["absent"] == {
-        "candidates": [], "unattributed": []}
-    assert got["header"]["inventory"]["candidates"] == {"present": 0, "absent": 0}
+                     "--repo", str(inventory_repo)]) == rrr.EXIT_FAIL
+    err = capsys.readouterr().err
+    assert not out.exists() and "0 flake and 0 unattributed rows" in err and "Traceback" not in err
+
+
+def _warn_of(snapshot: Path, history: tuple[Path, dict[str, str]], tmp_path: Path, repo: Path, *extra: str,
+             capsys: pytest.CaptureFixture[str]) -> tuple[str, Path]:
+    capsys.readouterr()
+    out = _cli(snapshot, history, tmp_path, repo, *extra)
+    return capsys.readouterr().err, out
+
+
+def test_cli_candidates_warns_and_still_writes_when_the_rev_is_not_on_develop(
+        snapshot: Path, history: tuple[Path, dict[str, str]], tmp_path: Path, inventory_repo: Path,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    base = _git(inventory_repo, "rev-parse", "HEAD")
+    for name in ("a", "b", "c", "d", "e"):
+        (tmp_path / name).mkdir()
+    # on develop with no origin: HEAD is develop, so no warning
+    err, out = _warn_of(snapshot, history, tmp_path / "a", inventory_repo, capsys=capsys)
+    assert "warning" not in err and out.exists()
+    # origin/develop is behind HEAD: the rev is not its ancestor
+    _commit(inventory_repo, "chore: ahead of origin", {"tests/test_extra.py": "x = 1\n"})
+    _git(inventory_repo, "update-ref", "refs/remotes/origin/develop", base)
+    err, out = _warn_of(snapshot, history, tmp_path / "b", inventory_repo, capsys=capsys)
+    assert out.exists() and err.count("\n") == 1
+    assert "warning: inventory rev " in err and "is not an ancestor of origin/develop" in err
+    err, out = _warn_of(snapshot, history, tmp_path / "c", inventory_repo, "--rev", base, capsys=capsys)
+    assert "warning" not in err and out.exists()
+    # no origin: the check falls back to develop
+    _git(inventory_repo, "update-ref", "-d", "refs/remotes/origin/develop")
+    _git(inventory_repo, "switch", "-q", "-c", "side", base)
+    side = _commit(inventory_repo, "chore: off develop", {"tests/test_side.py": "x = 1\n"})
+    err, out = _warn_of(snapshot, history, tmp_path / "d", inventory_repo, "--rev", side, capsys=capsys)
+    assert out.exists() and "is not an ancestor of develop" in err and "origin/develop" not in err
+    # neither ref exists
+    _git(inventory_repo, "branch", "-m", "develop", "trunk")
+    err, out = _warn_of(snapshot, history, tmp_path / "e", inventory_repo, capsys=capsys)
+    assert out.exists() and "neither origin/develop nor develop exists" in err

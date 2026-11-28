@@ -1383,11 +1383,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         h = report["header"]
         gone = {k: v["absent"] for k, v in h["inventory"].items()}
         absent, total = sum(gone.values()), sum(gone.values()) + h["candidate_tests"] + h["unattributed_tests"]
+        if total == 0:
+            sys.stderr.write("candidates: the extraction holds 0 flake and 0 unattributed rows: there is nothing to "
+                             "check, so nothing is written (an empty file would pass for a clean one).\n")
+            return EXIT_FAIL
         if 2 * absent > total:
             sys.stderr.write(f"candidates: {absent} of {total} rows are absent at {inv.rev[:12]} in {args.repo} "
                              f"(flake {gone['candidates']}, unattributed {gone['unattributed']}): is --repo the nexus "
                              f"checkout? Nothing written.\n")
             return EXIT_FAIL
+        try:
+            warning = inv.lineage_warning()
+        except RuntimeError as exc:
+            warning = f"cannot tell whether the rev survives a merge: {exc}"
+        if warning:
+            sys.stderr.write(f"candidates: warning: {warning}\n")
         write_candidates(report, args.out)
         sys.stdout.write(f"wrote {args.out}: {h['candidate_tests']} flake tests, "
                          f"{h['unattributed_tests']} unattributed tests (absent at {inv.rev[:12]}: "

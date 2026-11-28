@@ -81,6 +81,49 @@ def _class_in(body: Sequence[ast.stmt], name: str) -> ast.ClassDef | None:
     return next((st for st in _flat(body) if isinstance(st, ast.ClassDef) and st.name == name), None)
 
 
+def _classes_in(body: Sequence[ast.stmt], name: str) -> list[ast.ClassDef]:
+    """Every definition of the class, for one defined under both arms of an ``if``."""
+    return [st for st in _flat(body) if isinstance(st, ast.ClassDef) and st.name == name]
+
+
+def _deep(body: Sequence[ast.stmt]) -> Iterator[ast.stmt]:
+    """``_flat`` plus the bodies of ``for``, ``while`` and ``match``, which the walk does not follow."""
+    for st in _flat(body):
+        yield st
+        if isinstance(st, (ast.For, ast.AsyncFor, ast.While)):
+            yield from _deep(st.body)
+            yield from _deep(st.orelse)
+        elif isinstance(st, ast.Match):
+            for case in st.cases:
+                yield from _deep(case.body)
+
+
+def _imports(body: Sequence[ast.stmt], name: str) -> bool:
+    for st in _flat(body):
+        if isinstance(st, ast.Import) and any((a.asname or a.name.split(".")[0]) == name for a in st.names):
+            return True
+        if isinstance(st, ast.ImportFrom) and any((a.asname or a.name) == name for a in st.names):
+            return True
+    return False
+
+
+def _unresolved_binding(body: Sequence[ast.stmt], name: str, *, is_class: bool, module: bool) -> list[str]:
+    """Notes for the ways ``name`` can be bound that the walk cannot follow: an import, a star import
+    (module level only), an assignment of a class name (``TestFac = make()``), a def or class under a loop."""
+    notes: list[str] = []
+    if _imports(body, name):
+        notes.append(f"unresolved binding import {name}")
+    if module and any(isinstance(st, ast.ImportFrom) and any(a.name == "*" for a in st.names) for st in _flat(body)):
+        notes.append(f"unresolved binding star-import {name}")
+    if is_class and any(_binds(st, name) for st in _flat(body)):
+        notes.append(f"unresolved binding assignment {name}")
+    flat = {id(st) for st in _flat(body)}
+    hit = (lambda st: isinstance(st, ast.ClassDef) and st.name == name) if is_class else (lambda st: _binds(st, name))
+    if any(id(st) not in flat and hit(st) for st in _deep(body)):
+        notes.append(f"unresolved binding loop {name}")
+    return notes
+
+
 def _py_named(body: Sequence[ast.stmt], name: str, prefix: list[str]) -> Iterator[str]:
     """``prefix::Class::name`` for each definition of ``name`` at module or class level."""
     for st in _flat(body):
@@ -128,8 +171,18 @@ def _java_decls(src: str) -> set[str]:
     return out
 
 
+_JAVA_LANG = frozenset("Object Runnable Comparable AutoCloseable Cloneable Iterable CharSequence Thread "
+                       "Exception RuntimeException Error Throwable Record Enum".split())
+
+
+def _jdk_type(src: str, name: str) -> bool:
+    """Whether ``name`` is a ``java.lang`` type or imported by name from ``java.`` or ``javax.``."""
+    imported = re.search(rf"^\s*import\s+javax?\.[\w.]*\.{re.escape(name)}\s*;", _java_strip(src), re.M)
+    return name in _JAVA_LANG or imported is not None
+
+
 def _java_bases(src: str, cls: str) -> list[str]:
-    """Simple names the top-level class ``cls`` extends (several for an interface)."""
+    """Simple names the top-level class ``cls`` extends or implements (several for an interface)."""
     s = _java_strip(src)
     m = re.search(rf"\b(?:class|interface|enum|record)\s+{re.escape(cls)}(?![\w$])([^{{;]*)", s)
     if not m:
@@ -138,7 +191,9 @@ def _java_bases(src: str, cls: str) -> list[str]:
     while _ANGLES.search(head):
         head = _ANGLES.sub("", head)
     ext = re.search(r"\bextends\s+([\w$.,\s]+?)(?=\bimplements\b|\bpermits\b|$)", head)
-    return [n.strip().rsplit(".", 1)[-1] for n in ext.group(1).split(",") if n.strip()] if ext else []
+    imp = re.search(r"\bimplements\s+([\w$.,\s]+?)(?=\bpermits\b|$)", head)
+    names = [n for g in (ext, imp) if g for n in g.group(1).split(",")]
+    return [n.strip().rsplit(".", 1)[-1] for n in names if n.strip()]
 
 
 class Inventory:
@@ -196,7 +251,8 @@ class Inventory:
         return rf"^[[:space:]]*((async[[:space:]]+)?def[[:space:]]+{n}[[:space:]]*\(|{n}[[:space:]]*(:[^=]*)?=)"
 
     def _py_class_files(self, cls: str) -> list[str]:
-        return self._grep(rf"^[[:space:]]*class[[:space:]]+{re.escape(cls)}([^[:alnum:]_]|$)", "*.py")
+        n = re.escape(cls)
+        return self._grep(rf"^[[:space:]]*(class[[:space:]]+{n}([^[:alnum:]_]|$)|{n}[[:space:]]*(:[^=]*)?=)", "*.py")
 
     # -- python -----------------------------------------------------------------------------
 
@@ -229,17 +285,32 @@ class Inventory:
         tree = self._ast(path)
         if tree is None:
             return False, [f"unparseable {path}"]
-        body: Sequence[ast.stmt] = tree.body
-        cls: ast.ClassDef | None = None
+        notes: list[str] = []
+        scopes: list[tuple[Sequence[ast.stmt], ast.ClassDef | None]] = [(tree.body, None)]
         for c in classes:
-            cls = _class_in(body, c)
-            if cls is None:
-                return False, []
-            body = cls.body
-        if _defines(body, name):
+            nxt: list[tuple[Sequence[ast.stmt], ast.ClassDef | None]] = []
+            for body, _ in scopes:
+                defs = _classes_in(body, c)
+                nxt += [(d.body, d) for d in defs]
+                if not defs:
+                    notes += _unresolved_binding(body, c, is_class=True, module=body is tree.body)
+            scopes = nxt
+            if not scopes:
+                return False, notes
+        if any(_defines(body, name) for body, _ in scopes):
             return True, []
-        if cls is None:
-            return False, []
+        for body, cls in scopes:
+            notes += _unresolved_binding(body, name, is_class=False, module=cls is None)
+        for _, cls in scopes:
+            if cls is not None:
+                found, sub = self._py_bases(tree, path, cls, name, depth, seen)
+                if found:
+                    return True, []
+                notes += sub
+        return False, notes
+
+    def _py_bases(self, tree: ast.Module, path: str, cls: ast.ClassDef, name: str, depth: int,
+                  seen: set[tuple[str, tuple[str, ...]]]) -> tuple[bool, list[str]]:
         notes: list[str] = []
         for base in cls.bases:
             if self._stdlib_base(tree, base):
@@ -294,7 +365,7 @@ class Inventory:
             if method in self._java_names(path):
                 return True, []
             for base in _java_bases(self._source(path), cls):
-                if base == "Object":
+                if _jdk_type(self._source(path), base):
                     continue
                 if depth >= MAX_DEPTH:
                     notes.append(f"base chain deeper than {MAX_DEPTH} at {cls}")
@@ -315,12 +386,29 @@ class Inventory:
 
     # -- api --------------------------------------------------------------------------------
 
+    def lineage_warning(self) -> str | None:
+        """A line when the rev is not an ancestor of ``origin/develop`` (else ``develop``), or neither exists."""
+        for ref in ("origin/develop", "develop"):
+            tip = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "--verify", "--quiet", "--end-of-options",
+                                  f"{ref}^{{commit}}"], capture_output=True, check=False)
+            if tip.returncode != 0:
+                continue
+            r = subprocess.run(["git", "-C", str(self.repo), "merge-base", "--is-ancestor", self.rev, ref],
+                               capture_output=True, check=False)
+            if r.returncode not in (0, 1):
+                raise RuntimeError(f"git merge-base failed in {self.repo}: {r.stderr.decode('utf-8', 'replace')[:200]}")
+            if r.returncode == 1:
+                return f"inventory rev {self.rev[:12]} is not an ancestor of {ref}, so it may not survive a merge"
+            return None
+        return f"neither origin/develop nor develop exists in {self.repo}: cannot tell whether {self.rev[:12]} survives a merge"
+
     def judge(self, row: Row) -> Verdict:
         """``(absent_reason, present_reason)``.
 
         ``absent_reason`` is ``"file gone"`` or ``"test gone"`` and then the row is absent;
         ``present_reason`` is set on a present row only when an unresolvable base made it
-        "probably present" (``unresolved base <name>``).
+        "probably present": ``unresolved base <name>``, or ``unresolved binding <form> <name>`` for an
+        import, a star import, an assignment of a class name or a def under a loop.
         """
         base = str(row["nodeid"]).partition("[")[0]
         return self._judge_java(base) if row["kind"] == "java" else self._judge_python(base)
