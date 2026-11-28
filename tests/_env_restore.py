@@ -42,12 +42,16 @@ ENGINE_DB_ENV_KEYS: tuple[str, ...] = (
 )
 
 
-#: The inputs of ``nexus.config.is_local_mode`` and the keys that travel with cloud posture: the explicit mode switch, the
-#: managed endpoint and its credential, the storage backend, the Voyage key ``set_credentials`` sets, and the config
-#: directory that holds the ``install.mode`` record. A raw write to any of them, or a raw rebind of ``is_local_mode``, is
-#: cloud-mode state carried to the next test (RDR-258 Phase 1 step 3, nexus-2jomg.2).
+#: The inputs of ``nexus.config.is_local_mode`` and the credentials that travel with cloud posture, each with a planted
+#: leak and a reader in ``tests/test_mode_state_isolation.py`` (dropping one turns a test red): ``NX_LOCAL`` (the explicit
+#: switch), ``NX_SERVICE_URL`` (a configured endpoint reads as managed), ``NEXUS_CONFIG_DIR`` and ``NEXUS_REPO_ROOT`` (which
+#: global and per-repo ``config.yml`` / ``.nexus.yml`` carry ``install.mode``), ``NX_SERVICE_TOKEN`` and
+#: ``VOYAGE_API_KEY`` (read through ``get_credential``; the bearer that makes the managed endpoint usable, and the key
+#: ``set_credentials`` sets for a cloud test). ``NX_STORAGE_BACKEND`` is deliberately absent: ``storage_backend_for``
+#: returns the one backend whatever it holds, or raises on a bad value, so it selects no mode. ``HOME`` is absent
+#: because ``tests/_fence_home.py`` fences it once at session start; ``is_local_mode`` has no other env input.
 MODE_ENV_KEYS: tuple[str, ...] = (
-    "NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN", "NX_STORAGE_BACKEND", "VOYAGE_API_KEY", "NEXUS_CONFIG_DIR",
+    "NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN", "VOYAGE_API_KEY", "NEXUS_CONFIG_DIR", "NEXUS_REPO_ROOT",
 )
 
 
@@ -131,19 +135,29 @@ def _no_leaked_engine_db_env() -> Generator[None]:
 
 @pytest.fixture(autouse=True)
 def _restore_mode_state() -> Generator[None]:
-    """Put the mode state back after every test, so no test can hand cloud mode to the next (nexus-2jomg.2).
+    """Put the mode state back after every test, so a raw write to it does not reach the next test (nexus-2jomg.2).
 
     The mode-declarations census exists because a test that names a cloud embedder and declares no mode would
     pass only if an earlier test had left cloud mode behind. A test that sets the mode through ``monkeypatch``
     (``cloud_mode``) is undone by pytest. What outlives it is a raw write: ``os.environ["NX_LOCAL"] = "0"`` in
     product code, or ``nexus.config.is_local_mode = ...`` assigned rather than patched. This fixture snapshots
-    :data:`MODE_ENV_KEYS` and the ``is_local_mode`` binding before the test and puts both back after it, so the
-    leak ends at the test that made it. A plugin fixture, so the snapshot precedes every conftest fixture's
-    ``monkeypatch`` and the comparison follows its undo (see the module docstring); restored rather than failed,
-    as for :func:`_restore_product_written_env`, because a test may assert the write.
+    :data:`MODE_ENV_KEYS` and the ``nexus.config.is_local_mode`` binding before the test and puts both back after
+    it, so a leak through those ends at the test that made it. A plugin fixture, so it is set up before every
+    conftest fixture and torn down after them (pinned by ``tests/test_mode_state_isolation.py``); restored rather
+    than failed, as for :func:`_restore_product_written_env`, because a test may assert the write.
 
-    Not covered: a write made outside any test (collection, a session fixture), which the snapshot takes as the
-    starting state.
+    Covered: the keys in :data:`MODE_ENV_KEYS` and the ``nexus.config.is_local_mode`` attribute. A wider-scope
+    fixture's write (module, class, session) is set up before this fixture and so is kept for its tests.
+
+    Not covered, by design:
+    - a write made outside any test (collection, a session fixture, a thread between tests): the snapshot takes
+      it as the starting state;
+    - a module that bound the function at import time (``from nexus.config import is_local_mode`` at module
+      level) holds its own copy, which no rebind of the attribute reaches or restores;
+    - ``HOME``, which ``tests/_fence_home.py`` fences once at session start, and the working directory (a raw
+      ``os.chdir`` selects a different per-repo ``.nexus.yml``);
+    - ambient state a developer's shell exports under ``NX_TEST_T2_SUBSTRATE=none``: that is not carried from a
+      test, it is there for every test.
     """
     before = {k: os.environ.get(k) for k in MODE_ENV_KEYS}
     bound = getattr(sys.modules.get("nexus.config"), "is_local_mode", None)
@@ -152,5 +166,5 @@ def _restore_mode_state() -> Generator[None]:
     finally:
         restore_changed_keys(before)
         config = sys.modules.get("nexus.config")
-        if bound is not None and getattr(config, "is_local_mode", None) is not bound:
+        if config is not None and bound is not None and getattr(config, "is_local_mode", None) is not bound:
             config.is_local_mode = bound
