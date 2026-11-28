@@ -103,7 +103,7 @@ def history(tmp_path: Path, *, demoted_days_ago: int = 61, guards: str | None = 
             fix_day: int = 30, skip: frozenset[int] = frozenset(), step: int = 1, items_before: list[str] | None = None,
             items_after: list[str] | None = None, klass: str = "A", extra: dict[str, str] | None = None,
             tests: tuple[tuple[str, bool], ...] | None = None, tail: str = "",
-            between: dict[str, str | None] | None = None) -> tuple[Path, Path, dict[str, str]]:
+            between: dict[str, str | None] | None = None, registry: str | None = "") -> tuple[Path, Path, dict[str, str]]:
     """Check module born 70 days ago, demoted ``demoted_days_ago`` days ago, then a develop push every ``step`` days (minus
     ``skip``) with an artifact. At ``fix_day`` the push also changes ``fix_files`` (default: only docs/other.md) and the failing
     items drop from ``items_before`` to ``items_after``."""
@@ -113,7 +113,8 @@ def history(tmp_path: Path, *, demoted_days_ago: int = 61, guards: str | None = 
     before, after = items_before or ITEMS_BEFORE, items_after or ITEMS_AFTER
     specs: list[tuple[str, dict[str, str | None], int, str]] = [
         ("born", {MODULE: module_text(guards, marked=False, klass=klass, tests=tuple((n, False) for n, _ in tests) if tests else None) + tail,
-                  "src/foo/x.py": "x = 1\n", "conf/allowlist.txt": "a\n", **(extra or {})}, 70, "born"),
+                  "src/foo/x.py": "x = 1\n", "conf/allowlist.txt": "a\n",
+                  **({} if registry is None else {"tests/quarantine.toml": registry}), **(extra or {})}, 70, "born"),
         *([("between", between, 65, "between the birth and the demotion")] if between else []),
         ("demote", {MODULE: module_text(guards, klass=klass, tests=tests) + tail}, demoted_days_ago, "demote")]
     listed = {"demote": before}

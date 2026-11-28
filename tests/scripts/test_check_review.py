@@ -23,7 +23,10 @@ import zipfile
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
 from _check_review_fixture import MODULE, STEM, UNTIL, artifact, check, commit, git, history, load, module_text, record
+
+from tests import _quarantine_registry as reg
 
 cr = load()
 
@@ -321,13 +324,44 @@ def test_a_demotion_that_is_not_on_the_reviewed_rev_has_no_clock(tmp_path):
     assert rec["checks"] == [] and rec["due_for_deletion"] == [] and rec["totals"]["class_a_with_clock"] == 0
 
 
-def test_a_quarantined_test_older_than_14_days_is_listed_with_its_age(tmp_path):
-    repo, art, _ = history(tmp_path)
-    text = "import pytest\n\n@pytest.mark.quarantine\ndef test_flaky():\n    pass\n"
-    commit(repo, {"tests/test_flaky_thing.py": text}, 20, "quarantine it")
-    commit(repo, {"tests/test_new_flake.py": text.replace("flaky", "newflake")}, 3, "quarantine another")
+def _registry(*ages: tuple[str, int]) -> str:
+    """tests/quarantine.toml text with one entry per ``(nodeid, days old at UNTIL)``, written through the registry's own renderer."""
+    out = []
+    for n, (nodeid, age) in enumerate(ages):
+        since = UNTIL - timedelta(days=age)
+        out.append(reg.render(reg.Entry(nodeid, "pytest", since, reg.deadline_for(since), f"nexus-q{n}", "flakes under load", "a" * 64)))
+    return "\n".join(out)
+
+
+def test_a_quarantine_registry_entry_older_than_14_days_is_listed_with_its_deadline_and_bead_and_a_newer_one_is_not(tmp_path):
+    registry = _registry(("tests/test_flaky_thing.py::test_flaky", 15), ("tests/test_new_flake.py::test_newflake", 13))
+    repo, art, _ = history(tmp_path, registry=registry)
     q = _rec(repo, art)["quarantine"]
-    assert [(t["test"], t["age_days"]) for t in q["over_14_days"]] == [("tests/test_flaky_thing.py::test_flaky", 20)] and len(q["all"]) == 2
+    assert q["present"] is True and len(q["all"]) == 2
+    (old,) = q["over_14_days"]
+    assert old["test"] == "tests/test_flaky_thing.py::test_flaky" and old["age_days"] == 15
+    assert old["since"] == "2026-11-13" and old["deadline"] == "2026-11-27" and old["bead"] == "nexus-q0"
+    assert [t["age_days"] for t in q["all"]] == [15, 13]
+    text = cr.render_markdown(_rec(repo, art))
+    assert "tests/test_flaky_thing.py::test_flaky" in text and "deadline 2026-11-27, bead nexus-q0" in text and "test_newflake" not in text.split("## Class-A modules")[0].split("## Quarantined")[1]
+
+
+def test_an_empty_registry_is_an_empty_list_but_a_missing_one_fails_the_record_loudly(tmp_path, capsys):
+    repo, art, _ = history(tmp_path / "empty", registry="")
+    assert _rec(repo, art)["quarantine"] == {"registry": "tests/quarantine.toml", "present": False, "all": [], "over_14_days": []}
+    repo, art, _ = history(tmp_path / "gone", registry=None)
+    argv = ["record", "--repo", str(repo), "--rev", "HEAD", "--since", "2026-09-01", "--until", UNTIL.isoformat(), "--artifacts", str(art)]
+    assert cr.main(argv) == 2
+    cap = capsys.readouterr()
+    assert "tests/quarantine.toml is missing" in cap.err and "empty list would say there is no quarantine" in cap.err and cap.out == ""
+    with pytest.raises(cr.ReviewError, match="missing"):
+        _rec(repo, art)
+
+
+def test_a_malformed_registry_fails_the_record_too(tmp_path):
+    repo, art, _ = history(tmp_path, registry="[[quarantine]]\nnodeid = 1\n")
+    with pytest.raises(cr.ReviewError, match="not a valid registry"):
+        _rec(repo, art)
 
 
 # -- a numeric check -------------------------------------------------------------------------------------------------------
@@ -339,7 +373,7 @@ def _numeric_repo(tmp_path, value_at, alarm: int = 5544, demoted: int = 70, fix_
     git(repo, "init", "-q", "-b", "develop")
     mod = "tests/_storage_touch_fan_in.py"
     head = "# owner: ci\n# guards: nexus-2; src/\n# class: A\n"
-    commit(repo, {mod: head, "src/a.py": "a\n"}, 80, "born")
+    commit(repo, {mod: head, "src/a.py": "a\n", "tests/quarantine.toml": ""}, 80, "born")
     commit(repo, {mod: head + "alarm_line_tests = 5544\n"}, demoted, "demote")
     for d in range(demoted, -1, -1):
         s = commit(repo, {"docs/a.md": f"{d}\n", **({"src/a.py": "fixed\n"} if d == fix_day else {})}, d, f"run {d}")

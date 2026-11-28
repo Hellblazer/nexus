@@ -3,7 +3,7 @@
 """The 2-week check review and the step 7 batch proposal (RDR-258 Phase 1 steps 5 and 7, nexus-2jomg.2).
 
     check_review.py record --since DATE --until DATE [--repo .] [--rev origin/develop] [--artifacts DIR | --slug OWNER/REPO]
-                           [--prior RECORD ...] [--format md|json] [--quarantine-mark NAME] [--numeric PATH ...]
+                           [--prior RECORD ...] [--format md|json] [--numeric PATH ...]
     check_review.py deletion-plan RECORD [--repo .]
     check_review.py batch --report FILE [--repo .] [--size N] [--demoted CHECK ...] [--values FILE] [--target 0.30]
                           [--format md|json]
@@ -82,6 +82,9 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # the sibling red_run_report, as that script finds its own
 import red_run_report as rr  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # the repo root, for the quarantine registry module (stdlib only)
+from tests import _quarantine_registry as quarantine_registry  # noqa: E402
+
 Row = dict[str, Any]
 
 RETIRE_AFTER_DAYS = 60
@@ -90,6 +93,7 @@ COVERAGE_MIN_PCT = 80
 GAP_MAX_DAYS = 3
 RUN_LIST_CAP = 1000
 QUARANTINE_MAX_DAYS = 14
+QUARANTINE_REGISTRY = "tests/quarantine.toml"
 DEFAULT_SLUG = "Hellblazer/nexus"
 ARTIFACT_PREFIX = "class-a-items"
 LOG_JOB = "pytest-gate"
@@ -704,36 +708,27 @@ def _num(x: float) -> int | float:
     return int(x) if float(x).is_integer() else x
 
 
-def quarantine_report(repo: Path, rev: str, mark: str, until: date) -> Row:
-    """Tests carrying ``@pytest.mark.<mark>``, each with the age of its decorator line (``git blame``)."""
-    out = _git(repo, "grep", "-l", "-E", rf"mark\.{re.escape(mark)}", rev, "--", "tests", ok=(0, 1))
-    found: list[Row] = []
-    for line in out.splitlines():
-        path = line.partition(":")[2]
-        tree = _parse(_show(repo, rev, path) or "")
-        if tree is None:
-            continue
-
-        def visit(body: list[ast.stmt], prefix: str) -> None:
-            for node in body:
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    for dec in node.decorator_list:
-                        target = dec.func if isinstance(dec, ast.Call) else dec
-                        if ast.unparse(target) == f"pytest.mark.{mark}":
-                            blame = _git(repo, "blame", "-L", f"{dec.lineno},{dec.lineno}", "--porcelain", rev, "--", path)
-                            stamp = next(int(ln.split()[1]) for ln in blame.splitlines() if ln.startswith("committer-time "))
-                            age = (until - datetime.fromtimestamp(stamp, timezone.utc).date()).days
-                            found.append({"test": f"{path}::{prefix}{node.name}", "age_days": age})
-                    if isinstance(node, ast.ClassDef):
-                        visit(node.body, f"{prefix}{node.name}::")
-        visit(tree.body, "")
-    found.sort(key=lambda t: (-t["age_days"], t["test"]))
-    return {"mark": mark, "present": bool(found), "all": found,
+def quarantine_report(repo: Path, rev: str, until: date) -> Row:
+    """The flake quarantine registry (``tests/quarantine.toml``, Phase 5) as it stands on ``rev``, read through
+    ``tests/_quarantine_registry`` (the format and its checks live there): each entry with its age (``until`` minus ``since``),
+    deadline and bead. A missing, unreadable or malformed registry fails the record, never an empty list: no quarantine
+    and a registry nobody could read look the same otherwise."""
+    text = _show(repo, rev, QUARANTINE_REGISTRY)
+    if text is None:
+        raise ReviewError(f"{QUARANTINE_REGISTRY} is missing on {rev}: the quarantined-over-{QUARANTINE_MAX_DAYS}-days list cannot be read, "
+                          "and an empty list would say there is no quarantine")
+    try:
+        entries = quarantine_registry.parse(text)
+    except quarantine_registry.RegistryError as exc:
+        raise ReviewError(f"{QUARANTINE_REGISTRY} on {rev} is not a valid registry: {exc}") from exc
+    found = sorted(({"test": e.nodeid, "kind": e.kind, "age_days": e.age_days(until), "since": e.since.isoformat(),
+                     "deadline": e.deadline.isoformat(), "bead": e.bead} for e in entries), key=lambda t: (-t["age_days"], t["test"]))
+    return {"registry": QUARANTINE_REGISTRY, "present": bool(found), "all": found,
             "over_14_days": [t for t in found if t["age_days"] > QUARANTINE_MAX_DAYS]}
 
 
 def build_record(repo: Path, rev: str, since: date, until: date, art: Path, priors: Sequence[Row] = (),
-                 numeric: Iterable[str] = NUMERIC_MODULES, quarantine_mark: str = "quarantine") -> Row:
+                 numeric: Iterable[str] = NUMERIC_MODULES) -> Row:
     repo, art = Path(repo), Path(art)
     sha = _git(repo, "rev-parse", "--verify", f"{rev}^{{commit}}").strip()
     snaps, notes = load_snapshots(repo, art, rev, until)
@@ -788,7 +783,7 @@ def build_record(repo: Path, rev: str, since: date, until: date, art: Path, prio
         "thresholds": {"retire_after_days": RETIRE_AFTER_DAYS, "stuck_after_days": STUCK_AFTER_DAYS, "coverage_min_pct": COVERAGE_MIN_PCT,
                        "gap_max_days": GAP_MAX_DAYS, "quarantine_max_days": QUARANTINE_MAX_DAYS},
         "checks": checks, "findings": findings, "due_for_deletion": due, "stuck": stuck, "rose": rose, "unclockable": unclockable,
-        "fetch": ctx.fetch, "quarantine": quarantine_report(repo, rev, quarantine_mark, until),
+        "fetch": ctx.fetch, "quarantine": quarantine_report(repo, rev, until),
         "totals": {"class_a_with_clock": len(checks), "due_for_deletion": len(due), "stuck": len(stuck), "findings": len(findings),
                    "snapshots": len(snaps)},
     }
@@ -840,9 +835,10 @@ def render_markdown(rec: Row) -> str:
     q = rec["quarantine"]
     out += ["", f"## Quarantined over {QUARANTINE_MAX_DAYS} days", ""]
     if not q["present"]:
-        out.append(f"No test carries `pytest.mark.{q['mark']}` on this rev.")
+        out.append(f"`{q['registry']}` lists no quarantined test on this rev.")
     else:
-        out += [f"- `{x['test']}`: {x['age_days']} days" for x in q["over_14_days"]] or ["None over the deadline."]
+        out += [f"- `{x['test']}` ({x['kind']}): {x['age_days']} days since {x['since']}, deadline {x['deadline']}, bead {x['bead']}"
+                for x in q["over_14_days"]] or [f"None over {QUARANTINE_MAX_DAYS} days ({len(q['all'])} quarantined)."]
     out += ["", "## Class-A modules this tool cannot clock", ""]
     out += [f"- `{u['module']}`: {u['why']}" for u in rec["unclockable"]] or ["None."]
     out += ["", "## Findings", ""]
@@ -1301,7 +1297,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
         if art is None:
             art = Path(tmp)
             fetch_artifacts(args.slug, args.since - timedelta(days=7), args.until, art)
-        rec = build_record(args.repo, args.rev, args.since, args.until, art, priors, [*NUMERIC_MODULES, *args.numeric], args.quarantine_mark)
+        rec = build_record(args.repo, args.rev, args.since, args.until, art, priors, [*NUMERIC_MODULES, *args.numeric])
     _say(json.dumps(rec, indent=1, sort_keys=True) if args.format == "json" else render_markdown(rec))
     return 0
 
@@ -1335,7 +1331,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     rec.add_argument("--slug", default=DEFAULT_SLUG)
     rec.add_argument("--prior", action="append", default=[], help="an earlier record (md or json), chained for the 60-day evidence")
     rec.add_argument("--format", choices=("md", "json"), default="md")
-    rec.add_argument("--quarantine-mark", default="quarantine")
     rec.add_argument("--numeric", action="append", default=[], help="another numeric report-mode module (carries an alarm_line key)")
     rec.set_defaults(fn=_cmd_record)
     plan = sub.add_parser("deletion-plan", help="print the deletion plan of a settled record; edits nothing")
