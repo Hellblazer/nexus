@@ -397,8 +397,9 @@ header lines: `owner`, `guards` (the incident or bead it answers) and `class`.
 Its red count and catch count are derived, never hand-kept: a report script
 reads CI history the way strand B did (failing item per red run, plus the fix
 signal) and prints, per check, reds, catches and red hours in a window. A check
-with no catch in 60 days is put to retirement at the next 2-week review, one
-check at a time with Sam's decision (N and the cadence: Sam, 2026-11-27). For a class-U check, a catch is a
+with no catch in 60 days is deleted at the next 2-week review by default; the
+review keeps one only with a written reason in its record (retirement by default:
+Sam, 2026-11-27, T2 `nexus/sam-ruling-rdr258-retire-by-default-and-half-pins-2026-11-27`; N and the cadence: Sam, 2026-11-27). For a class-U check, a catch is a
 product catch. For a class-A check it is a guard catch (Sam, 2026-11-27, Q1;
 T2 `nexus/sam-ruling-rdr258-gate-answers-2026-11-27`): a red fixed by changing
 what the check's `guards:` header names. A check whose reds were all fixed by
@@ -754,11 +755,12 @@ automatic counts); for each numeric class-A check, its value, trend and a
 proposed alarm line, sent to Sam one check at a time; and the target for the
 ledger-and-ceiling commit share, which Sam left for Phase 0 to set.
 
-### Phase 1: Report mode for four class-A checks, the 2-week review, rule (h) and the review batches. Sam decides each demotion and alarm line, each batch, each retirement and the AGENTS.md rule; the implementer builds the reporting, runs the reviews and proposes the batches without him.
+### Phase 1: Report mode for four class-A checks, the 2-week review, rule (h) and the review batches. Sam decides each demotion and alarm line, each batch and the AGENTS.md rule; the implementer builds the reporting, runs the reviews and proposes the batches without him.
 
 **Sam decides**: each step's demotion, with the alarm line of a numeric check;
-each step 7 batch; each retirement the review proposes; the AGENTS.md rule in
-step 6.
+each step 7 batch; the AGENTS.md rule in step 6. Retirement needs no
+per-check decision: a check is deleted by default at 60 days, and the review
+record names any it keeps, with the reason, for Sam to read.
 **Without Sam**: the report-mode code, the advisory job layout, the review
 records, the cause test in step 3, the step 6 draft, and each batch proposal.
 
@@ -799,7 +801,8 @@ The first review runs two weeks after this phase's first demotion lands, and
 every two weeks after. Each writes a review record (Technical Design); Sam
 reads it. The first three records are the CA-3 measurement. From this step on,
 the review applies the retirement rule (b): a check with no guard catch in the
-60 days since its demotion is put to retirement, with Sam's decision per check.
+60 days since its demotion is deleted by default, and the review record gives a
+written reason for any it keeps (T2 `nexus/sam-ruling-rdr258-retire-by-default-and-half-pins-2026-11-27`).
 
 #### Step 6: No new gate per incident [Sam]
 
@@ -904,7 +907,10 @@ fixed or deleted.
 **Without Sam**: rewriting pins as behaviour tests, and fixing stale and
 ambient-coupled tests.
 
-Rewrite or delete the about 386 repository pins; fix the stale and
+Delete at least half of the about 386 repository pins (193 or more) and rewrite
+the rest as behaviour tests (T2 `nexus/sam-ruling-rdr258-retire-by-default-and-half-pins-2026-11-27`). The implementer proposes the deletion list,
+each entry with the behaviour it pins or why none exists, and Sam approves it in
+one batch. Fix the stale and
 ambient-coupled tests and the Windows portability failures to own their state.
 A diff that touches the Windows set's push filter is tested on native Windows
 before its push (AGENTS.md worktree rule 14).
@@ -1135,3 +1141,4 @@ split into its own RDR at accept if Sam prefers.
 - 2026-11-27: Sam's accept condition (T2 `nexus/sam-ruling-rdr258-accept-2026-11-27`; 258-research-20). Phase 1 step 7: the 2-week review demotes the class-A remainder in batches from Phase 0's report, each batch to Sam. The ruling sets no stop condition; the step 7 batches are what give the under-30% accounting target a path. This disposes of round 3's planning blocker "no phase demotes the class-A remainder". Fix-check one-liners: `guards:` carries the guarded paths, so the report can derive a guard catch; each 60-day clock starts at the demotion commit on develop, and every class-A check now has a demoting step or batch.
 - 2026-11-27: Gate round 4 — PASSED (0 Critical, 7 Significant, 0 ship-blocker(s)); blob `f4923e254b8b`; critique `nexus_rdr/258-gate-critique-2026-11-27-r4`.
 - 2026-11-27: Accepted by Sam (T2 `nexus/sam-ruling-rdr258-accept-2026-11-27`), on round 4's PASS (`nexus_rdr/258-gate-latest`). Round 3's planning blocker is disposed by Phase 1 step 7 (4cd68e5d09); round 4's 7 Significant residuals are discover-at-implementation and are carried to their phase beads under epic nexus-2jomg.
+- 2026-11-27: Amended on Sam's word (T2 `nexus/sam-ruling-rdr258-retire-by-default-and-half-pins-2026-11-27`): rule (b) and Phase 1 step 5 make retirement the default (a class-A check with no guard catch in 60 days is deleted unless the review keeps it with a written reason); Phase 6 deletes at least half of the about 386 repository pins, the list approved by Sam in one batch.
