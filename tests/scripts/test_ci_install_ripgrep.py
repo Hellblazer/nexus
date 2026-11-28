@@ -136,5 +136,5 @@ def test_every_workflow_ripgrep_install_goes_through_the_script() -> None:
                 via_script += "scripts/ci_install_ripgrep.sh" in run
     assert not bare, f"a bare apt install of ripgrep is back: {bare}"
     # ci.yml x3 (test, docs readers, integration) + the nightly's gate and slow jobs (the slow job runs
-    # test_doctor_search.py, whose doctor sweep asserts rg is present)
-    assert via_script == 5, via_script
+    # test_doctor_search.py, whose doctor sweep asserts rg is present) + the quarantine nightly's pytest job
+    assert via_script == 6, via_script
