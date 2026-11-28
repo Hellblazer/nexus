@@ -25,6 +25,7 @@ import pytest
 
 from nexus._install import generation_core as gen_core
 from nexus._install import layout_core as lc
+from tests._module_seam import setattr_in
 
 WIN = "win32"
 
@@ -92,7 +93,7 @@ class TestFilePointers:
         _flip(a, tools)
         renames: list[tuple[str, str]] = []
         real_rename = os.rename
-        monkeypatch.setattr(os, "rename", lambda s, d, *k, **kw: (renames.append((str(s), str(d))), real_rename(s, d))[1])
+        setattr_in(monkeypatch, "nexus._install.generation_core", "os.rename", lambda s, d, *k, **kw: (renames.append((str(s), str(d))), real_rename(s, d))[1])
         seen_absent: list[bool] = []
         real_replace = os.replace
 
@@ -100,7 +101,7 @@ class TestFilePointers:
             seen_absent.append(not os.path.lexists(dst))
             return real_replace(src, dst, *a_, **kw)
 
-        monkeypatch.setattr(os, "replace", watching_replace)
+        setattr_in(monkeypatch, "nexus._install.generation_core", "os.replace", watching_replace)
         _flip(b, tools)
         assert not [r for r in renames if "current" in r[0]], renames
         assert seen_absent and not any(seen_absent)
@@ -124,7 +125,7 @@ class TestFilePointers:
         def boom(*_a, **_k):
             raise OSError(5, "Access is denied")
 
-        monkeypatch.setattr(os, "replace", boom)
+        setattr_in(monkeypatch, "nexus._install.generation_core", "os.replace", boom)
         with pytest.raises(gen_core.GenerationError):
             _flip(b, tools)
         monkeypatch.undo()
@@ -204,15 +205,14 @@ class TestJunctionEraInstalls:
         """Under RedirectionGuard ``Path.exists`` on a path through the junction raises
         OSError 448. The flip must reach the pointer with ``lstat``-class calls only."""
         a, b = self._legacy_install(tools)
-        real_stat = os.stat
+        real_stat = Path.stat
 
-        def guarded(path, *args, **kwargs):
-            if str(path).startswith(str(tools / "current")) or str(path).startswith(str(tools / "previous")):
-                if kwargs.get("follow_symlinks", True) and not args:
-                    raise OSError(448, "The path cannot be traversed because it contains an untrusted mount point")
-            return real_stat(path, *args, **kwargs)
+        def guarded(self: Path, *args, **kwargs):
+            if str(self).startswith((str(tools / "current"), str(tools / "previous"))) and kwargs.get("follow_symlinks", True):
+                raise OSError(448, "The path cannot be traversed because it contains an untrusted mount point")
+            return real_stat(self, *args, **kwargs)
 
-        monkeypatch.setattr(os, "stat", guarded)
+        monkeypatch.setattr(Path, "stat", guarded)
         c = _gen(tools, "gen-C")
         _flip(c, tools)
         monkeypatch.undo()

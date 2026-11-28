@@ -715,6 +715,9 @@ _TREE_ALLOWED: dict[tuple[str, str, str], str] = {
     # -- the argv is an absolute path to an interpreter or an installed binary ------
     ("nexus/_install/layout_core.py", "declared_console_scripts_detail", "unresolved-spawn-argv"):
         "head is the generation's own venv interpreter, an absolute path (bootstrap-safe module)",
+    ("nexus/_install/_nx_dispatch.py", "main", "unresolved-spawn-argv"):
+        "head is <generation>/Scripts/<name>.exe, built from the absolute path the pointer file names and "
+        "checked to be a file first (the Windows dispatcher; standard library only, nexus-f9bgu.47)",
     ("nexus/_install/lease_core.py", "self_test", "unresolved-spawn-argv"):
         "head is <generation>/bin/python (Scripts/python.exe), built from the absolute generation path and "
         "checked to be a file first (bootstrap-safe module)",
@@ -744,6 +747,8 @@ _TREE_ALLOWED: dict[tuple[str, str, str], str] = {
     ("nexus/_install/generation_core.py", "_run", "unresolved-spawn-argv"):
         "argv = _off_cwd(argv) one line above (the module's stdlib-only copy of argv_off_cwd)",
     ("nexus/_install/generation_core.py", "build_generation", "bare-argv0"):
+        "install is spliced into the argv of the _run call that follows (_run resolves it)",
+    ("nexus/_install/generation_core.py", "ensure_dispatchers", "bare-argv0"):
         "install is spliced into the argv of the _run call that follows (_run resolves it)",
     ("nexus/_install/census_core.py", "<module>", "bare-argv0"):
         "PS_COMMAND, spawned only by _take_snapshot's non-win32 arm (see below)",

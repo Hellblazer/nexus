@@ -213,27 +213,17 @@ def venv_python(venv: Path, *, platform: str | None = None) -> Path:
     return venv_script(venv, "python", platform=platform)
 
 
-#: The first line of a pointer FILE, and what tells one from any other file.
-#: Windows RedirectionGuard refuses to traverse a directory junction a
-#: non-elevated process made (WinError 448), and an account without Developer
-#: Mode cannot make a symlink (WinError 1314), so on Windows the generation
-#: pointers (``current``, ``previous``, the legacy ledger entry) are plain files
-#: that hold the target's path. Nothing is traversed, so nothing can be
-#: untrusted (nexus-f9bgu.47).
+#: The first line of a pointer FILE. RedirectionGuard refuses to traverse a junction a non-elevated
+#: process made (WinError 448) and a symlink needs Developer Mode (1314), so the Windows generation
+#: pointers (``current``, ``previous``, the legacy ledger entry) are plain files holding the
+#: target's path: nothing is traversed (nexus-f9bgu.47).
 POINTER_MAGIC = "nx-pointer 1"
-
-#: The most of a pointer file that is read. A path is far shorter.
 _POINTER_READ_BYTES = 4096
 
 
 def write_pointer(path: Path | str, target: Path | str) -> None:
-    """Write the pointer file *path* naming the absolute path *target*.
-
-    Plain write, no rename: a caller that must replace a live pointer writes a
-    sibling and ``os.replace``s it (``generation_core.swap_link``). A relative
-    target and one with a line break are refused, since the reader would
-    misread both.
-    """
+    """Write the pointer file *path* naming the absolute path *target* (a relative one, or one with a
+    line break, is refused). A live pointer is replaced by ``generation_core.swap_link``."""
     text = str(target)
     if "\n" in text or "\r" in text:
         raise LayoutError(f"a pointer target must be one line, got {text!r}")
@@ -243,14 +233,9 @@ def write_pointer(path: Path | str, target: Path | str) -> None:
 
 
 def read_pointer(path: Path | str) -> str | None:
-    """The target a pointer FILE names, or ``None`` when *path* is not one.
-
-    Never raises: a missing path, a directory, a junction RedirectionGuard
-    will not open (``OSError`` 448) and a file with another first line are all
-    "not a pointer". A junction is opened with ``open``, which traverses; one
-    is told apart first by ``os.path.isjunction`` and ``is_symlink``, which do
-    not.
-    """
+    """The target a pointer FILE names, or ``None`` when *path* is not one. Never raises: a missing
+    path, a directory, a junction (told apart first, since ``open`` would traverse it and
+    RedirectionGuard answers OSError 448) and a file with another first line are "not a pointer"."""
     candidate = Path(path)
     try:
         if candidate.is_symlink() or os.path.isjunction(candidate) or candidate.is_dir():
@@ -270,16 +255,12 @@ def read_pointer(path: Path | str) -> str | None:
 def is_link(
     path: Path | str, *, platform: str | None = None, isjunction=None,
 ) -> bool:
-    """True when *path* is a symlink, or on Windows a directory junction or a
-    pointer file (:data:`POINTER_MAGIC`).
+    """True when *path* is a symlink, or on Windows a directory junction or a pointer file.
 
-    A junction is NOT a symlink to ``Path.is_symlink`` (measured on Windows,
-    Python 3.13: ``is_symlink()`` False, ``os.path.isjunction()`` True), so
-    every "is this a pointer" test that was written against symlinks reads a
-    junction as an ordinary directory -- and the first thing done to an
-    ordinary directory here is ``rmtree``. *isjunction* is the test seam. A
-    probe that raises (RedirectionGuard answers ``OSError`` 448 where a probe
-    would have said no) means "not a link".
+    A junction is NOT a symlink to ``Path.is_symlink`` (measured, Python 3.13: ``is_symlink()``
+    False, ``os.path.isjunction()`` True), so a test written against symlinks reads one as an
+    ordinary directory, and the first thing done to one here is ``rmtree``. *isjunction* is the
+    test seam. A probe that raises (RedirectionGuard: OSError 448) means "not a link".
     """
     candidate = Path(path)
     try:
@@ -300,14 +281,9 @@ def is_link(
 
 
 def read_link(path: Path | str, *, platform: str | None = None, readlink=None) -> str:
-    """The target of the link at *path*, as written.
-
-    Unchanged from ``os.readlink`` on POSIX. On Windows a pointer file's target
-    is read from the file; anything else is ``os.readlink`` (a junction's, which
-    does not traverse it, so a junction-era install stays readable under
-    RedirectionGuard) with the extended-length prefix stripped
-    (:func:`strip_extended_prefix`). *readlink* is the test seam.
-    """
+    """The target of the link at *path*, as written: ``os.readlink`` on POSIX; on Windows a pointer
+    file's target, else ``os.readlink`` (which does not traverse a junction, so a junction-era install
+    stays readable under RedirectionGuard) with the extended-length prefix stripped. *readlink* is the seam."""
     if _is_nt(platform) and readlink is None:
         pointed = read_pointer(path)
         if pointed is not None:

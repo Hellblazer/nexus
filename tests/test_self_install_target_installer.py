@@ -340,6 +340,8 @@ WINDOWS_SUPPORT = {
     "nexus/_install/lease_core.py": "# stand-in\n",
     "nexus/_install/_nx_lease.py": "# stand-in\n",
     "nexus/_install/_nx_dispatch.py": "# stand-in\n",
+    "nexus/_install/dispatch_core.py": "# stand-in\n",
+    "nexus/_install/userpath_core.py": "# stand-in\n",
     "nexus/_install/winproc_core.py": "# stand-in\n",
     "nexus/_install/overrides.txt": "",
 }

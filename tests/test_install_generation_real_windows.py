@@ -34,6 +34,7 @@ from nexus._install import gc_core
 from nexus._install import generation_core as gen_core
 from nexus._install import layout_core as lc
 from tests._child_encoding import PYTHON_CHILD_ENCODING
+from tests._settle import settle
 
 ON_WINDOWS = os.name == "nt"
 
@@ -315,7 +316,7 @@ def _build_demo_wheel(directory: Path) -> Path:
     files = {
         "nxdemo.py": (
             "import sys\nimport time\n\n\ndef main():\n"
-            "    if sys.argv[1:2] == ['sleep']:\n        time.sleep(30)\n        return\n"
+            "    if sys.argv[1:2] == ['sleep']:\n        open(sys.argv[2], 'w').close()\n        time.sleep(30)\n        return\n"
             "    if sys.argv[1:2] == ['echo']:\n"
             "        print('args=%r' % (sys.argv[1:],))\n"
             "        print('stdin=' + sys.stdin.readline().strip())\n"
@@ -383,9 +384,10 @@ class TestRealDispatchers:
         assert lc.compare_key(self._run(dispatcher)) == lc.compare_key(str(one)), "the dispatcher ran generation A"
 
         # A process is running THROUGH the dispatcher while the flip happens.
-        child = subprocess.Popen([str(dispatcher), "sleep"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ready = tmp_path / "ready"
+        child = subprocess.Popen([str(dispatcher), "sleep", str(ready)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            time.sleep(2.0)
+            settle(lambda: not ready.exists(), deadline=120.0, what="the demo launcher started")
             assert child.poll() is None, "the demo launcher should be sleeping"
             assert gen_core.ensure_dispatchers(tools, two, dist="nxdemo") == [], "nothing new to write"
             gen_core.flip_current(two, tools)

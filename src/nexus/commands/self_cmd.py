@@ -37,9 +37,8 @@ caller. It now distinguishes three sites rather than two:
 
 NATIVE WINDOWS (RDR-224, nexus-f9bgu.47). ``bash`` on Windows is the WSL
 launcher, so every ``_sh``/``bash`` call here has a Windows twin that calls
-``nexus._install.generation_core`` directly: build with uv, flip a pointer
-FILE (not a junction: RedirectionGuard refuses one), put ``<tools>\\bin`` (fixed
-dispatchers that read the pointer) first on the user PATH (the Windows shim: nexus
+``nexus._install.generation_core`` directly: build with uv, flip a pointer file,
+put ``<tools>\\bin`` (fixed dispatchers that read it) first on the user PATH (the shim: nexus
 writes no launcher into uv's bin dir, because a running one cannot be
 replaced), reap with Windows-aware rules, migrate a legacy uv tree. Each branch
 asks ``_is_windows()``; the POSIX path below it is unchanged. Out of scope on
@@ -1770,15 +1769,13 @@ def _windows_build_flip_shims(
 
 
 def _windows_flip_and_path(generation: Path, *, tools: Path, bootstrap: bool = False) -> None:
-    """Make the dispatchers, flip ``current`` (a pointer file) to *generation*, put
-    ``<tools>\\bin`` on the user PATH, and repoint the logon task. On the bootstrap path the failure names
+    """Flip ``current`` (a pointer file) to *generation*, put ``<tools>\\bin`` on the user
+    PATH, and repoint the logon task. On the bootstrap path the failure names
     the same ``--bootstrap`` command, because the plain one has no ``nx`` to
     run there."""
     core = _generation()
     try:
-        # The dispatchers first: a generation they cannot reach is never made current.
-        for line in core.ensure_dispatchers(tools, generation, platform=_plat()):
-            click.echo(line, err=True)
+        core.ensure_dispatchers(tools, generation, platform=_plat())  # first: no dispatcher, no flip
         core.flip_current(generation, tools, platform=_plat())
         _echo_path_result(core.ensure_launcher_path(tools))
     except core.GenerationError as exc:

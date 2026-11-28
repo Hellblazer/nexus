@@ -26,8 +26,10 @@ from pathlib import Path
 import pytest
 
 from nexus._install import _nx_dispatch as dispatch
+from nexus._install import dispatch_core
 from nexus._install import generation_core as gen_core
 from nexus._install import layout_core as lc
+from tests._module_seam import setattr_in
 from tests.test_install_generation_windows import FakeUv
 
 WIN = "win32"
@@ -62,17 +64,17 @@ class TestLauncherDirectory:
 
 class TestDispatchWheel:
     def test_it_installs_one_console_script_that_runs_the_dispatcher_module(self, tmp_path: Path) -> None:
-        wheel = gen_core.dispatch_wheel(tmp_path, "nx-mcp")
+        wheel = dispatch_core.dispatch_wheel(tmp_path, "nx-mcp", gen_core.DISPATCH_VERSION)
         with zipfile.ZipFile(wheel) as z:
             names = z.namelist()
             entry = z.read(next(n for n in names if n.endswith("entry_points.txt"))).decode()
             module_name = next(n for n in names if n.endswith(".py"))
-            assert z.read(module_name).decode() == gen_core.dispatch_source()
+            assert z.read(module_name).decode() == dispatch_core.dispatch_source()
         assert entry == "[console_scripts]\nnx-mcp = nxdispatch_nx_mcp:console_main\n"
         assert module_name == "nxdispatch_nx_mcp.py"
 
     def test_the_record_hashes_match_the_content(self, tmp_path: Path) -> None:
-        wheel = gen_core.dispatch_wheel(tmp_path, "nx")
+        wheel = dispatch_core.dispatch_wheel(tmp_path, "nx", gen_core.DISPATCH_VERSION)
         with zipfile.ZipFile(wheel) as z:
             record = z.read(next(n for n in z.namelist() if n.endswith("RECORD"))).decode().splitlines()
             for line in record:
@@ -86,8 +88,8 @@ class TestDispatchWheel:
     def test_the_same_inputs_make_the_same_bytes(self, tmp_path: Path) -> None:
         (tmp_path / "a").mkdir()
         (tmp_path / "b").mkdir()
-        one = gen_core.dispatch_wheel(tmp_path / "a", "nx")
-        two = gen_core.dispatch_wheel(tmp_path / "b", "nx")
+        one = dispatch_core.dispatch_wheel(tmp_path / "a", "nx", gen_core.DISPATCH_VERSION)
+        two = dispatch_core.dispatch_wheel(tmp_path / "b", "nx", gen_core.DISPATCH_VERSION)
         assert one.read_bytes() == two.read_bytes()
 
 
@@ -172,7 +174,7 @@ class TestEnsureDispatchers:
                 raise PermissionError(5, "Access is denied")  # the image is running
             return real_replace(src, dst, *a, **k)
 
-        monkeypatch.setattr(os, "replace", refuse_running)
+        setattr_in(monkeypatch, "nexus._install.dispatch_core", "os.replace", refuse_running)
         gen_core.ensure_dispatchers(tools, generation, run=FakeShimUv(), platform=WIN)
         monkeypatch.undo()
         assert (_bin(tools) / "nx.exe").read_bytes().endswith(b"nxdispatch_nx-2-py3-none-any.whl")
@@ -386,3 +388,18 @@ class TestDispatcherModule:
         from nexus import target_installer
 
         assert "_nx_dispatch.py" in target_installer.WINDOWS_FILES
+
+
+@pytest.mark.parametrize("module", ["dispatch_core", "userpath_core"])
+def test_the_new_install_cores_import_nothing_from_nexus(module: str) -> None:
+    """Like their siblings they run at bootstrap with nothing installed
+    (``tests/test_install_generation_core_is_bootstrap_safe.py``)."""
+    path = Path(dispatch.__file__).with_name(f"{module}.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    roots = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            roots.add((node.module or "").split(".")[0])
+    assert "nexus" not in roots, roots

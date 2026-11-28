@@ -691,21 +691,10 @@ def _check_orphan_uv_install() -> list[HealthResult]:
     # `nx self install` once nothing runs from it. An unregistered one is
     # never reaped by anything -- the state every checkout-driven box sat in
     # until nexus-hibpr -- and the row used to render both identically.
-    from nexus.install_layout import (  # noqa: PLC0415 — deferred import
-        compare_key,
-        is_link,
-        legacy_generation_link,
-        read_link,
-    )
-
+    from nexus._install.generation_core import ledger_registers  # noqa: PLC0415 — deferred import
+    from nexus.install_layout import legacy_generation_link  # noqa: PLC0415 — deferred import
     link = legacy_generation_link()
-    # Read the pointer, never ``link.resolve()``: the ledger entry is a pointer FILE on
-    # Windows (nexus-f9bgu.47), and a junction one makes resolve() raise OSError 448 under
-    # RedirectionGuard.
-    try:
-        registered = is_link(link) and compare_key(read_link(link)) == compare_key(legacy)
-    except OSError:
-        registered = False
+    registered = ledger_registers(link, legacy)
     if registered:
         return [HealthResult(
             label="Orphan uv install", ok=False, warn=True,
@@ -1832,10 +1821,9 @@ def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
     GENERATION EXCEPTION (RDR-224, nexus-7xzc1): when this process runs from
     a side-by-side generation (``<tools>/gen-*``), its prefix is the
     installed artifact, not a dev venv, and the plain first PATH hit is what
-    the plugin launches. On Windows the first hit is a dispatcher in ``<tools>\\bin``
-    (nexus-f9bgu.47; a junction into the running generation before that), which
-    starts the current generation's own program; demoting it probed uv's legacy
-    launcher, which survives until the reap.
+    the plugin launches. On Windows that hit is a dispatcher in ``<tools>\\bin``
+    (nexus-f9bgu.47) that starts the current generation's own program; demoting it
+    probed uv's legacy launcher, which survives until the reap.
 
     Returns ``(path_or_none, is_own_venv)``.
     """
