@@ -76,7 +76,10 @@ META_RUN = "uv run pytest -q -rfEs -p no:randomly --color=no -o addopts= -m '(li
 GUARD_RUN = "uv run pytest -q -rfEsp -p no:randomly --color=no -o addopts= -m 'not integration and not slow'"
 #: Meta-tests read files; none needs the engine, so no gate jar is built or checked for them, and
 #: no suite lease is taken (tests/conftest.py takes one only for a substrate that boots the engine).
-ENV = {"NX_TEST_T2_SUBSTRATE": "none"}
+#: NX_WIRE_PAIRING_MODE=report (RDR-258 Phase 2, nexus-2jomg.3): this is the pre-push sweep of a develop push, so the wire-pairing
+#: lint reports a finding there as the push gate does, and does not fail. Every other caller of that lint (a hand run, the release
+#: PR into main) leaves it unset and blocks.
+ENV = {"NX_TEST_T2_SUBSTRATE": "none", "NX_WIRE_PAIRING_MODE": "report"}
 #: The guard run, as CI's census-only job runs it (.github/workflows/ci.yml): tests/conftest.py
 #: skip-marks every item outside the census module, so the changed test files are collected (the
 #: census judges them) but none executes, and any non-zero exit is a real red.
