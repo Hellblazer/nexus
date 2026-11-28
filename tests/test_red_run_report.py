@@ -902,14 +902,14 @@ def test_cli_candidates_writes_a_json_header_with_the_hashes(
     extraction_file, out = tmp_path / "x.jsonl.gz", tmp_path / "c.json"
     rrr.write_extraction(_extract(snapshot, history[0]), extraction_file)
     repo_root = Path(__file__).resolve().parent.parent
-    assert rrr.main(["candidates", "--extraction", str(extraction_file), "--out", str(out),
-                     "--repo", str(repo_root)]) == rrr.EXIT_OK
+    assert rrr.main(["candidates", "--extraction", str(extraction_file), "--out", str(out)]) == rrr.EXIT_OK
     got = json.loads(out.read_text())
     header = got["header"]
     assert header["archive_sha256"] == rrr.PHASE0_ARCHIVE_SHA256 == (
         "520722bfbf0a9e75b566093f5ab19078ef3e3c41f39af4a356714d07b7f8a968")
     assert header["extraction_sha256"] == hashlib.sha256(extraction_file.read_bytes()).hexdigest()
-    assert len(header["script_commit"]) == 40 and header["window"] == ["2026-10-01", "2026-10-01"]
+    assert header["script_sha256"] == hashlib.sha256((repo_root / "scripts" / "red_run_report.py").read_bytes()).hexdigest()
+    assert "script_commit" not in header and header["window"] == ["2026-10-01", "2026-10-01"]
     assert header["snapshot_final"] is False and set(got) == {"header", "candidates", "unattributed"}
     assert "2 flake tests, 3 unattributed tests" in capsys.readouterr().out
     assert out.read_text().endswith("\n") and json.loads(out.read_text()) == got
@@ -925,12 +925,10 @@ def test_candidates_out_is_deterministic_gzip_when_the_path_ends_in_gz(
         snapshot: Path, history: tuple[Path, dict[str, str]], tmp_path: Path) -> None:
     extraction_file = tmp_path / "x.jsonl.gz"
     rrr.write_extraction(_extract(snapshot, history[0]), extraction_file)
-    repo_root = Path(__file__).resolve().parent.parent
     plain, one, two = tmp_path / "c.json", tmp_path / "one" / "c.json.gz", tmp_path / "two" / "c.json.gz"
     for out in (plain, one, two):
         out.parent.mkdir(exist_ok=True)
-        assert rrr.main(["candidates", "--extraction", str(extraction_file), "--out", str(out),
-                         "--repo", str(repo_root)]) == rrr.EXIT_OK
+        assert rrr.main(["candidates", "--extraction", str(extraction_file), "--out", str(out)]) == rrr.EXIT_OK
     assert one.read_bytes()[:2] == b"\x1f\x8b" and one.read_bytes() == two.read_bytes()   # mtime 0, no name
     with gzip.open(one, "rt", encoding="utf-8") as fh:
         assert fh.read() == plain.read_text()

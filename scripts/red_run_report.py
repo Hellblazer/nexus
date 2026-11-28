@@ -6,7 +6,7 @@
     red_run_report.py extract --snapshot DIR --green-jobs GREENDIR --repo . --out scripts/red-run-extraction-2026-09-23_2026-11-23.jsonl.gz
     red_run_report.py report  --extraction FILE [--top 15] [--repo .] [--sample RULE N --seed S]
     red_run_report.py mvv     --extraction FILE
-    red_run_report.py candidates --extraction FILE --out FILE.json[.gz] [--repo .]
+    red_run_report.py candidates --extraction FILE --out FILE.json[.gz]
 
 ``extract`` reads the Phase 0 step 1 snapshot (``runs.jsonl``, ``jobs/<run>.json``,
 ``logs/<run>/<job>.log``) and the git history, and writes one compressed jsonl file with four
@@ -1180,12 +1180,13 @@ def write_candidates(report: Row, path: Path) -> None:
         gz.write(text)
 
 
-def candidates_header(an: Mapping[str, Any], extraction: Path, repo: Path, archive_sha256: str) -> Row:
+def candidates_header(an: Mapping[str, Any], extraction: Path, archive_sha256: str) -> Row:
+    """Header of the candidates file; ``script_sha256`` hashes this file, so a rebase does not stale it."""
     meta = an["meta"]
     return {"window": meta.get("window"), "snapshot_final": bool(meta.get("final")),
             "archive_sha256": archive_sha256, "extraction": extraction.name,
             "extraction_sha256": hashlib.sha256(extraction.read_bytes()).hexdigest(),
-            "script_commit": _git(repo, "log", "-n1", "--format=%H", "--", "scripts/red_run_report.py").strip()}
+            "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
 
 
 # --- cli -----------------------------------------------------------------------------------
@@ -1224,7 +1225,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     cd = sub.add_parser("candidates", help="write the flake and unattributed named tests as JSON")
     cd.add_argument("--extraction", type=Path, required=True)
     cd.add_argument("--out", type=Path, required=True)
-    cd.add_argument("--repo", type=Path, default=Path("."))
     cd.add_argument("--archive-sha256", default=PHASE0_ARCHIVE_SHA256)
     mv = sub.add_parser("mvv")
     mv.add_argument("--extraction", type=Path, required=True)
@@ -1243,7 +1243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_OK
     an = analyze(read_extraction(args.extraction))
     if args.cmd == "candidates":
-        report = candidates_report(an, candidates_header(an, args.extraction, args.repo, args.archive_sha256))
+        report = candidates_report(an, candidates_header(an, args.extraction, args.archive_sha256))
         write_candidates(report, args.out)
         h = report["header"]
         sys.stdout.write(f"wrote {args.out}: {h['candidate_tests']} flake tests, "
