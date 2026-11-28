@@ -1,24 +1,28 @@
 # The flake quarantine (RDR-258 Phase 5, nexus-2jomg.6). One file, one list.
 #
-# A test named here gets the `quarantine` marker at collection (tests/_quarantine.py), so no test file is edited
-# to quarantine a test. Being listed changes nothing about whether the test runs in the default suite or in CI;
-# the nightly job (.github/workflows/quarantine-nightly.yml) runs `-m quarantine`. Taking quarantined tests out
-# of the merge gate is Sam's decision and is not made here.
+# A pytest test named here gets the `quarantine` marker at collection (tests/_quarantine.py), so no test file is
+# edited to quarantine a test. Being listed changes nothing about whether the test runs in the default suite or
+# in CI; the nightly job (.github/workflows/quarantine-nightly.yml) runs the listed tests several times a night.
+# Taking quarantined tests out of the merge gate is Sam's decision and is not made here.
 #
-# Each entry, by `scripts/quarantine_report.py add` (never by hand, so `source` is a real hash):
-#   nodeid   the exact pytest node id, e.g. tests/test_x.py::TestY::test_z[param]
-#   since    the date it was quarantined (TOML date)
-#   deadline since + 14 days, checked on every collection and by the report (Sam, 2026-11-27)
+# Each entry, written by `scripts/quarantine_report.py add` (never by hand, so `source` is a real hash):
+#   nodeid   pytest: the exact id, e.g. tests/test_x.py::TestY::test_z[param]; java: Class::method
+#   kind     "pytest" or "java" (a java entry runs through surefire, -Dtest=Class#method)
+#   since    the date it was quarantined (TOML date; today or yesterday, UTC)
+#   deadline since + 14 days, checked whenever the registry is read (Sam, 2026-11-27)
 #   bead     the bead that owns the fix
-#   reason   one line: what flakes, and where
+#   reason   one line: what flakes, and where; a test taken from the `unattributed` class carries the 2-week
+#            review's reference here (`add --review`)
 #   source   sha256 of the candidates file (`red_run_report.py candidates` output) the nodeid came from
 #
-# A nodeid that no run collects fails the run loudly, so a quarantine of a deleted or renamed test cannot rot.
+# A malformed registry fails every pytest run. With NX_QUARANTINE_STRICT=1 (the nightly) a pytest entry that no
+# collected test has fails the run too, so a quarantine of a deleted or renamed test cannot rot.
 # A passing quarantined test is not released automatically: delete its entry by hand.
-# Past its deadline a test is fixed or deleted, and `scripts/quarantine_report.py` exits non-zero until then.
+# Past its deadline a test is fixed or deleted, and `scripts/quarantine_report.py` exits 1 until then.
 #
 # [[quarantine]]
 # nodeid = "tests/test_example.py::test_flaky"
+# kind = "pytest"
 # since = 2026-11-27
 # deadline = 2026-12-11
 # bead = "nexus-xxxxx"

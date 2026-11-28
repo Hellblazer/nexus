@@ -2,24 +2,32 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Report the flake quarantine, and add to it (RDR-258 Phase 5, nexus-2jomg.6).
 
-    scripts/quarantine_report.py [--registry P] [--today D] [--json] [--results F]
-    scripts/quarantine_report.py count [--registry P]
-    scripts/quarantine_report.py add --candidates F --bead B --reason R [--since D] [--registry P] NODEID...
+    quarantine_report.py [report] [--registry P] [--today D] [--json] [--junit PATH]... [--expect-all]
+    quarantine_report.py select --kind pytest|java [--format lines|surefire|surefire-exclude] [--registry P]
+    quarantine_report.py classify --rc N [--junit PATH]...
+    quarantine_report.py add --candidates F --bead B --reason R [--since D] [--review REF] [--registry P] NODEID...
 
-The report prints, for each entry in ``tests/quarantine.toml``, its age in days, its deadline and the days left,
+``report`` prints, for each entry in ``tests/quarantine.toml``, its age in days, its deadline and the days left,
 and flags an entry past its deadline (Sam, 2026-11-27: a quarantine lasts 14 days, then the test is fixed or
-deleted). It exits 1 when any entry is overdue, 2 on a registry or usage error, 3 under ``--expect-all`` when a
-listed test has no result (a run that never examined it), 0 otherwise. ``--json`` prints the
-same for machines. ``--results F`` joins the outcomes a ``NX_QUARANTINE_RESULTS`` run wrote (tests/_quarantine.py);
-a test that passed is not released by this script or by any job: remove its entry by hand.
+deleted). With ``--junit`` (a junit file, or a directory searched for ``*.xml``; repeatable) it joins each entry's
+runs, "passed N of N", "failed k of N". Exit 1 when any entry is overdue; 3 under ``--expect-all`` when an entry
+has no run that examined it (no testcase, or only skips); 2 on a registry or usage error; 0 otherwise. ``--json``
+prints the same for machines.
 
-``count`` prints the number of entries and nothing else (the nightly workflow's first job reads it).
+``select`` prints the entries of one kind: one nodeid per line, or the ``-Dtest=`` value surefire takes
+(``surefire``: only those tests; ``surefire-exclude``: everything but them).
+
+``classify`` says whether a runner's exit code is acceptable for one quarantine pass, from the pass's junit: 0 is,
+1 is only with a failed or errored testcase, anything else is not (exit 1 here means not acceptable).
 
 ``add`` writes an entry for each NODEID that the candidates file (``red_run_report.py candidates`` output) lists
-under ``flake_infra``. It refuses a nodeid the file does not name, and one found only under ``unattributed``, which
-is a class Sam decides. The registry's ``source`` is the sha256 of the candidates file.
+under ``candidates``. It refuses a nodeid the file does not name. A nodeid found only under ``unattributed`` is
+accepted only with ``--review <ref>`` (the 2-week review's decision, stored in the entry's reason), one nodeid per
+call. ``--since`` may be today or yesterday (UTC), never later or earlier. The registry's ``source`` is the sha256
+of the candidates file.
 
-Standard library only; the registry format and the candidates reader are in ``tests/_quarantine_registry.py``.
+Standard library only; the registry format, the candidates reader and the junit tally are in
+``tests/_quarantine_registry.py``.
 """
 from __future__ import annotations
 
@@ -34,8 +42,6 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from tests import _quarantine_registry as reg  # noqa: E402
 
-_PASSED_NOTE = "passed: release by hand (remove the entry)"
-
 
 def _day(text: str) -> date:
     try:
@@ -44,34 +50,22 @@ def _day(text: str) -> date:
         raise argparse.ArgumentTypeError(f"{text!r} is not a date (YYYY-MM-DD)") from exc
 
 
-def _load(path: Path) -> list[reg.Entry]:
+def _load(args: argparse.Namespace) -> list[reg.Entry]:
     try:
-        return reg.load(path)
+        return reg.load(args.registry)
     except OSError as exc:
-        raise reg.RegistryError(f"cannot read the registry {path}: {exc}") from exc
+        raise reg.RegistryError(f"cannot read the registry {args.registry}: {exc}") from exc
 
 
-def _results(path: Path | None) -> dict[str, str] | None:
-    if path is None:
-        return None
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-        results = doc["results"]
-        if not isinstance(results, dict):
-            raise TypeError("results is not an object")
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise reg.RegistryError(f"cannot read the results file {path}: {exc}") from exc
-    return results
-
-
-def _row(e: reg.Entry, today: date, results: dict[str, str] | None) -> dict[str, object]:
+def _row(e: reg.Entry, today: date, cases: list[reg.Case] | None) -> dict[str, object]:
     row: dict[str, object] = {
-        "nodeid": e.nodeid, "since": e.since.isoformat(), "deadline": e.deadline.isoformat(), "bead": e.bead,
-        "reason": e.reason, "source": e.source, "age_days": e.age_days(today), "days_left": e.days_left(today),
-        "overdue": e.overdue(today),
+        "nodeid": e.nodeid, "kind": e.kind, "since": e.since.isoformat(), "deadline": e.deadline.isoformat(),
+        "bead": e.bead, "reason": e.reason, "source": e.source, "age_days": e.age_days(today),
+        "days_left": e.days_left(today), "overdue": e.overdue(today),
     }
-    if results is not None:
-        row["result"] = results.get(e.nodeid, "not run")
+    if cases is not None:
+        t = reg.tally(e, cases)
+        row.update(result=t.text(), passed=t.passed, failed=t.failed, skipped=t.skipped, runs=t.runs, examined=t.examined)
     return row
 
 
@@ -84,9 +78,9 @@ def _text(rows: list[dict[str, object]], today: date) -> str:
         left = int(r["days_left"])  # type: ignore[call-overload]
         when = f"{-left} days overdue" if left < 0 else f"{left} days left"
         flag = "OVERDUE" if r["overdue"] else "ok     "
-        line = f"  {flag} {r['nodeid']}  age {r['age_days']}d  deadline {r['deadline']}  {when}  {r['bead']}"
+        line = f"  {flag} {r['nodeid']} ({r['kind']})  age {r['age_days']}d  deadline {r['deadline']}  {when}  {r['bead']}"
         if "result" in r:
-            line += f"  [{r['result']}" + (f" -- {_PASSED_NOTE}" if r["result"] == "passed" else "") + "]"
+            line += f"  [{r['result']}]"
         lines.append(line)
     if overdue:
         lines.append(f"{overdue} past the 14-day deadline: fix or delete each test, then remove its entry")
@@ -94,53 +88,79 @@ def _text(rows: list[dict[str, object]], today: date) -> str:
 
 
 def _report(args: argparse.Namespace) -> int:
-    if args.expect_all and args.results is None:
-        raise reg.RegistryError("--expect-all needs --results")
-    today = args.today or date.today()
-    entries = _load(args.registry)
-    results = _results(args.results)
-    rows = [_row(e, today, results) for e in entries]
+    if args.expect_all and not args.junit:
+        raise reg.RegistryError("--expect-all needs --junit")
+    today = args.today or reg.today_utc()
+    entries = _load(args)
+    cases = reg.read_junit(args.junit) if args.junit else None
+    rows = [_row(e, today, cases) for e in entries]
     overdue = sum(1 for r in rows if r["overdue"])
-    unrun = [r["nodeid"] for r in rows if r.get("result") == "not run"] if args.expect_all else []
+    unexamined = [str(r["nodeid"]) for r in rows if args.expect_all and not r["examined"]]
     if args.json:
         print(json.dumps({"today": today.isoformat(), "count": len(rows), "overdue": overdue, "entries": rows}, indent=2))
     else:
         sys.stdout.write(_text(rows, today))
-    if unrun:
-        print(f"{len(unrun)} listed tests did not run (the run examined nothing for them): " + ", ".join(map(str, unrun)))
-    return 1 if overdue else 3 if unrun else 0
+    if unexamined:
+        print(f"{len(unexamined)} listed tests were not examined (no run, or only skips): " + ", ".join(unexamined))
+    return 1 if overdue else 3 if unexamined else 0
 
 
-def _count(args: argparse.Namespace) -> int:
-    print(len(_load(args.registry)))
+def _select(args: argparse.Namespace) -> int:
+    entries = [e for e in _load(args) if e.kind == args.kind]
+    if args.format == "surefire":
+        print(reg.surefire_selector(entries))
+    elif args.format == "surefire-exclude":
+        print(reg.surefire_exclusion(entries))
+    else:
+        for e in entries:
+            print(e.nodeid)
     return 0
+
+
+def _classify(args: argparse.Namespace) -> int:
+    present = [p for p in args.junit if p.exists()]
+    ok, why = reg.classify_exit(args.rc, reg.read_junit(present))
+    print(f"quarantine pass: {why}")
+    return 0 if ok else 1
 
 
 def _add(args: argparse.Namespace) -> int:
     added = reg.add_entries(
-        args.registry, args.candidates, args.nodeids, bead=args.bead, reason=args.reason, since=args.since or date.today()
+        args.registry, args.candidates, args.nodeids, bead=args.bead, reason=args.reason,
+        today=args.today or reg.today_utc(), since=args.since, review=args.review,
     )
     for e in added:
-        print(f"quarantined {e.nodeid} since {e.since} until {e.deadline} ({e.bead})")
+        print(f"quarantined {e.nodeid} ({e.kind}) since {e.since} until {e.deadline} ({e.bead})")
     return 0
 
 
 def _parser() -> argparse.ArgumentParser:
+    # --registry has no default on any parser (SUPPRESS), so a value given before or after the subcommand
+    # survives; main() fills in the real default.
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--registry", type=Path, default=reg.REGISTRY_PATH, help="the registry file (default tests/quarantine.toml)")
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], parents=[common])
-    p.add_argument("--today", type=_day, help="the date to age against (default: today)")
+    common.add_argument("--registry", type=Path, default=argparse.SUPPRESS, help="the registry file (default tests/quarantine.toml)")
+    p = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0], parents=[common])
+    p.add_argument("--today", type=_day, help="the date to age against (default: today, UTC)")
     p.add_argument("--json", action="store_true")
-    p.add_argument("--results", type=Path, help="the NX_QUARANTINE_RESULTS file of a run")
-    p.add_argument("--expect-all", action="store_true", help="with --results: exit 3 when a listed test has no result")
+    p.add_argument("--junit", type=Path, action="append", default=[], help="a junit file or a directory of them; repeatable")
+    p.add_argument("--expect-all", action="store_true", help="with --junit: exit 3 when an entry was never examined")
     p.set_defaults(func=_report)
     sub = p.add_subparsers(dest="command")
-    sub.add_parser("count", parents=[common], help="print the number of entries").set_defaults(func=_count)
-    add = sub.add_parser("add", parents=[common], help="quarantine nodeids the candidates file names under flake_infra")
+    sel = sub.add_parser("select", parents=[common], help="print the entries of one kind")
+    sel.add_argument("--kind", choices=reg.KINDS, required=True)
+    sel.add_argument("--format", choices=("lines", "surefire", "surefire-exclude"), default="lines")
+    sel.set_defaults(func=_select)
+    cls = sub.add_parser("classify", help="is this runner exit code acceptable for a quarantine pass")
+    cls.add_argument("--rc", type=int, required=True)
+    cls.add_argument("--junit", type=Path, action="append", default=[])
+    cls.set_defaults(func=_classify)
+    add = sub.add_parser("add", parents=[common], help="quarantine nodeids the candidates file names")
     add.add_argument("--candidates", type=Path, required=True)
     add.add_argument("--bead", required=True)
     add.add_argument("--reason", required=True)
-    add.add_argument("--since", type=_day, help="default: today")
+    add.add_argument("--since", type=_day, help="default: today (UTC); today or yesterday only")
+    add.add_argument("--today", type=_day, help="the date to treat as today (tests)")
+    add.add_argument("--review", help="the 2-week review's reference; required for a test only in `unattributed`")
     add.add_argument("nodeids", nargs="+", metavar="NODEID")
     add.set_defaults(func=_add)
     return p
@@ -148,6 +168,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if not hasattr(args, "registry"):
+        args.registry = reg.REGISTRY_PATH
     try:
         return args.func(args)
     except reg.RegistryError as exc:
