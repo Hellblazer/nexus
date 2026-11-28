@@ -322,6 +322,8 @@ def test_extract_scope_rows_and_coverage(extraction: list[dict]) -> None:
     assert (test["kind"], test["file"], test["venue"], test["derived"]) == ("test", "tests/test_a.py", "hosted", False)
     assert test["touched_test"] is True and test["fix_touched_product"] is True
     assert (test["fix_distance"], test["fix_is_fix"], test["fix_table_only"]) == (1, True, False)
+    assert (test["path_source"], by[(9, "bar")]["path_source"]) == ("summary", "java")
+    assert by[(13, "Windows test set")]["path_source"] == "" and "tb_path" not in test
     assert by[(1, "Verify the pytest suite or its legitimate skip")]["derived"] is True
     assert by[(9, "bar")]["kind"] == "java" and by[(9, "bar")]["venue"] == "self-hosted"
     assert by[(13, "Windows test set")]["venue"] == "windows"
@@ -876,6 +878,11 @@ def test_candidates_list_named_flake_tests_and_keep_unattributed_apart(
     assert (row["red_runs"], row["first_red"], row["last_red"], row["venues"], row["rule"]) == (
         1, "2026-10-01", "2026-10-01", ["hosted"], "flake:timing-message")
     assert flake["tests/test_r.py::test_r"]["rule"] == "flake:rerun-green"
+    assert {r["path_source"] for r in report["candidates"]} == {"summary"}
+    assert report["header"]["path_sources"] == {"candidates": {"summary": 2},
+                                                 "unattributed": {"java": 2, "summary": 1}}
+    assert {r["nodeid"]: r["path_source"] for r in report["unattributed"]} == {
+        "BarTest::m": "java", "FooIntegrationTest::bar": "java", "tests/test_b.py::test_flaky": "summary"}
     assert [r["nodeid"] for r in report["unattributed"]] == [
         "BarTest::m", "FooIntegrationTest::bar", "tests/test_b.py::test_flaky"]
     assert report["unattributed"][0]["rule"] == "unattributed:no-verified-green"
@@ -952,3 +959,92 @@ def test_the_route_scans_skip_a_red_run_data_dir_and_catch_the_same_file_elsewhe
     listed = {p.relative_to(tmp_path).as_posix() for p in retire_scan.TestNoAutomaticTrigger._files(tmp_path)}
     assert "scripts/elsewhere/names.txt" in listed and "scripts/red-run-data/names.txt" not in listed
     assert "red-run-data" in ttl_scan.SKIP_DIRS and "red-run-data" in retire_scan.TestNoAutomaticTrigger.SKIP_DIRS
+
+
+# --- paths recovered from the traceback --------------------------------------------------------
+
+
+def _section(name: str, *body: str) -> list[str]:
+    return [f"_____ {name} _____", *body, "E   AssertionError: no", "==== short test summary info ===="]
+
+
+def test_the_section_path_is_the_location_line_nearest_the_def_line() -> None:
+    lines = _section("TestK.test_x[a.b]", "", "tmp = 1", "    def test_x(self, tmp):", "        helper()",
+                     "> other()", "", "tests/test_z.py:7: AssertionError",
+                     "src/nexus/mod.py:40: in other", "/usr/lib/python3.12/contextlib.py:81: in inner")
+    assert rrr.parse_log(lines)["tests"][0]["tb_path"] == "tests/test_z.py"
+    win = _section("test_w", "    def test_w():", "x",
+                   "C:\\build\\runner-win\\_work\\nexus\\nexus\\tests\\daemon\\test_w.py:332: AssertionError")
+    assert rrr.parse_log(win)["tests"][0]["tb_path"] == "tests/daemon/test_w.py"
+    far_first = _section("test_n", "src/nexus/a.py:1: in a", "    def test_n():", "tests/test_n.py:5: Boom")
+    assert rrr.parse_log(far_first)["tests"][0]["tb_path"] == "tests/test_n.py"        # nearest, not first
+    no_def = _section("test_q", "src/nexus/a.py:1: in a", "tests/test_q.py:5: Boom")
+    assert rrr.parse_log(no_def)["tests"][0]["tb_path"] == "src/nexus/a.py"            # first location line
+    assert rrr.parse_log(_section("test_none", "no location here"))["tests"][0]["tb_path"] == ""
+
+
+def test_a_location_after_the_summary_header_is_not_the_sections() -> None:
+    lines = [*_section("test_x", "    def test_x():"), "tests/late.py:3: AssertionError"]
+    assert rrr.parse_log(lines)["tests"][0]["tb_path"] == ""
+
+
+def _mini(tmp_path: Path, log: str) -> Path:
+    """One red CI run at c4 (job 101) and a green rerun, whose only failing item comes from ``log``."""
+    snap = tmp_path / "mini"
+    for d in ("jobs", "green_jobs", "logs/1"):
+        (snap / d).mkdir(parents=True)
+    runs = [_run(1, "CI", "{c4}", "failure", 1), _run(2, "CI", "{c4}", "success", 2)]
+    (snap / "runs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in runs))
+    (snap / "jobs" / "1.json").write_text(json.dumps([_shard(101)]))
+    (snap / "green_jobs" / "2.json").write_text(json.dumps([
+        {"id": 201, "name": "pytest (Python 3.12, shard 1/6)", "conclusion": "success", "run_attempt": 1}]))
+    (snap / "logs" / "1" / "101.log").write_text(log)
+    return snap
+
+
+def _recover(tmp_path: Path, history: tuple[Path, dict[str, str]], log: str) -> dict:
+    snap = _mini(tmp_path, log)
+    runs = (snap / "runs.jsonl").read_text().replace("{c4}", history[1]["c4"])
+    (snap / "runs.jsonl").write_text(runs)
+    items = [r for r in _extract(snap, history[0]) if r["t"] == "item"]
+    assert len(items) == 1
+    return items[0]
+
+
+def test_a_bare_name_takes_the_traceback_path_when_that_file_defines_the_test(
+        tmp_path: Path, history: tuple[Path, dict[str, str]]) -> None:
+    item = _recover(tmp_path, history, "\n".join(_section(
+        "TestK.test_o[p.q]", "    def test_o(self):", "tests/test_old.py:5: AssertionError")) + "\n")
+    assert (item["file"], item["path_source"]) == ("tests/test_old.py", "traceback") and "tb_path" not in item
+    assert rrr.pytest_nodeid(item) == "tests/test_old.py::TestK::test_o[p.q]"      # dots become ::, params kept
+    assert item["touched_test"] is False                                          # the fix signal now works
+
+
+@pytest.mark.parametrize("body", [
+    ("    def test_o():", "tests/test_a.py:3: AssertionError"),          # the file exists but has no test_o
+    ("    def test_o():", "tests/test_missing.py:3: AssertionError"),    # no such file at the sha
+    ("    def test_o():", "src/nexus/a.py:2: AssertionError"),           # a repo file with no such def
+    ("    def test_o():",)])                                              # no location line at all
+def test_a_traceback_path_that_does_not_define_the_test_leaves_the_name_bare(
+        tmp_path: Path, history: tuple[Path, dict[str, str]], body: tuple[str, ...]) -> None:
+    item = _recover(tmp_path, history, "\n".join(_section("test_o", *body)) + "\n")
+    assert (item["file"], item["path_source"]) == ("", "none")
+    assert rrr.pytest_nodeid(item) == "test_o"
+
+
+def test_history_defines_reads_the_file_at_the_sha(history: tuple[Path, dict[str, str]]) -> None:
+    hist = rrr.History(history[0])
+    c3 = history[1]["c3"]
+    assert hist.defines(c3, "tests/test_old.py", "test_o")
+    assert not hist.defines(c3, "tests/test_old.py", "test_nope") and not hist.defines(c3, "tests/none.py", "test_o")
+    assert not hist.defines(history[1]["c2"], "tests/test_old.py", "test_o")       # not there yet at c2
+
+
+def test_a_fixture_error_header_names_the_test_and_a_collection_error_names_none() -> None:
+    got = rrr.parse_log(_section("ERROR at setup of TestK.test_o", "    def test_o(self):",
+                                 "tests/test_old.py:5: AssertionError"))
+    assert got["tests"][0]["name"] == "TestK.test_o" and got["tests"][0]["tb_path"] == "tests/test_old.py"
+    item = {"kind": "test", "file": "", "item": "ERROR collecting gw0", "run": 1, "derived": False,
+            "category": rrr.UNATTRIBUTED, "rule": "r", "venue": "hosted", "path_source": "none"}
+    an = {"runs": {1: {"created": "2026-10-01T00:00:00Z"}}, "items": [item], "meta": {}}
+    assert rrr.candidates_report(an, {})["unattributed"] == []

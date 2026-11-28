@@ -241,19 +241,48 @@ _SUMMARY_RE = re.compile(r"^(?:=+ )?(\d+ (?:failed|passed|errors?|skipped|desele
                          r"warnings?)\b.*) in [\d.]+s")
 _COUNT_RE = re.compile(r"(\d+) (failed|errors?)\b")
 _SECTION_RE = re.compile(r"^_{3,} (.+?) _{3,}$")
+#: A pytest traceback location line: ``tests/x.py:918: in helper`` or ``tests/x.py:929: AssertionError``.
+_LOC_RE = re.compile(r"^(\S+\.py):\d+: ")
+_REPO_PATH_RE = re.compile(r"(?:^|/)((?:tests|src|service/src)/[\w./-]+\.py)$")
+
+
+def _repo_path(path: str) -> str | None:
+    """A traceback path as a repo-relative path (a runner's absolute prefix dropped), else None."""
+    m = _REPO_PATH_RE.search(path.replace("\\", "/"))
+    return m.group(1) if m else None
+
+
+def _func_name(item: str) -> str:
+    """The test function of a node name: ``Cls.test_x[p]`` and ``Cls::test_x`` both give ``test_x``."""
+    head = item.partition("[")[0]                      # a parametrize id may contain dots
+    return head.rsplit(".", 1)[-1].rsplit("::", 1)[-1]
+
+
+def _section_path(sec: Row) -> str:
+    """The repo path of the traceback location line nearest the section's ``def <test>`` line.
+
+    Without a ``def`` line in the section, the first location line (the test's own frame).
+    """
+    locs = sec["locs"]
+    if not locs:
+        return ""
+    if sec["def_at"] is None:
+        return str(locs[0][1])
+    # a frame's location line follows its code, so at equal distance the later line wins
+    return str(min(locs, key=lambda x: (abs(x[0] - sec["def_at"]), x[0] < sec["def_at"], x[0]))[1])
 _JAVA_ROW_RE = re.compile(r"^\[ERROR\]\s{2,}([\w$.]+)\.(\w+)(?::\d+)?\s*(.*)$")
 
 
 def parse_log(lines: Iterable[str]) -> dict[str, Any]:
     """Failing tests and infra evidence from one job log. Streams; never holds the log."""
-    tests: dict[tuple[str, str, str], str] = {}
+    tests: dict[tuple[str, str, str], tuple[str, str]] = {}
     errors: list[str] = []
     failed_count = 0
     infra = False
     in_java = False
-    pending: str | None = None
+    cur: Row | None = None
     first_e = ""
-    sections: dict[str, str] = {}
+    sections: dict[str, Row] = {}
     for raw in lines:
         line = _ANSI_RE.sub("", _TS_RE.sub("", raw.rstrip("\n"))).rstrip()
         if line.startswith("##[error]"):
@@ -262,6 +291,8 @@ def parse_log(lines: Iterable[str]) -> dict[str, Any]:
             if INFRA_LOG_RE.search(line):
                 infra = True
             continue
+        if cur is not None and re.match(r"^=+ .* =+$", line):
+            cur = None                                   # the summary header ends the failure sections
         sm = _SUMMARY_RE.match(line)
         if sm:
             failed_count = max(failed_count, sum(int(n) for n, _ in _COUNT_RE.findall(sm.group(1))))
@@ -270,16 +301,25 @@ def parse_log(lines: Iterable[str]) -> dict[str, Any]:
             first_e = line[1:].strip()[:300]
         sec = _SECTION_RE.match(line)
         if sec:
-            pending = sec.group(1)
+            # pytest heads a fixture failure "ERROR at setup of Cls.test_x": the test is what follows
+            name = re.sub(r"^ERROR at (?:setup|teardown) of ", "", sec.group(1))
+            cur = {"name": name, "msg": "", "idx": 0, "def_at": None, "locs": []}
+            sections.setdefault(name, cur)
             continue
-        if pending is not None and line.startswith("E  "):
-            sections.setdefault(pending, line[1:].strip()[:300])
-            pending = None
-            continue
+        if cur is not None:
+            cur["idx"] += 1
+            if cur["def_at"] is None and re.match(
+                    rf"^\s*(?:async\s+)?def {re.escape(_func_name(cur['name']))}\(", line):
+                cur["def_at"] = cur["idx"]
+            loc = _LOC_RE.match(line)
+            if loc and _repo_path(loc.group(1)):
+                cur["locs"].append((cur["idx"], _repo_path(loc.group(1))))
+            if not cur["msg"] and line.startswith("E  "):
+                cur["msg"] = line[1:].strip()[:300]
         m = _PYTEST_RE.match(line)
         if m:
             tests.setdefault(("pytest", m.group(2).replace("\\", "/"), (m.group(3) or "")),
-                             (m.group(4) or "")[:300])
+                             ((m.group(4) or "")[:300], ""))
             continue
         if line.startswith("[ERROR] Failures:") or line.startswith("[ERROR] Errors:"):
             in_java = True
@@ -288,16 +328,18 @@ def parse_log(lines: Iterable[str]) -> dict[str, Any]:
             j = _JAVA_ROW_RE.match(line)
             if j:
                 cls = j.group(1).rsplit(".", 1)[-1].split("$")[0]
-                tests.setdefault(("java", cls, j.group(2)), j.group(3)[:300])
+                tests.setdefault(("java", cls, j.group(2)), (j.group(3)[:300], ""))
             elif line.startswith("[ERROR] Tests run:") or re.fullmatch(r"\[ERROR\]\s*", line):
                 in_java = False
     if not tests:
-        # No FAILED lines (the Windows leg runs with -rs only): name the failures by their
-        # section headers; the file is not in the log.
-        for name, msg in sections.items():
-            tests[("pytest", "", name)] = msg
+        # No FAILED lines (the Windows leg and some Linux logs run without -r): name the failures
+        # by their section headers. The file is not named; the traceback location nearest the test's
+        # ``def`` line is kept as a candidate and checked against git at extraction.
+        for name, sec in sections.items():
+            tests[("pytest", "", name)] = (sec["msg"], _section_path(sec))
     return {
-        "tests": [{"kind": k, "file": f, "name": n, "msg": m} for (k, f, n), m in tests.items()],
+        "tests": [{"kind": k, "file": f, "name": n, "msg": m, "tb_path": tb}
+                  for (k, f, n), (m, tb) in tests.items()],
         "errors": errors,
         "infra": infra,
         "failed_count": failed_count,
@@ -384,6 +426,7 @@ class History:
     def __init__(self, repo: Path) -> None:
         self.repo = repo
         self._anc: dict[tuple[str, str], bool] = {}
+        self._src: dict[tuple[str, str], str] = {}
         self.commits: dict[str, Row] = {}
 
     def is_ancestor(self, older: str, newer: str) -> bool:
@@ -418,6 +461,15 @@ class History:
 
     def files(self, sha: str) -> list[str]:
         return self.commits.get(sha, {}).get("files", [])
+
+    def defines(self, sha: str, path: str, name: str) -> bool:
+        """Whether ``path`` at ``sha`` has a ``def <name>`` (False when the file is absent there)."""
+        key = (sha, path)
+        if key not in self._src:
+            r = subprocess.run(["git", "-C", str(self.repo), "show", f"{sha}:{path}"],
+                               capture_output=True, check=False)
+            self._src[key] = r.stdout.decode("utf-8", "replace") if r.returncode == 0 else ""
+        return bool(re.search(rf"^\s*(?:async\s+)?def {re.escape(name)}\(", self._src[key], re.M))
 
     def table_only(self, sha: str, path: str) -> bool | None:
         """Whether a commit's change to one file is only table-like lines (None: no change found)."""
@@ -609,14 +661,17 @@ def _items_for_run(run: Row, jobs: Sequence[Row], snapshot: Path,
             first = steps[0] if steps else job["name"]
             for t in parsed["tests"]:
                 kind = "java" if t["kind"] == "java" else "test"
+                source = "java" if kind == "java" else "summary" if t["file"] else (
+                    "pending" if t["tb_path"] else "none")
                 items.append({**base, "kind": kind, "step": first, "file": t["file"],
-                              "item": t["name"], "msg": t["msg"]})
+                              "item": t["name"], "msg": t["msg"], "tb_path": t["tb_path"],
+                              "path_source": source})
             emitted_tests = True
         for idx, step in enumerate(steps or [job["name"]]):
             if emitted_tests and idx == 0:
                 continue
             items.append({**base, "kind": "step", "step": step, "file": "", "item": step,
-                          "msg": (parsed or {}).get("first_e", "")})
+                          "msg": (parsed or {}).get("first_e", ""), "tb_path": "", "path_source": ""})
     _mark_derived(items)
     return items, cov
 
@@ -624,7 +679,8 @@ def _items_for_run(run: Row, jobs: Sequence[Row], snapshot: Path,
 def _placeholder_item(run: Row) -> Row:
     return {"t": "item", "run": run["id"], "sha": run["head_sha"], "workflow": run["name"],
             "job": PLACEHOLDER_JOB, "venue": "unknown", "job_id": 0, "infra": False, "errors": [],
-            "has_log": False, "failed_count": 0, "evidence": False, "kind": "step",
+            "has_log": False, "failed_count": 0, "evidence": False, "kind": "step", "tb_path": "",
+            "path_source": "",
             "step": PLACEHOLDER_JOB, "file": "", "item": PLACEHOLDER_JOB, "msg": "", "derived": False}
 
 
@@ -661,6 +717,21 @@ def snapshot_status(snapshot: Path, gaps: Sequence[Row]) -> Row:
             explained += int(g["run"] in jobs_missing and (g["run"], 0, "jobs") in tsv)
     return {"manifest": True, "final": explained == len(gaps), "gaps": len(gaps),
             "gaps_explained": explained, "buckets": str(manifest.get("red_scope_buckets", ""))}
+
+
+def _recover_path(it: Row, hist: History) -> None:
+    """Give a test named only by its section header the path of its traceback, if that file defines it.
+
+    The candidate is the location line nearest the ``def <test>`` line; it is accepted only when
+    ``def <name>`` is in that file at the item's sha, else the item stays bare (``path_source``
+    ``none``). ``summary`` items already had a path from a ``FAILED path::name`` line.
+    """
+    if it.get("path_source") == "pending":
+        if hist.defines(it["sha"], it["tb_path"], _func_name(it["item"])):
+            it["file"], it["path_source"] = it["tb_path"], "traceback"
+        else:
+            it["path_source"] = "none"
+    it.pop("tb_path", None)
 
 
 def _fix_signal(it: Row, rng: Sequence[str], green: Row | None, hist: History) -> None:
@@ -734,6 +805,7 @@ def extract(snapshot: Path, repo: Path, *, conclusions: Sequence[str] = DEFAULT_
                         and any(is_product(f) for f in hist.files(c)) for c in rng)}
         out_runs.append(rec)
         for it in items:
+            _recover_path(it, hist)
             _fix_signal(it, rng, green, hist)
             out_items.append(it)
     if any(r["green_run"] and not r["rerun_green"] for r in out_runs) and not hist.commits:
@@ -791,7 +863,7 @@ def label_item(item: Row, run: Row) -> tuple[str, str]:
     stem = item["file"] if item["kind"] == "java" else Path(item["file"]).stem
     if named and not item["file"]:
         # a Windows log names the test but not its file: use the test function's name
-        stem = re.split(r"\[", item["item"].rsplit(".", 1)[-1])[0]
+        stem = _func_name(item["item"])
     job = item["job"]
     if job == PLACEHOLDER_JOB:
         return UNLABELLED, "unlabelled:jobs-missing"
@@ -819,7 +891,7 @@ def label_item(item: Row, run: Row) -> tuple[str, str]:
         return FLAKE, "flake:timing-message"
     if _accounting_msg(item.get("msg", "")):
         return ACCOUNTING, "accounting:meta-msg"
-    func = re.split(r"\[", item["item"].rsplit(".", 1)[-1])[0]
+    func = _func_name(item["item"])
     if META_FILE_RE.search(stem) or ALLOWLISTED_FUNC_RE.search(func):
         return ACCOUNTING, "accounting:meta-file"
     if item["file"].startswith("tests/scripts/") or HARNESS_FILE_RE.search(stem):
@@ -1135,33 +1207,62 @@ def render_mvv(an: Mapping[str, Any]) -> tuple[str, bool]:
 # --- candidates ----------------------------------------------------------------------------
 
 
+def pytest_nodeid(it: Row) -> str:
+    """``path::Class::test[param]`` for a pytest item with a path, ``Class::method`` for Java, else the bare name.
+
+    A name taken from a failure-section header spells its class with a dot (``Cls.test_x[p]``);
+    pytest's node id uses ``::``, so the dots before any ``[`` become ``::``.
+    """
+    if it["kind"] == "java":
+        return f"{it['file']}::{it['item']}"
+    if not it["file"]:
+        return str(it["item"])
+    name = str(it["item"])
+    if it.get("path_source") == "traceback":
+        head, bracket, tail = name.partition("[")
+        name = head.replace(".", "::") + bracket + tail
+    return f"{it['file']}::{name}"
+
+
 def _test_rows(an: Mapping[str, Any], category: str) -> list[Row]:
     rows: dict[str, Row] = {}
     for it in an["items"]:
         if it["derived"] or it["category"] != category or it["kind"] == "step":
             continue
-        nodeid = f"{it['file']}::{it['item']}" if it["file"] else it["item"]
-        row = rows.setdefault(nodeid, {"kind": it["kind"], "runs": set(), "dates": [],
-                                       "venues": set(), "rules": set()})
+        if it["item"].startswith("ERROR collecting"):
+            continue                                    # a collection error names no test
+        nodeid = pytest_nodeid(it)
+        row = rows.setdefault(nodeid, {"kind": it["kind"], "runs": set(), "dates": [], "venues": set(),
+                                       "rules": set(), "sources": set()})
         row["runs"].add(it["run"])
         row["dates"].append(an["runs"][it["run"]]["created"][:10])
         row["venues"].add(it["venue"])
         row["rules"].add(it["rule"])
-    return [{"nodeid": k, "kind": v["kind"], "red_runs": len(v["runs"]), "first_red": min(v["dates"]),
-             "last_red": max(v["dates"]), "venues": sorted(v["venues"]), "rule": "|".join(sorted(v["rules"])),
+        row["sources"].add(it.get("path_source", "none"))
+    return [{"nodeid": k, "kind": v["kind"], "path_source": "|".join(sorted(v["sources"])),
+             "red_runs": len(v["runs"]), "first_red": min(v["dates"]), "last_red": max(v["dates"]),
+             "venues": sorted(v["venues"]), "rule": "|".join(sorted(v["rules"])),
              "run_ids": sorted(v["runs"])} for k, v in sorted(rows.items())]
 
 
 def candidates_report(an: Mapping[str, Any], header: Row) -> Row:
     """The named tests labelled flake_infra, and those labelled unattributed, as one JSON-able dict.
 
-    One row per test (a pytest node id with Windows paths normalised, or ``Class::method`` for Java;
-    a Windows test named only by its section header has no file part). A failing step that names no
-    test has no row. ``unattributed`` is a separate array so the reader can decide whether it counts.
+    One row per test: ``nodeid`` is a collectable pytest node id (Windows paths normalised) or
+    ``Class::method`` for Java. ``path_source`` says where the path came from: ``summary`` (a
+    ``FAILED path::name`` line), ``traceback`` (recovered from the failure section's location line
+    nearest the ``def`` line and confirmed by ``def <name>`` in that file at the red sha), ``java``,
+    or ``none`` (a bare name; no path could be confirmed). A failing step that names no test has no
+    row. ``unattributed`` is a separate array so the reader can decide whether it counts.
     """
     flake, unattributed = _test_rows(an, FLAKE), _test_rows(an, UNATTRIBUTED)
+
+    def by_source(rows: Sequence[Row]) -> dict[str, int]:
+        return dict(sorted(collections.Counter(r["path_source"] for r in rows).items()))
+
     header = {**header, "red_runs": len(an["runs"]), "candidate_tests": len(flake),
-              "unattributed_tests": len(unattributed)}
+              "unattributed_tests": len(unattributed),
+              "path_sources": {"candidates": by_source(flake), "unattributed": by_source(unattributed)}}
     return {"header": header, "candidates": flake, "unattributed": unattributed}
 
 
