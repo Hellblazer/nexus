@@ -26,6 +26,8 @@ from pathlib import Path
 import pytest
 from _check_review_fixture import MODULE, STEM, UNTIL, artifact, check, commit, git, history, load, module_text, record
 
+from tests._module_seam import setattr_in
+
 from tests import _quarantine_registry as reg
 
 cr = load()
@@ -492,7 +494,7 @@ def test_run_gh_only_ever_issues_a_get(monkeypatch):
 
     class Done:
         returncode, stdout, stderr = 0, b"{}", b""
-    monkeypatch.setattr(cr.subprocess, "run", lambda argv, **kw: seen.append(argv) or Done())
+    setattr_in(monkeypatch, cr, "subprocess.run", lambda argv, **kw: seen.append(argv) or Done())  # check_review's view only
     cr.run_gh("repos/o/r/actions/runs?per_page=100")
     cr.run_gh("repos/o/r/actions/artifacts/1/zip", binary=True)
     assert seen and all(argv[:4] == ["gh", "api", "--method", "GET"] for argv in seen)
