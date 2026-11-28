@@ -342,8 +342,9 @@ class TestLegacySite:
         assert (host / "bin" / "nx.exe").is_file()
         assert (tmp_path / "userpath.txt").read_text().strip().split(";")[0] == str(tools / "bin")
         assert layout_core.read_link(tools / "gen-legacy-uv-tool", platform="win32") == str(legacy)
-        assert [c for c in spy.calls if c[0] == "uv" and "pip" in c] == [], "no other generation was built"
-        assert set(sorted(p.name for p in tools.iterdir())) - set(gens_before) == {"gen-legacy-uv-tool"}
+        built = [c for c in spy.calls if c[0] == "uv" and "pip" in c and not any(a.endswith(".whl") for a in c)]
+        assert built == [], "no other generation was built (only the dispatcher wheels were installed)"
+        assert set(sorted(p.name for p in tools.iterdir())) - set(gens_before) == {"gen-legacy-uv-tool", "bin", "shim"}
 
         # and again: nothing left to do, nothing printed
         assert self_cmd.perform_self_install() is None
@@ -397,6 +398,9 @@ class TestRegisterAndGc:
         layout_core.write_pointer(tools / "current", str(gens[-1]))
         (gens[-1] / "bin").mkdir()
         (gens[-1] / "bin" / "nx.exe").write_bytes(b"new")
+        (tools / "bin").mkdir()  # the dispatchers uv's launchers are replaced by
+        (tools / "bin" / "nx.exe").write_bytes(b"dispatcher")
+        (tools / "bin" / "nx-hook.exe").write_bytes(b"dispatcher")
         python = gens[-1] / "Scripts" / "python.exe"  # answers "what do you declare"
         python.write_text("#!/bin/sh\nprintf '%s\\n' nx\n")
         python.chmod(0o755)
