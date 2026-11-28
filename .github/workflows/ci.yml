@@ -1335,7 +1335,9 @@ jobs:
         # the hosted wall time is unmeasured until the first run.
         run: |
           set -euo pipefail
-          uv run pytest -m lint -q -n 4 --splits 2 --group ${{ matrix.group }} \
+          # RDR-258 Phase 1 (nexus-2jomg.2): `not class_a` leaves the class-A checks in report mode to the advisory
+          # `test-class-a-report` job; everything else in the bucket still blocks here.
+          uv run pytest -m "lint and not class_a" -q -n 4 --splits 2 --group ${{ matrix.group }} \
             --splitting-algorithm least_duration --durations=20 | tee lint-output.txt
 
       - name: Enforce lint-leg non-vacuity floor
@@ -1470,6 +1472,83 @@ jobs:
           summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' docs-output.txt | tail -1)" || summary=""
           [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 600 ] \
             || { echo "::error::docs-reader leg passed fewer than 600 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
+
+  test-class-a-report:
+    # RDR-258 Phase 1 (nexus-2jomg.2, Sam 2026-11-27): THE ADVISORY JOB for class-A pass/fail pytest checks. A class-A check
+    # with no value and no alarm line never fails develop (docs/rdr/rdr-258-test-apparatus-costs-more-than-it-protects.md,
+    # Technical Design, "Report mode for class A"). pytest-gate reads whole jobs (its `needs:` list), not single tests, so
+    # such a test cannot stay in the blocking `test-lint` job: it carries the `class_a` marker (always together with `lint`),
+    # `test-lint` selects `lint and not class_a`, and this job selects `class_a`. LAYOUT, chosen once for every pass/fail
+    # check of Phase 1: an advisory job is either a job that runs only class-A tests, like this one, or the check's own
+    # existing job when it needs a different shape (the mode-declarations census needs the whole unsharded corpus and
+    # its own env, so `test-mode-census` stays and runs through the same reporter). Neither is in pytest-gate's `needs:`.
+    # The reporter (scripts/class_a_report.py) lists every failing item, as a ::warning:: and in this job's summary, and
+    # exits 0; it exits 1 only when it examined too little (pytest crashed, no junit, fewer tests than the floor), so a
+    # report over nothing cannot read as green.
+    # No `needs:` and no `if:`: docs_reference_rot reads docs/, so it must run on a docs-only push too, where `changes`
+    # skips every code job. It costs one hosted runner, the same shape as test-lint's.
+    name: class-A report (lint-marked checks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    env:
+      # A lint-marked test is a pure-Python scan with no T2 dependency, so `none` is correct here, not a workaround; see
+      # `test-lint`'s identical env for why the autouse substrate pin would otherwise skip every test on a runner.
+      NX_TEST_T2_SUBSTRATE: "none"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          # tests/test_docs_reference_rot.py resolves cited commit shas and tags, which a depth-1 checkout does not carry.
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Cache the pinned PG bundle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          # Collecting the full tree (which `-m class_a` does) resolves pg_bin_dir() at module scope in several test
+          # modules; see `test-lint`'s identical step.
+          path: ~/.cache/nexus-test-substrate
+          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Report the class-A lint checks (docs_reference_rot, module_seam)
+        # --min-tests 1: a selection that examines nothing (the marker moved, every test skipped) is a failed report, not a
+        # quiet one. Each check's own floor is a `--require <node id prefix>=N` line, put here by the commit that demotes it,
+        # so one check cannot vanish behind another's tests, and a demotion reverted alone takes its floor with it (they sit
+        # on separate lines with an unchanged line between, so that revert is clean). The same lines are in the nightly job
+        # (tests/scripts/test_class_a_layout.py keeps the two sets equal). --items-out is the machine-readable record of the
+        # failing items (`CLASS_A_ITEM <check> <id>` lines in the log carry the same), uploaded below for 30 days.
+        run: |
+          set -euo pipefail
+          uv run python scripts/class_a_report.py \
+            --name "class-A lint checks" \
+            --min-tests 1 \
+            --items-out class-a-items.json \
+            -- uv run pytest -m class_a -q -p no:cacheprovider
+
+      - name: Upload the failing items (kept 30 days)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: class-a-items
+          path: class-a-items.json
+          retention-days: 30
+          if-no-files-found: warn
 
   test-mode-census:
     # nexus-vdti6 (candidate 1, chosen over: candidate 2 — an out-of-band

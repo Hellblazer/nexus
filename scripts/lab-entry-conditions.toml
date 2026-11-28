@@ -198,7 +198,7 @@ id = "pipefail-lint"
 workflow = "ci.yml"
 job = "test-lint"
 step = "Run lint-marked tests"
-run_contains = "pytest -m lint"
+run_contains = 'pytest -m "lint and not class_a"'
 after = []
 twin = "partial"
 host = "laptop worktree"
@@ -396,6 +396,14 @@ ci_job = "pytest-gate"
 ci_step = "Whole-run gate (DDL/bytes fan-in, storage-touch fan-in, shard collection; every one evaluated)"
 hand_path = "checklist 7b fan-ins over the final pass's shard reports"
 reason = "The whole-run fan-in over every shard's report; a single lane has no full set of shard reports to fan in."
+
+[[excluded]]
+script = "scripts/class_a_report.py"
+ci_workflow = "ci.yml"
+ci_job = "test-class-a-report"
+ci_step = "Report the class-A lint checks (docs_reference_rot, module_seam)"
+hand_path = "uv run pytest -m class_a (every class-A lint check, which also runs under -m lint); scripts/meta_tests.py run covers the lint bucket"
+reason = "Report mode (RDR-258 Phase 1): the wrapper lists a class-A check's failing items and never fails develop, so a lane has no gate to run; the checks themselves run by hand under -m lint."
 
 [[excluded]]
 script = "scripts/ci_junit_verdict.py"

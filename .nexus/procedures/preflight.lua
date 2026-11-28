@@ -107,6 +107,10 @@ local PYTEST = "uv run pytest -q -rf -p no:randomly --color=no"
 -- them whatever their mark (the last -m wins); a test runs pytest --collect-only over
 -- each step's own argv and wants a test from every named file.
 local NOT_SLOW = "-m 'not integration and not slow'"
+-- The same, less the class-A checks in report mode (RDR-258 Phase 1): a changed lint-marked file is collected here, and a
+-- class_a test in it (docs_reference_rot, module_seam, the census's lint twin) must not refuse a push where CI no longer
+-- refuses (CI's test-lint runs `lint and not class_a`; the advisory test-class-a-report job lists them).
+local CHANGED_MARKS = "-m 'not integration and not slow and not class_a'"
 local SUMMARY_AT = " in [0-9.]+s( \\([0-9:]+\\))?( =+)?$"
 local SUMMARY_OK = "^(=+ )?[0-9]+ passed(, [0-9]+ (warnings?|skipped|deselected|xfailed|xpassed))* in [0-9.]+s( \\([0-9:]+\\))?( =+)?$"
 local NOTHING = "nothing selected"
@@ -158,7 +162,7 @@ local CLASSES = {
           .. " invocation (a changed lint-marked file runs here too; integration-marked ones run in the integration"
           .. " row, slow-marked ones in the nightly gate)",
           gated(piped("{ " .. live({":(glob)tests/**/test_*.py"}) .. " && printf '%s\\0' "
-            .. words(CHANGED_TEST_GUARDS) .. "; }", PYTEST .. " " .. NOT_SLOW .. " --")), false))
+            .. words(CHANGED_TEST_GUARDS) .. "; }", PYTEST .. " " .. CHANGED_MARKS .. " --")), false))
       end
       -- tests/test_cli_registration.py checks every command module is wired into
       -- cli.py; no test that shares a subject with a command module names it, so a
@@ -496,7 +500,7 @@ local function standing(select_all)
     -- inside a grant (never a wait that holds the grant); a miss builds within the
     -- grant's cores and memory. A 75 here means: rerun.
     step("the whole lint bucket." .. JAR_75,
-      gated("lab-remote -- bash -c 'scripts/build-gate-jar.sh && " .. PYTEST .. " -m lint -n auto'"), true),
+      gated("lab-remote -- bash -c 'scripts/build-gate-jar.sh && " .. PYTEST .. " -m \"lint and not class_a\" -n auto'"), true),
     -- The ledger test reads COMMITTED trees (it diffs ref..HEAD against the pinned
     -- tag), so it is run after the commit: an uncommitted conexus/ edit is invisible
     -- to it and it calls the new entries stale.

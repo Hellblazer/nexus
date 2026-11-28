@@ -67,8 +67,10 @@ JAVA_TEST_ROOT = "service/src/test/java"
 JAVA_WALK = re.compile(r"Files\.(walk|list|find|newDirectoryStream)\(")
 JAVA_SURFACE = "service/src/"
 #: The two invocations, as the shell lines they are (files follow). The meta-tests in a selected
-#: file only: a file may hold behaviour tests beside its census.
-META_RUN = "uv run pytest -q -rfEs -p no:randomly --color=no -o addopts= -m '(lint or census) and not integration and not slow'"
+#: file only: a file may hold behaviour tests beside its census. ``not class_a``: a class-A check in report mode (RDR-258
+#: Phase 1) does not refuse here where it no longer fails develop; CI's advisory test-class-a-report job lists it, and
+#: ``uv run pytest -m class_a`` runs it by hand.
+META_RUN = "uv run pytest -q -rfEs -p no:randomly --color=no -o addopts= -m '(lint or census) and not class_a and not integration and not slow'"
 #: -rp lists each pass, so a guard counts only when its PASSED line appears (a skip inside
 #: tests/conftest.py is reported at the conftest, not at the guard file).
 #: The session-items guard judges what its own invocation collected, so the changed test files are

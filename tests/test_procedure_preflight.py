@@ -132,12 +132,12 @@ def test_a_python_change_gets_ruff_its_tests_and_the_standing_checks(
         "( set -o pipefail; { git diff -z --no-renames --diff-filter=d --name-only base...HEAD -- "
         "':(glob)tests/**/test_*.py' && printf '%s\\0' "
         "tests/test_mode_declarations_are_explicit.py; } | "
-        "xargs -0 -r uv run pytest -q -rf -p no:randomly --color=no -m 'not integration and not slow' -- )",
+        "xargs -0 -r uv run pytest -q -rf -p no:randomly --color=no -m 'not integration and not slow and not class_a' -- )",
     ]
     assert _bare(_commands(out)["code"]) == [
         "scripts/build-gate-jar.sh",
         UNTRACKED,
-        "lab-remote -- bash -c 'scripts/build-gate-jar.sh && uv run pytest -q -rf -p no:randomly --color=no -m lint -n auto'",
+        "lab-remote -- bash -c 'scripts/build-gate-jar.sh && uv run pytest -q -rf -p no:randomly --color=no -m \"lint and not class_a\" -n auto'",
         "NX_LEDGER_MODE=block uv run pytest -q -rf -p no:randomly --color=no tests/test_plugin_release_drift_ledger.py tests/daemon/test_lifecycle_gate.py",
         "uv run scripts/tenant_delta.py --strict --base=base",
         "uv run scripts/windows_hand_test.py --check",

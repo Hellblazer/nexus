@@ -568,3 +568,32 @@ jobs:
               sys.exit(1)
           print(f"moved tests ran: {list(REQUIRED)}")
           PY
+
+      - name: Class-A report (RDR-258 Phase 1, nightly)
+        # The class-A pass/fail pytest checks (docs_reference_rot, module_seam, the census's lint twin) run on develop's tip every
+        # night, as RDR-258 asks, through the same reporter as ci.yml's advisory job: this job already has the checkout with
+        # history (docs_reference_rot resolves cited shas) and the synced environment, so it costs about a minute, not a runner.
+        # Report mode: the reporter exits 0 on findings, so a finding never turns the nightly red; only a structural failure does
+        # (a floor missed, a crash, a report over nothing), which is the non-vacuity rule: a check that vanished must be seen. So
+        # there is no `continue-on-error`; `if: always()` makes the step run after a red slow-tests step too. The failing items
+        # are in the job summary and in the class-a-items-nightly artifact (30 days). Each check's floor is a --require line, the
+        # same set as ci.yml's (tests/scripts/test_class_a_layout.py keeps them equal).
+        if: always()
+        env:
+          NX_TEST_T2_SUBSTRATE: "none"
+        run: |
+          set -euo pipefail
+          uv run python scripts/class_a_report.py \
+            --name "class-A checks (nightly)" \
+            --min-tests 1 \
+            --items-out class-a-items-nightly.json \
+            -- uv run pytest -m class_a -q -p no:cacheprovider
+
+      - name: Upload the failing items (kept 30 days)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: class-a-items-nightly
+          path: class-a-items-nightly.json
+          retention-days: 30
+          if-no-files-found: warn

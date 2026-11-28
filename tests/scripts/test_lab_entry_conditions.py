@@ -462,7 +462,8 @@ def test_a_lint_marked_twin_runs_a_file_the_lint_bucket_selects() -> None:
 def test_ci_runs_the_pipefail_lint_through_the_lint_bucket() -> None:
     """The pipefail lint is CI-only because the default addopts deselect `lint`; pin that CI still selects it."""
     runs = [run for job, _name, run in _steps("ci.yml") if job == "test-lint"]
-    assert any("pytest -m lint" in r for r in runs), "ci.yml's test-lint job no longer runs `pytest -m lint`"
+    # RDR-258 Phase 1: `not class_a` leaves the report-mode class-A checks to the advisory test-class-a-report job.
+    assert any('pytest -m "lint and not class_a"' in r for r in runs), "ci.yml's test-lint job no longer runs the lint bucket"
     assert "pytest.mark.lint" in (ROOT / "tests/test_pipefail_early_exit_consumer_lint.py").read_text()
     reg = _registry()
     twin = next(c for c in reg["check"] if c["id"] == "pipefail-lint")
