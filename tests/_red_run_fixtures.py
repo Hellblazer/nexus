@@ -237,3 +237,17 @@ def _set_green(snapshot: Path, run_id: int, conclusions: dict[str, str]) -> None
 @pytest.fixture
 def extraction(snapshot: Path, history: tuple[Path, dict[str, str]]) -> list[dict]:
     return _extract(snapshot, history[0])
+
+
+@pytest.fixture
+def inventory_repo(tmp_path: Path) -> Path:
+    """A repo with every test the ``snapshot`` fixture's flake and unattributed rows name."""
+    root = tmp_path / "inventory"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "develop")
+    _commit(root, "feat: the named tests", {
+        "tests/test_t.py": "def test_t():\n    pass\n", "tests/test_r.py": "def test_r():\n    pass\n",
+        "tests/test_b.py": "def test_flaky():\n    pass\n",
+        "service/src/test/java/dev/BarTest.java": "class BarTest { void m() {} }\n",
+        "service/src/test/java/dev/FooIntegrationTest.java": "class FooIntegrationTest { void bar() {} }\n"})
+    return root

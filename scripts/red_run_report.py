@@ -6,7 +6,7 @@
     red_run_report.py extract --snapshot DIR --green-jobs GREENDIR --repo . --out scripts/red-run-data/red-run-extraction-2026-09-23_2026-11-23.jsonl.gz
     red_run_report.py report  --extraction FILE [--top 15] [--repo .] [--sample RULE N --seed S]
     red_run_report.py mvv     --extraction FILE
-    red_run_report.py candidates --extraction FILE --out FILE.json[.gz]
+    red_run_report.py candidates --extraction FILE --out FILE.json[.gz] [--repo . --rev HEAD]
 
 ``extract`` reads the Phase 0 step 1 snapshot (``runs.jsonl``, ``jobs/<run>.json``,
 ``logs/<run>/<job>.log``) and the git history, and writes one compressed jsonl file with four
@@ -54,7 +54,9 @@ majority of its non-derived items (ties by ``PRIORITY``). Strand B's classifier 
 are rebuilt from 258-research-1, -2 and -15, hand-sampled, and each item records the rule that
 labelled it. They are not fitted to strand B's counts.
 
-``candidates`` writes the flake and unattributed named tests as JSON (one row per test).
+``candidates`` writes the flake and unattributed named tests as JSON (one row per test), each
+checked against the tests at ``--rev`` of ``--repo`` (``Inventory``); a row whose test is gone there
+moves to ``absent``, so a quarantine consumer never reads a dead one.
 
 Check headers (wren's ``check_headers.py``) are not read here. ``guard_catches`` takes a
 ``check -> guard paths`` mapping so the header parser plugs in later.
@@ -1245,7 +1247,69 @@ def _test_rows(an: Mapping[str, Any], category: str) -> list[Row]:
              "run_ids": sorted(v["runs"])} for k, v in sorted(rows.items())]
 
 
-def candidates_report(an: Mapping[str, Any], header: Row) -> Row:
+class Inventory:
+    """The tests that exist at one rev of ``repo``, for checking that a candidate row still names one.
+
+    Python: the file is at the rev and has ``def <name>`` and, when the node id names them,
+    ``class <Class>``; a parametrize id is stripped first. A bare name (no path) is looked up in the
+    Python files that define it anywhere. Java: some ``<Class>.java`` has the method name as a word
+    followed by ``(``. Renames are not followed: a renamed test is absent under its old name.
+    """
+
+    def __init__(self, repo: Path, rev: str = "HEAD") -> None:
+        self.repo = repo
+        self.rev = _git(repo, "rev-parse", "--verify", f"{rev}^{{commit}}").strip()
+        listing = _git(repo, "ls-tree", "-r", "-z", "--name-only", self.rev)
+        self.files = frozenset(f for f in listing.split("\0") if f)
+        if not self.files:
+            raise RuntimeError(f"no files at {self.rev[:12]} in {repo}")
+        self._src: dict[str, str] = {}
+        self._java: dict[str, list[str]] = {}
+        for f in sorted(self.files):
+            if f.endswith(".java"):
+                self._java.setdefault(f.rsplit("/", 1)[-1][:-5], []).append(f)
+
+    def _source(self, path: str) -> str:
+        if path not in self._src:
+            r = subprocess.run(["git", "-C", str(self.repo), "show", f"{self.rev}:{path}"],
+                               capture_output=True, check=False)
+            self._src[path] = r.stdout.decode("utf-8", "replace") if r.returncode == 0 else ""
+        return self._src[path]
+
+    def _py_has(self, path: str, classes: Sequence[str], name: str) -> bool:
+        src = self._source(path)
+        return (re.search(rf"^\s*(?:async\s+)?def {re.escape(name)}\(", src, re.M) is not None
+                and all(re.search(rf"^\s*class {re.escape(c)}\b", src, re.M) for c in classes))
+
+    def _py_files_defining(self, name: str) -> list[str]:
+        pattern = rf"^[[:space:]]*(async[[:space:]]+)?def {re.escape(name)}\("
+        r = subprocess.run(["git", "-C", str(self.repo), "grep", "-l", "-z", "-E", "-e", pattern,
+                            self.rev, "--", "*.py"], capture_output=True, check=False)
+        if r.returncode not in (0, 1):                  # 1 is "no match"
+            raise RuntimeError(f"git grep failed in {self.repo}: {r.stderr.decode()[:200]}")
+        return [f.split(":", 1)[1] for f in r.stdout.decode("utf-8", "replace").split("\0") if f]
+
+    def absent_reason(self, row: Row) -> str | None:
+        """``None`` when the row's test exists at the rev, else ``"file gone"`` or ``"test gone"``."""
+        base = str(row["nodeid"]).partition("[")[0]
+        if row["kind"] == "java":
+            cls, _, method = base.partition("::")
+            paths = self._java.get(cls, [])
+            if not paths:
+                return "file gone"
+            word = re.compile(rf"\b{re.escape(method)}\s*\(")
+            return None if any(word.search(self._source(p)) for p in paths) else "test gone"
+        parts = base.split("::")
+        if len(parts) > 1 and parts[0].endswith(".py"):
+            if parts[0] not in self.files:
+                return "file gone"
+            return None if self._py_has(parts[0], parts[1:-1], parts[-1]) else "test gone"
+        *classes, name = base.split(".")
+        found = any(self._py_has(p, classes, name) for p in self._py_files_defining(name))
+        return None if found else "test gone"
+
+
+def candidates_report(an: Mapping[str, Any], header: Row, inventory: Inventory | None = None) -> Row:
     """The named tests labelled flake_infra, and those labelled unattributed, as one JSON-able dict.
 
     One row per test: ``nodeid`` is a collectable pytest node id (Windows paths normalised) or
@@ -1254,8 +1318,25 @@ def candidates_report(an: Mapping[str, Any], header: Row) -> Row:
     nearest the ``def`` line and confirmed by ``def <name>`` in that file at the red sha), ``java``,
     or ``none`` (a bare name; no path could be confirmed). A failing step that names no test has no
     row. ``unattributed`` is a separate array so the reader can decide whether it counts.
+
+    With an ``inventory`` every row is checked against the tests at its rev: a present row gets
+    ``present: true`` and stays in its list; an absent one gets ``present: false`` and an
+    ``absent_reason`` and moves to the same list under ``absent``, so a consumer of ``candidates``
+    never sees a test that no longer exists. The header records the rev and the counts.
     """
     flake, unattributed = _test_rows(an, FLAKE), _test_rows(an, UNATTRIBUTED)
+    extra: Row = {}
+    if inventory is not None:
+        absent: Row = {}
+        counts: Row = {}
+        for key, rows in (("candidates", flake), ("unattributed", unattributed)):
+            reasons = [inventory.absent_reason(r) for r in rows]
+            absent[key] = [{**r, "present": False, "absent_reason": why} for r, why in zip(rows, reasons) if why]
+            kept = [{**r, "present": True} for r, why in zip(rows, reasons) if not why]
+            counts[key] = {"present": len(kept), "absent": len(absent[key])}
+            rows[:] = kept
+        extra["absent"] = absent
+        header = {**header, "inventory_rev": inventory.rev, "inventory": counts}
 
     def by_source(rows: Sequence[Row]) -> dict[str, int]:
         return dict(sorted(collections.Counter(r["path_source"] for r in rows).items()))
@@ -1263,7 +1344,7 @@ def candidates_report(an: Mapping[str, Any], header: Row) -> Row:
     header = {**header, "red_runs": len(an["runs"]), "candidate_tests": len(flake),
               "unattributed_tests": len(unattributed),
               "path_sources": {"candidates": by_source(flake), "unattributed": by_source(unattributed)}}
-    return {"header": header, "candidates": flake, "unattributed": unattributed}
+    return {"header": header, "candidates": flake, "unattributed": unattributed, **extra}
 
 
 def write_candidates(report: Row, path: Path) -> None:
@@ -1327,6 +1408,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     cd.add_argument("--extraction", type=Path, required=True)
     cd.add_argument("--out", type=Path, required=True)
     cd.add_argument("--archive-sha256", default=PHASE0_ARCHIVE_SHA256)
+    cd.add_argument("--repo", type=Path, default=Path("."), help="checkout whose tests the rows are checked against")
+    cd.add_argument("--rev", default="HEAD", help="rev of --repo that is the test inventory (default HEAD)")
     mv = sub.add_parser("mvv")
     mv.add_argument("--extraction", type=Path, required=True)
     args = ap.parse_args(argv)
@@ -1344,11 +1427,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_OK
     an = analyze(read_extraction(args.extraction))
     if args.cmd == "candidates":
-        report = candidates_report(an, candidates_header(an, args.extraction, args.archive_sha256))
-        write_candidates(report, args.out)
+        inv = Inventory(args.repo, args.rev)
+        report = candidates_report(an, candidates_header(an, args.extraction, args.archive_sha256), inv)
         h = report["header"]
+        if h["candidate_tests"] + h["unattributed_tests"] == 0:
+            sys.stderr.write(f"no row is present at {inv.rev[:12]} in {args.repo}: is --repo the nexus checkout?\n")
+            return EXIT_FAIL
+        write_candidates(report, args.out)
+        gone = {k: v["absent"] for k, v in h["inventory"].items()}
         sys.stdout.write(f"wrote {args.out}: {h['candidate_tests']} flake tests, "
-                         f"{h['unattributed_tests']} unattributed tests\n")
+                         f"{h['unattributed_tests']} unattributed tests (absent at {inv.rev[:12]}: "
+                         f"{gone['candidates']} flake, {gone['unattributed']} unattributed)\n")
         return EXIT_OK
     if args.cmd == "report" and args.sample:
         if not sample_runs(an, args.sample[0], 1, args.seed):

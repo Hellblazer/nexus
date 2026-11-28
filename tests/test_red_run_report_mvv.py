@@ -15,7 +15,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from tests._red_run_fixtures import _extract, _run, _set_green, _shard, extraction, history, snapshot  # noqa: F401
+from tests._red_run_fixtures import (  # noqa: F401
+    _extract, _run, _set_green, _shard, extraction, history, inventory_repo, snapshot,
+)
 
 import red_run_report as rrr
 
@@ -215,12 +217,13 @@ def test_candidates_count_distinct_red_runs_and_dates_across_runs() -> None:
 
 
 def test_cli_candidates_writes_a_json_header_with_the_hashes(
-        snapshot: Path, history: tuple[Path, dict[str, str]], tmp_path: Path,
+        snapshot: Path, history: tuple[Path, dict[str, str]], tmp_path: Path, inventory_repo: Path,
         capsys: pytest.CaptureFixture[str]) -> None:
     extraction_file, out = tmp_path / "x.jsonl.gz", tmp_path / "c.json"
     rrr.write_extraction(_extract(snapshot, history[0]), extraction_file)
     repo_root = Path(__file__).resolve().parent.parent
-    assert rrr.main(["candidates", "--extraction", str(extraction_file), "--out", str(out)]) == rrr.EXIT_OK
+    assert rrr.main(["candidates", "--extraction", str(extraction_file), "--out", str(out),
+                     "--repo", str(inventory_repo)]) == rrr.EXIT_OK
     got = json.loads(out.read_text())
     header = got["header"]
     assert header["archive_sha256"] == rrr.PHASE0_ARCHIVE_SHA256 == (
@@ -228,7 +231,7 @@ def test_cli_candidates_writes_a_json_header_with_the_hashes(
     assert header["extraction_sha256"] == hashlib.sha256(extraction_file.read_bytes()).hexdigest()
     assert header["script_sha256"] == hashlib.sha256((repo_root / "scripts" / "red_run_report.py").read_bytes()).hexdigest()
     assert "script_commit" not in header and header["window"] == ["2026-10-01", "2026-10-01"]
-    assert header["snapshot_final"] is False and set(got) == {"header", "candidates", "unattributed"}
+    assert header["snapshot_final"] is False and set(got) == {"header", "candidates", "unattributed", "absent"}
     assert "2 flake tests, 3 unattributed tests" in capsys.readouterr().out
     assert out.read_text().endswith("\n") and json.loads(out.read_text()) == got
 
@@ -240,13 +243,14 @@ def test_the_ledger_regex_no_longer_takes_a_pending_name_for_a_ledger() -> None:
 
 
 def test_candidates_out_is_deterministic_gzip_when_the_path_ends_in_gz(
-        snapshot: Path, history: tuple[Path, dict[str, str]], tmp_path: Path) -> None:
+        snapshot: Path, history: tuple[Path, dict[str, str]], tmp_path: Path, inventory_repo: Path) -> None:
     extraction_file = tmp_path / "x.jsonl.gz"
     rrr.write_extraction(_extract(snapshot, history[0]), extraction_file)
     plain, one, two = tmp_path / "c.json", tmp_path / "one" / "c.json.gz", tmp_path / "two" / "c.json.gz"
     for out in (plain, one, two):
         out.parent.mkdir(exist_ok=True)
-        assert rrr.main(["candidates", "--extraction", str(extraction_file), "--out", str(out)]) == rrr.EXIT_OK
+        assert rrr.main(["candidates", "--extraction", str(extraction_file), "--out", str(out),
+                         "--repo", str(inventory_repo)]) == rrr.EXIT_OK
     assert one.read_bytes()[:2] == b"\x1f\x8b" and one.read_bytes() == two.read_bytes()   # mtime 0, no name
     with gzip.open(one, "rt", encoding="utf-8") as fh:
         assert fh.read() == plain.read_text()
