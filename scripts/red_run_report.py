@@ -6,7 +6,7 @@
     red_run_report.py extract --snapshot DIR --green-jobs GREENDIR --repo . --out scripts/red-run-extraction-2026-09-23_2026-11-23.jsonl.gz
     red_run_report.py report  --extraction FILE [--top 15] [--repo .] [--sample RULE N --seed S]
     red_run_report.py mvv     --extraction FILE
-    red_run_report.py candidates --extraction FILE --out FILE.json [--repo .]
+    red_run_report.py candidates --extraction FILE --out FILE.json[.gz] [--repo .]
 
 ``extract`` reads the Phase 0 step 1 snapshot (``runs.jsonl``, ``jobs/<run>.json``,
 ``logs/<run>/<job>.log``) and the git history, and writes one compressed jsonl file with four
@@ -1165,6 +1165,21 @@ def candidates_report(an: Mapping[str, Any], header: Row) -> Row:
     return {"header": header, "candidates": flake, "unattributed": unattributed}
 
 
+def write_candidates(report: Row, path: Path) -> None:
+    """JSON; gzip with a zeroed mtime and no stored name when the path ends ``.gz``.
+
+    The repo-wide source scans read every non-markdown UTF-8 file, so a committed candidates file
+    that names routes through test node ids is written compressed.
+    """
+    text = (json.dumps(report, indent=1, sort_keys=True) + "\n").encode("utf-8")
+    if path.suffix != ".gz":
+        path.write_bytes(text)
+        return
+    with path.open("wb") as raw, gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0,
+                                                compresslevel=9) as gz:
+        gz.write(text)
+
+
 def candidates_header(an: Mapping[str, Any], extraction: Path, repo: Path, archive_sha256: str) -> Row:
     meta = an["meta"]
     return {"window": meta.get("window"), "snapshot_final": bool(meta.get("final")),
@@ -1229,7 +1244,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     an = analyze(read_extraction(args.extraction))
     if args.cmd == "candidates":
         report = candidates_report(an, candidates_header(an, args.extraction, args.repo, args.archive_sha256))
-        args.out.write_text(json.dumps(report, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        write_candidates(report, args.out)
         h = report["header"]
         sys.stdout.write(f"wrote {args.out}: {h['candidate_tests']} flake tests, "
                          f"{h['unattributed_tests']} unattributed tests\n")

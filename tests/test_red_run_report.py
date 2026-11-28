@@ -11,6 +11,7 @@ this file needs no engine.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -918,3 +919,19 @@ def test_the_ledger_regex_no_longer_takes_a_pending_name_for_a_ledger() -> None:
     assert not rrr.is_ledger_file("tests/test_pending_jobs.py")
     assert not rrr.is_ledger_file("docs/notes/pending-items.md")
     assert rrr.is_ledger_file("docs/wire-contract-pending.md") and rrr.is_ledger_file("tests/x_ceiling.toml")
+
+
+def test_candidates_out_is_deterministic_gzip_when_the_path_ends_in_gz(
+        snapshot: Path, history: tuple[Path, dict[str, str]], tmp_path: Path) -> None:
+    extraction_file = tmp_path / "x.jsonl.gz"
+    rrr.write_extraction(_extract(snapshot, history[0]), extraction_file)
+    repo_root = Path(__file__).resolve().parent.parent
+    plain, one, two = tmp_path / "c.json", tmp_path / "one" / "c.json.gz", tmp_path / "two" / "c.json.gz"
+    for out in (plain, one, two):
+        out.parent.mkdir(exist_ok=True)
+        assert rrr.main(["candidates", "--extraction", str(extraction_file), "--out", str(out),
+                         "--repo", str(repo_root)]) == rrr.EXIT_OK
+    assert one.read_bytes()[:2] == b"\x1f\x8b" and one.read_bytes() == two.read_bytes()   # mtime 0, no name
+    with gzip.open(one, "rt", encoding="utf-8") as fh:
+        assert fh.read() == plain.read_text()
+    assert plain.read_bytes()[:1] == b"{"
