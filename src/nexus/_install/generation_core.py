@@ -1102,16 +1102,29 @@ def ensure_dispatchers(
         recorded = marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
     except OSError as exc:
         raise GenerationError(f"could not prepare the dispatcher directory {bin_dir}: {exc}") from exc
-    refresh = bool(recorded) and recorded != DISPATCH_VERSION
+    # The dispatcher venv is built on a base interpreter, and uv removes a managed Python
+    # it no longer needs: every dispatcher is then dead and `nx` itself cannot run to say so.
+    # The venv is rebuilt (and every file refreshed) the next time this runs, whichever
+    # generation it is run for.
+    stranded = False
+    try:
+        cfg_home = _pyvenv_value((venv / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace"), "home")
+        stranded = bool(cfg_home) and not os.path.isdir(cfg_home)
+    except OSError:
+        pass
+    refresh = (bool(recorded) and recorded != DISPATCH_VERSION) or stranded
     todo = [
         n for n in names
         if refresh or not (bin_dir / layout.exe_name(n, platform=platform)).is_file()
     ]
     if not todo:
         return lines
-    if not python.is_file():
+    if stranded:
+        lines.append(f"the Python behind {venv} is gone; rebuilding the dispatcher environment")
+    if stranded or not python.is_file():
         _run(
-            ["uv", "venv", "--allow-existing", "--python", _shim_python_request(gen), str(venv)],
+            ["uv", "venv", *(["--clear"] if stranded else ["--allow-existing"]),
+             "--python", _shim_python_request(gen), str(venv)],
             run, "uv venv (dispatchers)", progress=progress,
         )
     staging = root / f".dispatch-wheels.{os.getpid()}"
@@ -1120,7 +1133,7 @@ def ensure_dispatchers(
         staging.mkdir()
         wheels = [str(dispatch_wheel(staging, name)) for name in todo]
         install = ["uv", "pip", "install", "--python", str(python), "--no-deps"]
-        if refresh:
+        if refresh and not stranded:
             install.append("--reinstall")
         _run([*install, *wheels], run, "uv pip install (dispatchers)", progress=progress)
         for name in todo:
@@ -1530,8 +1543,9 @@ def repair_layout(
     # pointers into files.
     if not (entry / layout.exe_name("nx", platform=platform)).is_file():
         lines.append(f"building the dispatchers in {entry}")
-        if not dry_run:
-            lines.extend(ensure_dispatchers(root, current, run=run, platform=platform))
+    if not dry_run:
+        # Idempotent: writes nothing when every dispatcher is there and its environment runs.
+        lines.extend(ensure_dispatchers(root, current, run=run, platform=platform))
     for name in (layout.CURRENT_LINK_NAME, layout.PREVIOUS_LINK_NAME):
         pointer = root / name
         if ops.is_link(pointer) and layout.read_pointer(pointer) is None:

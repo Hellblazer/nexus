@@ -179,6 +179,21 @@ class TestEnsureDispatchers:
         litter = [p.name for p in _bin(tools).iterdir() if p.name.startswith(".")]
         assert len(litter) == 1 and ".old." in litter[0], litter
 
+    def test_a_dispatcher_environment_whose_python_is_gone_is_rebuilt_and_every_file_refreshed(
+        self, tools: Path, generation: Path, tmp_path: Path,
+    ) -> None:
+        """uv removes a managed Python it no longer needs. Every dispatcher is then dead, and
+        `nx` cannot run to say so, so the next install or repair rebuilds the environment."""
+        gen_core.ensure_dispatchers(tools, generation, run=FakeShimUv(), platform=WIN)
+        (tools / "shim" / "pyvenv.cfg").write_text(f"home = {tmp_path / 'gone'}\nversion = 3.13.1\n", encoding="utf-8")
+        uv = FakeShimUv()
+        lines = gen_core.ensure_dispatchers(tools, generation, run=uv, platform=WIN)
+        venv = next(c for c in uv.calls if c[:2] == ["uv", "venv"])
+        assert "--clear" in venv
+        assert "--reinstall" not in uv.shim_installs[0], "a cleared environment has nothing to reinstall"
+        assert any("is gone; rebuilding" in line for line in lines)
+        assert sorted(p.name for p in _bin(tools).iterdir()) == ["nx-mcp.exe", "nx.exe"]
+
     def test_litter_of_an_earlier_refresh_is_swept(self, tools: Path, generation: Path) -> None:
         gen_core.ensure_dispatchers(tools, generation, run=FakeShimUv(), platform=WIN)
         (_bin(tools) / ".nx.exe.old.4242").write_bytes(b"old")
