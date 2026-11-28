@@ -338,6 +338,8 @@ local CLASSES = {
       "^prose%-edit/%.claude%-plugin/plugin%.json$",
       "^%.claude%-plugin/marketplace%.json$",
       "^scripts/plugin_ledger%.py$", "^scripts/plugin_channel%.py$",
+      "^scripts/plugin_surface%.py$", "^scripts/ledger_mode%.py$",
+      "^tests/_ledger_terminal%.py$",
       "^tests/test_plugin_release_drift_ledger%.py$",
       "^%.github/workflows/plugin%-drift%-ledger%.yml$",
       -- Not a watched path: the hook-skew harness is hooks.json's own e2e, and

@@ -21,6 +21,8 @@ import sys
 from collections.abc import Callable, Mapping
 
 ENV = "NX_LEDGER_MODE"
+#: Report mode also appends its lines here when set: the one place they survive a pytest-xdist worker (RDR-258 Phase 4).
+REPORT_FILE_ENV = "NX_LEDGER_REPORT_FILE"
 BLOCK = "block"
 REPORT = "report"
 MODES = (BLOCK, REPORT)
@@ -73,18 +75,26 @@ def _stdout(line: str) -> None:
 
 def settle(ledger: str, findings: list[str], examined: int, *, environ: Mapping[str, str] | None = None) -> bool:
     """True when the check passes. In block mode that is ``not findings`` and nothing is printed. In report mode it is
-    ``examined > 0``, after the findings and the summary are printed."""
+    ``examined > 0``, after the findings and the summary are printed (and appended to ``NX_LEDGER_REPORT_FILE`` when set)."""
     env = os.environ if environ is None else environ
     if mode(env) == BLOCK:
         return not findings
-    emit = _sink or _stdout
     annotate = env.get("GITHUB_ACTIONS") == "true"
+    lines: list[str] = []
     for text in findings:
-        emit(f"{FINDING_PREFIX} {ledger}: {_flat(text)}")
+        lines.append(f"{FINDING_PREFIX} {ledger}: {_flat(text)}")
         if annotate:
-            emit(_annotation(ledger, _flat(text)))
-    emit(f"{SUMMARY_PREFIX} {ledger}: {len(findings)} finding(s), {examined} item(s) examined (mode={REPORT})")
+            lines.append(_annotation(ledger, _flat(text)))
+    lines.append(f"{SUMMARY_PREFIX} {ledger}: {len(findings)} finding(s), {examined} item(s) examined (mode={REPORT})")
     if examined <= 0:
-        emit(f"{VACUOUS_PREFIX} {ledger}: examined 0 items; report mode does not pass a check that examined nothing")
-        return False
-    return True
+        lines.append(f"{VACUOUS_PREFIX} {ledger}: examined 0 items; report mode does not pass a check that examined nothing")
+    emit = _sink or _stdout
+    for line in lines:
+        emit(line)
+    path = env.get(REPORT_FILE_ENV, "").strip()
+    if path:
+        # pytest-xdist workers print to a pipe nothing reads; a file every worker appends to survives them (one short write
+        # per line, so concurrent workers do not interleave inside a line). A CI step prints the file after the run.
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    return examined > 0

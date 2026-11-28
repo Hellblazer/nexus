@@ -9,7 +9,8 @@ same diff base the other ``changes`` steps use: a pull request diffs from its me
 the branch's previous tip (``before..HEAD``). Any doubt answers ``true``: an unusable base (empty, all zeros, not in the
 checkout). An empty changed-file list between two good commits is a broken range, never "nothing changed": exit 1.
 
-:data:`SURFACE_PATHS` is the list the workflow's own ``paths:`` filter carried before the job moved into ``ci.yml``; a path
+:data:`SURFACE_PATHS` is the list the workflow's own ``paths:`` filter carried before the job moved into ``ci.yml``, plus the three files the ledger test
+imports and this script is (``plugin_surface.py``, ``ledger_mode.py``, ``tests/_ledger_terminal.py``); a path
 ending ``/**`` is a directory prefix and any other entry is an exact path.
 tests/test_plugin_release_drift_ledger.py pins that the list covers every surface prefix the ledger test reads, and
 tests/test_procedure_preflight.py that preflight classes each of them as ``plugin``.
@@ -43,6 +44,9 @@ SURFACE_PATHS: tuple[str, ...] = (
     ".claude-plugin/marketplace.json",
     "scripts/plugin_ledger.py",
     "scripts/plugin_channel.py",
+    "scripts/plugin_surface.py",
+    "scripts/ledger_mode.py",
+    "tests/_ledger_terminal.py",
     "tests/test_plugin_release_drift_ledger.py",
     ".github/workflows/plugin-drift-ledger.yml",
 )

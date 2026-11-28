@@ -17,7 +17,7 @@ SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "changelog_coverage.p
 
 @pytest.fixture(autouse=True)
 def _plain_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (ledger_mode.ENV, "GITHUB_ACTIONS"):
+    for name in (ledger_mode.ENV, ledger_mode.REPORT_FILE_ENV, "GITHUB_ACTIONS"):
         monkeypatch.delenv(name, raising=False)
 
 
