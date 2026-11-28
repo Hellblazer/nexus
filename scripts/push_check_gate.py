@@ -64,7 +64,7 @@ or revert commits only (the script exits 0 and says so in its summary line).
 
 The changelog, changelog-coverage, cloud-leg and plugin-ledger checks also take a MODE (RDR-258 Phase 4, scripts/ledger_mode.py): block, or report
 (a finding is listed as ``PUSH_CHECK_REPORT`` lines, at most eight per check and then a ``+N more`` line, and not refused). The mode is the
-spec's ``default_mode`` (block, but report for changelog-coverage) or, with ``--ledger-report REASON``, report on the record: each selected ledger check prints
+spec's ``default_mode`` (report for all four, since RDR-258 Phase 4 step 2) or, with ``--ledger-report REASON``, report on the record: each selected ledger check prints
 ``PUSH_CHECK_LEDGER_MODE NAME mode=... source=default|flag [reason=...]`` and the push script records a ``source=flag`` one as
 ``NAME-report=REASON``. ``NX_LEDGER_MODE`` in the environment is ignored (``PUSH_CHECK_NOTE`` says so): a variable left exported
 demotes nothing. A check that reports, by either route above, is named on ``PUSH_CHECKS_PASSED`` as ``reported=NAME`` (one path,
@@ -203,7 +203,8 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
          "fix the fragment under changelog/unreleased/ the report names (one fragment per bead, never CHANGELOG.md)",
          # In report mode a finding exits 0 with the summary line instead of "ok" (a run that examined nothing still exits 10);
          # in block mode only "ok" is a pass, so a LEDGER-REPORT line cannot stand in for it.
-         marker=r"changelog_fold check: ok", report_marker=r"LEDGER-REPORT changelog:", ledger="changelog"),
+         marker=r"changelog_fold check: ok", report_marker=r"LEDGER-REPORT changelog:", ledger="changelog",
+         default_mode="report"),
     Spec("changelog-coverage", "PUSH_REFUSED_CHANGELOG_COVERAGE", "run", ("scripts/changelog_coverage.py", LEDGER_MODE_SCRIPT),
          "uv run python scripts/changelog_coverage.py --base <origin/develop> --head <tip> --mode report",
          "add changelog/unreleased/<bead-id>.md for each commit the report names, or cite the bead in another entry, or add a "
@@ -228,13 +229,15 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
          "uv run pytest -o addopts= -m 'not integration and not slow' tests/scripts/test_cloud_leg.py",
          f"map every route of {LEDGER_PATH} in tests/e2e/lib/cloud_leg.py (the failing test names the unmapped one)",
          # Collected 2026-11-22: 102 tests, 101 pass and 1 is the opt-in real run (NX_CLOUDLEG_REAL_RUN), the one skip allowed.
-         min_passed=80, skip_ok="NX_CLOUDLEG_REAL_RUN", ledger="cloud-leg-routes"),
+         min_passed=80, skip_ok="NX_CLOUDLEG_REAL_RUN", ledger="cloud-leg-routes",
+         default_mode="report"),
     Spec("plugin-ledger", "PUSH_REFUSED_PLUGIN_LEDGER", "run", ("tests/test_plugin_release_drift_ledger.py", LEDGER_MODE_SCRIPT),
          "uv run pytest -o addopts= -m 'not integration and not slow' tests/test_plugin_release_drift_ledger.py",
          "add every changed plugin file to conexus/PENDING_RELEASE.md (one path per bullet), or drop a shipped entry",
          # Collected 2026-11-22: 30 tests, all pass, none skips. NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 turns the tagless-checkout skip
          # (9 tests) into a failure, so a pass cannot be a tagless one.
-         min_passed=20, env=(("NX_REQUIRE_PLUGIN_DRIFT_CHECK", "1"),), ledger="plugin-ledger"),
+         min_passed=20, env=(("NX_REQUIRE_PLUGIN_DRIFT_CHECK", "1"),), ledger="plugin-ledger",
+         default_mode="report"),
     # Collected 2026-11-22: 67 files, 2790 tests (1061 on 2026-10-05, when ci.yml's floor of 600 was set).
     Spec("pg-cluster", "PUSH_REFUSED_PG_CLUSTER", "run", (CLUSTER_CENSUS,),
          "uv run pytest -o addopts= -m 'not slow' tests/test_integration_pg_cluster.py",

@@ -26,6 +26,22 @@ CI = yaml.safe_load(CI_TEXT)
 LEDGER_WF = yaml.safe_load((WORKFLOWS / "plugin-drift-ledger.yml").read_text(encoding="utf-8"))
 
 
+REPORT_ON_DEVELOP = ("${{ ((github.event_name == 'push' && github.ref == 'refs/heads/develop') || "
+                     "(github.event_name == 'pull_request' && github.base_ref == 'develop')) && 'report' || 'block' }}")
+
+
+@pytest.mark.parametrize("job", ["test-lint", "test-docs-readers"])
+def test_the_ledger_tests_run_in_report_mode_on_develop_and_block_mode_elsewhere(job: str) -> None:
+    assert CI["jobs"][job]["env"]["NX_LEDGER_MODE"] == REPORT_ON_DEVELOP
+
+
+def test_the_lint_leg_collects_xdist_report_lines_in_a_file_and_prints_it() -> None:
+    lint = CI["jobs"]["test-lint"]
+    assert lint["env"]["NX_LEDGER_REPORT_FILE"] == "${{ github.workspace }}/ledger-report.txt"
+    step = next(s for s in lint["steps"] if s.get("name") == "Ledger findings (report mode)")
+    assert step["if"] == "always()" and 'cat "${{ github.workspace }}/ledger-report.txt"' in step["run"]
+
+
 def test_the_release_pr_runs_the_missing_fragment_detector_in_report_mode_first() -> None:
     steps = CI["jobs"]["release-ledger-gate"]["steps"]
     step = next(s for s in steps if "changelog fragment" in s.get("name", ""))
@@ -63,7 +79,7 @@ def test_the_gate_job_runs_on_a_changed_surface_or_a_pull_request_into_main_and_
     assert job["if"] == ("${{ needs.changes.outputs.plugin == 'true' || "
                          "(github.event_name == 'pull_request' && github.base_ref == 'main') }}")
     assert job["permissions"] == {"contents": "read"}
-    assert job["with"] == {"ledger_mode": "block"}, "step 2 of the phase flips this, not this commit"
+    assert job["with"] == {"ledger_mode": REPORT_ON_DEVELOP}
     assert "runs-on" not in job and "steps" not in job, "a caller job starts no runner of its own"
 
 

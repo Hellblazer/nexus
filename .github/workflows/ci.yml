@@ -1296,6 +1296,13 @@ jobs:
     # Those are serial figures; since nexus-0h5a7 the job runs at -n 4 (lower this after a measured run).
     timeout-minutes: 25
     env:
+      # RDR-258 Phase 4 step 2 (Sam): the changelog and cloud-leg route ledgers report on develop (a push, or a PR into develop)
+      # and block everywhere else, the release PR into main above all (scripts/ledger_mode.py). Same event test as the
+      # mcpb-resolve-gate branch in pytest-gate.
+      NX_LEDGER_MODE: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'pull_request' && github.base_ref == 'develop')) && 'report' || 'block' }}
+      # The lint leg runs -n 4 and an xdist worker's stdout reaches no log: report mode also appends here, and the
+      # "Ledger findings" step below prints the file (scripts/ledger_mode.py, tests/scripts/test_ledger_mode.py).
+      NX_LEDGER_REPORT_FILE: ${{ github.workspace }}/ledger-report.txt
       # nexus-wixar (2026-08-18): this job provisions NO service jar (by
       # design — see the comment block above), which made every lint-marked
       # test hit the autouse `_pin_t2_substrate` fixture's engine-substrate
@@ -1402,6 +1409,18 @@ jobs:
           [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 200 ] \
             || { echo "::error::lint leg passed fewer than 200 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
 
+      - name: Ledger findings (report mode)
+        # RDR-258 Phase 4 step 2: the changelog and cloud-leg route ledger tests ran under -n 4, so their LEDGER-FINDING lines
+        # and ::warning:: annotations are in this file, not in the pytest log. Empty or absent means block mode or no finding.
+        if: always()
+        run: |
+          if [ -s "${{ github.workspace }}/ledger-report.txt" ]; then
+            echo "ledger report (group ${{ matrix.group }}):"
+            cat "${{ github.workspace }}/ledger-report.txt"
+          else
+            echo "no ledger report lines (block mode, or the ledger tests ran in the other group)"
+          fi
+
   test-docs-readers:
     # nexus-q99w4 (Sam, 2026-10-05, option B): the doc-only fast lane skips
     # the shard matrix, but some tests read docs/ at assert time, so a
@@ -1425,6 +1444,10 @@ jobs:
     timeout-minutes: 20
     env:
       NX_T2_SUBSTRATE_EXPECTED: "1"
+      # RDR-258 Phase 4 step 2 (Sam): the changelog and cloud-leg route ledgers report on develop (a push, or a PR into develop)
+      # and block everywhere else, the release PR into main above all (scripts/ledger_mode.py). Same event test as the
+      # mcpb-resolve-gate branch in pytest-gate.
+      NX_LEDGER_MODE: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'pull_request' && github.base_ref == 'develop')) && 'report' || 'block' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
@@ -2062,7 +2085,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/plugin-drift-ledger.yml
     with:
-      ledger_mode: block
+      ledger_mode: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'pull_request' && github.base_ref == 'develop')) && 'report' || 'block' }}
 
   pytest-gate:
     # nexus-n0ful: required-check fan-in over the sharded `test` matrix.

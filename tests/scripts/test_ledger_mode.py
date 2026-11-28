@@ -192,9 +192,9 @@ def _run_changelog(tree: Path, reason: str = "", spec=None):
     return gate.run_check(spec or gate.SPECS["changelog"], tree, [sys.executable], [sys.executable], reason)
 
 
-def test_the_gate_refuses_a_ledger_finding_by_default(tmp_path: Path) -> None:
+def test_the_gate_lists_a_ledger_finding_by_default_from_phase_4_step_2(tmp_path: Path) -> None:
     out = _run_changelog(_gate_tree(tmp_path, bad=True))
-    assert out.ok is False and "nexus-aaa.1.md" in out.detail
+    assert out.ok is True and any(ln.startswith("LEDGER-FINDING changelog:") for ln in out.lines)
 
 
 def test_the_gate_passes_a_finding_only_under_the_ledger_report_flag_and_hands_its_lines_on(tmp_path: Path) -> None:
@@ -216,7 +216,7 @@ def test_nx_ledger_mode_in_the_environment_demotes_nothing_on_the_gate(tmp_path:
                                                                        value: str) -> None:
     monkeypatch.setenv(ledger_mode.ENV, value)
     out = _run_changelog(_gate_tree(tmp_path, bad=True))
-    assert out.ok is False and "nexus-aaa.1.md" in out.detail, "the finding still refuses, whatever the variable says"
+    assert out.ok is True, "the spec's report default stands, whatever the variable says"
 
 
 def test_the_ledger_checks_are_the_four_and_need_the_helper() -> None:
@@ -236,14 +236,17 @@ def test_a_spec_default_mode_applies_without_the_flag_and_the_environment_cannot
     import dataclasses  # noqa: PLC0415
 
     modes = {n: s.default_mode for n, s in gate.SPECS.items() if s.ledger}
-    assert modes == {"changelog": "block", "changelog-coverage": "report", "cloud-leg": "block", "plugin-ledger": "block"}, \
-        "the three ledgers block; the missing-fragment listing only reports"
-    spec = dataclasses.replace(gate.SPECS["changelog"], default_mode="report")
+    assert modes == {"changelog": "report", "changelog-coverage": "report", "cloud-leg": "report", "plugin-ledger": "report"}, \
+        "RDR-258 Phase 4 step 2"
     tree = _gate_tree(tmp_path, bad=True)
-    assert _run_changelog(tree, spec=spec).ok is True
+    report_spec = dataclasses.replace(gate.SPECS["changelog"], default_mode="report")
+    block_spec = dataclasses.replace(gate.SPECS["changelog"], default_mode="block")
+    assert _run_changelog(tree, spec=report_spec).ok is True and _run_changelog(tree, spec=block_spec).ok is False
     monkeypatch.setenv(ledger_mode.ENV, "block")
-    assert _run_changelog(tree, spec=spec).ok is True, "an exported variable does not move the spec's mode either way"
-    assert gate.ledger_mode_for(gate.SPECS["changelog"]) == ("block", "default")
+    assert _run_changelog(tree, spec=report_spec).ok is True, "an exported variable does not move the spec's mode either way"
+    monkeypatch.setenv(ledger_mode.ENV, "report")
+    assert _run_changelog(tree, spec=block_spec).ok is False, "nor does it demote a spec that blocks"
+    assert gate.ledger_mode_for(gate.SPECS["changelog"]) == ("report", "default")
     assert gate.ledger_mode_for(gate.SPECS["changelog-coverage"]) == ("report", "default")
     assert gate.ledger_mode_for(gate.SPECS["changelog"], "why") == ("report", "flag")
 
@@ -289,7 +292,7 @@ def test_run_gate_prints_each_ledger_checks_mode_and_hands_a_flag_override_to_th
     repo, base, tip = _gate_sh_repo(tmp_path)
     monkeypatch.setenv(ledger_mode.ENV, "report")                       # ignored, and said so
     code, out, err = _run_gate(repo, base, tip, tmp_path)
-    assert code == 14 and "PUSH_CHECK_LEDGER_MODE changelog mode=block source=default" in out and "PUSH_REFUSED_CHANGELOG" in out
+    assert code == 0 and "PUSH_CHECK_LEDGER_MODE changelog mode=report source=default" in out
     assert "PUSH_CHECK_NOTE NX_LEDGER_MODE='report' in the environment is ignored" in err
     monkeypatch.delenv(ledger_mode.ENV)
     code, out, err = _run_gate(repo, base, tip, tmp_path, ledger_report="the ledger is being rebuilt")

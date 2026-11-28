@@ -539,29 +539,33 @@ def test_a_skip_overrides_one_check_and_its_reason_is_in_the_summary_and_the_rec
     assert _git("rev-parse", "refs/heads/develop", cwd=origin) == sha
 
 
-def test_ledger_report_is_a_flag_on_the_record_and_the_environment_cannot_stand_in_for_it(armed, fake_nx,
-                                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
-    """RDR-258 Phase 4: the changelog, cloud-leg and plugin-ledger checks run in report mode only under --ledger-report, which
-    is recorded like a skip; NX_LEDGER_MODE in the environment demotes nothing."""
+def test_ledger_report_is_the_default_and_the_flag_is_on_the_record_and_the_environment_stands_in_for_neither(
+        armed, fake_nx, monkeypatch: pytest.MonkeyPatch) -> None:
+    """RDR-258 Phase 4 step 2: the changelog, cloud-leg and plugin-ledger checks list a finding by default (``Spec.default_mode``),
+    which is not an override and records nothing; --ledger-report asks for the same mode on the record, like a skip;
+    NX_LEDGER_MODE in the environment moves neither."""
     origin, work = armed
-    before = _git("rev-parse", "refs/heads/develop", cwd=origin)
     sha = _commit_paths(work, "bad fragment", {"changelog/unreleased/nexus-xyz.md": "### Nonsense\n\n- a bullet\n"})
-    monkeypatch.setenv("NX_LEDGER_MODE", "report")
+    monkeypatch.setenv("NX_LEDGER_MODE", "block")
     proc = _push(work, fake_nx, sha)
-    assert proc.returncode == 14 and "PUSH_REFUSED_CHANGELOG" in proc.stdout, proc.stdout + proc.stderr
-    assert "PUSH_CHECK_LEDGER_MODE changelog mode=block source=default" in proc.stdout
-    assert "NX_LEDGER_MODE='report' in the environment is ignored" in proc.stderr
-    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == before
-    proc = _push(work, fake_nx, "--ledger-report", "the fragments are being rewritten, nexus-xyz", sha)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "PUSH_CHECK_LEDGER_MODE changelog mode=report source=flag reason=the fragments are being rewritten, nexus-xyz" in proc.stdout
+    assert "PUSH_CHECK_LEDGER_MODE changelog mode=report source=default" in proc.stdout
+    assert "NX_LEDGER_MODE='block' in the environment is ignored" in proc.stderr
     assert "PUSH_CHECK_REPORT changelog: LEDGER-FINDING changelog:" in proc.stderr
     assert "reported=changelog" in proc.stderr, "one report path: a ledger finding is named on PUSH_CHECKS_PASSED like the wire-ledger's"
     (record,) = _records(fake_nx[1])
+    assert not _opt(record, "--skip"), "report as the spec's default is not an override, so nothing is recorded"
+    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == sha
+    monkeypatch.delenv("NX_LEDGER_MODE")
+    again = _commit_paths(work, "another bad fragment", {"changelog/unreleased/nexus-xyw.md": "### Nonsense\n\n- a bullet\n"})
+    proc = _push(work, fake_nx, "--ledger-report", "the fragments are being rewritten, nexus-xyz", again)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "PUSH_CHECK_LEDGER_MODE changelog mode=report source=flag reason=the fragments are being rewritten, nexus-xyz" in proc.stdout
+    first, second = _records(fake_nx[1])
     reason = "the fragments are being rewritten, nexus-xyz"
     # --ledger-report records every selected ledger check; changelog-coverage is always selected (RDR-258 Phase 4 step 2)
-    assert set(_opt(record, "--skip")) == {f"changelog-report={reason}", f"changelog-coverage-report={reason}"}
-    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == sha
+    assert set(_opt(second, "--skip")) == {f"changelog-report={reason}", f"changelog-coverage-report={reason}"}
+    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == again
 
 
 def test_a_skip_does_not_cover_another_red_check(armed, fake_nx) -> None:

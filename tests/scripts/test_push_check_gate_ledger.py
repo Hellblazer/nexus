@@ -36,8 +36,11 @@ def _tree(tmp_path: Path, output: str, code: int = 0, *, body: str = "", with_le
     return tmp_path
 
 
-def _run(tree: Path, reason: str = "") -> object:
-    return gate.run_check(gate.SPECS["changelog"], tree, [sys.executable], [sys.executable, "-m", "pytest"], reason)
+def _run(tree: Path, reason: str = "", *, block: bool = False) -> object:
+    """Run the changelog check. *block* pins the spec's default to block (the mode the spec had before RDR-258 Phase 4 step 2
+    and the one a spec without a default has); otherwise the real spec, whose default is report, and *reason* is the flag."""
+    spec = dataclasses.replace(gate.SPECS["changelog"], default_mode="block") if block else gate.SPECS["changelog"]
+    return gate.run_check(spec, tree, [sys.executable], [sys.executable, "-m", "pytest"], reason)
 
 
 def _refused(outcome: object, *fragments: str) -> None:
@@ -49,22 +52,22 @@ def _refused(outcome: object, *fragments: str) -> None:
 # ── S1: the output is held to the pinned mode ───────────────────────────────
 
 def test_block_mode_passes_on_its_own_marker_and_reports_nothing(tmp_path: Path) -> None:
-    outcome = _run(_tree(tmp_path, OK))
+    outcome = _run(_tree(tmp_path, OK), block=True)
     assert outcome.ok and not outcome.reported and outcome.lines == []
 
 
 def test_block_mode_exit_zero_with_a_finding_line_is_refused(tmp_path: Path) -> None:
-    _refused(_run(_tree(tmp_path, f"{OK}\n{FINDING}")), "block mode", "LEDGER-FINDING")
+    _refused(_run(_tree(tmp_path, f"{OK}\n{FINDING}"), block=True), "block mode", "LEDGER-FINDING")
 
 
 def test_block_mode_does_not_pass_on_a_report_summary_line(tmp_path: Path) -> None:
     """The changelog marker's report alternative is for report mode only: a LEDGER-REPORT line is not block mode's ``ok``."""
-    _refused(_run(_tree(tmp_path, SUMMARY_NONE)), "no /changelog_fold check: ok/")
+    _refused(_run(_tree(tmp_path, SUMMARY_NONE), block=True), "no /changelog_fold check: ok/")
 
 
-@pytest.mark.parametrize("reason", ["", REASON], ids=["block", "report"])
-def test_a_vacuous_line_is_refused_in_either_mode(tmp_path: Path, reason: str) -> None:
-    _refused(_run(_tree(tmp_path, f"{OK}\n{SUMMARY_NONE}\n{VACUOUS}"), reason), "LEDGER-VACUOUS", "vacuous")
+@pytest.mark.parametrize("reason,block", [("", True), ("", False), (REASON, False)], ids=["block", "report-default", "report-flag"])
+def test_a_vacuous_line_is_refused_in_either_mode(tmp_path: Path, reason: str, block: bool) -> None:
+    _refused(_run(_tree(tmp_path, f"{OK}\n{SUMMARY_NONE}\n{VACUOUS}"), reason, block=block), "LEDGER-VACUOUS", "vacuous")
 
 
 def test_report_mode_findings_with_no_summary_are_refused(tmp_path: Path) -> None:
@@ -84,37 +87,45 @@ def test_report_mode_with_zero_findings_passes_unreported_and_prints_nothing(tmp
     assert out.getvalue() == "" and err.getvalue() == "", "a check that reported nothing prints nothing, summary line included"
 
 
-# ── S2: a ledger check that crashes still refuses under --ledger-report ─────
+# ── S2: a ledger check that crashes still refuses in report mode, by the spec's default or by --ledger-report ─────
 
-def test_a_crash_with_a_traceback_is_refused_even_after_findings_were_printed(tmp_path: Path) -> None:
+#: Report mode reached by the spec's default (RDR-258 Phase 4 step 2: no flag) and by the --ledger-report flag.
+REPORT_ROUTES = pytest.mark.parametrize("reason", ["", REASON], ids=["default", "flag"])
+
+
+@REPORT_ROUTES
+def test_a_crash_with_a_traceback_is_refused_even_after_findings_were_printed(tmp_path: Path, reason: str) -> None:
     # Prints everything a passing report-mode run prints, then crashes: only the non-zero exit makes it a refusal.
     body = f"print({OK!r})\nprint({FINDING!r})\nprint({SUMMARY!r})\nraise RuntimeError('boom')\n"
-    outcome = _run(_tree(tmp_path, "", body=body), REASON)
+    outcome = _run(_tree(tmp_path, "", body=body), reason)
     _refused(outcome, "RuntimeError: boom")
     assert "exit 0 but" not in outcome.detail, "refused for its exit code, not by one of the output checks"
 
 
-def test_exit_two_is_refused_under_report_mode(tmp_path: Path) -> None:
+@REPORT_ROUTES
+def test_exit_two_is_refused_under_report_mode(tmp_path: Path, reason: str) -> None:
     # A passing run's output (marker and summary) with exit 2: only the exit code makes it a refusal.
-    outcome = _run(_tree(tmp_path, f"{OK}\n{SUMMARY_NONE}", 2), REASON)
+    outcome = _run(_tree(tmp_path, f"{OK}\n{SUMMARY_NONE}", 2), reason)
     _refused(outcome, SUMMARY_NONE)
     assert "exit 0 but" not in outcome.detail, "refused for its exit code, not by one of the output checks"
 
 
-def test_a_timeout_is_refused_under_report_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@REPORT_ROUTES
+def test_a_timeout_is_refused_under_report_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str) -> None:
     monkeypatch.setenv("NX_PUSH_CHECK_TIMEOUT_S", "1")
-    _refused(_run(_tree(tmp_path, "", body="import time\ntime.sleep(60)\n"), REASON), "ran past 1s")
+    _refused(_run(_tree(tmp_path, "", body="import time\ntime.sleep(60)\n"), reason), "ran past 1s")
 
 
+@REPORT_ROUTES
 @pytest.mark.parametrize("name", ["changelog", "changelog-coverage", "cloud-leg", "plugin-ledger"])
-def test_a_tree_with_no_ledger_mode_script_is_refused_under_report_mode(tmp_path: Path, name: str) -> None:
+def test_a_tree_with_no_ledger_mode_script_is_refused_under_report_mode(tmp_path: Path, name: str, reason: str) -> None:
     """The child needs scripts/ledger_mode.py to import; without it there is no report to trust, and the run is a refusal."""
     spec = gate.SPECS[name]
     for need in spec.needs:
         if need != gate.LEDGER_MODE_SCRIPT:
             (tmp_path / need).parent.mkdir(parents=True, exist_ok=True)
             (tmp_path / need).write_text("import sys\nprint('changelog_fold check: ok')\nsys.exit(0)\n")
-    outcome = gate.run_check(spec, tmp_path, [sys.executable], [sys.executable, "-m", "pytest"], REASON)
+    outcome = gate.run_check(spec, tmp_path, [sys.executable], [sys.executable, "-m", "pytest"], reason)
     _refused(outcome, "scripts/ledger_mode.py", "refusal, not a skip")
 
 
