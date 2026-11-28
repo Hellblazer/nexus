@@ -80,6 +80,9 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `prose-edit/skills/prose-edit/markup-route.md`: a bare "Yes, apply." after a held query counts as No on the query, applies in the same turn (even when every edit is held), and leaves the voice-card question to step 13, nexus-scmcs.
 - `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`: the linked-worktree probe asks git for its git dir and common dir in one `rev-parse` instead of two, one process fewer per subagent Bash call that reaches it; a reply that is not exactly two lines fails closed as a failed call does (no bead; found diagnosing the Windows test set timeout, 2026-11-27).
 
+- `conexus/hooks/scripts/_cli_lookup.py`: the lookup reads `<tools>/current` as a pointer FILE (the Windows pointer since RedirectionGuard refuses a junction made without administrator rights), and falls back to `readlink` for the symlink or junction of an earlier install, nexus-f9bgu.47.
+- `conexus/hooks/scripts/version_lockstep_action.py`: `generation_install_present` accepts a pointer file naming an existing generation, as `current` is on Windows now, nexus-f9bgu.47.
+
 
 ## Deferred to the next client release
 
