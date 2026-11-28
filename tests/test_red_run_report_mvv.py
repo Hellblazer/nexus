@@ -268,6 +268,7 @@ def test_the_route_scans_skip_a_red_run_data_dir_and_catch_the_same_file_elsewhe
     for rel in ("scripts/red-run-data/names.txt", "scripts/elsewhere/names.txt"):
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text(f"tests/test_{route}_x.py::test_a\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, timeout=60)   # the scans read tracked files
     seen, _ = ttl_scan._scan(tmp_path)
     assert "scripts/elsewhere/names.txt" in seen and "scripts/red-run-data/names.txt" not in seen
     listed = {p.relative_to(tmp_path).as_posix() for p in retire_scan.TestNoAutomaticTrigger._files(tmp_path)}
