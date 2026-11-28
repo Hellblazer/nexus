@@ -485,6 +485,10 @@ stays green, and the review fixes the offenders (the parametrized self-tests of 
 scan still block). A site that must stay process-wide goes in its `ALLOWED`
 with the reason.
 
+A fake that does get in does not fail a test: it blocks a teardown until the job runs out its timeout, which
+ends the JOB cancelled inside a run GitHub marks failed. `scripts/red_run_report.py` counts that shape
+(`scripts/red_run_stuck.py`: a cancelled or timed_out job whose log says it exceeded the maximum execution time).
+
 ## Lint guard
 
 `tests/test_mode_declarations_are_explicit.py` enforces the convention. For every collected test whose source contains the regex `voyage-(context|code)-3`, it requires one of:

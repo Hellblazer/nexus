@@ -83,6 +83,7 @@ from pathlib import Path
 from typing import Any
 
 import red_run_inventory as inventory_module
+import red_run_stuck
 from red_run_inventory import Inventory
 
 Row = dict[str, Any]
@@ -819,6 +820,13 @@ def extract(snapshot: Path, repo: Path, *, conclusions: Sequence[str] = DEFAULT_
     commits = [{"t": "commit", "sha": s[:12], "subj": v["subj"], "files": v["files"]}
                for s, v in sorted(hist.commits.items())]
     status = snapshot_status(snapshot, gaps)
+    # RDR-258 Phase 1 step 4: runs that ended timed_out or cancelled are not red runs, and are counted beside them.
+    stuck = red_run_stuck.stuck_rows(
+        runs, lambda rid: _load_jobs(snapshot, rid),
+        lambda rid, jid: any(red_run_stuck.log_has_timeout(root / str(rid) / f"{jid}.log")
+                             for root in (snapshot / "logs", *extra_logs)),
+        lambda rid, jid: any(red_run_stuck.log_present(root / str(rid) / f"{jid}.log")
+                             for root in (snapshot / "logs", *extra_logs)))
     meta = {"t": "meta", "window": [since, until], "conclusions": list(conclusions),
             "include_jobless": include_jobless, "runs_in_window": len(runs),
             "red_runs": len(out_runs), "dropped_jobless": dropped_jobless,
@@ -826,8 +834,8 @@ def extract(snapshot: Path, repo: Path, *, conclusions: Sequence[str] = DEFAULT_
             "failed_jobs_with_log": cov["logs"], "logs_from_extra_roots": cov["extra"],
             "manifest": status["manifest"], "final": status["final"],
             "gaps": status["gaps"], "gaps_explained": status["gaps_explained"],
-            "scope_buckets": status["buckets"]}
-    return [meta] + out_runs + out_items + commits + _decided(runs)
+            "scope_buckets": status["buckets"], "stuck": red_run_stuck.summarize(stuck)}
+    return [meta] + out_runs + out_items + commits + _decided(runs) + stuck
 
 
 def write_extraction(records: Iterable[Row], path: Path) -> None:
@@ -945,6 +953,7 @@ def analyze(records: Sequence[Row]) -> dict[str, Any]:
     return {"runs": runs, "items": items, "by_run": by_run,
             "meta": next((r for r in records if r["t"] == "meta"), {}),
             "decided": [r for r in records if r["t"] == "decided"],
+            "stuck": [r for r in records if r["t"] == "stuck"],
             "commits": {r["sha"]: r for r in records if r["t"] == "commit"}}
 
 
@@ -1123,7 +1132,8 @@ def render_report(an: Mapping[str, Any], top: int = 15, repo: Path | None = None
     rules = collections.Counter(r for run in an["runs"].values() for r in run["rules"])
     lines += [f"  {k:40s} {v:5d}" for k, v in sorted(rules.items())]
     hrs = red_hours(an)
-    lines += ["", f"CI red hours {hrs['_total']}  by category "
+    lines += ["", *red_run_stuck.render(meta, an.get("stuck", [])), ""]
+    lines += [f"CI red hours {hrs['_total']}  by category "
               + ", ".join(f"{k} {v}" for k, v in sorted(hrs.items()) if k != "_total")]
     venues = collections.Counter(i["venue"] for i in an["items"] if not i["derived"])
     lines += ["", "failing items by venue: " + ", ".join(f"{k} {v}" for k, v in venues.most_common())]
