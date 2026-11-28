@@ -12,7 +12,6 @@ helpers that must not resend it, the registration helper, and the two surfaces a
 from __future__ import annotations
 
 import json
-import re
 import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -153,16 +152,60 @@ def test_the_reason_constant_is_the_value_the_engine_sends() -> None:
     assert CHUNK_METADATA_KEY_REFUSED_REASON == "chunk_metadata_key_refused"
 
 
-def test_the_client_constant_equals_the_engines_once_the_engine_declares_it() -> None:
-    """Parity with ``HttpUtil`` where the engine half has landed. Until then the declaration is
-    absent and this reports a skip naming that, and ``test_the_reason_constant_is_the_value_the_engine_sends``
-    above is the client-side pin. After the engine branch merges, move the name into
-    ``test_engine_reasons.test_the_rdr225_partition_reasons_equal_the_engines``'s list."""
-    http_util = Path(__file__).resolve().parents[1] / "service/src/main/java/dev/nexus/service/http/HttpUtil.java"
-    match = re.search(r'CHUNK_METADATA_KEY_REFUSED_REASON\s*=\s*"([a-z_]+)"', http_util.read_text())
-    if match is None:
-        pytest.skip("HttpUtil does not declare CHUNK_METADATA_KEY_REFUSED_REASON yet (engine half of nexus-6pfgb.66)")
-    assert match.group(1) == CHUNK_METADATA_KEY_REFUSED_REASON
+_ENGINE_MAIN = Path(__file__).resolve().parents[1] / "service" / "src" / "main"
+_MODE_ENV = "NX_CHUNK_KEY_CHECK_MODE"
+
+
+def _parity_verdict(engine_main: Path) -> tuple[str, str]:
+    """``(verdict, why)`` of the client-engine parity of the refusal reason, read off the engine tree.
+
+    The engine has no refuse mode at all until something under *engine_main* names ``NX_CHUNK_KEY_CHECK_MODE``:
+    only then is "skip" allowed, with the reason printed. Once it does, the engine must carry the reason as a quoted
+    string literal (``"chunk_metadata_key_refused"``, whatever the constant holding it is called) and the verdict is
+    "fail" without one. A tree with no source files at all is a "fail" too: a check that examined nothing is not a
+    pass."""
+    files = [p for p in engine_main.rglob("*") if p.suffix in (".java", ".kt", ".xml", ".properties", ".yml", ".yaml") and p.is_file()]
+    if not files:
+        return "fail", f"no engine sources found under {engine_main}: the parity check examined nothing"
+    texts = [p.read_text(encoding="utf-8", errors="replace") for p in files]
+    if not any(_MODE_ENV in t for t in texts):
+        return "skip", f"the engine tree has no {_MODE_ENV} (no refuse mode yet): nothing to hold the client reason against"
+    if not any(f'"{CHUNK_METADATA_KEY_REFUSED_REASON}"' in t for t in texts):
+        return "fail", (f"the engine has a refuse mode ({_MODE_ENV}) but no \"{CHUNK_METADATA_KEY_REFUSED_REASON}\" string literal: "
+                        "its 422 reason and the client's constant have drifted, or the engine renamed it")
+    return "ok", ""
+
+
+def test_the_clients_reason_is_the_engines_literal_once_the_engine_can_refuse() -> None:
+    """Skips only while the engine has no refuse mode (no NX_CHUNK_KEY_CHECK_MODE in service/), and says why; FAILS
+    when it has one and no string literal equal to the client's reason, however the engine names its constant."""
+    verdict, why = _parity_verdict(_ENGINE_MAIN)
+    if verdict == "skip":
+        pytest.skip(why)
+    assert verdict == "ok", why
+
+
+@pytest.mark.parametrize(
+    "files, expected",
+    [
+        pytest.param({}, "fail", id="no-sources-is-not-a-pass"),
+        pytest.param({"A.java": 'class A { String r = "chunk_metadata_key_refused"; }'}, "skip", id="no-refuse-mode-skips"),
+        pytest.param({"A.java": 'class A { String m = "NX_CHUNK_KEY_CHECK_MODE"; }'}, "fail", id="mode-without-the-literal-fails"),
+        pytest.param({"A.java": 'class A { String m = "NX_CHUNK_KEY_CHECK_MODE"; }',
+                      "B.java": '// {@code chunk_metadata_key_refused} in a comment is not a literal\nclass B {}'},
+                     "fail", id="a-comment-is-not-the-literal"),
+        pytest.param({"A.java": 'class A { String m = "NX_CHUNK_KEY_CHECK_MODE"; }',
+                      "B.java": 'class B { static final String R = "chunk_metadata_key_refused"; }'}, "ok", id="mode-and-literal"),
+        pytest.param({"A.java": 'class A { String m = "NX_CHUNK_KEY_CHECK_MODE"; }',
+                      "B.java": 'class B { static final String REASON = "chunk_metadata_key_refused"; }'}, "ok", id="any-constant-name"),
+        pytest.param({"A.java": 'class A { String m = "NX_CHUNK_KEY_CHECK_MODE"; }',
+                      "B.java": 'class B { String R = "chunk_metadata_key_rejected"; }'}, "fail", id="a-renamed-reason-fails"),
+    ],
+)
+def test_the_parity_verdict_on_synthetic_engine_trees(tmp_path: Path, files: dict[str, str], expected: str) -> None:
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    assert _parity_verdict(tmp_path)[0] == expected
 
 
 # ── transport 1: the urllib vector client (upsert-chunks, update-metadata) ───
