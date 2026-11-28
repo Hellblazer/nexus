@@ -58,7 +58,7 @@ from nexus.db.gateway_backoff import (
 )
 from nexus.db.client_identity import client_identity_headers
 from nexus.db.expire_sweep import ExpireIncompleteError, ExpireReport, RetiredNote, sweep_expired  # noqa: F401 — the report types are re-exported: callers import them from here
-from nexus.collection_errors import superseded_write_error_from_body
+from nexus.collection_errors import chunk_key_refused_error_from_body, superseded_write_error_from_body
 from nexus.db.engine_reasons import (
     QUARANTINE_RESTORE_BUSY_REASON,
     RENAME_BUSY_REASON,
@@ -2061,6 +2061,11 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: float = 12
         _superseded = superseded_write_error_from_body(e.code, err)
         if _superseded is not None:
             raise _superseded from e
+        # nexus-6pfgb.66: the engine refused chunk metadata keys (422). Typed and final for the same
+        # reason: not a VectorServiceError, so no degrade path or retry ladder resends it.
+        _key_refused = chunk_key_refused_error_from_body(e.code, err)
+        if _key_refused is not None:
+            raise _key_refused from e
         # nexus-8ooxn: a 401/403 body can echo the rejected credential;
         # redact where it enters the message so every renderer sees it gone.
         msg = f"POST {path} → HTTP {e.code}: {redact_credentials(str(err.get('error', err)))}"

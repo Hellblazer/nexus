@@ -7,6 +7,7 @@ importing the corpus module on every invocation.
 from __future__ import annotations
 
 import shlex
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -123,3 +124,92 @@ def label_reserved_error_from_body(
         return None
     label = body.get("label")
     return LabelReservedError(label, user_chooses_label=user_chooses_label) if isinstance(label, str) and label else None
+
+
+@dataclass(frozen=True)
+class RefusedChunkKey:
+    """One entry of the engine's ``refused`` list: a metadata ``key``, its ``cls`` (DOCUMENT, POSITION, LEGACY or
+    UNKNOWN; empty when the engine sent none) and the ``home`` where the value lives instead (empty when none)."""
+
+    key: str
+    cls: str = ""
+    home: str = ""
+
+    def render(self) -> str:
+        detail = ", ".join(part for part in (self.cls, f"belongs in: {self.home}" if self.home else "") if part)
+        return f"{self.key!r} ({detail})" if detail else repr(self.key)
+
+
+class ChunkMetadataKeyRefusedError(RuntimeError):
+    """The engine refused a chunk write because its metadata names a key a chunk row does not carry
+    (422 ``chunk_metadata_key_refused``, RDR-236 Phase 4, nexus-6pfgb.66).
+
+    Answered on ``upsert-chunks``, ``update-metadata`` and the combined manifest writes (``append``, ``append_many``,
+    ``write_many``) for a collection outside the ``quarantine-`` and ``taxonomy__`` prefixes. It is a defect in the
+    writer, which put a document or position field (or an unknown one) on a chunk, so resending can only repeat it:
+    never retried, never turned into a registration. Not a ``VectorServiceError`` on purpose, as with
+    :class:`SupersededCollectionWriteError`, so no degrade path or retry ladder treats it as a transient engine failure.
+
+    Exposes ``refused`` (a tuple of :class:`RefusedChunkKey`; empty when the body named none), ``route``,
+    ``collection``, ``collection_id``, ``refused_chunks`` and ``requested_count`` (each ``None`` when the engine
+    did not send it) and ``engine_message`` (the engine's own prose).
+    """
+
+    def __init__(
+        self, *, refused: tuple[RefusedChunkKey, ...] = (), route: str | None = None, collection: str | None = None,
+        collection_id: int | None = None, refused_chunks: int | None = None, requested_count: int | None = None,
+        engine_message: str | None = None,
+    ) -> None:
+        self.refused = refused
+        self.route = route
+        self.collection = collection
+        self.collection_id = collection_id
+        self.refused_chunks = refused_chunks
+        self.requested_count = requested_count
+        self.engine_message = engine_message
+        where = " on ".join(part for part in (
+            f"collection {collection!r}" if collection else "", route or "") if part)
+        head = "the engine refused a chunk write: its metadata names keys a chunk row does not carry"
+        if where:
+            head += f" ({where})"
+        if refused:
+            keys = "\n".join(f"  {k.render()}" for k in refused)
+            body = f"{head}:\n{keys}"
+        else:
+            body = f"{head}. {engine_message}" if engine_message else f"{head}."
+        if refused_chunks is not None and requested_count is not None:
+            body += f"\n{refused_chunks} of {requested_count} chunks carried one."
+        super().__init__(body + "\nThe writer must stop sending these keys; the same write is refused again, so it is not retried.")
+
+
+def _opt_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _opt_str(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def chunk_key_refused_error_from_body(status: int | None, body: Any) -> ChunkMetadataKeyRefusedError | None:
+    """The typed error for the engine's ``chunk_metadata_key_refused`` body, else None.
+
+    Keyed on the body's ``reason`` (the engine's stable discriminator) and read defensively: a 4xx or an absent
+    status is accepted, ``refused`` is optional and a malformed entry is skipped, and a body with no usable
+    ``refused`` falls back to the engine's ``error`` prose. Never raises."""
+    from nexus.db.engine_reasons import CHUNK_METADATA_KEY_REFUSED_REASON, error_reason  # noqa: PLC0415 — deferred: this module stays import-free for the CLI boundary
+
+    if status is not None and not 400 <= status < 500:
+        return None
+    if not isinstance(body, dict) or error_reason(body) != CHUNK_METADATA_KEY_REFUSED_REASON:
+        return None
+    raw = body.get("refused")
+    refused = tuple(
+        RefusedChunkKey(key=e["key"], cls=_opt_str(e.get("class")) or "", home=_opt_str(e.get("home")) or "")
+        for e in (raw if isinstance(raw, list) else ())
+        if isinstance(e, dict) and isinstance(e.get("key"), str) and e["key"]
+    )
+    return ChunkMetadataKeyRefusedError(
+        refused=refused, route=_opt_str(body.get("route")), collection=_opt_str(body.get("collection")),
+        collection_id=_opt_int(body.get("collection_id")), refused_chunks=_opt_int(body.get("refused_chunks")),
+        requested_count=_opt_int(body.get("requested_count")), engine_message=_opt_str(body.get("error")),
+    )

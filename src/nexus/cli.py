@@ -103,7 +103,7 @@ class _StorageBackendGuardGroup(click.Group):
         import httpx  # noqa: PLC0415 — deferred: keep CLI import surface light
 
         from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred: keep CLI import surface light
-        from nexus.collection_errors import LabelReservedError, SupersededCollectionWriteError  # noqa: PLC0415 — deferred: keep CLI import surface light
+        from nexus.collection_errors import ChunkMetadataKeyRefusedError, LabelReservedError, SupersededCollectionWriteError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.config import PdfConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.entity_keys import EntityConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
@@ -123,6 +123,10 @@ class _StorageBackendGuardGroup(click.Group):
         except (SupersededCollectionWriteError, LabelReservedError) as exc:
             # nexus-wwuzp: a write named a retired collection. The message
             # names the successor; a traceback buried it.
+            raise click.ClickException(str(exc)) from exc
+        except ChunkMetadataKeyRefusedError as exc:
+            # nexus-6pfgb.66 (RDR-236 Phase 4): the engine refused chunk metadata keys. The message names
+            # each key and where its value lives instead; a traceback buried them.
             raise click.ClickException(str(exc)) from exc
         except ServiceEndpointUnresolvableError as exc:
             # nexus-sis0m.1: no service to talk to (a stopped local service,

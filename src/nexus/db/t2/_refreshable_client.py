@@ -66,7 +66,11 @@ import structlog
 # additionally pins this module's and http_vector_client's values equal
 # against a future local-redefinition drift.
 from nexus._log_safe_url import log_endpoint
-from nexus.collection_errors import label_reserved_error_from_body, superseded_write_error_from_body
+from nexus.collection_errors import (
+    chunk_key_refused_error_from_body,
+    label_reserved_error_from_body,
+    superseded_write_error_from_body,
+)
 from nexus.db.client_identity import client_identity_headers
 from nexus.db.t2.bearer_transport import bearer_httpx_kwargs as _bearer_httpx_kwargs
 from nexus.identity.token_header import request_with_identity, superseded_from_response
@@ -1434,6 +1438,15 @@ class RefreshableHttpStoreMixin:
         # taxonomy, aspect, highlight or aspect-queue write. Typed, naming the
         # successor. It is not an HTTPStatusError, so neither retry ladder in
         # this mixin (both key on that type) can resend it.
+        if resp.status_code == 422:
+            # nexus-6pfgb.66 (RDR-236 Phase 4): the engine refused chunk metadata keys on a chunk write
+            # (append, append_many, write_many). Typed and final, like the 409s below: not an HTTPStatusError.
+            try:
+                key_refused = chunk_key_refused_error_from_body(422, resp.json())
+            except Exception:  # noqa: BLE001 — an unreadable body is never this error; the generic 422 stands
+                key_refused = None
+            if key_refused is not None:
+                raise key_refused from failure
         if resp.status_code == 409:
             try:
                 superseded = superseded_write_error_from_body(409, resp.json())

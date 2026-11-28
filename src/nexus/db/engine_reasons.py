@@ -98,6 +98,14 @@ RESTORE_ORIGIN_UNREGISTERED_REASON: str = "restore_origin_unregistered"
 #: Nothing was written. Never retryable: pick another label, or rename the collection that was renamed away back to it.
 LABEL_RESERVED_REASON: str = "label_reserved"
 
+#: A chunk write named a metadata key outside the CHUNK key set, in a collection without the ``quarantine-`` or
+#: ``taxonomy__`` prefix (HTTP 422, RDR-236 Phase 4, nexus-6pfgb.66). Answered on ``upsert-chunks``,
+#: ``update-metadata`` and the combined manifest writes ``append``, ``append_many`` and ``write_many``. Also carries
+#: ``route``, ``collection``, ``collection_id``, ``refused`` (a list of ``{key, class, home}``: the class is DOCUMENT,
+#: POSITION, LEGACY or UNKNOWN, the home says where the value lives instead), ``refused_chunks`` and ``requested_count``.
+#: Never retryable: the same body is refused again. The remedy is in the writer, which stops sending the key.
+CHUNK_METADATA_KEY_REFUSED_REASON: str = "chunk_metadata_key_refused"
+
 #: A write naming an embedding model registered nowhere (HTTP 422, RDR-225).
 UNREGISTERED_EMBEDDING_MODEL_REASON: str = "unregistered_embedding_model"
 
